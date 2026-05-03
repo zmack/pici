@@ -27,6 +27,34 @@ class LLMClient;
 // Returns true to continue, false to abort.
 using StreamCallback = std::function<void(const AgentEvent&)>;
 
+struct BeforeToolCallContext {
+    const Message& assistant_message;
+    const ToolCall& tool_call;
+    std::string args_json;
+    AgentContext& context;
+};
+
+struct BeforeToolCallResult {
+    bool block{false};
+    std::string reason;
+};
+
+struct AfterToolCallContext {
+    const Message& assistant_message;
+    const ToolCall& tool_call;
+    std::string args_json;
+    std::shared_ptr<ToolResult> result;
+    bool is_error{false};
+    AgentContext& context;
+};
+
+struct AfterToolCallResult {
+    std::optional<std::string> content;
+    std::optional<std::string> details;
+    std::optional<bool> is_error;
+    std::optional<bool> terminate;
+};
+
 // ─── Config for the agent loop ─────────────────────────────────────────────
 
 struct AgentLoopConfig {
@@ -59,16 +87,15 @@ struct AgentLoopConfig {
     std::function<std::vector<Message>()> get_follow_up_messages;
 
     // Called before tool execution
-    std::function<std::optional<bool>(const Message&,
-                                      const ToolCall&,
-                                      std::string_view args_json)>
+    std::function<std::optional<BeforeToolCallResult>(
+        const BeforeToolCallContext&,
+        std::stop_token)>
         before_tool_call;
 
     // Called after tool execution to possibly override result
-    std::function<std::optional<std::tuple<std::string, bool, bool>>(
-        const Message&,
-        const ToolCall&,
-        std::shared_ptr<ToolResult>)>
+    std::function<std::optional<AfterToolCallResult>(
+        const AfterToolCallContext&,
+        std::stop_token)>
         after_tool_call;
 
     // The LLM client to use

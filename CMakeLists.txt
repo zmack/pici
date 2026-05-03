@@ -37,27 +37,28 @@ target_link_libraries(pi-cli PRIVATE pi-core)
 
 # ─── Tests ───
 if(PI_CPP_BUILD_TESTS)
-    add_executable(test-core
-        test/test_core.cpp
-        test/test_agent_loop.cpp
-        test/test_agent.cpp
-        test/test_stream.cpp
-    )
+    enable_testing()
 
-    target_link_libraries(test-core PRIVATE pi-core)
+    foreach(test_name IN ITEMS core agent_loop agent stream)
+        add_executable(test-${test_name}
+            test/test_${test_name}.cpp
+        )
 
-    add_test(NAME test-core COMMAND test-core)
+        target_link_libraries(test-${test_name} PRIVATE pi-core)
+        add_test(NAME test-${test_name} COMMAND test-${test_name})
+    endforeach()
 endif()
 
 # ─── HTTP client (optional) ───
 if(PI_CPP_ENABLE_HTTP)
     find_package(CURL REQUIRED)
+    find_package(nlohmann_json REQUIRED)
 
     add_library(pi-http
         src/http/http_client.cpp
     )
 
     target_include_directories(pi-http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl)
+    target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl nlohmann_json::nlohmann_json)
     target_compile_definitions(pi-http PUBLIC PI_CPP_HAVE_HTTP)
 endif()

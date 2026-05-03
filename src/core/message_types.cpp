@@ -151,6 +151,7 @@ struct JsonValue {
 
     // Object access
     JsonValue& operator[](std::string_view key) {
+        kind = JsonKind::object_t;
         for (auto& [k, v] : obj) {
             if (k == key) return v;
         }
@@ -168,6 +169,7 @@ struct JsonValue {
 
     template<typename T>
     JsonValue& set(std::string_view key, T val) {
+        kind = JsonKind::object_t;
         for (auto& [k, v] : obj) {
             if (k == key) { v = val; return v; }
         }
@@ -460,6 +462,7 @@ static JsonValue content_block_to_json(const ContentBlock& block) {
                 j.set<std::string_view>("id", value.id);
                 j.set<std::string_view>("name", value.name);
                 JsonValue args;
+                args.kind = JsonKind::object_t;
                 for (const auto& [k, v] : value.arguments) {
                     args.set<std::string_view>(k, v);
                 }
@@ -518,6 +521,7 @@ static JsonValue message_to_json(const Message& msg) {
                 j.set<std::string_view>("role", "user");
                 j.set<std::int64_t>("timestamp", m.timestamp);
                 JsonValue arr;
+                arr.kind = JsonKind::array_t;
                 for (const auto& cb : m.content) {
                     arr.arr.push_back(content_block_to_json(cb));
                 }
@@ -534,6 +538,7 @@ static JsonValue message_to_json(const Message& msg) {
 
                 {
                     JsonValue arr;
+                    arr.kind = JsonKind::array_t;
                     for (const auto& cb : m.content) {
                         arr.arr.push_back(content_block_to_json(cb));
                     }
@@ -574,6 +579,7 @@ static JsonValue message_to_json(const Message& msg) {
                 j.set<std::int64_t>("timestamp", m.timestamp);
                 {
                     JsonValue arr;
+                    arr.kind = JsonKind::array_t;
                     for (const auto& cb : m.content) {
                         arr.arr.push_back(content_block_to_json(cb));
                     }
@@ -613,6 +619,7 @@ std::string to_json(const Model& model) {
     j.set<bool>("reasoning", model.reasoning);
     {
         JsonValue arr;
+        arr.kind = JsonKind::array_t;
         for (const auto& cap : model.input_capabilities) {
             arr.arr.push_back(JsonValue(cap));
         }

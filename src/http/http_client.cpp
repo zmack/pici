@@ -11,6 +11,34 @@ namespace pi::core {
 
 namespace json = nlohmann;
 
+namespace {
+
+struct CurlHandle {
+    CURL* handle{curl_easy_init()};
+    ~CurlHandle() {
+        if (handle) {
+            curl_easy_cleanup(handle);
+        }
+    }
+
+    CurlHandle(const CurlHandle&) = delete;
+    CurlHandle& operator=(const CurlHandle&) = delete;
+};
+
+struct CurlHeaders {
+    curl_slist* list{nullptr};
+    ~CurlHeaders() { curl_slist_free_all(list); }
+
+    void append(const std::string& header) {
+        list = curl_slist_append(list, header.c_str());
+    }
+
+    CurlHeaders(const CurlHeaders&) = delete;
+    CurlHeaders& operator=(const CurlHeaders&) = delete;
+};
+
+} // namespace
+
 // ─── OpenAICompatibleClient ───────────────────────────────────────────────
 
 OpenAICompatibleClient::OpenAICompatibleClient(
@@ -30,7 +58,6 @@ std::shared_ptr<AssistantMessage> OpenAICompatibleClient::stream(
     auto request = build_request_json(context, thinking_level, model);
 
     auto result = std::make_shared<AssistantMessage>();
-    result->role = AssistantMessage::role;
     result->api = model.api;
     result->provider = model.provider;
     result->model = model.id;
@@ -41,7 +68,11 @@ std::shared_ptr<AssistantMessage> OpenAICompatibleClient::stream(
 
     auto emit_partial = [result, &emit](const std::string& content_type,
                                         const std::string& content) {
-        // In a real implementation, we'd emit proper events
+        (void)content_type;
+        TextContent text;
+        text.text = content;
+        result->content.push_back(std::move(text));
+        emit(MessageUpdateEvent(*result, content));
     };
 
     // Use streaming HTTP
@@ -57,7 +88,9 @@ std::shared_ptr<AssistantMessage> OpenAICompatibleClient::stream(
             std::string data = line.substr(6);
             try {
                 auto j = json::parse(data);
-                auto delta = j.value("delta", json::object());
+                auto delta = j.value("choices", json::array()).empty()
+                                 ? json::object()
+                                 : j["choices"][0].value("delta", json::object());
                 auto content = delta.value("content", std::string{});
                 if (!content.empty()) {
                     emit_partial("text", content);
@@ -80,17 +113,38 @@ std::string OpenAICompatibleClient::build_request_json(
     (void)thinking_level;
 
     json::array_t messages;
-    for (const auto& msg : context.messages) {
-        // In a full impl, convert Message to OpenAI format
-    }
-
-    if (context.system_prompt) {
+    if (!context.system_prompt.empty()) {
         messages.push_back(
             json{{"role", "system"}, {"content", context.system_prompt}});
     }
 
+    for (const auto& msg : context.messages) {
+        std::string role;
+        std::string content;
+        std::visit(
+            [&](const auto& value) {
+                using T = std::remove_cvref_t<decltype(value)>;
+                if constexpr (std::same_as<T, UserMessage>) {
+                    role = "user";
+                } else if constexpr (std::same_as<T, AssistantMessage>) {
+                    role = "assistant";
+                } else if constexpr (std::same_as<T, ToolResultMessage>) {
+                    role = "tool";
+                }
+                for (const auto& block : value.content) {
+                    if (const auto* text = std::get_if<TextContent>(&block)) {
+                        content += text->text;
+                    }
+                }
+            },
+            msg);
+        if (!role.empty()) {
+            messages.push_back(json{{"role", role}, {"content", content}});
+        }
+    }
+
     json::array_t tools_arr;
-    if (context.tools) {
+    if (!context.tools.empty()) {
         for (const auto& t : context.tools) {
             tools_arr.push_back(t->schema().serialize());
         }
@@ -119,50 +173,47 @@ HttpClient::Response HttpClient::post(
     std::stop_token stop_tok) {
     (void)stop_tok;
 
-    CURL* curl = curl_easy_init();
-    if (!curl) {
+    CurlHandle curl;
+    if (!curl.handle) {
         return std::nullopt;
     }
+    Response result;
 
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, "Accept: application/json");
+    CurlHeaders headers;
+    headers.append("Content-Type: application/json");
+    headers.append("Accept: application/json");
 
     if (api_key) {
-        std::string auth = "Bearer " + *api_key;
-        headers = curl_slist_append(headers, auth.c_str());
+        headers.append("Authorization: Bearer " + *api_key);
     }
 
     for (const auto& [key, value] : extra_headers) {
-        std::string header = key + ": " + value;
-        headers = curl_slist_append(headers, header.c_str());
+        headers.append(key + ": " + value);
     }
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+    curl_easy_setopt(curl.handle, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl.handle, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl.handle, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl.handle, CURLOPT_HTTPHEADER, headers.list);
+    curl_easy_setopt(curl.handle, CURLOPT_WRITEFUNCTION,
                      [](char* ptr, size_t size, size_t nmemb, void* data) {
                          auto* resp = static_cast<HttpClient::Response*>(data);
                          resp->body.append(ptr, size * nmemb);
                          return size * nmemb;
                      });
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result);
+    curl_easy_setopt(curl.handle, CURLOPT_WRITEDATA, &result);
 
-    CURLcode res = curl_easy_perform(curl);
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
+    CURLcode res = curl_easy_perform(curl.handle);
 
     if (res != CURLE_OK) {
         return std::nullopt;
     }
 
     long status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_getinfo(curl.handle, CURLINFO_RESPONSE_CODE, &status);
 
-    return HttpClient::Response{static_cast<int>(status), std::move(result), {}};
+    result.status_code = static_cast<int>(status);
+    return result;
 }
 
 std::optional<std::string> HttpClient::post_streaming(
@@ -173,9 +224,6 @@ std::optional<std::string> HttpClient::post_streaming(
     const std::optional<std::string>& api_key,
     std::stop_token stop_tok) {
     (void)stop_tok;
-
-    std::string buffer;
-    std::string line;
 
     auto write_callback = [](char* ptr, size_t size, size_t nmemb,
                               void* data) -> size_t {
@@ -188,7 +236,7 @@ std::optional<std::string> HttpClient::post_streaming(
         // Process complete lines
         size_t pos;
         while ((pos = buf->find('\n')) != std::string::npos) {
-            line = buf->substr(0, pos);
+            auto line = buf->substr(0, pos);
             buf->erase(0, pos + 1);
             if (!line.empty()) {
                 (*callback)(line);
@@ -198,41 +246,37 @@ std::optional<std::string> HttpClient::post_streaming(
         return size * nmemb;
     };
 
-    CURL* curl = curl_easy_init();
-    if (!curl) return std::nullopt;
+    CurlHandle curl;
+    if (!curl.handle) return std::nullopt;
 
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, "Accept: text/event-stream");
+    CurlHeaders headers;
+    headers.append("Content-Type: application/json");
+    headers.append("Accept: text/event-stream");
 
     if (api_key) {
-        std::string auth = "Bearer " + *api_key;
-        headers = curl_slist_append(headers, auth.c_str());
+        headers.append("Authorization: Bearer " + *api_key);
     }
 
     for (const auto& [key, value] : extra_headers) {
-        std::string header = key + ": " + value;
-        headers = curl_slist_append(headers, header.c_str());
+        headers.append(key + ": " + value);
     }
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl.handle, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl.handle, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl.handle, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl.handle, CURLOPT_HTTPHEADER, headers.list);
+    curl_easy_setopt(curl.handle, CURLOPT_WRITEFUNCTION, write_callback);
 
+    std::string buffer;
     std::pair<std::string, std::function<void(const std::string&)>> state{&buffer, on_line};
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+    curl_easy_setopt(curl.handle, CURLOPT_WRITEDATA, &state);
 
-    CURLcode res = curl_easy_perform(curl);
+    CURLcode res = curl_easy_perform(curl.handle);
 
     // Process remaining buffer
     if (!buffer.empty()) {
         on_line(buffer);
     }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 
     return res == CURLE_OK ? std::string{} : std::string{"HTTP request failed"};
 }

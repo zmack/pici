@@ -2,6 +2,7 @@
 #include <chrono>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -18,6 +19,42 @@
 #include "core/stream.h"
 
 using namespace pi::core;
+
+class TestSchema : public ToolSchema {
+public:
+    std::string serialize() const override { return R"({"type":"object"})"; }
+    std::map<std::string, std::string> to_definition() const override {
+        return {{"type", "object"}};
+    }
+};
+
+class NamedTool : public ToolDefinition {
+public:
+    explicit NamedTool(std::string name) : name_(std::move(name)) {}
+
+    std::string_view name() const override { return name_; }
+    std::string_view description() const override { return "test tool"; }
+    ToolSchema& schema() const override { return schema_; }
+
+    class Result : public ToolResult {
+    public:
+        bool is_error() const override { return false; }
+        std::string content() const override { return "ok"; }
+        std::optional<std::string> details() const override { return std::nullopt; }
+    };
+
+    std::shared_ptr<ToolResult> execute(
+        std::string_view,
+        std::string_view,
+        std::stop_token = std::stop_token{},
+        ToolUpdateCallback = {}) const override {
+        return std::make_shared<Result>();
+    }
+
+private:
+    std::string name_;
+    mutable TestSchema schema_;
+};
 
 // ─── Simple test harness ──────────────────────────────────────────────────
 
@@ -103,7 +140,7 @@ void test_agent_with_options() {
 void test_agent_add_tool() {
     tests::register_test("Agent: add tool", []() {
         Agent agent;
-        auto tool = std::make_shared<EchoTool>();
+        auto tool = std::make_shared<NamedTool>("echo");
         agent.add_tool(tool);
 
         CHECK_EQ(agent.state().tools().size(), std::size_t(1));
@@ -114,8 +151,8 @@ void test_agent_add_tool() {
 void test_agent_set_tools() {
     tests::register_test("Agent: set tools", []() {
         Agent agent;
-        auto tool1 = std::make_shared<EchoTool>();
-        auto tool2 = std::make_shared<CounterTool>();
+        auto tool1 = std::make_shared<NamedTool>("echo");
+        auto tool2 = std::make_shared<NamedTool>("counter");
 
         agent.set_tools({tool1, tool2});
         CHECK_EQ(agent.state().tools().size(), std::size_t(2));
@@ -143,7 +180,7 @@ void test_agent_follow_up() {
 void test_agent_reset() {
     tests::register_test("Agent: reset", []() {
         Agent agent;
-        agent.set_tools({std::make_shared<EchoTool>()});
+        agent.set_tools({std::make_shared<NamedTool>("echo")});
         auto msg = UserMessage{};
         msg.timestamp = 1;
         TextContent tc;
@@ -197,5 +234,5 @@ int main() {
 
     tests::print_summary();
 
-    return failed > 0 ? 1 : 0;
+    return tests::failed > 0 ? 1 : 0;
 }

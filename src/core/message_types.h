@@ -88,7 +88,7 @@ struct ToolResultMessage;
 struct UserMessage {
     static constexpr std::string_view role = "user";
     std::vector<ContentBlock> content;
-    std::int64_t timestamp;
+    std::int64_t timestamp{0};
 };
 
 // ─── AssistantMessage ───────────────────────────────────────────────────────
@@ -191,17 +191,20 @@ public:
     virtual bool terminate() const { return false; }
 };
 
+using ToolUpdateCallback = std::function<void(std::shared_ptr<ToolResult>)>;
+
 class ToolDefinition {
 public:
     virtual ~ToolDefinition() = default;
     virtual std::string_view name() const = 0;
     virtual std::string_view description() const = 0;
-    virtual ToolSchema& schema() = 0;
+    virtual ToolSchema& schema() const = 0;
     // Execute the tool
     virtual std::shared_ptr<ToolResult> execute(
         std::string_view call_id,
         std::string_view args_json,
-        std::stop_token stop_tok = std::stop_token{}) const = 0;
+        std::stop_token stop_tok = std::stop_token{},
+        ToolUpdateCallback on_update = {}) const = 0;
     // Per-tool execution mode override
     virtual ToolExecutionMode execution_mode() const { return ToolExecutionMode::parallel; }
 };

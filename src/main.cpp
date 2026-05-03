@@ -56,7 +56,7 @@ public:
         }
     };
 
-    ToolSchema& schema() override {
+    ToolSchema& schema() const override {
         if (!schema_) {
             schema_ = std::make_unique<EchoSchema>();
         }
@@ -80,7 +80,8 @@ public:
     std::shared_ptr<ToolResult> execute(
         std::string_view call_id,
         std::string_view args_json,
-        std::stop_token) const override {
+        std::stop_token,
+        ToolUpdateCallback) const override {
         (void)call_id;
         // Parse args and echo back
         return std::make_shared<EchoResult>(
@@ -88,7 +89,7 @@ public:
     }
 
 private:
-    std::unique_ptr<ToolSchema> schema_;
+    mutable std::unique_ptr<ToolSchema> schema_;
 };
 
 } // namespace pi::core

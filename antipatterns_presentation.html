@@ -1,0 +1,752 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code Antipatterns Found in pici</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172026;
+      --muted: #5a6872;
+      --line: #d9e1e7;
+      --panel: #f7fafb;
+      --accent: #0f766e;
+      --accent-2: #b45309;
+      --danger: #b42318;
+      --ok: #2563eb;
+      --page: #ffffff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--page);
+      line-height: 1.5;
+    }
+
+    nav {
+      position: fixed;
+      inset: 0 0 auto 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 22px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(10px);
+    }
+
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    nav a:hover {
+      color: var(--accent);
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 14px;
+      overflow-x: auto;
+      max-width: 72vw;
+      padding-bottom: 2px;
+    }
+
+    section {
+      min-height: 100vh;
+      display: grid;
+      align-items: center;
+      padding: 92px 7vw 56px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .wrap {
+      width: min(1120px, 100%);
+      margin: 0 auto;
+    }
+
+    .kicker {
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      margin: 0 0 14px;
+    }
+
+    h1,
+    h2 {
+      margin: 0;
+      line-height: 1.04;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      font-size: clamp(42px, 7vw, 86px);
+      max-width: 920px;
+    }
+
+    h2 {
+      font-size: clamp(34px, 5vw, 66px);
+      max-width: 980px;
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    p {
+      color: var(--muted);
+      font-size: clamp(18px, 2vw, 24px);
+      max-width: 880px;
+      margin: 22px 0 0;
+    }
+
+    .lead {
+      font-size: clamp(20px, 2.4vw, 30px);
+      color: #31414c;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 34px;
+    }
+
+    .three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 22px;
+      min-height: 160px;
+    }
+
+    .card p,
+    li {
+      font-size: 17px;
+      color: var(--muted);
+      margin: 0;
+    }
+
+    ul {
+      margin: 24px 0 0;
+      padding-left: 22px;
+      max-width: 900px;
+    }
+
+    li {
+      margin: 12px 0;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+      background: #edf3f5;
+      border: 1px solid #d4e0e6;
+      border-radius: 5px;
+      padding: 2px 5px;
+      color: #17313a;
+    }
+
+    pre {
+      margin: 14px 0 0;
+      padding: 16px;
+      overflow-x: auto;
+      border-radius: 8px;
+      border: 1px solid #d4e0e6;
+      background: #111b22;
+      color: #e8f1f4;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    pre code {
+      display: block;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      white-space: pre;
+    }
+
+    .code-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 26px;
+    }
+
+    .sample {
+      min-width: 0;
+    }
+
+    .sample-title {
+      display: inline-flex;
+      align-items: center;
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 800;
+      color: white;
+      background: var(--danger);
+    }
+
+    .sample-title.good {
+      background: var(--ok);
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
+      gap: 34px;
+      align-items: start;
+      margin-top: 34px;
+    }
+
+    .label {
+      display: inline-flex;
+      align-items: center;
+      height: 28px;
+      padding: 0 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 800;
+      margin-bottom: 14px;
+      color: white;
+      background: var(--danger);
+    }
+
+    .label.ok {
+      background: var(--ok);
+    }
+
+    .label.warn {
+      background: var(--accent-2);
+    }
+
+    .rule {
+      border-left: 4px solid var(--accent);
+      padding: 14px 0 14px 18px;
+      margin-top: 28px;
+      color: #263742;
+      font-size: clamp(19px, 2vw, 26px);
+      max-width: 920px;
+      background: linear-gradient(90deg, #eef8f6, transparent);
+    }
+
+    .where {
+      margin-top: 28px;
+      border: 1px solid #cfdbe2;
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 18px;
+      max-width: 960px;
+    }
+
+    .where strong {
+      display: block;
+      font-size: 14px;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .where p {
+      margin: 0;
+      font-size: 16px;
+      color: var(--muted);
+    }
+
+    .where code {
+      white-space: nowrap;
+    }
+
+    .foot {
+      margin-top: 36px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    @media (max-width: 780px) {
+      nav {
+        padding: 10px 14px;
+      }
+
+      .nav-links {
+        max-width: 58vw;
+      }
+
+      section {
+        padding: 86px 22px 46px;
+      }
+
+      .grid,
+      .grid.three,
+      .code-grid,
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .card {
+        min-height: auto;
+      }
+    }
+
+    @media print {
+      nav {
+        display: none;
+      }
+
+      section {
+        min-height: 100vh;
+        page-break-after: always;
+        padding-top: 56px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="#title">pici antipatterns</a>
+    <div class="nav-links" aria-label="Slides">
+      <a href="#lifetime">Lifetimes</a>
+      <a href="#stream">Streams</a>
+      <a href="#tests">Tests</a>
+      <a href="#optional">Optional Code</a>
+      <a href="#state">State</a>
+      <a href="#json">JSON</a>
+      <a href="#http">HTTP</a>
+      <a href="#rules">Rules</a>
+    </div>
+  </nav>
+
+  <section id="title">
+    <div class="wrap">
+      <p class="kicker">Code review summary</p>
+      <h1>Antipatterns found in this project so far</h1>
+      <p class="lead">These were not just style issues. Most were correctness risks: dangling references, tests that could not link cleanly, optional code paths that decayed, and APIs that invited misuse.</p>
+      <div class="grid three">
+        <div class="card">
+          <h3>Risk category</h3>
+          <p>Async lifetime, stream semantics, build configuration, state safety, serialization, and HTTP resource handling.</p>
+        </div>
+        <div class="card">
+          <h3>Main theme</h3>
+          <p>Several APIs worked only if every caller remembered hidden rules. That is brittle engineering.</p>
+        </div>
+        <div class="card">
+          <h3>Fix direction</h3>
+          <p>Make ownership explicit, make final states automatic, build all test programs correctly, and keep optional code honest.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="lifetime">
+    <div class="wrap">
+      <p class="kicker">Antipattern 1</p>
+      <h2>Capturing returned objects by reference in async work</h2>
+      <p>The agent returned an <code>EventStream</code> while background tasks captured that same stream by reference. Once the function returned, the producer could be writing through a dangling reference.</p>
+      <div class="split">
+        <div>
+          <div class="label">Why it is bad</div>
+          <ul>
+            <li>It creates undefined behavior that may pass tests and fail under timing changes.</li>
+            <li>It makes ownership impossible to reason about from the function signature.</li>
+            <li>It turns harmless refactors, such as moving a local variable, into concurrency bugs.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <div class="label ok">Better habit</div>
+          <p>Async producers and returned consumers should share explicit state, usually through a small shared object. Capture data by value when a task outlives the stack frame that started it.</p>
+        </div>
+      </div>
+      <div class="rule">Steer clear when a lambda with <code>std::async</code>, <code>std::thread</code>, or callbacks captures locals by <code>&</code>.</div>
+      <div class="where">
+        <strong>Where in this project</strong>
+        <p><code>src/core/agent.cpp:106</code> and <code>src/core/agent.cpp:182</code> start async agent work. Before the fix, these paths captured the returned <code>EventStream</code> by reference. <code>src/core/agent_loop.cpp:416</code> and <code>src/core/agent_loop.cpp:562</code> are the loop-side async launches, which now capture the loop context and stream by value.</p>
+      </div>
+      <div class="code-grid">
+        <div class="sample">
+          <span class="sample-title">Avoid</span>
+          <pre><code>EventStream stream(...);
+
+std::async(std::launch::async, [&stream]() {
+  stream.push(AgentStartEvent{});
+});
+
+return stream;</code></pre>
+        </div>
+        <div class="sample">
+          <span class="sample-title good">Prefer</span>
+          <pre><code>EventStream stream(...); // shares internal state
+
+std::async(std::launch::async, [stream]() mutable {
+  stream.push(AgentStartEvent{});
+});
+
+return stream;</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="stream">
+    <div class="wrap">
+      <p class="kicker">Antipattern 2</p>
+      <h2>Completion semantics that callers have to remember manually</h2>
+      <p><code>EventStream::push()</code> accepted final events but did not finish the stream. Only <code>push_and_check()</code> honored the done predicate. That split made it easy to publish an <code>AgentEndEvent</code> and leave readers blocked forever.</p>
+      <div class="grid">
+        <div class="card">
+          <h3>Why it is an antipattern</h3>
+          <p>The API exposes two ways to do nearly the same thing, but only one is safe. That forces every caller to carry internal knowledge of the stream implementation.</p>
+        </div>
+        <div class="card">
+          <h3>What changed</h3>
+          <p>Final events now complete the stream through the normal publish path. A reader consuming the returned stream can terminate naturally.</p>
+        </div>
+      </div>
+      <div class="rule">Good APIs make the correct path the boring path.</div>
+      <div class="where">
+        <strong>Where in this project</strong>
+        <p><code>src/core/stream.h:44</code> is the normal <code>push()</code> path. This is where final events now honor the stream's done predicate. The risk showed up in callers such as <code>src/core/agent_loop.cpp:419</code>, where every event is published through one helper.</p>
+      </div>
+      <div class="code-grid">
+        <div class="sample">
+          <span class="sample-title">Avoid</span>
+          <pre><code>stream.push(AgentEndEvent(messages));
+
+// Reader may block forever because push()
+// did not close the stream.</code></pre>
+        </div>
+        <div class="sample">
+          <span class="sample-title good">Prefer</span>
+          <pre><code>bool push(Event event) {
+  if (done_(event)) {
+    result_ = extract_(event);
+    is_complete_ = true;
+  }
+  queue_.push(std::move(event));
+  condition_.notify_all();
+}</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tests">
+    <div class="wrap">
+      <p class="kicker">Antipattern 3</p>
+      <h2>Multiple test programs linked into one executable</h2>
+      <p>CMake put several <code>test_*.cpp</code> files into a single <code>test-core</code> binary even though each file defined its own <code>main()</code> and duplicated test harness globals.</p>
+      <div class="grid">
+        <div class="card">
+          <h3>Why it is bad</h3>
+          <p>It cannot scale. As soon as those translation units are built together, the linker sees duplicate entry points and duplicate symbols.</p>
+        </div>
+        <div class="card">
+          <h3>Why to avoid it</h3>
+          <p>Broken test topology hides actual product defects behind build-system noise. You want each test failure to point at behavior, not target layout.</p>
+        </div>
+      </div>
+      <div class="rule">If test files have their own <code>main()</code>, give each one its own target or centralize the harness.</div>
+      <div class="where">
+        <strong>Where in this project</strong>
+        <p><code>CMakeLists.txt:39</code> now creates separate test executables for <code>test_core.cpp</code>, <code>test_agent_loop.cpp</code>, <code>test_agent.cpp</code>, and <code>test_stream.cpp</code>. Before that, those files were grouped into one target even though each had its own <code>main()</code>.</p>
+      </div>
+      <div class="code-grid">
+        <div class="sample">
+          <span class="sample-title">Avoid</span>
+          <pre><code>add_executable(test-core
+  test/test_core.cpp       # has main()
+  test/test_agent.cpp      # has main()
+  test/test_stream.cpp     # has main()
+)</code></pre>
+        </div>
+        <div class="sample">
+          <span class="sample-title good">Prefer</span>
+          <pre><code>foreach(test_name IN ITEMS core agent stream)
+  add_executable(test-${test_name}
+    test/test_${test_name}.cpp)
+  add_test(NAME test-${test_name}
+    COMMAND test-${test_name})
+endforeach()</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="optional">
+    <div class="wrap">
+      <p class="kicker">Antipattern 4</p>
+      <h2>Optional code paths that are disabled by default and never checked</h2>
+      <p>The HTTP client was behind <code>PI_CPP_ENABLE_HTTP</code>. Because that option was off, HTTP-only compile errors and dependency gaps could sit unnoticed.</p>
+      <div class="split">
+        <div>
+          <div class="label warn">Failure mode</div>
+          <ul>
+            <li>The default build stays green while optional users get a broken build.</li>
+            <li>Missing dependencies are discovered late.</li>
+            <li>Code ownership gets fuzzy because few contributors exercise that path.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <div class="label ok">Better habit</div>
+          <p>Every supported feature flag should be covered by at least one CI/configure job. Optional code is still production code.</p>
+        </div>
+      </div>
+      <div class="where">
+        <strong>Where in this project</strong>
+        <p><code>CMakeLists.txt:53</code> gates the HTTP target behind <code>PI_CPP_ENABLE_HTTP</code>. The HTTP code itself lives in <code>src/http/http_client.cpp</code>. Since that path is off by default, its missing dependencies and compile issues were hidden from the normal build.</p>
+      </div>
+      <div class="code-grid">
+        <div class="sample">
+          <span class="sample-title">Avoid</span>
+          <pre><code>option(PI_CPP_ENABLE_HTTP "HTTP" OFF)
+
+if(PI_CPP_ENABLE_HTTP)
+  add_library(pi-http src/http/http_client.cpp)
+endif()
+
+# CI only builds the default OFF path.</code></pre>
+        </div>
+        <div class="sample">
+          <span class="sample-title good">Prefer</span>
+          <pre><code># CI job 1
+cmake -S . -B build
+cmake --build build
+
+# CI job 2
+cmake -S . -B build-http -DPI_CPP_ENABLE_HTTP=ON
+cmake --build build-http</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="state">
+    <div class="wrap">
+      <p class="kicker">Antipattern 5</p>
+      <h2>Returning references out of locked state</h2>
+      <p><code>AgentState</code> locked a mutex, returned references like <code>const Model&amp;</code>, then released the lock. The caller held a reference to mutable shared data with no protection.</p>
+      <div class="grid">
+        <div class="card">
+          <h3>Why it is dangerous</h3>
+          <p>The code looks thread-safe because there is a mutex, but the safety ends before the caller uses the reference.</p>
+        </div>
+        <div class="card">
+          <h3>What to prefer</h3>
+          <p>Return value snapshots for small state, or expose scoped access patterns that keep the lock alive for the whole operation.</p>
+        </div>
+      </div>
+      <div class="rule">A lock that ends before the data is used is often just thread-safety theater.</div>
+      <div class="where">
+        <strong>Where in this project</strong>
+        <p><code>src/core/agent_state.h:31</code>, <code>src/core/agent_state.h:41</code>, and <code>src/core/agent_state.h:85</code> are state accessors. These now return snapshots by value. Before the fix, similar accessors returned references after releasing the mutex.</p>
+      </div>
+      <div class="code-grid">
+        <div class="sample">
+          <span class="sample-title">Avoid</span>
+          <pre><code>const Model& model() const {
+  std::lock_guard lock(mutex_);
+  return model_;
+}
+
+// lock is gone, reference remains</code></pre>
+        </div>
+        <div class="sample">
+          <span class="sample-title good">Prefer</span>
+          <pre><code>Model model() const {
+  std::lock_guard lock(mutex_);
+  return model_; // snapshot
+}
+
+// caller owns a safe copy</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="json">
+    <div class="wrap">
+      <p class="kicker">Antipattern 6</p>
+      <h2>Custom structured data types with implicit invalid states</h2>
+      <p>The hand-rolled JSON value could hold object fields or array items while still being marked as <code>null</code>. Serialization then produced <code>null</code> for populated values.</p>
+      <div class="grid">
+        <div class="card">
+          <h3>Why it is an antipattern</h3>
+          <p>The representation allowed contradictory state: data existed, but the tag said it did not. That is the kind of bug type systems are supposed to prevent.</p>
+        </div>
+        <div class="card">
+          <h3>How to steer clear</h3>
+          <p>Use a proven JSON library when possible. If a custom type is necessary, make constructors and mutators preserve invariants automatically.</p>
+        </div>
+      </div>
+      <div class="where">
+        <strong>Where in this project</strong>
+        <p><code>src/core/message_types.cpp:114</code> defines the custom <code>JsonValue</code>. The issue was in object and array construction: populated values could still have <code>JsonKind::null_t</code>. The invariant is now enforced in mutators like <code>operator[]</code> at <code>src/core/message_types.cpp:153</code> and <code>set()</code> at <code>src/core/message_types.cpp:170</code>.</p>
+      </div>
+      <div class="code-grid">
+        <div class="sample">
+          <span class="sample-title">Avoid</span>
+          <pre><code>JsonValue j;          // kind == null_t
+j.obj.emplace_back("id", "gpt-4");
+
+serialize(j);        // returns "null"</code></pre>
+        </div>
+        <div class="sample">
+          <span class="sample-title good">Prefer</span>
+          <pre><code>JsonValue& set(key, value) {
+  kind = JsonKind::object_t;
+  obj.emplace_back(key, value);
+  return obj.back().second;
+}
+
+serialize(j);        // returns an object</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="http">
+    <div class="wrap">
+      <p class="kicker">Antipattern 7</p>
+      <h2>Manual resource cleanup scattered through HTTP code</h2>
+      <p>The libcurl code manually initialized handles, built header lists, performed requests, cleaned up, and queried status. That created cleanup-order bugs and malformed auth headers.</p>
+      <div class="split">
+        <div>
+          <div class="label">Why it is bad</div>
+          <ul>
+            <li>Cleanup after early returns is easy to miss.</li>
+            <li>Using a handle after cleanup is undefined behavior.</li>
+            <li>Small protocol mistakes, such as missing <code>Authorization:</code>, are hard to spot in low-level setup code.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <div class="label ok">Better habit</div>
+          <p>Wrap resources in RAII objects so lifetime follows scope. Build headers with helpers that encode protocol details once.</p>
+        </div>
+      </div>
+      <div class="rule">In C++, manual cleanup is usually a smell when RAII can express the lifetime.</div>
+      <div class="where">
+        <strong>Where in this project</strong>
+        <p><code>src/http/http_client.cpp:16</code> and <code>src/http/http_client.cpp:28</code> now wrap curl handles and header lists. The risky code was in <code>HttpClient::post()</code> and <code>post_streaming()</code>, now centered around <code>src/http/http_client.cpp:168</code> and <code>src/http/http_client.cpp:219</code>.</p>
+      </div>
+      <div class="code-grid">
+        <div class="sample">
+          <span class="sample-title">Avoid</span>
+          <pre><code>CURL* curl = curl_easy_init();
+curl_slist* headers = nullptr;
+
+curl_easy_perform(curl);
+curl_slist_free_all(headers);
+curl_easy_cleanup(curl);
+curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);</code></pre>
+        </div>
+        <div class="sample">
+          <span class="sample-title good">Prefer</span>
+          <pre><code>struct CurlHandle {
+  CURL* handle{curl_easy_init()};
+  ~CurlHandle() { curl_easy_cleanup(handle); }
+};
+
+CurlHandle curl;
+curl_easy_perform(curl.handle);
+curl_easy_getinfo(curl.handle, CURLINFO_RESPONSE_CODE, &status);</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="callbacks">
+    <div class="wrap">
+      <p class="kicker">Antipattern 8</p>
+      <h2>Callbacks whose results are computed and ignored</h2>
+      <p>The tool loop called <code>after_tool_call</code>, unpacked the override tuple, and then did not apply it. That makes extension points misleading.</p>
+      <div class="grid">
+        <div class="card">
+          <h3>Why it is harmful</h3>
+          <p>Users believe they can modify tool output, but the system silently discards the requested override.</p>
+        </div>
+        <div class="card">
+          <h3>What to do instead</h3>
+          <p>Either implement the callback contract fully or remove the hook until the behavior exists. Half-contracts are worse than no contract.</p>
+        </div>
+      </div>
+      <div class="where">
+        <strong>Where in this project</strong>
+        <p><code>src/core/agent_loop.cpp:253</code> and <code>src/core/agent_loop.cpp:333</code> call <code>after_tool_call</code>. Before the fix, the override tuple was unpacked and then ignored. It now replaces the tool result with a concrete <code>StaticToolResult</code>.</p>
+      </div>
+      <div class="code-grid">
+        <div class="sample">
+          <span class="sample-title">Avoid</span>
+          <pre><code>auto override = after_tool_call(...);
+if (override) {
+  auto [content, is_err, terminate] = *override;
+  // values are never used
+}</code></pre>
+        </div>
+        <div class="sample">
+          <span class="sample-title good">Prefer</span>
+          <pre><code>auto override = after_tool_call(...);
+if (override) {
+  auto [content, is_err, terminate] = *override;
+  tool_result = std::make_shared&lt;StaticToolResult&gt;(
+    std::move(content), is_err, terminate);
+}</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="rules">
+    <div class="wrap">
+      <p class="kicker">Practical guardrails</p>
+      <h2>Rules worth keeping in this codebase</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Ownership</h3>
+          <p>If work crosses a thread boundary, capture by value or share explicit state. Avoid default reference captures in async code.</p>
+        </div>
+        <div class="card">
+          <h3>APIs</h3>
+          <p>Do not create two similar methods where one silently skips required behavior. The ordinary method should be safe.</p>
+        </div>
+        <div class="card">
+          <h3>Builds</h3>
+          <p>Every executable should have exactly one entry point. Every supported feature flag should be configured somewhere.</p>
+        </div>
+        <div class="card">
+          <h3>State</h3>
+          <p>Thread-safe classes should not return unlocked references to mutable internals. Return snapshots or scoped access.</p>
+        </div>
+      </div>
+      <p class="foot">Default verification after fixes: <code>cmake --build build</code> and <code>ctest --test-dir build --output-on-failure --timeout 10</code>.</p>
+    </div>
+  </section>
+</body>
+</html>

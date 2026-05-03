@@ -1,6 +1,8 @@
 #pragma once
 
 #include <concepts>
+#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <source_location>
 #include <string>
@@ -36,23 +38,31 @@ std::string_view event_type_to_string(EventType type);
 // Base event — all events carry a timestamp and source location for debugging
 struct EventBase {
     EventType type;
-    std::int64_t timestamp;
+    std::int64_t timestamp{0};
     std::string source_file;
-    std::uint32_t source_line;
+    std::uint32_t source_line{0};
+
+    explicit EventBase(
+        EventType event_type,
+        std::source_location loc = std::source_location::current())
+        : type(event_type),
+          timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count()),
+          source_file(loc.file_name()),
+          source_line(loc.line()) {}
 
     static EventBase create(EventType type,
                             std::source_location loc = std::source_location::current()) {
-        return {type,
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch())
-                    .count(),
-                loc.file_name(), static_cast<std::int64_t>(loc.line())};
+        return EventBase(type, loc);
     }
 };
 
 struct AgentStartEvent : EventBase {
     static constexpr EventType type = EventType::agent_start;
-    AgentStartEvent() : EventBase(EventType::agent_start) {}
+    explicit AgentStartEvent(
+        std::source_location loc = std::source_location::current())
+        : EventBase(EventType::agent_start, loc) {}
 };
 
 struct AgentEndEvent : EventBase {
@@ -60,12 +70,14 @@ struct AgentEndEvent : EventBase {
     std::vector<Message> messages;
     AgentEndEvent(std::vector<Message> msgs,
                   std::source_location loc = std::source_location::current())
-        : EventBase(EventType::agent_end), messages(std::move(msgs)) {}
+        : EventBase(EventType::agent_end, loc), messages(std::move(msgs)) {}
 };
 
 struct TurnStartEvent : EventBase {
     static constexpr EventType type = EventType::turn_start;
-    TurnStartEvent() : EventBase(EventType::turn_start) {}
+    explicit TurnStartEvent(
+        std::source_location loc = std::source_location::current())
+        : EventBase(EventType::turn_start, loc) {}
 };
 
 struct TurnEndEvent : EventBase {
@@ -75,7 +87,7 @@ struct TurnEndEvent : EventBase {
     TurnEndEvent(Message msg,
                  std::vector<ToolResultMessage> results,
                  std::source_location loc = std::source_location::current())
-        : EventBase(EventType::turn_end),
+        : EventBase(EventType::turn_end, loc),
           message(std::move(msg)),
           tool_results(std::move(results)) {}
 };
@@ -85,7 +97,7 @@ struct MessageStartEvent : EventBase {
     Message message;
     MessageStartEvent(Message msg,
                       std::source_location loc = std::source_location::current())
-        : EventBase(EventType::message_start), message(std::move(msg)) {}
+        : EventBase(EventType::message_start, loc), message(std::move(msg)) {}
 };
 
 struct MessageUpdateEvent : EventBase {
@@ -94,7 +106,7 @@ struct MessageUpdateEvent : EventBase {
     std::string delta; // describes what changed
     MessageUpdateEvent(Message msg, std::string d,
                        std::source_location loc = std::source_location::current())
-        : EventBase(EventType::message_update),
+        : EventBase(EventType::message_update, loc),
           message(std::move(msg)),
           delta(std::move(d)) {}
 };
@@ -104,7 +116,7 @@ struct MessageEndEvent : EventBase {
     Message message;
     MessageEndEvent(Message msg,
                     std::source_location loc = std::source_location::current())
-        : EventBase(EventType::message_end), message(std::move(msg)) {}
+        : EventBase(EventType::message_end, loc), message(std::move(msg)) {}
 };
 
 struct ToolExecutionStartEvent : EventBase {
@@ -114,7 +126,7 @@ struct ToolExecutionStartEvent : EventBase {
     std::string args;
     ToolExecutionStartEvent(std::string id, std::string name, std::string a,
                             std::source_location loc = std::source_location::current())
-        : EventBase(EventType::tool_execution_start),
+        : EventBase(EventType::tool_execution_start, loc),
           tool_call_id(std::move(id)),
           tool_name(std::move(name)),
           args(std::move(a)) {}
@@ -129,7 +141,7 @@ struct ToolExecutionUpdateEvent : EventBase {
     ToolExecutionUpdateEvent(std::string id, std::string name, std::string a,
                              std::string pr,
                              std::source_location loc = std::source_location::current())
-        : EventBase(EventType::tool_execution_update),
+        : EventBase(EventType::tool_execution_update, loc),
           tool_call_id(std::move(id)),
           tool_name(std::move(name)),
           args(std::move(a)),
@@ -145,7 +157,7 @@ struct ToolExecutionEndEvent : EventBase {
     ToolExecutionEndEvent(std::string id, std::string name,
                           std::shared_ptr<ToolResult> res, bool err,
                           std::source_location loc = std::source_location::current())
-        : EventBase(EventType::tool_execution_end),
+        : EventBase(EventType::tool_execution_end, loc),
           tool_call_id(std::move(id)),
           tool_name(std::move(name)),
           result(std::move(res)),

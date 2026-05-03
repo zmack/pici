@@ -28,7 +28,7 @@ public:
 
     // ── Properties ─────────────────────────────────────────────────────
 
-    const std::string& system_prompt() const {
+    std::string system_prompt() const {
         std::lock_guard lock(mutex_);
         return system_prompt_;
     }
@@ -38,7 +38,7 @@ public:
         system_prompt_ = std::move(prompt);
     }
 
-    const Model& model() const {
+    Model model() const {
         std::lock_guard lock(mutex_);
         return model_;
     }
@@ -82,7 +82,7 @@ public:
                          std::make_move_iterator(msgs.end()));
     }
 
-    const Message& last_message() const {
+    Message last_message() const {
         std::lock_guard lock(mutex_);
         return messages_.back();
     }
@@ -158,7 +158,11 @@ public:
 
     void reset() {
         std::unique_lock lock(mutex_);
+        system_prompt_.clear();
+        model_ = Model{};
+        thinking_level_ = ThinkingLevel::off;
         messages_.clear();
+        tools_.clear();
         pending_tool_calls_.clear();
         error_message_.reset();
         is_streaming_ = false;

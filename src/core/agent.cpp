@@ -1,6 +1,7 @@
 #include "core/agent.h"
 
 #include <algorithm>
+#include <chrono>
 #include <future>
 #include <mutex>
 #include <optional>
@@ -8,6 +9,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "core/agent_loop.h"
@@ -53,6 +55,8 @@ Message make_user_message(std::string text,
 } // namespace
 
 // ─── Agent ─────────────────────────────────────────────────────────────────
+
+Agent::Agent() : Agent(Options{}) {}
 
 Agent::Agent(const Options& options)
     : state_(options.system_prompt, options.model, options.thinking_level),
@@ -100,10 +104,10 @@ Agent::prompt(std::vector<Message> messages) {
     auto config = create_loop_config();
 
     std::ignore = std::async(std::launch::async, [this, messages, ctx,
-                                                  config, &stream]() mutable {
+                                                  config, stream]() mutable {
         run_with_lifecycle([this, messages = std::move(messages), ctx = std::move(ctx),
-                            config = std::move(config), &stream](
-                               std::stop_token stop_tok) {
+                            config = std::move(config), stream](
+                               std::stop_token stop_tok) mutable {
             auto event_stream =
                 run_agent_loop(messages, ctx, config,
                                [this](const AgentEvent& event) {
@@ -117,7 +121,7 @@ Agent::prompt(std::vector<Message> messages) {
                 stream.push(std::move(event));
             }
 
-            auto [result, error] = stream.wait();
+            stream.wait();
         });
     });
 
@@ -177,9 +181,9 @@ EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
 
     std::ignore = std::async(std::launch::async, [this, context = std::move(context),
                                                   config = std::move(config),
-                                                  &stream]() mutable {
+                                                  stream]() mutable {
         run_with_lifecycle([this, context = std::move(context),
-                            config = std::move(config), &stream](
+                            config = std::move(config), stream](
                                std::stop_token stop_tok) mutable {
             auto event_stream =
                 run_agent_loop_continue(

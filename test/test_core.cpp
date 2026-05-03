@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/agent_state.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/stream.h"
@@ -292,7 +293,7 @@ void test_event_stream_for_each() {
     tests::register_test("EventStream: for_each", []() {
         EventStream<AgentEvent, std::monostate> stream(
             [](const AgentEvent&) { return false; },
-            [](const AgentEvent&) {});
+            [](const AgentEvent&) { return std::monostate{}; });
 
         int count = 0;
 
@@ -343,7 +344,7 @@ void test_event_stream_error() {
     tests::register_test("EventStream: error path", []() {
         EventStream<AgentEvent, std::monostate> stream(
             [](const AgentEvent&) { return false; },
-            [](const AgentEvent&) {});
+            [](const AgentEvent&) { return std::monostate{}; });
 
         stream.finish_error("Something went wrong");
 
@@ -503,5 +504,5 @@ int main() {
 
     tests::print_summary();
 
-    return failed > 0 ? 1 : 0;
+    return tests::failed > 0 ? 1 : 0;
 }

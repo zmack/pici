@@ -11,6 +11,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "core/event_types.h"
@@ -61,6 +62,33 @@ ToolResultMessage make_tool_result_message(
     return msg;
 }
 
+class StaticToolResult : public ToolResult {
+public:
+    StaticToolResult(std::string content,
+                     bool is_error,
+                     bool terminate = false,
+                     std::optional<std::string> details = std::nullopt)
+        : content_(std::move(content)), is_error_(is_error),
+          terminate_(terminate), details_(std::move(details)) {}
+
+    bool is_error() const override { return is_error_; }
+    std::string content() const override { return content_; }
+    std::optional<std::string> details() const override { return details_; }
+    bool terminate() const override { return terminate_; }
+
+private:
+    std::string content_;
+    bool is_error_{false};
+    bool terminate_{false};
+    std::optional<std::string> details_;
+};
+
+struct FinalizedToolCall {
+    ToolCall tool_call;
+    std::shared_ptr<ToolResult> result;
+    bool is_error{false};
+};
+
 // Helper: emit a tool result message pair (start + end)
 void emit_tool_result(
     const ToolCall& tc,
@@ -69,20 +97,36 @@ void emit_tool_result(
     StreamCallback emit) {
     ToolResultMessage msg = make_tool_result_message(tc, result);
 
-    // Emit start
-    emit(MessageStartEvent(std::move(msg),
+    emit(MessageStartEvent(msg,
                            std::source_location::current()));
-
-    // Emit end
     emit(MessageEndEvent(
-        std::move(msg), std::source_location::current()));
+        msg, std::source_location::current()));
+    emit(ToolExecutionEndEvent(
+        tc.id, tc.name, std::move(result), is_err,
+        std::source_location::current()));
 }
 
-// Helper: serialize tool call arguments as JSON-like string
+std::string json_escape(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (char ch : value) {
+        switch (ch) {
+            case '"': escaped += "\\\""; break;
+            case '\\': escaped += "\\\\"; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            default: escaped += ch; break;
+        }
+    }
+    return escaped;
+}
+
+// Helper: serialize tool call arguments as JSON string
 std::string tool_call_args_json(const ToolCall& tc) {
     std::string json_str = "{";
     for (const auto& [k, v] : tc.arguments) {
-        json_str += "\"" + k + "\":\"" + v + "\",";
+        json_str += "\"" + json_escape(k) + "\":\"" + json_escape(v) + "\",";
     }
     if (json_str.size() > 1 && json_str.back() == ',') {
         json_str.pop_back();
@@ -100,6 +144,129 @@ bool is_sequential_tool(const std::vector<std::shared_ptr<const ToolDefinition>>
         }
     }
     return false;
+}
+
+std::shared_ptr<ToolResult> make_error_tool_result(std::string message) {
+    return std::make_shared<StaticToolResult>(std::move(message), true);
+}
+
+std::optional<FinalizedToolCall> prepare_immediate_tool_result(
+    AgentContext& context,
+    const AssistantMessage& assistant_message,
+    const ToolCall& tc,
+    const AgentLoopConfig& config,
+    std::string_view args_json,
+    std::stop_token stop_tok) {
+    auto tool_it =
+        std::find_if(context.tools.begin(), context.tools.end(),
+                     [&tc](const auto& t) {
+                         return t->name() == tc.name;
+                     });
+
+    if (tool_it == context.tools.end()) {
+        return FinalizedToolCall{
+            tc, make_error_tool_result("Tool " + tc.name + " not found"), true};
+    }
+
+    if (config.before_tool_call) {
+        auto before = config.before_tool_call(
+            BeforeToolCallContext{
+                assistant_message,
+                tc,
+                std::string(args_json),
+                context,
+            },
+            stop_tok);
+        if (before && before->block) {
+            auto reason = before->reason.empty()
+                              ? std::string{"Tool execution was blocked"}
+                              : before->reason;
+            return FinalizedToolCall{
+                tc, make_error_tool_result(std::move(reason)), true};
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::shared_ptr<const ToolDefinition> find_tool(
+    const AgentContext& context,
+    const ToolCall& tc) {
+    auto tool_it =
+        std::find_if(context.tools.begin(), context.tools.end(),
+                     [&tc](const auto& t) {
+                         return t->name() == tc.name;
+                     });
+    if (tool_it == context.tools.end()) {
+        return nullptr;
+    }
+    return *tool_it;
+}
+
+FinalizedToolCall finalize_tool_call(
+    AgentContext& context,
+    const AssistantMessage& assistant_message,
+    const ToolCall& tc,
+    std::shared_ptr<ToolResult> tool_result,
+    bool is_error,
+    const AgentLoopConfig& config,
+    std::string_view args_json,
+    std::stop_token stop_tok) {
+    if (!tool_result) {
+        tool_result = make_error_tool_result("Tool returned no result");
+        is_error = true;
+    }
+
+    if (config.after_tool_call) {
+        try {
+            auto after = config.after_tool_call(
+                AfterToolCallContext{
+                    assistant_message,
+                    tc,
+                    std::string(args_json),
+                    tool_result,
+                    is_error,
+                    context,
+                },
+                stop_tok);
+            if (after) {
+                auto content = after->content.value_or(tool_result->content());
+                auto details = after->details.has_value()
+                                   ? after->details
+                                   : tool_result->details();
+                auto final_is_error = after->is_error.value_or(is_error);
+                auto terminate =
+                    after->terminate.value_or(tool_result->terminate());
+                tool_result = std::make_shared<StaticToolResult>(
+                    std::move(content), final_is_error, terminate,
+                    std::move(details));
+                is_error = final_is_error;
+            }
+        } catch (const std::exception& e) {
+            tool_result = make_error_tool_result(e.what());
+            is_error = true;
+        } catch (...) {
+            tool_result = make_error_tool_result("Unknown after_tool_call error");
+            is_error = true;
+        }
+    }
+
+    return FinalizedToolCall{tc, std::move(tool_result), is_error};
+}
+
+bool should_terminate_tool_batch(
+    const std::vector<FinalizedToolCall>& finalized_calls) {
+    return !finalized_calls.empty() &&
+           std::ranges::all_of(finalized_calls, [](const auto& finalized) {
+               return finalized.result && finalized.result->terminate();
+           });
+}
+
+ToolResultMessage emit_finalized_tool_call(
+    const FinalizedToolCall& finalized,
+    StreamCallback emit) {
+    emit_tool_result(finalized.tool_call, finalized.result, finalized.is_error, emit);
+    return make_tool_result_message(finalized.tool_call, finalized.result);
 }
 
 } // namespace
@@ -175,86 +342,38 @@ static ToolCallResult execute_tool_calls_sequential(
     StreamCallback emit,
     std::stop_token stop_tok) {
     ToolCallResult result;
+    std::vector<FinalizedToolCall> finalized_calls;
 
     for (const auto& tc : tool_calls) {
-        // Find tool
-        auto tool_it =
-            std::find_if(context.tools.begin(), context.tools.end(),
-                         [&tc](const auto& t) {
-                             return t->name() == tc.name;
-                         });
-
-        // Emit tool_execution_start
+        auto args_json = tool_call_args_json(tc);
         emit(ToolExecutionStartEvent(
-            tc.id, tc.name, tool_call_args_json(tc),
-            std::source_location::current()));
+            tc.id, tc.name, args_json, std::source_location::current()));
 
-        if (tool_it != context.tools.end()) {
-            // Call before_tool_call
-            bool tool_blocked = false;
-            if (config.before_tool_call) {
-                auto block = config.before_tool_call(
-                    assistant_message, tc, tool_call_args_json(tc));
-                if (block.has_value() && *block) {
-                    tool_blocked = true;
-                }
-            }
-
-            if (tool_blocked) {
-                // Tool was blocked — emit error result
-                // Create a minimal error result inline
-                struct SimpleErrorResult : public ToolResult {
-                    bool is_error() const override { return true; }
-                    std::string content() const override { return "Tool execution blocked"; }
-                    std::optional<std::string> details() const override { return std::nullopt; }
-                };
-                auto error_result = std::make_shared<SimpleErrorResult>();
-                emit_tool_result(tc, error_result, true, emit);
-                result.messages.push_back(
-                    make_tool_result_message(tc, error_result));
-                result.terminate = true;
-                continue;
-            }
-
-            // Execute tool
-            auto tool_result = (*tool_it)->execute(
-                tc.id, tool_call_args_json(tc), stop_tok);
-
-            // Call after_tool_call
-            if (config.after_tool_call && tool_result) {
-                auto override = config.after_tool_call(
-                    assistant_message, tc, tool_result);
-                if (override) {
-                    auto [content, is_err, terminate] = *override;
-                    // Note: In a full impl, we'd modify the result here
-                }
-            }
-
-            emit_tool_result(tc, tool_result, tool_result->is_error(),
-                             emit);
-            result.messages.push_back(
-                make_tool_result_message(tc, tool_result));
-
-            if (tool_result && tool_result->terminate()) {
-                result.terminate = true;
-            }
+        auto immediate = prepare_immediate_tool_result(
+            context, assistant_message, tc, config, args_json, stop_tok);
+        FinalizedToolCall finalized;
+        if (immediate) {
+            finalized = std::move(*immediate);
         } else {
-            // Tool not found — error
-            struct SimpleErrorResult : public ToolResult {
-                bool is_error() const override { return true; }
-                std::string content() const override { return "Tool not found"; }
-                std::optional<std::string> details() const override { return std::nullopt; }
-            };
-            auto error_result = std::make_shared<SimpleErrorResult>();
-            emit_tool_result(tc, error_result, true, emit);
-            result.messages.push_back(
-                make_tool_result_message(tc, error_result));
-            result.terminate = true;
+            auto tool = find_tool(context, tc);
+            auto tool_result = tool->execute(
+                tc.id, args_json, stop_tok,
+                [&emit, &tc, args_json](std::shared_ptr<ToolResult> partial) {
+                    emit(ToolExecutionUpdateEvent(
+                        tc.id, tc.name, args_json,
+                        partial ? partial->content() : std::string{},
+                        std::source_location::current()));
+                });
+            finalized = finalize_tool_call(
+                context, assistant_message, tc, std::move(tool_result), false,
+                config, args_json, stop_tok);
         }
 
-        if (result.terminate) break;
+        result.messages.push_back(emit_finalized_tool_call(finalized, emit));
+        finalized_calls.push_back(std::move(finalized));
     }
 
+    result.terminate = should_terminate_tool_batch(finalized_calls);
     return result;
 }
 
@@ -270,81 +389,61 @@ static ToolCallResult execute_tool_calls_parallel(
     StreamCallback emit,
     std::stop_token stop_tok) {
     ToolCallResult result;
+    std::vector<FinalizedToolCall> finalized_calls;
+    std::vector<std::future<FinalizedToolCall>> pending;
 
     for (const auto& tc : tool_calls) {
-        auto tool_it =
-            std::find_if(context.tools.begin(), context.tools.end(),
-                         [&tc](const auto& t) {
-                             return t->name() == tc.name;
-                         });
-
-        // Emit tool_execution_start
+        auto args_json = tool_call_args_json(tc);
         emit(ToolExecutionStartEvent(
-            tc.id, tc.name, tool_call_args_json(tc),
-            std::source_location::current()));
+            tc.id, tc.name, args_json, std::source_location::current()));
 
-        if (tool_it != context.tools.end()) {
-            if (config.before_tool_call) {
-                auto block_result = config.before_tool_call(
-                    assistant_message, tc, tool_call_args_json(tc));
-                if (block_result.has_value() && *block_result) {
-                    struct SimpleErrorResult : public ToolResult {
-                        bool is_error() const override { return true; }
-                        std::string content() const override {
-                            return "Tool execution blocked";
-                        }
-                        std::optional<std::string> details() const override {
-                            return std::nullopt;
-                        }
-                    };
-                    auto error_result = std::make_shared<SimpleErrorResult>();
-                    emit_tool_result(tc, error_result, true, emit);
-                    result.messages.push_back(
-                        make_tool_result_message(tc, error_result));
-                    result.terminate = true;
-                    continue;
-                }
-            }
-
-            auto tool_result =
-                (*tool_it)->execute(tc.id, tool_call_args_json(tc), stop_tok);
-
-            if (config.after_tool_call && tool_result) {
-                auto override = config.after_tool_call(
-                    assistant_message, tc, tool_result);
-                if (override) {
-                    auto [content, is_err, terminate] = *override;
-                }
-            }
-
-            emit_tool_result(tc, tool_result, tool_result->is_error(),
-                             emit);
-            result.messages.push_back(
-                make_tool_result_message(tc, tool_result));
-
-            if (tool_result && tool_result->terminate()) {
-                result.terminate = true;
-            }
-        } else {
-            struct SimpleErrorResult : public ToolResult {
-                bool is_error() const override { return true; }
-                std::string content() const override {
-                    return "Tool not found";
-                }
-                std::optional<std::string> details() const override {
-                    return std::nullopt;
-                }
-            };
-            auto error_result = std::make_shared<SimpleErrorResult>();
-            emit_tool_result(tc, error_result, true, emit);
-            result.messages.push_back(
-                make_tool_result_message(tc, error_result));
-            result.terminate = true;
+        auto immediate = prepare_immediate_tool_result(
+            context, assistant_message, tc, config, args_json, stop_tok);
+        if (immediate) {
+            emit(ToolExecutionEndEvent(
+                tc.id, tc.name, immediate->result, immediate->is_error,
+                std::source_location::current()));
+            finalized_calls.push_back(std::move(*immediate));
+            continue;
         }
 
-        if (result.terminate) break;
+        auto tool = find_tool(context, tc);
+        pending.push_back(std::async(
+            std::launch::async,
+            [&context, &assistant_message, &config, emit, stop_tok,
+             tc, args_json, tool]() mutable {
+                auto tool_result = tool->execute(
+                    tc.id, args_json, stop_tok,
+                    [emit, tc, args_json](std::shared_ptr<ToolResult> partial) {
+                        emit(ToolExecutionUpdateEvent(
+                            tc.id, tc.name, args_json,
+                            partial ? partial->content() : std::string{},
+                            std::source_location::current()));
+                    });
+                auto finalized = finalize_tool_call(
+                    context, assistant_message, tc, std::move(tool_result),
+                    false, config, args_json, stop_tok);
+                emit(ToolExecutionEndEvent(
+                    tc.id, tc.name, finalized.result, finalized.is_error,
+                    std::source_location::current()));
+                return finalized;
+            }));
     }
 
+    for (auto& future : pending) {
+        finalized_calls.push_back(future.get());
+    }
+
+    for (const auto& finalized : finalized_calls) {
+        result.messages.push_back(make_tool_result_message(
+            finalized.tool_call, finalized.result));
+    }
+    for (const auto& message : result.messages) {
+        emit(MessageStartEvent(message, std::source_location::current()));
+        emit(MessageEndEvent(message, std::source_location::current()));
+    }
+
+    result.terminate = should_terminate_tool_batch(finalized_calls);
     return result;
 }
 
@@ -398,48 +497,71 @@ run_agent_loop(const std::vector<Message>& prompts,
             return {};
         });
 
-    // Run the loop asynchronously
-    std::ignore = std::async(std::launch::async, [&]() mutable {
-        emit(AgentStartEvent());
-        emit(TurnStartEvent());
+    std::ignore = std::async(std::launch::async,
+                             [prompts, context = std::move(context), config,
+                              emit = std::move(emit), stream, stop_tok]() mutable {
+        auto publish = [&](AgentEvent event) {
+            emit(event);
+            stream.push(std::move(event));
+        };
+
+        publish(AgentStartEvent());
+        publish(TurnStartEvent());
 
         // Emit prompt messages
         for (const auto& prompt : prompts) {
-            emit(MessageStartEvent(prompt));
-            emit(MessageEndEvent(prompt));
+            publish(MessageStartEvent(prompt));
+            publish(MessageEndEvent(prompt));
+            context.messages.push_back(prompt);
         }
 
         auto new_messages = prompts;
+        auto pending_messages =
+            config.get_steering_messages ? config.get_steering_messages()
+                                         : std::vector<Message>{};
+        bool first_turn = true;
 
         // Outer loop: continues when follow-up messages arrive
         while (!stop_tok.stop_requested()) {
             bool has_more_tool_calls = true;
 
             // Inner loop: process tool calls and steering messages
-            while (has_more_tool_calls || !context.messages.empty()) {
-                // Check steering messages
-                auto steering =
-                    config.get_steering_messages ? config.get_steering_messages()
-                                                 : std::vector<Message>{};
-                if (!steering.empty()) {
-                    for (const auto& msg : steering) {
-                        emit(MessageStartEvent(msg));
-                        emit(MessageEndEvent(msg));
+            while (has_more_tool_calls || !pending_messages.empty()) {
+                if (first_turn) {
+                    first_turn = false;
+                } else {
+                    publish(TurnStartEvent());
+                }
+                has_more_tool_calls = false;
+
+                if (!pending_messages.empty()) {
+                    for (const auto& msg : pending_messages) {
+                        publish(MessageStartEvent(msg));
+                        publish(MessageEndEvent(msg));
                         context.messages.push_back(msg);
                         new_messages.push_back(msg);
                     }
+                    pending_messages.clear();
                 }
 
                 // Stream assistant response
                 auto assistant_msg = stream_assistant_response(
-                    context, config, emit, stop_tok);
+                    context, config, publish, stop_tok);
+                if (!assistant_msg) {
+                    assistant_msg = std::make_shared<AssistantMessage>();
+                    assistant_msg->api = "none";
+                    assistant_msg->provider = "none";
+                    assistant_msg->model = config.model.id;
+                    assistant_msg->stop_reason = StopReason::error;
+                    assistant_msg->error_message = "LLM client returned no message";
+                }
                 new_messages.push_back(*assistant_msg);
 
                 // Check for error/abort
                 if (assistant_msg->stop_reason == StopReason::error ||
                     assistant_msg->stop_reason == StopReason::aborted) {
-                    emit(TurnEndEvent(*assistant_msg, {}));
-                    emit(AgentEndEvent(new_messages));
+                    publish(TurnEndEvent(*assistant_msg, {}));
+                    publish(AgentEndEvent(new_messages));
                     stream.finish(new_messages);
                     return;
                 }
@@ -448,11 +570,9 @@ run_agent_loop(const std::vector<Message>& prompts,
                 auto tool_calls = extract_tool_calls(assistant_msg->content);
 
                 std::vector<ToolResultMessage> tool_results;
-                has_more_tool_calls = false;
-
                 if (!tool_calls.empty()) {
                     auto batch_result = execute_tool_calls(
-                        context, *assistant_msg, config, emit, stop_tok);
+                        context, *assistant_msg, config, publish, stop_tok);
                     tool_results = std::move(batch_result.messages);
                     has_more_tool_calls = !batch_result.terminate;
 
@@ -462,18 +582,22 @@ run_agent_loop(const std::vector<Message>& prompts,
                     }
                 }
 
-                emit(TurnEndEvent(*assistant_msg, tool_results));
+                publish(TurnEndEvent(*assistant_msg, tool_results));
 
                 // Should we stop after this turn?
                 if (config.should_stop_after_turn) {
                     bool stop = config.should_stop_after_turn(
                         *assistant_msg, tool_results, context);
                     if (stop) {
-                        emit(AgentEndEvent(new_messages));
+                        publish(AgentEndEvent(new_messages));
                         stream.finish(new_messages);
                         return;
                     }
                 }
+
+                pending_messages =
+                    config.get_steering_messages ? config.get_steering_messages()
+                                                 : std::vector<Message>{};
             }
 
             // Check for follow-up messages
@@ -481,6 +605,7 @@ run_agent_loop(const std::vector<Message>& prompts,
                 config.get_follow_up_messages ? config.get_follow_up_messages()
                                               : std::vector<Message>{};
             if (!follow_ups.empty()) {
+                pending_messages = std::move(follow_ups);
                 continue;
             }
 
@@ -488,7 +613,7 @@ run_agent_loop(const std::vector<Message>& prompts,
             break;
         }
 
-        emit(AgentEndEvent(new_messages));
+        publish(AgentEndEvent(new_messages));
         stream.finish(new_messages);
     });
 
@@ -522,40 +647,61 @@ run_agent_loop_continue(AgentContext& context,
             return {};
         });
 
-    std::ignore = std::async(std::launch::async, [&]() mutable {
-        emit(AgentStartEvent());
-        emit(TurnStartEvent());
+    auto context_snapshot = context;
+    std::ignore = std::async(std::launch::async,
+                             [context = std::move(context_snapshot), config,
+                              emit = std::move(emit), stream, stop_tok]() mutable {
+        auto publish = [&](AgentEvent event) {
+            emit(event);
+            stream.push(std::move(event));
+        };
+
+        publish(AgentStartEvent());
+        publish(TurnStartEvent());
 
         auto new_messages = std::vector<Message>{};
+        auto pending_messages =
+            config.get_steering_messages ? config.get_steering_messages()
+                                         : std::vector<Message>{};
+        bool first_turn = true;
 
         while (!stop_tok.stop_requested()) {
             bool has_more_tool_calls = true;
 
-            while (has_more_tool_calls) {
-                emit(TurnStartEvent());
+            while (has_more_tool_calls || !pending_messages.empty()) {
+                if (first_turn) {
+                    first_turn = false;
+                } else {
+                    publish(TurnStartEvent());
+                }
 
-                // Check steering messages
-                auto steering =
-                    config.get_steering_messages ? config.get_steering_messages()
-                                                 : std::vector<Message>{};
-                if (!steering.empty()) {
-                    for (const auto& msg : steering) {
-                        emit(MessageStartEvent(msg));
-                        emit(MessageEndEvent(msg));
+                if (!pending_messages.empty()) {
+                    for (const auto& msg : pending_messages) {
+                        publish(MessageStartEvent(msg));
+                        publish(MessageEndEvent(msg));
                         context.messages.push_back(msg);
                         new_messages.push_back(msg);
                     }
+                    pending_messages.clear();
                 }
 
                 // Stream assistant response
                 auto assistant_msg = stream_assistant_response(
-                    context, config, emit, stop_tok);
+                    context, config, publish, stop_tok);
+                if (!assistant_msg) {
+                    assistant_msg = std::make_shared<AssistantMessage>();
+                    assistant_msg->api = "none";
+                    assistant_msg->provider = "none";
+                    assistant_msg->model = config.model.id;
+                    assistant_msg->stop_reason = StopReason::error;
+                    assistant_msg->error_message = "LLM client returned no message";
+                }
                 new_messages.push_back(*assistant_msg);
 
                 if (assistant_msg->stop_reason == StopReason::error ||
                     assistant_msg->stop_reason == StopReason::aborted) {
-                    emit(TurnEndEvent(*assistant_msg, {}));
-                    emit(AgentEndEvent(new_messages));
+                    publish(TurnEndEvent(*assistant_msg, {}));
+                    publish(AgentEndEvent(new_messages));
                     stream.finish(new_messages);
                     return;
                 }
@@ -568,7 +714,7 @@ run_agent_loop_continue(AgentContext& context,
 
                 if (!tool_calls.empty()) {
                     auto batch_result = execute_tool_calls(
-                        context, *assistant_msg, config, emit, stop_tok);
+                        context, *assistant_msg, config, publish, stop_tok);
                     tool_results = std::move(batch_result.messages);
                     has_more_tool_calls = !batch_result.terminate;
 
@@ -578,29 +724,34 @@ run_agent_loop_continue(AgentContext& context,
                     }
                 }
 
-                emit(TurnEndEvent(*assistant_msg, tool_results));
+                publish(TurnEndEvent(*assistant_msg, tool_results));
 
                 if (config.should_stop_after_turn) {
                     bool stop = config.should_stop_after_turn(
                         *assistant_msg, tool_results, context);
                     if (stop) {
-                        emit(AgentEndEvent(new_messages));
+                        publish(AgentEndEvent(new_messages));
                         stream.finish(new_messages);
                         return;
                     }
                 }
+
+                pending_messages =
+                    config.get_steering_messages ? config.get_steering_messages()
+                                                 : std::vector<Message>{};
             }
 
             auto follow_ups =
                 config.get_follow_up_messages ? config.get_follow_up_messages()
                                               : std::vector<Message>{};
             if (!follow_ups.empty()) {
+                pending_messages = std::move(follow_ups);
                 continue;
             }
             break;
         }
 
-        emit(AgentEndEvent(new_messages));
+        publish(AgentEndEvent(new_messages));
         stream.finish(new_messages);
     });
 

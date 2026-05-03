@@ -31,52 +31,35 @@ public:
     using ResultExtractor = std::function<FinalResultT(const Event&)>;
 
     EventStream(DonePredicate done, ResultExtractor extract)
-        : done_(std::move(done)), extract_(std::move(extract)) {}
+        : state_(std::make_shared<State>(std::move(done), std::move(extract))) {}
 
-    // Non-copyable
-    EventStream(const EventStream&) = delete;
-    EventStream& operator=(const EventStream&) = delete;
-
-    // Movable (internal mutex is locked during move)
-    EventStream(EventStream&& other) noexcept {
-        std::scoped_lock lk(mutex_, other.mutex_);
-        std::swap(queue_, other.queue_);
-        std::swap(done_, other.done_);
-        std::swap(extract_, other.extract_);
-        std::swap(is_complete_, other.is_complete_);
-        std::swap(result_, other.result_);
-        std::swap(has_result_, other.has_result_);
-        std::swap(has_error_, other.has_error_);
-        std::swap(error_, other.error_);
-    }
-
-    EventStream& operator=(EventStream&& other) noexcept {
-        if (this != &other) {
-            std::scoped_lock lk(mutex_, other.mutex_);
-            std::swap(queue_, other.queue_);
-            std::swap(done_, other.done_);
-            std::swap(extract_, other.extract_);
-            std::swap(is_complete_, other.is_complete_);
-            std::swap(result_, other.result_);
-            std::swap(has_result_, other.has_result_);
-            std::swap(has_error_, other.has_error_);
-            std::swap(error_, other.error_);
-        }
-        return *this;
-    }
+    EventStream(const EventStream&) = default;
+    EventStream& operator=(const EventStream&) = default;
+    EventStream(EventStream&&) noexcept = default;
+    EventStream& operator=(EventStream&&) noexcept = default;
 
     // ── Push events ────────────────────────────────────────────────────
 
     // Push an event. Returns true if the stream is not yet complete.
     bool push(Event event) {
+        bool complete = false;
         {
-            std::lock_guard lock(mutex_);
-            if (is_complete_) return false;
-            queue_.push(std::move(event));
-            has_error_ = false;
-            condition_.notify_one();
+            std::lock_guard lock(state_->mutex);
+            if (state_->is_complete) return false;
+            complete = state_->done && state_->done(event);
+            if (complete) {
+                state_->result = state_->extract ? state_->extract(event)
+                                                 : FinalResultT{};
+                state_->has_result = true;
+            }
+            state_->queue.push(std::move(event));
+            state_->has_error = false;
+            if (complete) {
+                state_->is_complete = true;
+            }
         }
-        return !is_complete_;
+        state_->condition.notify_all();
+        return !complete;
     }
 
     // Push and check if this event marks the stream as done.
@@ -84,52 +67,50 @@ public:
     bool push_and_check(Event event) {
         bool done = false;
         {
-            std::lock_guard lock(mutex_);
-            if (is_complete_) return false;
+            std::lock_guard lock(state_->mutex);
+            if (state_->is_complete) return false;
 
-            queue_.push(std::move(event));
-
-            if (done_ && done_(queue_.front())) {
-                done = true;
-                result_ = extract_ ? extract_(queue_.front()) : FinalResultT{};
-                has_result_ = true;
-                queue_.pop();
-            } else {
-                has_error_ = false;
-            }
-
+            done = state_->done && state_->done(event);
             if (done) {
-                // Drain remaining events if any, then close
-                is_complete_ = true;
-                condition_.notify_all();
+                state_->result = state_->extract ? state_->extract(event)
+                                                 : FinalResultT{};
+                state_->has_result = true;
+            } else {
+                state_->has_error = false;
+            }
+            state_->queue.push(std::move(event));
+            if (done) {
+                state_->is_complete = true;
             }
         }
-        if (done) {
-            condition_.notify_all();
-        }
-        return !is_complete_;
+        state_->condition.notify_all();
+        return !done;
     }
 
     // Push a final event that ends the stream
-    void finish(FinalResultT result) {
-        std::lock_guard lock(mutex_);
-        is_complete_ = true;
-        result_ = std::move(result);
-        has_result_ = true;
-        condition_.notify_all();
+    void finish(FinalResultT result = FinalResultT{}) {
+        {
+            std::lock_guard lock(state_->mutex);
+            state_->is_complete = true;
+            state_->result = std::move(result);
+            state_->has_result = true;
+        }
+        state_->condition.notify_all();
     }
 
     void finish_error(std::string error) {
-        std::lock_guard lock(mutex_);
-        is_complete_ = true;
-        error_ = std::move(error);
-        has_error_ = true;
-        condition_.notify_all();
+        {
+            std::lock_guard lock(state_->mutex);
+            state_->is_complete = true;
+            state_->error = std::move(error);
+            state_->has_error = true;
+        }
+        state_->condition.notify_all();
     }
 
     bool is_done() {
-        std::lock_guard lock(mutex_);
-        return is_complete_;
+        std::lock_guard lock(state_->mutex);
+        return state_->is_complete;
     }
 
     // ── Iterator interface ─────────────────────────────────────────────
@@ -137,25 +118,22 @@ public:
 
     // Returns the next event, blocking. Returns std::nullopt when done.
     std::optional<Event> next() {
-        std::unique_lock lock(mutex_);
-        condition_.wait(lock, [this] {
-            return !queue_.empty() || is_complete_;
+        std::unique_lock lock(state_->mutex);
+        state_->condition.wait(lock, [this] {
+            return !state_->queue.empty() || state_->is_complete;
         });
-        if (queue_.empty() && is_complete_) {
+        if (state_->queue.empty()) {
             return std::nullopt;
         }
-        if (queue_.empty()) {
-            return std::nullopt;
-        }
-        Event ev = std::move(queue_.front());
-        queue_.pop();
+        Event ev = std::move(state_->queue.front());
+        state_->queue.pop();
         return ev;
     }
 
     // ── Range-based iteration ──────────────────────────────────────────
 
     class iterator {
-        EventStream* stream_;
+        EventStream* stream_{nullptr};
 
     public:
         using iterator_category = std::input_iterator_tag;
@@ -210,14 +188,14 @@ public:
 
     std::pair<std::optional<FinalResultT>, std::optional<std::string>>
     wait() {
-        std::unique_lock lock(mutex_);
-        condition_.wait(lock, [this] { return is_complete_; });
+        std::unique_lock lock(state_->mutex);
+        state_->condition.wait(lock, [this] { return state_->is_complete; });
 
-        if (has_result_) {
-            return {std::move(result_), std::nullopt};
+        if (state_->has_result) {
+            return {state_->result, std::nullopt};
         }
-        if (has_error_) {
-            return {std::optional<FinalResultT>{}, std::move(error_)};
+        if (state_->has_error) {
+            return {std::optional<FinalResultT>{}, state_->error};
         }
         return {std::optional<FinalResultT>{}, std::nullopt};
     }
@@ -227,29 +205,36 @@ public:
     std::vector<Event> drain() {
         std::vector<Event> events;
         {
-            std::lock_guard lock(mutex_);
-            while (!queue_.empty()) {
-                events.push_back(std::move(queue_.front()));
-                queue_.pop();
+            std::lock_guard lock(state_->mutex);
+            while (!state_->queue.empty()) {
+                events.push_back(std::move(state_->queue.front()));
+                state_->queue.pop();
             }
         }
         return events;
     }
 
 private:
-    std::mutex mutex_;
-    std::condition_variable condition_;
-    std::queue<Event> queue_;
+    struct State {
+        State(DonePredicate done_in, ResultExtractor extract_in)
+            : done(std::move(done_in)), extract(std::move(extract_in)) {}
 
-    DonePredicate done_;
-    ResultExtractor extract_;
+        std::mutex mutex;
+        std::condition_variable condition;
+        std::queue<Event> queue;
 
-    bool is_complete_{false};
-    FinalResultT result_;
-    bool has_result_{false};
+        DonePredicate done;
+        ResultExtractor extract;
 
-    std::string error_;
-    bool has_error_{false};
+        bool is_complete{false};
+        FinalResultT result{};
+        bool has_result{false};
+
+        std::string error;
+        bool has_error{false};
+    };
+
+    std::shared_ptr<State> state_;
 };
 
 // ─── AsyncEventStream: Non-blocking stream with callbacks ───────────────────
@@ -270,16 +255,11 @@ public:
 
             // Run callback on a worker thread if one exists
             event_queue_.push_back(std::move(event));
-            if (event_queue_.back().index() == 0) {
-                // Check if it's an agent_end event
-                if (std::holds_alternative<AgentEndEvent>(event_queue_.back())) {
-                    is_last = true;
-                }
+            if (std::holds_alternative<AgentEndEvent>(event_queue_.back())) {
+                is_last = true;
             }
 
-            if (is_last ||
-                (event_queue_.back().index() == 0 &&
-                 std::holds_alternative<AgentEndEvent>(event_queue_.back()))) {
+            if (is_last) {
                 is_complete_ = true;
             }
         }

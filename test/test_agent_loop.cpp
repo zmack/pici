@@ -106,7 +106,7 @@ public:
         }
     };
 
-    ToolSchema& schema() override {
+    ToolSchema& schema() const override {
         if (!schema_) {
             schema_ = std::make_unique<CounterSchema>();
         }
@@ -134,7 +134,8 @@ public:
     std::shared_ptr<ToolResult> execute(
         std::string_view call_id,
         std::string_view args_json,
-        std::stop_token) override {
+        std::stop_token,
+        ToolUpdateCallback) const override {
         (void)call_id;
         (void)args_json;
         int start = 0;
@@ -157,7 +158,44 @@ public:
     }
 
 private:
-    std::unique_ptr<ToolSchema> schema_;
+    mutable std::unique_ptr<ToolSchema> schema_;
+};
+
+class TrackingTool : public ToolDefinition {
+public:
+    explicit TrackingTool(std::atomic<int>& executions)
+        : executions_(executions) {}
+
+    std::string_view name() const override { return "tracking"; }
+    std::string_view description() const override { return "Tracks calls"; }
+    ToolSchema& schema() const override {
+        if (!schema_) {
+            schema_ = std::make_unique<CounterTool::CounterSchema>();
+        }
+        return *schema_;
+    }
+
+    class Result : public ToolResult {
+    public:
+        bool is_error() const override { return false; }
+        std::string content() const override { return "executed"; }
+        std::optional<std::string> details() const override {
+            return "tracking-details";
+        }
+    };
+
+    std::shared_ptr<ToolResult> execute(
+        std::string_view,
+        std::string_view,
+        std::stop_token,
+        ToolUpdateCallback) const override {
+        executions_++;
+        return std::make_shared<Result>();
+    }
+
+private:
+    std::atomic<int>& executions_;
+    mutable std::unique_ptr<ToolSchema> schema_;
 };
 
 // ─── Test LLM client: returns a pre-programmed response ───────────────────
@@ -263,7 +301,8 @@ void test_agent_loop_single_turn() {
         auto stream = run_agent_loop({}, ctx, config,
                                      [](const AgentEvent&) {});
 
-        for (auto& : stream) {
+        for (auto& ev : stream) {
+            (void)ev;
         }
 
         CHECK(message_events >= 2);
@@ -343,7 +382,8 @@ void test_agent_loop_with_tools() {
                                          }
                                      });
 
-        for (auto& : stream) {
+        for (auto& ev : stream) {
+            (void)ev;
         }
 
         CHECK(turn_start_count >= 1);
@@ -411,7 +451,8 @@ void test_agent_loop_stop_after_turn() {
         auto stream = run_agent_loop({}, ctx, config,
                                      [](const AgentEvent&) {});
 
-        for (auto& : stream) {
+        for (auto& ev : stream) {
+            (void)ev;
         }
 
         CHECK_EQ(turn_count, 1);
@@ -492,7 +533,8 @@ void test_agent_loop_sequential_tools() {
                                          }
                                      });
 
-        for (auto& : stream) {
+        for (auto& ev : stream) {
+            (void)ev;
         }
 
         CHECK_EQ(tool_start_count, 2);
@@ -544,7 +586,8 @@ void test_agent_loop_no_llm_client() {
                                          }
                                      });
 
-        for (auto& : stream) {
+        for (auto& ev : stream) {
+            (void)ev;
         }
 
         CHECK(error_handled);
@@ -611,7 +654,8 @@ void test_agent_loop_continue() {
         // First continuation
         auto stream1 = run_agent_loop_continue(ctx, config,
                                                [](const AgentEvent&) {});
-        for (auto& : stream1) {
+        for (auto& ev : stream1) {
+            (void)ev;
         }
         CHECK_EQ(turn_count, 1);
 
@@ -625,9 +669,206 @@ void test_agent_loop_continue() {
 
         auto stream2 = run_agent_loop_continue(ctx, config,
                                                [](const AgentEvent&) {});
-        for (auto& : stream2) {
+        for (auto& ev : stream2) {
+            (void)ev;
         }
         CHECK_EQ(turn_count, 2);
+    });
+}
+
+void test_agent_loop_before_tool_call_blocks_with_reason() {
+    tests::register_test("Agent loop: before_tool_call blocks with reason", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [](const AgentContext&,
+               ThinkingLevel,
+               StreamCallback,
+               std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->stop_reason = StopReason::tool_use;
+
+                ToolCall tc;
+                tc.id = "call_blocked";
+                tc.name = "tracking";
+                tc.arguments["start"] = "0";
+                msg->content.push_back(std::move(tc));
+                return msg;
+            });
+
+        std::atomic<int> executions{0};
+        AgentContext ctx;
+        ctx.tools.push_back(std::make_shared<TrackingTool>(executions));
+
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.should_stop_after_turn = [](const Message&,
+                                           const std::vector<ToolResultMessage>&,
+                                           AgentContext&) {
+            return true;
+        };
+        config.get_steering_messages = [] { return std::vector<Message>{}; };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+        config.before_tool_call =
+            [](const BeforeToolCallContext& ctx, std::stop_token) {
+                CHECK_EQ(ctx.tool_call.name, "tracking");
+                return BeforeToolCallResult{true, "blocked by policy"};
+            };
+
+        std::vector<ToolResultMessage> tool_results;
+        auto stream = run_agent_loop({}, ctx, config,
+                                     [&tool_results](const AgentEvent& ev) {
+                                         if (auto* e = std::get_if<TurnEndEvent>(&ev)) {
+                                             tool_results = e->tool_results;
+                                         }
+                                     });
+        for (auto& ev : stream) {
+            (void)ev;
+        }
+
+        CHECK_EQ(executions.load(), 0);
+        CHECK_EQ(tool_results.size(), std::size_t(1));
+        CHECK(tool_results[0].is_error);
+        CHECK_EQ(std::get<TextContent>(tool_results[0].content[0]).text,
+                 "blocked by policy");
+    });
+}
+
+void test_agent_loop_after_tool_call_partial_override() {
+    tests::register_test("Agent loop: after_tool_call applies partial override", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [](const AgentContext&,
+               ThinkingLevel,
+               StreamCallback,
+               std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->stop_reason = StopReason::tool_use;
+
+                ToolCall tc;
+                tc.id = "call_override";
+                tc.name = "tracking";
+                tc.arguments["start"] = "0";
+                msg->content.push_back(std::move(tc));
+                return msg;
+            });
+
+        std::atomic<int> executions{0};
+        AgentContext ctx;
+        ctx.tools.push_back(std::make_shared<TrackingTool>(executions));
+
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.should_stop_after_turn = [](const Message&,
+                                           const std::vector<ToolResultMessage>&,
+                                           AgentContext&) {
+            return true;
+        };
+        config.get_steering_messages = [] { return std::vector<Message>{}; };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+        config.after_tool_call =
+            [](const AfterToolCallContext& ctx, std::stop_token) {
+                CHECK_EQ(ctx.result->content(), "executed");
+                AfterToolCallResult result;
+                result.content = "overridden";
+                result.is_error = true;
+                return result;
+            };
+
+        std::vector<ToolResultMessage> tool_results;
+        auto stream = run_agent_loop({}, ctx, config,
+                                     [&tool_results](const AgentEvent& ev) {
+                                         if (auto* e = std::get_if<TurnEndEvent>(&ev)) {
+                                             tool_results = e->tool_results;
+                                         }
+                                     });
+        for (auto& ev : stream) {
+            (void)ev;
+        }
+
+        CHECK_EQ(executions.load(), 1);
+        CHECK_EQ(tool_results.size(), std::size_t(1));
+        CHECK(tool_results[0].is_error);
+        CHECK_EQ(std::get<TextContent>(tool_results[0].content[0]).text,
+                 "overridden");
+        CHECK_EQ(*tool_results[0].details, "tracking-details");
+    });
+}
+
+void test_agent_loop_steering_after_turn_continues() {
+    tests::register_test("Agent loop: steering after turn continues", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        int turn_count = 0;
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [&turn_count](const AgentContext&,
+                          ThinkingLevel,
+                          StreamCallback,
+                          std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                turn_count++;
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->stop_reason = StopReason::stop;
+                TextContent text;
+                text.text = "turn " + std::to_string(turn_count);
+                msg->content.push_back(std::move(text));
+                return msg;
+            });
+
+        int steering_calls = 0;
+        AgentContext ctx;
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.should_stop_after_turn = [](const Message&,
+                                           const std::vector<ToolResultMessage>&,
+                                           AgentContext&) {
+            return false;
+        };
+        config.get_steering_messages = [&steering_calls] {
+            steering_calls++;
+            if (steering_calls == 2) {
+                UserMessage msg;
+                TextContent text;
+                text.text = "steer";
+                msg.content.push_back(std::move(text));
+                return std::vector<Message>{std::move(msg)};
+            }
+            return std::vector<Message>{};
+        };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+
+        auto stream = run_agent_loop({}, ctx, config,
+                                     [](const AgentEvent&) {});
+        for (auto& ev : stream) {
+            (void)ev;
+        }
+
+        CHECK_EQ(turn_count, 2);
+        CHECK_EQ(steering_calls, 3);
     });
 }
 
@@ -642,8 +883,11 @@ int main() {
     test_agent_loop_sequential_tools();
     test_agent_loop_no_llm_client();
     test_agent_loop_continue();
+    test_agent_loop_before_tool_call_blocks_with_reason();
+    test_agent_loop_after_tool_call_partial_override();
+    test_agent_loop_steering_after_turn_continues();
 
     tests::print_summary();
 
-    return failed > 0 ? 1 : 0;
+    return tests::failed > 0 ? 1 : 0;
 }

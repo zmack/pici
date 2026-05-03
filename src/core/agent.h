@@ -43,15 +43,14 @@ public:
             convert_to_llm;
 
         // Tool callbacks
-        std::function<std::optional<bool>(const Message&,
-                                          const ToolCall&,
-                                          std::string_view args)>
+        std::function<std::optional<BeforeToolCallResult>(
+            const BeforeToolCallContext&,
+            std::stop_token)>
             before_tool_call;
 
-        std::function<std::optional<std::tuple<std::string, bool, bool>>(
-            const Message&,
-            const ToolCall&,
-            std::shared_ptr<ToolResult>)>
+        std::function<std::optional<AfterToolCallResult>(
+            const AfterToolCallContext&,
+            std::stop_token)>
             after_tool_call;
 
         // Stop condition
@@ -65,10 +64,12 @@ public:
         std::function<std::vector<Message>()> get_follow_up_messages;
     };
 
+    Agent();
     explicit Agent(const Options& options);
 
     // ── State access ───────────────────────────────────────────────────
 
+    AgentState& state() { return state_; }
     const AgentState& state() const { return state_; }
 
     // ── Tools ──────────────────────────────────────────────────────────
