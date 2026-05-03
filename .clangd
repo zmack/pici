@@ -1,0 +1,10 @@
+CompileFlags:
+  CompilationDatabase: build
+
+Diagnostics:
+  Suppress:
+    - -Wunused-parameter
+  UnusedIncludes: Strict
+
+Index:
+  Background: Build
