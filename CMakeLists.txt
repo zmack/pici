@@ -115,3 +115,51 @@ add_library(pi-http
 )
 target_include_directories(pi-http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl)
+
+# ─── clang-tidy ───────────────────────────────────────────────────────────────
+
+find_program(CLANG_TIDY_BIN NAMES clang-tidy-23 clang-tidy-22 clang-tidy-20 clang-tidy)
+find_program(RUN_CLANG_TIDY_BIN NAMES run-clang-tidy-23 run-clang-tidy-22 run-clang-tidy-20 run-clang-tidy)
+
+if(CLANG_TIDY_BIN)
+    # Regex passed to run-clang-tidy matching only our src/ files,
+    # excluding FetchContent deps (which live under build/_deps) and tests.
+    set(TIDY_REGEX "${CMAKE_CURRENT_SOURCE_DIR}/src/")
+
+    if(RUN_CLANG_TIDY_BIN)
+        add_custom_target(tidy
+            COMMAND ${RUN_CLANG_TIDY_BIN}
+                -clang-tidy-binary ${CLANG_TIDY_BIN}
+                -p ${CMAKE_BINARY_DIR}
+                ${TIDY_REGEX}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Running clang-tidy (parallel, ${CLANG_TIDY_BIN})"
+            VERBATIM
+        )
+        add_custom_target(tidy-fix
+            COMMAND ${RUN_CLANG_TIDY_BIN}
+                -clang-tidy-binary ${CLANG_TIDY_BIN}
+                -p ${CMAKE_BINARY_DIR}
+                -fix
+                ${TIDY_REGEX}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Running clang-tidy --fix (parallel)"
+            VERBATIM
+        )
+    else()
+        # Serial fallback — enumerate files manually
+        file(GLOB_RECURSE TIDY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+        add_custom_target(tidy
+            COMMAND ${CLANG_TIDY_BIN}
+                -p ${CMAKE_BINARY_DIR}
+                ${TIDY_SOURCES}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Running clang-tidy (serial, ${CLANG_TIDY_BIN})"
+            VERBATIM
+        )
+    endif()
+
+    message(STATUS "clang-tidy: ${CLANG_TIDY_BIN}  →  'cmake --build build --target tidy'")
+else()
+    message(STATUS "clang-tidy not found — skipping tidy target (install clang-tidy-23)")
+endif()
