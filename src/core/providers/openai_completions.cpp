@@ -1,0 +1,557 @@
+#include "core/providers/openai_completions.h"
+#include "core/providers/transform_messages.h"
+#include "http/http_client.h"
+
+#include <algorithm>
+#include <chrono>
+#include <map>
+#include <string>
+#include <variant>
+
+namespace pi::core {
+
+namespace {
+
+std::int64_t now_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+bool str_contains(const std::string& haystack, std::string_view needle) {
+    return haystack.find(needle) != std::string::npos;
+}
+
+void parse_chunk_usage(const nlohmann::json& usage_j, TokenUsage& out) {
+    out.input = usage_j.value("prompt_tokens", std::uint64_t(0));
+    out.output = usage_j.value("completion_tokens", std::uint64_t(0));
+    auto details = usage_j.value("prompt_tokens_details", nlohmann::json::object());
+    out.cache_read = details.value("cached_tokens", std::uint64_t(0));
+    out.cache_write = details.value("cache_write_tokens", std::uint64_t(0));
+    auto reported = usage_j.value("prompt_cache_hit_tokens", out.cache_read);
+    if (out.cache_write > 0) {
+        out.cache_read = std::max(std::uint64_t(0), reported - out.cache_write);
+    } else {
+        out.cache_read = reported;
+    }
+    out.input = std::max(std::uint64_t(0), out.input - out.cache_read - out.cache_write);
+    out.total_tokens = out.input + out.output + out.cache_read + out.cache_write;
+}
+
+nlohmann::json convert_messages(
+    const Model& model,
+    const AgentContext& context,
+    const OpenAICompletionsCompat& compat) {
+
+    auto normalize_id = [](const std::string& id) -> std::string {
+        if (id.find('|') != std::string::npos) {
+            auto pos = id.find('|');
+            std::string call_id = id.substr(0, pos);
+            if (call_id.size() > 40) call_id.resize(40);
+            return call_id;
+        }
+        if (id.size() > 40) return id.substr(0, 40);
+        return id;
+    };
+
+    auto transformed = transform_messages(context.messages, model, normalize_id);
+
+    nlohmann::json params = nlohmann::json::array();
+
+    if (!context.system_prompt.empty()) {
+        std::string role = (model.reasoning && compat.supports_developer_role)
+                               ? "developer"
+                               : "system";
+        params.push_back({{"role", role}, {"content", context.system_prompt}});
+    }
+
+    for (const auto& msg : transformed) {
+        if (std::holds_alternative<UserMessage>(msg)) {
+            const auto& um = std::get<UserMessage>(msg);
+            if (um.content.empty()) continue;
+
+            bool has_non_text = false;
+            for (const auto& b : um.content) {
+                if (!std::holds_alternative<TextContent>(b)) {
+                    has_non_text = true;
+                    break;
+                }
+            }
+
+            if (!has_non_text && um.content.size() == 1) {
+                const auto& tc = std::get<TextContent>(um.content[0]);
+                params.push_back({{"role", "user"}, {"content", tc.text}});
+            } else {
+                nlohmann::json content_arr = nlohmann::json::array();
+                for (const auto& b : um.content) {
+                    if (const auto* tc = std::get_if<TextContent>(&b)) {
+                        content_arr.push_back({{"type", "text"}, {"text", tc->text}});
+                    } else if (const auto* img = std::get_if<ImageContent>(&b)) {
+                        std::string url = "data:" + img->mime_type + ";base64," + img->data;
+                        content_arr.push_back({
+                            {"type", "image_url"},
+                            {"image_url", {{"url", url}}}
+                        });
+                    }
+                }
+                if (content_arr.empty()) continue;
+                params.push_back({{"role", "user"}, {"content", content_arr}});
+            }
+        } else if (std::holds_alternative<AssistantMessage>(msg)) {
+            const auto& am = std::get<AssistantMessage>(msg);
+
+            std::string content_text;
+            for (const auto& b : am.content) {
+                if (const auto* tc = std::get_if<TextContent>(&b)) {
+                    if (!tc->text.empty() && tc->text.find_first_not_of(" \t\n\r") != std::string::npos) {
+                        content_text += tc->text;
+                    }
+                } else if (const auto* th = std::get_if<ThinkingContent>(&b)) {
+                    if (compat.requires_thinking_as_text &&
+                        !th->thinking.empty() &&
+                        th->thinking.find_first_not_of(" \t\n\r") != std::string::npos) {
+                        content_text = th->thinking + (content_text.empty() ? "" : "\n\n" + content_text);
+                    }
+                }
+            }
+
+            nlohmann::json tool_calls = nlohmann::json::array();
+            for (const auto& b : am.content) {
+                if (const auto* tc = std::get_if<ToolCall>(&b)) {
+                    tool_calls.push_back({
+                        {"id", tc->id},
+                        {"type", "function"},
+                        {"function", {
+                            {"name", tc->name},
+                            {"arguments", tc->arguments.dump()}
+                        }}
+                    });
+                }
+            }
+
+            bool has_content = !content_text.empty();
+            bool has_tools = !tool_calls.empty();
+            if (!has_content && !has_tools) continue;
+
+            nlohmann::json assistant_msg = {{"role", "assistant"}};
+            if (has_content) {
+                assistant_msg["content"] = content_text;
+            } else {
+                assistant_msg["content"] = nullptr;
+            }
+            if (has_tools) {
+                assistant_msg["tool_calls"] = tool_calls;
+            }
+            params.push_back(std::move(assistant_msg));
+        } else if (std::holds_alternative<ToolResultMessage>(msg)) {
+            const auto& trm = std::get<ToolResultMessage>(msg);
+            std::string text;
+            for (const auto& b : trm.content) {
+                if (const auto* tc = std::get_if<TextContent>(&b)) {
+                    if (!text.empty()) text += "\n";
+                    text += tc->text;
+                }
+            }
+            nlohmann::json tool_msg = {
+                {"role", "tool"},
+                {"tool_call_id", trm.tool_call_id},
+                {"content", text}
+            };
+            if (compat.requires_tool_result_name && !trm.tool_name.empty()) {
+                tool_msg["name"] = trm.tool_name;
+            }
+            params.push_back(std::move(tool_msg));
+        }
+    }
+
+    return params;
+}
+
+enum class BlockType { none, text, thinking, tool_call };
+
+struct PartialToolCall {
+    std::string id;
+    std::string name;
+    std::string partial_args;
+    int index{0};
+};
+
+struct StreamingState {
+    std::shared_ptr<AssistantMessage> result;
+    AssistantEventCallback on_event;
+    BlockType current_block{BlockType::none};
+    std::size_t current_content_index{0};
+    std::map<int, PartialToolCall> partial_tool_calls;
+};
+
+void finish_current_block(StreamingState& state) {
+    if (state.current_block == BlockType::none) return;
+    auto& result = *state.result;
+    std::size_t idx = state.current_content_index;
+
+    if (state.current_block == BlockType::text) {
+        const auto* tc = std::get_if<TextContent>(&result.content[idx]);
+        std::string content = tc ? tc->text : "";
+        if (state.on_event) {
+            state.on_event(AssistantMessageTextEndEvent{
+                idx, std::move(content), result});
+        }
+    } else if (state.current_block == BlockType::thinking) {
+        const auto* th = std::get_if<ThinkingContent>(&result.content[idx]);
+        std::string content = th ? th->thinking : "";
+        if (state.on_event) {
+            state.on_event(AssistantMessageThinkingEndEvent{
+                idx, std::move(content), result});
+        }
+    } else if (state.current_block == BlockType::tool_call) {
+        const auto* tc = std::get_if<ToolCall>(&result.content[idx]);
+        if (tc && state.on_event) {
+            state.on_event(AssistantMessageToolCallEndEvent{
+                idx, *tc, result});
+        }
+    }
+
+    state.current_block = BlockType::none;
+}
+
+void process_sse_line(const std::string& line, StreamingState& state) {
+    if (line.empty() || line == "data: [DONE]") return;
+    if (line.rfind("data: ", 0) != 0) return;
+
+    auto json_str = line.substr(6);
+    auto chunk = nlohmann::json::parse(json_str, nullptr, false);
+    if (chunk.is_discarded()) return;
+
+    auto& result = *state.result;
+
+    if (!result.response_id.has_value()) {
+        auto id_it = chunk.find("id");
+        if (id_it != chunk.end() && id_it->is_string()) {
+            result.response_id = id_it->get<std::string>();
+        }
+    }
+
+    if (auto usage_it = chunk.find("usage"); usage_it != chunk.end() && !usage_it->is_null()) {
+        parse_chunk_usage(*usage_it, result.usage);
+    }
+
+    auto choices_it = chunk.find("choices");
+    if (choices_it == chunk.end() || !choices_it->is_array() || choices_it->empty()) return;
+
+    const auto& choice = (*choices_it)[0];
+
+    if (auto fr_it = choice.find("finish_reason");
+        fr_it != choice.end() && !fr_it->is_null()) {
+        result.stop_reason = OpenAICompatibleClient::map_finish_reason(fr_it->get<std::string>());
+    }
+
+    auto delta_it = choice.find("delta");
+    if (delta_it == choice.end()) return;
+    const auto& delta = *delta_it;
+
+    auto content_it = delta.find("content");
+    if (content_it != delta.end() && !content_it->is_null()) {
+        auto text = content_it->get<std::string>();
+        if (!text.empty()) {
+            if (state.current_block != BlockType::text) {
+                finish_current_block(state);
+                state.current_content_index = result.content.size();
+                result.content.push_back(TextContent{.text = ""});
+                state.current_block = BlockType::text;
+                if (state.on_event) {
+                    state.on_event(AssistantMessageTextStartEvent{
+                        state.current_content_index, result});
+                }
+            }
+            auto& tc = std::get<TextContent>(result.content[state.current_content_index]);
+            tc.text += text;
+            if (state.on_event) {
+                state.on_event(AssistantMessageTextDeltaEvent{
+                    state.current_content_index, text, result});
+            }
+        }
+    }
+
+    auto reasoning_it = delta.find("reasoning_content");
+    if (reasoning_it == delta.end()) reasoning_it = delta.find("reasoning");
+    if (reasoning_it != delta.end() && !reasoning_it->is_null()) {
+        auto text = reasoning_it->get<std::string>();
+        if (!text.empty()) {
+            if (state.current_block != BlockType::thinking) {
+                finish_current_block(state);
+                state.current_content_index = result.content.size();
+                result.content.push_back(ThinkingContent{.thinking = ""});
+                state.current_block = BlockType::thinking;
+                if (state.on_event) {
+                    state.on_event(AssistantMessageThinkingStartEvent{
+                        state.current_content_index, result});
+                }
+            }
+            auto& th = std::get<ThinkingContent>(result.content[state.current_content_index]);
+            th.thinking += text;
+            if (state.on_event) {
+                state.on_event(AssistantMessageThinkingDeltaEvent{
+                    state.current_content_index, text, result});
+            }
+        }
+    }
+
+    auto tool_calls_it = delta.find("tool_calls");
+    if (tool_calls_it != delta.end() && tool_calls_it->is_array()) {
+        for (const auto& tc_delta : *tool_calls_it) {
+            int index = tc_delta.value("index", 0);
+            auto& ptc = state.partial_tool_calls[index];
+            ptc.index = index;
+
+            if (auto id_it = tc_delta.find("id");
+                id_it != tc_delta.end() && id_it->is_string()) {
+                if (ptc.id.empty()) {
+                    ptc.id = id_it->get<std::string>();
+                }
+            }
+
+            if (auto fn_it = tc_delta.find("function"); fn_it != tc_delta.end()) {
+                if (auto name_it = fn_it->find("name");
+                    name_it != fn_it->end() && name_it->is_string()) {
+                    if (ptc.name.empty()) {
+                        ptc.name = name_it->get<std::string>();
+                    }
+                }
+                if (auto args_it = fn_it->find("arguments");
+                    args_it != fn_it->end() && args_it->is_string()) {
+                    std::string delta_str = args_it->get<std::string>();
+                    if (!delta_str.empty()) {
+                        bool is_new = ptc.partial_args.empty() && state.current_block != BlockType::tool_call;
+
+                        if (is_new || (state.current_block == BlockType::tool_call &&
+                                       state.partial_tool_calls.size() > 1)) {
+                            if (state.current_block == BlockType::tool_call) {
+                                auto& existing_tc = std::get<ToolCall>(
+                                    result.content[state.current_content_index]);
+                                auto parsed = nlohmann::json::parse(
+                                    existing_tc.partial_json, nullptr, false);
+                                existing_tc.arguments = parsed.is_discarded()
+                                    ? nlohmann::json::object()
+                                    : parsed;
+                                finish_current_block(state);
+                            }
+
+                            finish_current_block(state);
+                            state.current_content_index = result.content.size();
+                            ToolCall new_tc;
+                            new_tc.id = ptc.id;
+                            new_tc.name = ptc.name;
+                            result.content.push_back(std::move(new_tc));
+                            state.current_block = BlockType::tool_call;
+                            if (state.on_event) {
+                                state.on_event(AssistantMessageToolCallStartEvent{
+                                    state.current_content_index, result});
+                            }
+                        }
+
+                        ptc.partial_args += delta_str;
+                        auto& cur_tc = std::get<ToolCall>(
+                            result.content[state.current_content_index]);
+                        cur_tc.partial_json = ptc.partial_args;
+
+                        if (state.on_event) {
+                            state.on_event(AssistantMessageToolCallDeltaEvent{
+                                state.current_content_index, delta_str, result});
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+} // namespace
+
+OpenAICompatibleClient::OpenAICompatibleClient(std::string base_url, std::string model_id)
+    : base_url_(std::move(base_url)), model_id_(std::move(model_id)) {}
+
+OpenAICompletionsCompat OpenAICompatibleClient::detect_compat(const Model& model) {
+    const auto& provider = model.provider;
+    const auto& base_url = model.base_url;
+
+    bool is_zai = provider == "zai" || str_contains(base_url, "api.z.ai");
+    bool is_moonshot = provider == "moonshotai" || provider == "moonshotai-cn" ||
+                       str_contains(base_url, "api.moonshot.");
+    bool is_cloudflare_workers = provider == "cloudflare-workers-ai" ||
+                                 str_contains(base_url, "api.cloudflare.com");
+    bool is_cloudflare_gateway = provider == "cloudflare-ai-gateway" ||
+                                 str_contains(base_url, "gateway.ai.cloudflare.com");
+
+    bool is_non_standard =
+        provider == "cerebras" ||
+        str_contains(base_url, "cerebras.ai") ||
+        provider == "xai" ||
+        str_contains(base_url, "api.x.ai") ||
+        str_contains(base_url, "chutes.ai") ||
+        str_contains(base_url, "deepseek.com") ||
+        is_zai ||
+        is_moonshot ||
+        provider == "opencode" ||
+        str_contains(base_url, "opencode.ai") ||
+        is_cloudflare_workers ||
+        is_cloudflare_gateway;
+
+    bool use_max_tokens = str_contains(base_url, "chutes.ai") ||
+                          is_moonshot ||
+                          is_cloudflare_gateway;
+
+    bool is_grok = provider == "xai" || str_contains(base_url, "api.x.ai");
+    bool is_deepseek = provider == "deepseek" || str_contains(base_url, "deepseek.com");
+    bool is_openrouter = provider == "openrouter" || str_contains(base_url, "openrouter.ai");
+
+    std::string cache_control_format;
+    if (is_openrouter && model.id.rfind("anthropic/", 0) == 0) {
+        cache_control_format = "anthropic";
+    }
+
+    std::string thinking_format;
+    if (is_deepseek) {
+        thinking_format = "deepseek";
+    } else if (is_zai) {
+        thinking_format = "zai";
+    } else if (is_openrouter) {
+        thinking_format = "openrouter";
+    } else {
+        thinking_format = "openai";
+    }
+
+    OpenAICompletionsCompat compat;
+    compat.supports_store = !is_non_standard;
+    compat.supports_developer_role = !is_non_standard;
+    compat.supports_reasoning_effort = !is_grok && !is_zai && !is_moonshot && !is_cloudflare_gateway;
+    compat.supports_usage_in_streaming = true;
+    compat.max_tokens_field = use_max_tokens ? "max_tokens" : "max_completion_tokens";
+    compat.requires_tool_result_name = false;
+    compat.requires_assistant_after_tool_result = false;
+    compat.requires_thinking_as_text = false;
+    compat.thinking_format = std::move(thinking_format);
+    compat.supports_strict_mode = !is_moonshot && !is_cloudflare_gateway;
+    compat.cache_control_format = std::move(cache_control_format);
+    return compat;
+}
+
+StopReason OpenAICompatibleClient::map_finish_reason(std::string_view reason) {
+    if (reason == "stop" || reason == "end") return StopReason::stop;
+    if (reason == "length") return StopReason::length;
+    if (reason == "tool_calls" || reason == "function_call") return StopReason::tool_use;
+    return StopReason::error;
+}
+
+nlohmann::json OpenAICompatibleClient::build_request_json(
+    const Model& model,
+    const AgentContext& context,
+    const StreamOptions& options) const {
+
+    auto compat = detect_compat(model);
+    auto messages = convert_messages(model, context, compat);
+
+    nlohmann::json tools_arr = nlohmann::json::array();
+    if (!context.tools.empty()) {
+        for (const auto& t : context.tools) {
+            auto schema_str = t->schema().serialize();
+            nlohmann::json schema = nlohmann::json::parse(schema_str, nullptr, false);
+            if (schema.is_discarded()) schema = nlohmann::json::object();
+            tools_arr.push_back({
+                {"type", "function"},
+                {"function", {
+                    {"name", std::string(t->name())},
+                    {"description", std::string(t->description())},
+                    {"parameters", schema},
+                    {"strict", false}
+                }}
+            });
+        }
+    }
+
+    nlohmann::json params = {
+        {"model", model.id},
+        {"messages", messages},
+        {"stream", true},
+        {"stream_options", {{"include_usage", true}}}
+    };
+    if (compat.supports_store) params["store"] = false;
+    if (options.max_tokens) {
+        params[compat.max_tokens_field] = *options.max_tokens;
+    }
+    if (options.temperature) params["temperature"] = *options.temperature;
+    if (!tools_arr.empty()) params["tools"] = tools_arr;
+
+    if (model.reasoning && options.reasoning != ThinkingLevel::off &&
+        compat.supports_reasoning_effort) {
+        params["reasoning_effort"] = std::string(thinking_level_to_string(options.reasoning));
+    }
+
+    if (options.on_payload) {
+        auto next = options.on_payload(params, model);
+        if (next) params = *next;
+    }
+
+    return params;
+}
+
+std::shared_ptr<AssistantMessage> OpenAICompatibleClient::stream(
+    const Model& model,
+    const AgentContext& context,
+    const StreamOptions& options,
+    AssistantEventCallback on_event,
+    std::stop_token stop_tok) {
+
+    auto result = std::make_shared<AssistantMessage>();
+    result->api = model.api;
+    result->provider = model.provider;
+    result->model = model.id;
+    result->stop_reason = StopReason::stop;
+    result->timestamp = now_ms();
+
+    auto request_json = build_request_json(model, context, options);
+    auto request_body = request_json.dump();
+
+    std::map<std::string, std::string> headers = options.headers;
+    headers["Content-Type"] = "application/json";
+    headers["Accept"] = "text/event-stream";
+
+    std::string url = base_url_.empty() ? model.base_url : base_url_;
+    if (!url.empty() && url.back() == '/') url.pop_back();
+    url += "/chat/completions";
+
+    if (on_event) on_event(AssistantMessageStartEvent{*result});
+
+    StreamingState state{result, on_event};
+
+    bool ok = HttpClient::post_streaming(
+        url, request_body,
+        [&state](const std::string& line) {
+            process_sse_line(line, state);
+        },
+        headers,
+        options.api_key,
+        options.timeout_ms,
+        stop_tok);
+
+    for (auto& [idx, ptc] : state.partial_tool_calls) {
+        if (state.current_block == BlockType::tool_call) {
+            auto& tc = std::get<ToolCall>(result->content[state.current_content_index]);
+            auto parsed = nlohmann::json::parse(ptc.partial_args, nullptr, false);
+            tc.arguments = parsed.is_discarded() ? nlohmann::json::object() : parsed;
+            tc.partial_json.clear();
+        }
+    }
+
+    finish_current_block(state);
+
+    if (!ok || stop_tok.stop_requested()) {
+        result->stop_reason = stop_tok.stop_requested() ? StopReason::aborted : StopReason::error;
+        if (stop_tok.stop_requested()) result->error_message = "Request was aborted";
+        if (on_event) on_event(AssistantMessageErrorEvent{result->stop_reason, *result});
+        return result;
+    }
+
+    if (on_event) on_event(AssistantMessageDoneEvent{result->stop_reason, *result});
+    return result;
+}
+
+} // namespace pi::core

@@ -62,6 +62,7 @@ add_library(pi-core
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
     src/core/providers/faux.cpp
+    src/core/providers/transform_messages.cpp
 )
 
 target_include_directories(pi-core PUBLIC
@@ -100,10 +101,15 @@ if(PI_CPP_BUILD_TESTS)
     add_executable(test-faux_client test/test_faux_client.cpp)
     target_link_libraries(test-faux_client PRIVATE pi-core)
     add_test(NAME test-faux_client COMMAND test-faux_client)
+
+    add_executable(test-openai_completions test/test_openai_completions.cpp)
+    target_link_libraries(test-openai_completions PRIVATE pi-http)
+    add_test(NAME test-openai_completions COMMAND test-openai_completions)
 endif()
 
 add_library(pi-http
     src/http/http_client.cpp
+    src/core/providers/openai_completions.cpp
 )
 target_include_directories(pi-http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl)
