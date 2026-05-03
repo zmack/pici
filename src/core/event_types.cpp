@@ -61,7 +61,7 @@ std::ostream& operator<<(std::ostream& os, const AgentEvent& event) {
             } else if constexpr (std::same_as<T, MessageUpdateEvent>) {
                 os << "type:" << event_type_to_string(ev.type)
                    << ", msg: " << msg_type(ev.message)
-                   << ", delta: " << ev.delta << "}";
+                   << ", ev_idx: " << ev.assistant_message_event.index() << "}";
             } else if constexpr (std::same_as<T, MessageEndEvent>) {
                 os << "type:" << event_type_to_string(ev.type)
                    << ", msg: " << msg_type(ev.message) << "}";

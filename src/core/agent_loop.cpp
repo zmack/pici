@@ -287,6 +287,19 @@ ToolResultMessage emit_finalized_tool_call(
     return make_tool_result_message(finalized.tool_call, finalized.result);
 }
 
+AssistantMessage get_partial(const AssistantMessageEvent& ev) {
+    return std::visit([](const auto& e) -> AssistantMessage {
+        using E = std::decay_t<decltype(e)>;
+        if constexpr (std::is_same_v<E, AssistantMessageDoneEvent>) {
+            return e.message;
+        } else if constexpr (std::is_same_v<E, AssistantMessageErrorEvent>) {
+            return e.error;
+        } else {
+            return e.partial;
+        }
+    }, ev);
+}
+
 } // namespace
 
 // ─── stream_assistant_response ─────────────────────────────────────────────
@@ -296,20 +309,16 @@ std::shared_ptr<AssistantMessage> stream_assistant_response(
     const AgentLoopConfig& config,
     StreamCallback emit,
     std::stop_token stop_tok) {
-    // 1. Apply context transform if configured
     auto messages = context.messages;
     if (config.transform_context) {
         messages = config.transform_context(messages, stop_tok);
     }
 
-    // 2. Convert to LLM messages
     auto llm_messages = config.convert_to_llm(messages);
     (void)llm_messages;
 
-    // 3. Call the LLM client
     auto client = config.llm_client;
     if (!client) {
-        // No LLM client configured — return a stub message
         auto stub = std::make_shared<AssistantMessage>();
         stub->api = "none";
         stub->provider = "none";
@@ -340,21 +349,40 @@ std::shared_ptr<AssistantMessage> stream_assistant_response(
         ? config.get_api_key(config.model.provider)
         : std::nullopt;
 
-    auto result = client->stream(config.model, context, opts, emit, stop_tok);
+    std::shared_ptr<AssistantMessage> partial;
+    bool added_partial = false;
 
-    // 4. Update context with the result
-    if (result) {
-        // Replace the last message in context (the partial assistant message)
-        // with the final result
-        if (!context.messages.empty() &&
-            std::holds_alternative<AssistantMessage>(context.messages.back())) {
-            context.messages.back() = *result;
-        } else {
-            context.messages.push_back(*result);
-        }
+    auto on_event = [&](const AssistantMessageEvent& ev) {
+        std::visit([&](const auto& e) {
+            using E = std::decay_t<decltype(e)>;
+            if constexpr (std::is_same_v<E, AssistantMessageStartEvent>) {
+                partial = std::make_shared<AssistantMessage>(e.partial);
+                context.messages.push_back(*partial);
+                added_partial = true;
+                emit(MessageStartEvent(*partial));
+            } else if constexpr (std::is_same_v<E, AssistantMessageDoneEvent>
+                              || std::is_same_v<E, AssistantMessageErrorEvent>) {
+                // handled after stream() returns
+            } else {
+                if (partial) {
+                    partial = std::make_shared<AssistantMessage>(get_partial(ev));
+                    context.messages.back() = *partial;
+                    emit(MessageUpdateEvent(*partial, ev));
+                }
+            }
+        }, ev);
+    };
+
+    auto final_msg = client->stream(config.model, context, opts, on_event, stop_tok);
+
+    if (added_partial) {
+        context.messages.back() = *final_msg;
+    } else {
+        context.messages.push_back(*final_msg);
+        emit(MessageStartEvent(*final_msg));
     }
-
-    return result;
+    emit(MessageEndEvent(*final_msg));
+    return final_msg;
 }
 
 // ─── execute_tool_calls (sequential) ───────────────────────────────────────

@@ -16,6 +16,77 @@ namespace pi::core {
 
 // Forward declaration — defined in stream.h
 
+// ─── AssistantMessageEvent structs and variant ────────────────────────────
+
+struct AssistantMessageStartEvent {
+    AssistantMessage partial;
+};
+struct AssistantMessageTextStartEvent {
+    std::size_t content_index;
+    AssistantMessage partial;
+};
+struct AssistantMessageTextDeltaEvent {
+    std::size_t content_index;
+    std::string delta;
+    AssistantMessage partial;
+};
+struct AssistantMessageTextEndEvent {
+    std::size_t content_index;
+    std::string content;
+    AssistantMessage partial;
+};
+struct AssistantMessageThinkingStartEvent {
+    std::size_t content_index;
+    AssistantMessage partial;
+};
+struct AssistantMessageThinkingDeltaEvent {
+    std::size_t content_index;
+    std::string delta;
+    AssistantMessage partial;
+};
+struct AssistantMessageThinkingEndEvent {
+    std::size_t content_index;
+    std::string content;
+    AssistantMessage partial;
+};
+struct AssistantMessageToolCallStartEvent {
+    std::size_t content_index;
+    AssistantMessage partial;
+};
+struct AssistantMessageToolCallDeltaEvent {
+    std::size_t content_index;
+    std::string delta;
+    AssistantMessage partial;
+};
+struct AssistantMessageToolCallEndEvent {
+    std::size_t content_index;
+    ToolCall tool_call;
+    AssistantMessage partial;
+};
+struct AssistantMessageDoneEvent {
+    StopReason reason;
+    AssistantMessage message;
+};
+struct AssistantMessageErrorEvent {
+    StopReason reason;
+    AssistantMessage error;
+};
+
+using AssistantMessageEvent = std::variant<
+    AssistantMessageStartEvent,
+    AssistantMessageTextStartEvent,
+    AssistantMessageTextDeltaEvent,
+    AssistantMessageTextEndEvent,
+    AssistantMessageThinkingStartEvent,
+    AssistantMessageThinkingDeltaEvent,
+    AssistantMessageThinkingEndEvent,
+    AssistantMessageToolCallStartEvent,
+    AssistantMessageToolCallDeltaEvent,
+    AssistantMessageToolCallEndEvent,
+    AssistantMessageDoneEvent,
+    AssistantMessageErrorEvent
+>;
+
 // ─── Event type enumeration ────────────────────────────────────────────────
 
 enum class EventType {
@@ -103,12 +174,12 @@ struct MessageStartEvent : EventBase {
 struct MessageUpdateEvent : EventBase {
     static constexpr EventType type = EventType::message_update;
     Message message;
-    std::string delta; // describes what changed
-    MessageUpdateEvent(Message msg, std::string d,
+    AssistantMessageEvent assistant_message_event;
+    MessageUpdateEvent(Message msg, AssistantMessageEvent ev,
                        std::source_location loc = std::source_location::current())
         : EventBase(EventType::message_update, loc),
           message(std::move(msg)),
-          delta(std::move(d)) {}
+          assistant_message_event(std::move(ev)) {}
 };
 
 struct MessageEndEvent : EventBase {

@@ -12,14 +12,12 @@ public:
         const Model& model,
         const AgentContext& context,
         const StreamOptions& options,
-        StreamCallback emit,
+        AssistantEventCallback on_event,
         std::stop_token stop_tok) override {
         (void)model;
         (void)context;
         (void)options;
-        (void)emit;
         (void)stop_tok;
-        // Return a stub error message
         auto msg = std::make_shared<AssistantMessage>();
         msg->api = "none";
         msg->provider = "none";
@@ -29,6 +27,9 @@ public:
         msg->timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now().time_since_epoch())
                              .count();
+        if (on_event) {
+            on_event(AssistantMessageErrorEvent{StopReason::error, *msg});
+        }
         return msg;
     }
 

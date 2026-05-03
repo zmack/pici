@@ -21,6 +21,7 @@ namespace pi::core {
 
 // Callback type for streaming events
 using StreamCallback = std::function<void(const AgentEvent&)>;
+using AssistantEventCallback = std::function<void(const AssistantMessageEvent&)>;
 
 struct StreamOptions {
     std::optional<double> temperature;
@@ -57,7 +58,7 @@ public:
         const Model& model,
         const AgentContext& context,
         const StreamOptions& options,
-        StreamCallback emit,
+        AssistantEventCallback on_event,
         std::stop_token stop_tok = std::stop_token{}) = 0;
 
     // Get the provider name (e.g., "openai", "anthropic")
