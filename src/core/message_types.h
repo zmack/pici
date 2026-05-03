@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <ostream>
 #include <stop_token>
@@ -33,6 +34,10 @@ struct TokenUsage {
     } cost{};
 };
 
+// ─── Tool arguments ─────────────────────────────────────────────────────────
+// Must hold a JSON object (not array/scalar) for tool calls.
+using ToolArguments = nlohmann::json;
+
 // ─── Content blocks ─────────────────────────────────────────────────────────
 
 struct TextContent {
@@ -58,14 +63,13 @@ struct ToolCall {
     static constexpr std::string_view type = "toolCall";
     std::string id;
     std::string name;
-    std::map<std::string, std::string> arguments;
+    ToolArguments arguments = nlohmann::json::object();
     // Temporary field used during JSON streaming
     std::string partial_json;
 };
 
 using ContentBlock = std::variant<TextContent, ThinkingContent, ImageContent, ToolCall>;
 using ToolResultContentBlock = std::variant<TextContent, ImageContent>;
-using ToolArguments = std::map<std::string, std::string>;
 
 // ─── Message types ──────────────────────────────────────────────────────────
 
@@ -182,8 +186,10 @@ public:
     virtual std::string serialize() const = 0;
     // Returns a JSON-like map representation for the tool definition
     virtual std::map<std::string, std::string> to_definition() const = 0;
+    // Returns nullopt on success, error string on failure.
+    // Non-const to allow coercion mutations via validate_arguments.
     virtual std::optional<std::string> validate_arguments(
-        const ToolArguments& arguments) const {
+        ToolArguments& arguments) const {
         (void)arguments;
         return std::nullopt;
     }
@@ -227,9 +233,17 @@ public:
     virtual ToolExecutionMode execution_mode() const { return ToolExecutionMode::parallel; }
 };
 
+// ─── JsonSchemaToolSchema ───────────────────────────────────────────────────
+// Base class for tools that validate via ToolValidator (json-schema-validator).
+// Subclasses only need to implement serialize() and to_definition().
+// validate_arguments applies TypeBox-style coercion before structural validation.
+class JsonSchemaToolSchema : public ToolSchema {
+public:
+    std::optional<std::string> validate_arguments(
+        ToolArguments& arguments) const override;
+};
+
 // ─── JSON helpers ───────────────────────────────────────────────────────────
-// Forward declaration
-namespace json { struct JsonValue; }
 
 namespace json {
 

@@ -1,6 +1,6 @@
 # pi-cpp — C++23 Agent Loop
 
-A C++23 implementation of the [pi-mono](https://github.com/badlogic/pi-mono) core agent loop runtime, built with CMake. Zero external dependencies.
+A C++23 implementation of the [pi-mono](https://github.com/badlogic/pi-mono) core agent loop runtime, built with CMake.
 
 ## Architecture
 
@@ -82,10 +82,11 @@ A C++23 implementation of the [pi-mono](https://github.com/badlogic/pi-mono) cor
 
 ## Dependencies
 
-**Zero external dependencies.** Pure standard library:
 - **CMake 3.28+** (for C++23 support)
 - **g++ 13+** or **clang 17+**
 - **libstdc++** with C++23 support (threads, stop_token, concepts, ranges)
+- **nlohmann/json** v3.11.3 (fetched automatically via FetchContent)
+- **pboettch/json-schema-validator** v2.3.0 (fetched automatically via FetchContent)
 
 ## Building
 
@@ -174,7 +175,7 @@ int main() {
 
 ## Key Design Decisions
 
-1. **Zero external dependencies** — all JSON parsing/serialization is built-in
+1. **nlohmann/json** — all JSON parsing/serialization via nlohmann/json; JSON Schema validation via pboettch/json-schema-validator
 2. **No exceptions** — error propagation via `std::optional` and return values
 3. **Thread safety** — `AgentState` uses `std::mutex` for all shared state
 4. **Async streaming** — `EventStream` supports blocking iterator, `for_each`, and `wait()`

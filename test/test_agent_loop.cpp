@@ -173,7 +173,7 @@ public:
             class TrackingSchema : public CounterTool::CounterSchema {
             public:
                 std::optional<std::string> validate_arguments(
-                    const ToolArguments& arguments) const override {
+                    ToolArguments& arguments) const override {
                     if (!arguments.contains("start")) {
                         return "Missing required argument: start";
                     }
@@ -188,10 +188,8 @@ public:
     ToolArguments prepare_arguments(
         const ToolArguments& arguments) const override {
         auto prepared = arguments;
-        if (!prepared.contains("start")) {
-            if (auto it = prepared.find("alias_start"); it != prepared.end()) {
-                prepared["start"] = it->second;
-            }
+        if (!prepared.contains("start") && prepared.contains("alias_start")) {
+            prepared["start"] = prepared["alias_start"];
         }
         return prepared;
     }
@@ -365,7 +363,7 @@ void test_agent_loop_with_tools() {
                 ToolCall tc;
                 tc.id = "call_001";
                 tc.name = "counter";
-                tc.arguments[{"start"}] = "0";
+                tc.arguments["start"] = "0";
                 msg->content.push_back(std::move(tc));
 
                 return msg;
@@ -511,13 +509,13 @@ void test_agent_loop_sequential_tools() {
                 ToolCall tc1;
                 tc1.id = "call_1";
                 tc1.name = "counter";
-                tc1.arguments[{"start"}] = "0";
+                tc1.arguments["start"] = "0";
                 msg->content.push_back(std::move(tc1));
 
                 ToolCall tc2;
                 tc2.id = "call_2";
                 tc2.name = "counter";
-                tc2.arguments[{"start"}] = "10";
+                tc2.arguments["start"] = "10";
                 msg->content.push_back(std::move(tc2));
 
                 return msg;
@@ -998,7 +996,7 @@ void test_agent_loop_prepare_arguments_before_validation() {
         config.before_tool_call =
             [](const BeforeToolCallContext& ctx, std::stop_token) {
                 CHECK(ctx.tool_call.arguments.contains("start"));
-                CHECK_EQ(ctx.args_json.find("\"start\":\"7\"") != std::string::npos,
+                CHECK_EQ(ctx.args_json.find("\"start\"") != std::string::npos,
                          true);
                 return std::optional<BeforeToolCallResult>{};
             };

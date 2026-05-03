@@ -1,11 +1,7 @@
 #include "core/message_types.h"
+#include "core/tool_validation.h"
 
-#include <algorithm>
-#include <charconv>
-#include <cmath>
-#include <cstdlib>
-#include <numeric>
-#include <source_location>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string_view>
 
@@ -68,7 +64,7 @@ ThinkingLevel thinking_level_from_string(std::string_view s) {
     return ThinkingLevel::off;
 }
 
-// ─── ToolExecutionMode ─────────────────────────────────────────────────────
+// ─── Stream operators ──────────────────────────────────────────────────────
 
 std::ostream& operator<<(std::ostream& os, StopReason reason) {
     os << stop_reason_to_string(reason);
@@ -92,551 +88,222 @@ std::ostream& operator<<(std::ostream& os, ToolExecutionMode mode) {
     return os;
 }
 
-// ─── Minimal JSON ──────────────────────────────────────────────────────────
+// ─── JsonSchemaToolSchema ──────────────────────────────────────────────────
+
+std::optional<std::string> JsonSchemaToolSchema::validate_arguments(
+    ToolArguments& arguments) const {
+    // validate() mutates arguments in-place for coercion; const_cast is safe
+    // here because JsonSchemaToolSchema is specifically designed for coercion.
+    return ToolValidator::validate("(schema)", serialize(), arguments);
+}
+
+// ─── JSON serialization helpers ────────────────────────────────────────────
 
 namespace json {
 
-// ── Simple JSON value type ─────────────────────────────────────────────
+using nlohmann::json;
 
-enum class JsonKind {
-    null_t,
-    bool_t,
-    int64_t,
-    double_t,
-    string_t,
-    array_t,
-    object_t,
-};
-
-struct JsonValue;
-using JsonObject = std::vector<std::pair<std::string, JsonValue>>;
-
-struct JsonValue {
-    JsonKind kind{JsonKind::null_t};
-    bool bval{false};
-    std::int64_t ival{0};
-    double dval{0.0};
-    std::string sval;
-    std::vector<JsonValue> arr;
-    JsonObject obj;
-
-    JsonValue() = default;
-    JsonValue(std::nullptr_t) : kind(JsonKind::null_t) {}
-    JsonValue(bool v) : kind(JsonKind::bool_t), bval(v) {}
-    JsonValue(std::int64_t v) : kind(JsonKind::int64_t), ival(v) {}
-    JsonValue(std::uint64_t v) : kind(JsonKind::int64_t), ival(static_cast<std::int64_t>(v)) {}
-    JsonValue(double v) : kind(JsonKind::double_t), dval(v) {}
-    JsonValue(std::string_view s) : kind(JsonKind::string_t), sval(s) {}
-    JsonValue(const char* s) : kind(JsonKind::string_t), sval(s) {}
-
-    // Assignment from string
-    JsonValue& operator=(std::string_view s) {
-        sval = s;
-        kind = JsonKind::string_t;
-        return *this;
-    }
-    JsonValue& operator=(const std::string& s) {
-        sval = s;
-        kind = JsonKind::string_t;
-        return *this;
-    }
-
-    // Array access
-    JsonValue& operator[](std::size_t i) {
-        return arr.at(i);
-    }
-    const JsonValue& operator[](std::size_t i) const {
-        return arr.at(i);
-    }
-
-    // Object access
-    JsonValue& operator[](std::string_view key) {
-        kind = JsonKind::object_t;
-        for (auto& [k, v] : obj) {
-            if (k == key) return v;
-        }
-        obj.emplace_back(key, JsonValue{});
-        return obj.back().second;
-    }
-
-    const JsonValue& operator[](std::string_view key) const {
-        for (const auto& [k, v] : obj) {
-            if (k == key) return v;
-        }
-        static JsonValue null_val;
-        return null_val;
-    }
-
-    template<typename T>
-    JsonValue& set(std::string_view key, T val) {
-        kind = JsonKind::object_t;
-        for (auto& [k, v] : obj) {
-            if (k == key) { v = val; return v; }
-        }
-        obj.emplace_back(key, JsonValue{});
-        obj.back().second = val;
-        return obj.back().second;
-    }
-
-    bool has(std::string_view key) const {
-        for (const auto& [k, v] : obj) {
-            if (k == key) return true;
-        }
-        return false;
-    }
-
-    template<typename T>
-    T get(std::string_view key, T default_val) const {
-        for (const auto& [k, v] : obj) {
-            if (k == key) {
-                if constexpr (std::is_same_v<T, bool>) return v.bval;
-                if constexpr (std::is_same_v<T, std::int64_t>) return v.ival;
-                if constexpr (std::is_same_v<T, std::uint64_t>) return static_cast<std::uint64_t>(v.ival);
-                if constexpr (std::is_same_v<T, double>) return v.dval;
-                if constexpr (std::is_same_v<T, std::string>) return v.sval;
-                return default_val;
-            }
-        }
-        return default_val;
-    }
-
-    template<typename T>
-    T get(std::string_view key) const {
-        return get<T>(key, T{});
-    }
-};
-
-// ── JSON parser ─────────────────────────────────────────────────────────
-
-class JsonParser {
-public:
-    explicit JsonParser(std::string_view input) : input_(input), pos_(0) {}
-
-    JsonValue parse() {
-        skip_ws();
-        auto result = parse_value();
-        skip_ws();
-        return result;
-    }
-
-private:
-    std::string_view input_;
-    std::size_t pos_;
-
-    char peek() const { return pos_ < input_.size() ? input_[pos_] : '\0'; }
-    char next() { return input_[pos_++]; }
-
-    void skip_ws() {
-        while (pos_ < input_.size() &&
-               (input_[pos_] == ' ' || input_[pos_] == '\t' ||
-                input_[pos_] == '\n' || input_[pos_] == '\r')) {
-            pos_++;
-        }
-    }
-
-    JsonValue parse_value() {
-        skip_ws();
-        char c = peek();
-        if (c == '"') {
-            std::string s = parse_string();
-            return JsonValue(std::string_view(s));
-        }
-        if (c == '{') return parse_object();
-        if (c == '[') return parse_array();
-        if (match("true")) return JsonValue(true);
-        if (match("false")) return JsonValue(false);
-        if (match("null")) return JsonValue(nullptr);
-        return parse_number();
-    }
-
-    std::string parse_string() {
-        next(); // skip opening "
-        std::string result;
-        while (pos_ < input_.size()) {
-            char c = next();
-            if (c == '"') return result;
-            if (c == '\\') {
-                char esc = next();
-                switch (esc) {
-                    case '"': result += '"'; break;
-                    case '\\': result += '\\'; break;
-                    case '/': result += '/'; break;
-                    case 'n': result += '\n'; break;
-                    case 't': result += '\t'; break;
-                    case 'r': result += '\r'; break;
-                    case 'b': result += '\b'; break;
-                    case 'f': result += '\f'; break;
-                    case 'u': {
-                        std::string hex;
-                        for (int i = 0; i < 4 && pos_ < input_.size(); i++) {
-                            hex += next();
-                        }
-                        result += "?";
-                        break;
-                    }
-                    default: result += esc; break;
-                }
-            } else {
-                result += c;
-            }
-        }
-        throw std::runtime_error("Unterminated string in JSON");
-    }
-
-    JsonValue parse_array() {
-        next(); // skip [
-        JsonValue arr;
-        arr.kind = JsonKind::array_t;
-        skip_ws();
-        if (peek() == ']') { next(); return arr; }
-        while (true) {
-            arr.arr.push_back(parse_value());
-            skip_ws();
-            if (peek() == ',') { next(); continue; }
-            if (peek() == ']') { next(); break; }
-            throw std::runtime_error("Expected ',' or ']' in JSON array");
-        }
-        return arr;
-    }
-
-    JsonValue parse_object() {
-        next(); // skip {
-        JsonValue obj;
-        obj.kind = JsonKind::object_t;
-        skip_ws();
-        if (peek() == '}') { next(); return obj; }
-        while (true) {
-            skip_ws();
-            std::string key = parse_string();
-            skip_ws();
-            if (peek() != ':') throw std::runtime_error("Expected ':' in JSON object");
-            next();
-            auto val = parse_value();
-            obj.obj.emplace_back(std::move(key), std::move(val));
-            skip_ws();
-            if (peek() == ',') { next(); continue; }
-            if (peek() == '}') { next(); break; }
-            throw std::runtime_error("Expected ',' or '}' in JSON object");
-        }
-        return obj;
-    }
-
-    JsonValue parse_number() {
-        std::size_t start = pos_;
-        bool is_float = false;
-        if (peek() == '-') next();
-        while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) next();
-        if (pos_ < input_.size() && input_[pos_] == '.') {
-            is_float = true;
-            next();
-            while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) next();
-        }
-        if (pos_ < input_.size() && (input_[pos_] == 'e' || input_[pos_] == 'E')) {
-            is_float = true;
-            next();
-            if (pos_ < input_.size() && (input_[pos_] == '+' || input_[pos_] == '-')) next();
-            while (pos_ < input_.size() && std::isdigit(static_cast<unsigned char>(input_[pos_]))) next();
-        }
-        std::string num_str = std::string(input_.substr(start, pos_ - start));
-        if (is_float) {
-            return JsonValue(std::stod(num_str));
-        }
-        return JsonValue(static_cast<std::int64_t>(std::stoll(num_str)));
-    }
-
-    bool match(std::string_view s) {
-        if (input_.substr(pos_, s.size()) == s) {
-            pos_ += s.size();
-            return true;
-        }
-        return false;
-    }
-};
-
-JsonValue parse(std::string_view s) {
-    return JsonParser(s).parse();
-}
-
-// ── JSON serializer ─────────────────────────────────────────────────────
-
-static std::string indent_str(int n) {
-    return std::string(n * 2, ' ');
-}
-
-std::string serialize(const JsonValue& v, int indent = 0, int current_indent = 0) {
-    switch (v.kind) {
-        case JsonKind::null_t:
-            return "null";
-        case JsonKind::bool_t:
-            return v.bval ? "true" : "false";
-        case JsonKind::int64_t:
-            return std::to_string(v.ival);
-        case JsonKind::double_t: {
-            char buf[64];
-            int len = std::snprintf(buf, sizeof(buf), "%.17g", v.dval);
-            return std::string(buf, len);
-        }
-        case JsonKind::string_t: {
-            std::string result = "\"";
-            for (char c : v.sval) {
-                switch (c) {
-                    case '"': result += "\\\""; break;
-                    case '\\': result += "\\\\"; break;
-                    case '\n': result += "\\n"; break;
-                    case '\t': result += "\\t"; break;
-                    case '\r': result += "\\r"; break;
-                    case '\b': result += "\\b"; break;
-                    case '\f': result += "\\f"; break;
-                    default:
-                        if (static_cast<unsigned char>(c) < 0x20) {
-                            char buf[8];
-                            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                            result += buf;
-                        } else {
-                            result += c;
-                        }
-                        break;
-                }
-            }
-            result += "\"";
-            return result;
-        }
-        case JsonKind::array_t: {
-            if (v.arr.empty()) return "[]";
-            std::string result = "[\n";
-            for (std::size_t i = 0; i < v.arr.size(); i++) {
-                result += indent_str(current_indent + 1) + serialize(v.arr[i], indent, current_indent + 1);
-                if (i + 1 < v.arr.size()) result += ",";
-                result += "\n";
-            }
-            result += indent_str(current_indent) + "]";
-            return result;
-        }
-        case JsonKind::object_t: {
-            if (v.obj.empty()) return "{}";
-            std::string result = "{\n";
-            for (std::size_t i = 0; i < v.obj.size(); i++) {
-                auto& [key, val] = v.obj[i];
-                result += indent_str(current_indent + 1) + "\"" + key + "\": " + serialize(val, indent, current_indent + 1);
-                if (i + 1 < v.obj.size()) result += ",";
-                result += "\n";
-            }
-            result += indent_str(current_indent) + "}";
-            return result;
-        }
-    }
-    return "null";
-}
-
-// ── Message to/from JSON ─────────────────────────────────────────────────
-
-static JsonValue content_block_to_json(const ContentBlock& block) {
+static json content_block_to_json(const ContentBlock& block) {
     return std::visit(
-        []<typename T>(const T& value) -> JsonValue {
+        []<typename T>(const T& value) -> json {
             if constexpr (std::same_as<T, TextContent>) {
-                JsonValue j;
-                j.set<std::string_view>("type", "text");
-                j.set<std::string_view>("text", value.text);
+                json j = json::object();
+                j["type"] = "text";
+                j["text"] = value.text;
                 if (value.text_signature) {
-                    j.set<std::string_view>("textSignature", *value.text_signature);
+                    j["textSignature"] = *value.text_signature;
                 }
                 return j;
             } else if constexpr (std::same_as<T, ThinkingContent>) {
-                JsonValue j;
-                j.set<std::string_view>("type", "thinking");
-                j.set<std::string_view>("thinking", value.thinking);
+                json j = json::object();
+                j["type"] = "thinking";
+                j["thinking"] = value.thinking;
                 if (value.thinking_signature) {
-                    j.set<std::string_view>("thinkingSignature", *value.thinking_signature);
+                    j["thinkingSignature"] = *value.thinking_signature;
                 }
-                j.set<bool>("redacted", value.redacted);
+                j["redacted"] = value.redacted;
                 return j;
             } else if constexpr (std::same_as<T, ImageContent>) {
-                JsonValue j;
-                j.set<std::string_view>("type", "image");
-                j.set<std::string_view>("data", value.data);
-                j.set<std::string_view>("mimeType", value.mime_type);
+                json j = json::object();
+                j["type"] = "image";
+                j["data"] = value.data;
+                j["mimeType"] = value.mime_type;
                 return j;
             } else if constexpr (std::same_as<T, ToolCall>) {
-                JsonValue j;
-                j.set<std::string_view>("type", "toolCall");
-                j.set<std::string_view>("id", value.id);
-                j.set<std::string_view>("name", value.name);
-                JsonValue args;
-                args.kind = JsonKind::object_t;
-                for (const auto& [k, v] : value.arguments) {
-                    args.set<std::string_view>(k, v);
-                }
-                j.set<JsonValue>("arguments", args);
+                json j = json::object();
+                j["type"] = "toolCall";
+                j["id"] = value.id;
+                j["name"] = value.name;
+                j["arguments"] = value.arguments.is_object()
+                                      ? value.arguments
+                                      : json::object();
                 return j;
             }
-            return JsonValue{};
+            return json{};
         },
         block);
 }
 
-static std::optional<ContentBlock> json_to_content_block(const JsonValue& j) {
-    auto type = j.get<std::string>("type");
+static std::optional<ContentBlock> json_to_content_block(const json& j) {
+    if (!j.is_object()) return std::nullopt;
+    auto type_it = j.find("type");
+    if (type_it == j.end() || !type_it->is_string()) return std::nullopt;
+    std::string type = type_it->get<std::string>();
+
     if (type == "text") {
         TextContent tc;
-        tc.text = j.get<std::string>("text", "");
-        if (j.has("textSignature")) {
-            tc.text_signature = j.get<std::string>("textSignature");
+        tc.text = j.value("text", "");
+        if (j.contains("textSignature") && j["textSignature"].is_string()) {
+            tc.text_signature = j["textSignature"].get<std::string>();
         }
         return tc;
     }
     if (type == "thinking") {
         ThinkingContent tc;
-        tc.thinking = j.get<std::string>("thinking", "");
-        if (j.has("thinkingSignature")) {
-            tc.thinking_signature = j.get<std::string>("thinkingSignature");
+        tc.thinking = j.value("thinking", "");
+        if (j.contains("thinkingSignature") && j["thinkingSignature"].is_string()) {
+            tc.thinking_signature = j["thinkingSignature"].get<std::string>();
         }
-        tc.redacted = j.get<bool>("redacted", false);
+        tc.redacted = j.value("redacted", false);
         return tc;
     }
     if (type == "image") {
         ImageContent ic;
-        ic.data = j.get<std::string>("data", "");
-        ic.mime_type = j.get<std::string>("mimeType", "");
+        ic.data = j.value("data", "");
+        ic.mime_type = j.value("mimeType", "");
         return ic;
     }
     if (type == "toolCall") {
         ToolCall tc;
-        tc.id = j.get<std::string>("id", "");
-        tc.name = j.get<std::string>("name", "");
-        if (j.has("arguments")) {
-            for (const auto& [k, v] : j["arguments"].obj) {
-                tc.arguments[k] = v.sval;
-            }
+        tc.id = j.value("id", "");
+        tc.name = j.value("name", "");
+        if (j.contains("arguments") && j["arguments"].is_object()) {
+            tc.arguments = j["arguments"];
+        } else {
+            tc.arguments = json::object();
         }
         return tc;
     }
     return std::nullopt;
 }
 
-static JsonValue message_to_json(const Message& msg) {
+// Build a JSON object for a Message. Key order is explicitly controlled to
+// match the output the existing tests expect (insertion order in nlohmann).
+static json message_to_json_obj(const Message& msg) {
     return std::visit(
-        []<typename T>(const T& m) -> JsonValue {
+        []<typename T>(const T& m) -> json {
             if constexpr (std::same_as<T, UserMessage>) {
-                JsonValue j;
-                j.set<std::string_view>("role", "user");
-                j.set<std::int64_t>("timestamp", m.timestamp);
-                JsonValue arr;
-                arr.kind = JsonKind::array_t;
+                json j = json::object();
+                j["role"] = "user";
+                j["timestamp"] = m.timestamp;
+                json arr = json::array();
                 for (const auto& cb : m.content) {
-                    arr.arr.push_back(content_block_to_json(cb));
+                    arr.push_back(content_block_to_json(cb));
                 }
-                j.set<JsonValue>("content", arr);
+                j["content"] = std::move(arr);
                 return j;
             } else if constexpr (std::same_as<T, AssistantMessage>) {
-                JsonValue j;
-                j.set<std::string_view>("role", "assistant");
-                j.set<std::string_view>("api", m.api);
-                j.set<std::string_view>("provider", m.provider);
-                j.set<std::string_view>("model", m.model);
-                j.set<std::string_view>("stopReason", stop_reason_to_string(m.stop_reason));
-                j.set<std::int64_t>("timestamp", m.timestamp);
+                json j = json::object();
+                j["role"] = "assistant";
+                j["api"] = m.api;
+                j["provider"] = m.provider;
+                j["model"] = m.model;
+                j["stopReason"] = stop_reason_to_string(m.stop_reason);
+                j["timestamp"] = m.timestamp;
+
+                json arr = json::array();
+                for (const auto& cb : m.content) {
+                    arr.push_back(content_block_to_json(cb));
+                }
+                j["content"] = std::move(arr);
 
                 {
-                    JsonValue arr;
-                    arr.kind = JsonKind::array_t;
-                    for (const auto& cb : m.content) {
-                        arr.arr.push_back(content_block_to_json(cb));
-                    }
-                    j.set<JsonValue>("content", arr);
-                }
-                {
-                    JsonValue usage;
-                    usage.set<std::int64_t>("input", static_cast<std::int64_t>(m.usage.input));
-                    usage.set<std::int64_t>("output", static_cast<std::int64_t>(m.usage.output));
-                    usage.set<std::int64_t>("cacheRead", static_cast<std::int64_t>(m.usage.cache_read));
-                    usage.set<std::int64_t>("cacheWrite", static_cast<std::int64_t>(m.usage.cache_write));
-                    usage.set<std::int64_t>("totalTokens", static_cast<std::int64_t>(m.usage.total_tokens));
-                    JsonValue cost;
-                    cost.set<double>("input", m.usage.cost.input);
-                    cost.set<double>("output", m.usage.cost.output);
-                    cost.set<double>("cacheRead", m.usage.cost.cache_read);
-                    cost.set<double>("cacheWrite", m.usage.cost.cache_write);
-                    cost.set<double>("total", m.usage.cost.total);
-                    usage.set<JsonValue>("cost", cost);
-                    j.set<JsonValue>("usage", usage);
+                    json usage = json::object();
+                    usage["input"] = m.usage.input;
+                    usage["output"] = m.usage.output;
+                    usage["cacheRead"] = m.usage.cache_read;
+                    usage["cacheWrite"] = m.usage.cache_write;
+                    usage["totalTokens"] = m.usage.total_tokens;
+                    json cost = json::object();
+                    cost["input"] = m.usage.cost.input;
+                    cost["output"] = m.usage.cost.output;
+                    cost["cacheRead"] = m.usage.cost.cache_read;
+                    cost["cacheWrite"] = m.usage.cost.cache_write;
+                    cost["total"] = m.usage.cost.total;
+                    usage["cost"] = std::move(cost);
+                    j["usage"] = std::move(usage);
                 }
                 if (!m.response_model.empty()) {
-                    j.set<std::string_view>("responseModel", m.response_model);
+                    j["responseModel"] = m.response_model;
                 }
                 if (m.response_id.has_value()) {
-                    j.set<std::string_view>("responseId", *m.response_id);
+                    j["responseId"] = *m.response_id;
                 }
                 if (m.error_message.has_value()) {
-                    j.set<std::string_view>("errorMessage", *m.error_message);
+                    j["errorMessage"] = *m.error_message;
                 }
                 return j;
             } else if constexpr (std::same_as<T, ToolResultMessage>) {
-                JsonValue j;
-                j.set<std::string_view>("role", "toolResult");
-                j.set<std::string_view>("toolCallId", m.tool_call_id);
-                j.set<std::string_view>("toolName", m.tool_name);
-                j.set<bool>("isError", m.is_error);
-                j.set<std::int64_t>("timestamp", m.timestamp);
-                {
-                    JsonValue arr;
-                    arr.kind = JsonKind::array_t;
-                    for (const auto& cb : m.content) {
-                        arr.arr.push_back(content_block_to_json(cb));
-                    }
-                    j.set<JsonValue>("content", arr);
+                json j = json::object();
+                j["role"] = "toolResult";
+                j["toolCallId"] = m.tool_call_id;
+                j["toolName"] = m.tool_name;
+                j["isError"] = m.is_error;
+                j["timestamp"] = m.timestamp;
+                json arr = json::array();
+                for (const auto& cb : m.content) {
+                    arr.push_back(content_block_to_json(cb));
                 }
+                j["content"] = std::move(arr);
                 if (m.details.has_value()) {
-                    j.set<std::string_view>("details", *m.details);
+                    j["details"] = *m.details;
                 }
                 return j;
             }
-            return JsonValue{};
+            return json{};
         },
         msg);
 }
 
 std::string to_json(const TokenUsage& usage) {
-    JsonValue j;
-    j.set<std::int64_t>("input", static_cast<std::int64_t>(usage.input));
-    j.set<std::int64_t>("output", static_cast<std::int64_t>(usage.output));
-    j.set<std::int64_t>("cacheRead", static_cast<std::int64_t>(usage.cache_read));
-    j.set<std::int64_t>("cacheWrite", static_cast<std::int64_t>(usage.cache_write));
-    j.set<std::int64_t>("totalTokens", static_cast<std::int64_t>(usage.total_tokens));
-    return serialize(j);
+    json j = json::object();
+    j["input"] = usage.input;
+    j["output"] = usage.output;
+    j["cacheRead"] = usage.cache_read;
+    j["cacheWrite"] = usage.cache_write;
+    j["totalTokens"] = usage.total_tokens;
+    return j.dump(2);
 }
 
 std::string to_json(const Message& msg) {
-    return serialize(message_to_json(msg), 2);
+    return message_to_json_obj(msg).dump(2);
 }
 
 std::string to_json(const Model& model) {
-    JsonValue j;
-    j.set<std::string_view>("id", model.id);
-    j.set<std::string_view>("name", model.name);
-    j.set<std::string_view>("api", model.api);
-    j.set<std::string_view>("provider", model.provider);
-    j.set<std::string_view>("baseUrl", model.base_url);
-    j.set<bool>("reasoning", model.reasoning);
-    {
-        JsonValue arr;
-        arr.kind = JsonKind::array_t;
-        for (const auto& cap : model.input_capabilities) {
-            arr.arr.push_back(JsonValue(cap));
-        }
-        j.set<JsonValue>("input", arr);
+    json j = json::object();
+    j["id"] = model.id;
+    j["name"] = model.name;
+    j["api"] = model.api;
+    j["provider"] = model.provider;
+    j["baseUrl"] = model.base_url;
+    j["reasoning"] = model.reasoning;
+    json arr = json::array();
+    for (const auto& cap : model.input_capabilities) {
+        arr.push_back(cap);
     }
-    j.set<std::int64_t>("contextWindow", static_cast<std::int64_t>(model.context_window));
-    j.set<std::int64_t>("maxTokens", static_cast<std::int64_t>(model.max_tokens));
-    return serialize(j, 2);
+    j["input"] = std::move(arr);
+    j["contextWindow"] = model.context_window;
+    j["maxTokens"] = model.max_tokens;
+    return j.dump(2);
 }
 
-static Message from_json_message(const JsonValue& j) {
-    auto role = j.get<std::string>("role");
+static Message from_json_message(const json& j) {
+    std::string role = j.value("role", "");
     if (role == "user") {
         UserMessage msg;
-        msg.timestamp = j.get<std::int64_t>("timestamp", 0LL);
-        if (j.has("content")) {
-            for (const auto& cb : j["content"].arr) {
+        msg.timestamp = j.value("timestamp", std::int64_t{0});
+        if (j.contains("content") && j["content"].is_array()) {
+            for (const auto& cb : j["content"]) {
                 auto block = json_to_content_block(cb);
                 if (block) msg.content.push_back(*block);
             }
@@ -645,58 +312,58 @@ static Message from_json_message(const JsonValue& j) {
     }
     if (role == "assistant") {
         AssistantMessage msg;
-        msg.api = j.get<std::string>("api", "");
-        msg.provider = j.get<std::string>("provider", "");
-        msg.model = j.get<std::string>("model", "");
-        msg.stop_reason = stop_reason_from_string(j.get<std::string>("stopReason", ""));
-        msg.timestamp = j.get<std::int64_t>("timestamp", 0LL);
-        if (j.has("responseModel")) {
-            msg.response_model = j.get<std::string>("responseModel");
+        msg.api = j.value("api", "");
+        msg.provider = j.value("provider", "");
+        msg.model = j.value("model", "");
+        msg.stop_reason = stop_reason_from_string(j.value("stopReason", ""));
+        msg.timestamp = j.value("timestamp", std::int64_t{0});
+        if (j.contains("responseModel") && j["responseModel"].is_string()) {
+            msg.response_model = j["responseModel"].get<std::string>();
         }
-        if (j.has("responseId")) {
-            msg.response_id = j.get<std::string>("responseId");
+        if (j.contains("responseId") && j["responseId"].is_string()) {
+            msg.response_id = j["responseId"].get<std::string>();
         }
-        if (j.has("errorMessage")) {
-            msg.error_message = j.get<std::string>("errorMessage");
+        if (j.contains("errorMessage") && j["errorMessage"].is_string()) {
+            msg.error_message = j["errorMessage"].get<std::string>();
         }
-        if (j.has("content")) {
-            for (const auto& cb : j["content"].arr) {
+        if (j.contains("content") && j["content"].is_array()) {
+            for (const auto& cb : j["content"]) {
                 auto block = json_to_content_block(cb);
                 if (block) msg.content.push_back(*block);
             }
         }
-        if (j.has("usage")) {
+        if (j.contains("usage") && j["usage"].is_object()) {
             const auto& u = j["usage"];
-            msg.usage.input = static_cast<std::uint64_t>(u.get<std::int64_t>("input", 0));
-            msg.usage.output = static_cast<std::uint64_t>(u.get<std::int64_t>("output", 0));
-            msg.usage.cache_read = static_cast<std::uint64_t>(u.get<std::int64_t>("cacheRead", 0));
-            msg.usage.cache_write = static_cast<std::uint64_t>(u.get<std::int64_t>("cacheWrite", 0));
-            msg.usage.total_tokens = static_cast<std::uint64_t>(u.get<std::int64_t>("totalTokens", 0));
-            if (j["usage"].has("cost")) {
-                const auto& c = j["usage"]["cost"];
-                msg.usage.cost.input = c.get<double>("input", 0.0);
-                msg.usage.cost.output = c.get<double>("output", 0.0);
-                msg.usage.cost.cache_read = c.get<double>("cacheRead", 0.0);
-                msg.usage.cost.cache_write = c.get<double>("cacheWrite", 0.0);
-                msg.usage.cost.total = c.get<double>("total", 0.0);
+            msg.usage.input = u.value("input", std::uint64_t{0});
+            msg.usage.output = u.value("output", std::uint64_t{0});
+            msg.usage.cache_read = u.value("cacheRead", std::uint64_t{0});
+            msg.usage.cache_write = u.value("cacheWrite", std::uint64_t{0});
+            msg.usage.total_tokens = u.value("totalTokens", std::uint64_t{0});
+            if (u.contains("cost") && u["cost"].is_object()) {
+                const auto& c = u["cost"];
+                msg.usage.cost.input = c.value("input", 0.0);
+                msg.usage.cost.output = c.value("output", 0.0);
+                msg.usage.cost.cache_read = c.value("cacheRead", 0.0);
+                msg.usage.cost.cache_write = c.value("cacheWrite", 0.0);
+                msg.usage.cost.total = c.value("total", 0.0);
             }
         }
         return msg;
     }
     if (role == "toolResult") {
         ToolResultMessage msg;
-        msg.tool_call_id = j.get<std::string>("toolCallId", "");
-        msg.tool_name = j.get<std::string>("toolName", "");
-        msg.is_error = j.get<bool>("isError", false);
-        msg.timestamp = j.get<std::int64_t>("timestamp", 0LL);
-        if (j.has("content")) {
-            for (const auto& cb : j["content"].arr) {
+        msg.tool_call_id = j.value("toolCallId", "");
+        msg.tool_name = j.value("toolName", "");
+        msg.is_error = j.value("isError", false);
+        msg.timestamp = j.value("timestamp", std::int64_t{0});
+        if (j.contains("content") && j["content"].is_array()) {
+            for (const auto& cb : j["content"]) {
                 auto block = json_to_content_block(cb);
                 if (block) msg.content.push_back(*block);
             }
         }
-        if (j.has("details")) {
-            msg.details = j.get<std::string>("details");
+        if (j.contains("details") && j["details"].is_string()) {
+            msg.details = j["details"].get<std::string>();
         }
         return msg;
     }
@@ -705,7 +372,7 @@ static Message from_json_message(const JsonValue& j) {
 
 std::optional<Message> from_json(const std::string& s) {
     try {
-        auto j = parse(s);
+        auto j = nlohmann::json::parse(s);
         return from_json_message(j);
     } catch (...) {
         return std::nullopt;

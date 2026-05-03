@@ -131,33 +131,12 @@ void emit_tool_result(
         std::source_location::current()));
 }
 
-std::string json_escape(std::string_view value) {
-    std::string escaped;
-    escaped.reserve(value.size());
-    for (char ch : value) {
-        switch (ch) {
-            case '"': escaped += "\\\""; break;
-            case '\\': escaped += "\\\\"; break;
-            case '\n': escaped += "\\n"; break;
-            case '\r': escaped += "\\r"; break;
-            case '\t': escaped += "\\t"; break;
-            default: escaped += ch; break;
-        }
-    }
-    return escaped;
-}
-
-// Helper: serialize tool call arguments as JSON string
+// Helper: serialize tool call arguments as compact JSON string
 std::string tool_call_args_json(const ToolCall& tc) {
-    std::string json_str = "{";
-    for (const auto& [k, v] : tc.arguments) {
-        json_str += "\"" + json_escape(k) + "\":\"" + json_escape(v) + "\",";
+    if (tc.arguments.is_object()) {
+        return tc.arguments.dump();
     }
-    if (json_str.size() > 1 && json_str.back() == ',') {
-        json_str.pop_back();
-    }
-    json_str += "}";
-    return json_str;
+    return "{}";
 }
 
 // Helper: check if a tool is marked sequential
@@ -549,9 +528,8 @@ run_agent_loop(const std::vector<Message>& prompts,
             return {};
         });
 
-    std::ignore = std::async(std::launch::async,
-                             [prompts, context = std::move(context), config,
-                              emit = std::move(emit), stream, stop_tok]() mutable {
+    std::thread([prompts, context = std::move(context), config,
+                  emit = std::move(emit), stream, stop_tok]() mutable {
         auto publish = [&](AgentEvent event) {
             emit(event);
             stream.push(std::move(event));
@@ -667,7 +645,7 @@ run_agent_loop(const std::vector<Message>& prompts,
 
         publish(AgentEndEvent(new_messages));
         stream.finish(new_messages);
-    });
+    }).detach();
 
     return stream;
 }
@@ -700,9 +678,8 @@ run_agent_loop_continue(AgentContext& context,
         });
 
     auto context_snapshot = context;
-    std::ignore = std::async(std::launch::async,
-                             [context = std::move(context_snapshot), config,
-                              emit = std::move(emit), stream, stop_tok]() mutable {
+    std::thread([context = std::move(context_snapshot), config,
+                 emit = std::move(emit), stream, stop_tok]() mutable {
         auto publish = [&](AgentEvent event) {
             emit(event);
             stream.push(std::move(event));
@@ -805,7 +782,7 @@ run_agent_loop_continue(AgentContext& context,
 
         publish(AgentEndEvent(new_messages));
         stream.finish(new_messages);
-    });
+    }).detach();
 
     return stream;
 }
