@@ -555,3 +555,12 @@ std::shared_ptr<AssistantMessage> OpenAICompatibleClient::stream(
 }
 
 } // namespace pi::core
+
+namespace {
+const bool registered = [] {
+    pi::core::LLMClientRegistry::instance().register_client(
+        "openai-completions",
+        [] { return std::make_shared<pi::core::OpenAICompatibleClient>(); });
+    return true;
+}();
+} // namespace

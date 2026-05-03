@@ -61,6 +61,7 @@ add_library(pi-core
     src/core/agent.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
+    src/core/env_api_keys.cpp
     src/core/providers/faux.cpp
     src/core/providers/transform_messages.cpp
 )
