@@ -1,7 +1,9 @@
 #pragma once
 
 #include <concepts>
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <source_location>
@@ -61,6 +63,19 @@ struct AgentLoopConfig {
     Model model;
     ThinkingLevel thinking_level{ThinkingLevel::off};
     ToolExecutionMode tool_execution{ToolExecutionMode::parallel};
+
+    std::optional<double> temperature;
+    std::optional<std::uint32_t> max_tokens;
+    std::optional<std::string> cache_retention;
+    std::optional<std::string> session_id;
+    Transport transport{Transport::auto_transport};
+    std::map<std::string, std::string> headers;
+    std::optional<std::uint32_t> timeout_ms;
+    std::optional<std::uint32_t> max_retries;
+    std::optional<std::uint32_t> max_retry_delay_ms;
+    nlohmann::json metadata;
+    decltype(StreamOptions::on_payload) on_payload;
+    decltype(StreamOptions::on_response) on_response;
 
     // Converts AgentMessage[] to LLM-compatible messages
     std::function<std::vector<Message>(const std::vector<Message>&)>

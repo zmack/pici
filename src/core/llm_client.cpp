@@ -11,15 +11,13 @@ public:
     std::shared_ptr<AssistantMessage> stream(
         const Model& model,
         const AgentContext& context,
-        ThinkingLevel thinking_level,
+        const StreamOptions& options,
         StreamCallback emit,
-        const std::optional<std::string>& api_key,
         std::stop_token stop_tok) override {
         (void)model;
         (void)context;
-        (void)thinking_level;
+        (void)options;
         (void)emit;
-        (void)api_key;
         (void)stop_tok;
         // Return a stub error message
         auto msg = std::make_shared<AssistantMessage>();

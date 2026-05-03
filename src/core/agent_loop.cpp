@@ -322,18 +322,25 @@ std::shared_ptr<AssistantMessage> stream_assistant_response(
         return stub;
     }
 
-    auto result = client->stream(
-        config.model,
-        context,
-        config.thinking_level,
-        emit,
-        []<class C>(const C& cfg) -> std::optional<std::string> {
-            if (cfg.get_api_key) {
-                return cfg.get_api_key(cfg.model.provider);
-            }
-            return std::nullopt;
-        }(config),
-        stop_tok);
+    StreamOptions opts;
+    opts.temperature = config.temperature;
+    opts.max_tokens = config.max_tokens;
+    opts.reasoning = config.thinking_level;
+    opts.cache_retention = config.cache_retention;
+    opts.session_id = config.session_id;
+    opts.transport = config.transport;
+    opts.headers = config.headers;
+    opts.timeout_ms = config.timeout_ms;
+    opts.max_retries = config.max_retries;
+    opts.max_retry_delay_ms = config.max_retry_delay_ms;
+    opts.metadata = config.metadata;
+    opts.on_payload = config.on_payload;
+    opts.on_response = config.on_response;
+    opts.api_key = config.get_api_key
+        ? config.get_api_key(config.model.provider)
+        : std::nullopt;
+
+    auto result = client->stream(config.model, context, opts, emit, stop_tok);
 
     // 4. Update context with the result
     if (result) {

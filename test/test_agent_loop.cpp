@@ -223,20 +223,18 @@ class TestLLMClient : public LLMClient {
 public:
     TestLLMClient(
         std::function<std::shared_ptr<AssistantMessage>(
-            const AgentContext&, ThinkingLevel, StreamCallback, std::stop_token)>
+            const AgentContext&, const StreamOptions&, StreamCallback, std::stop_token)>
             factory)
         : factory_(std::move(factory)) {}
 
     std::shared_ptr<AssistantMessage> stream(
         const Model& model,
         const AgentContext& context,
-        ThinkingLevel thinking_level,
+        const StreamOptions& options,
         StreamCallback emit,
-        const std::optional<std::string>& api_key,
         std::stop_token stop_tok) override {
         (void)model;
-        (void)api_key;
-        return factory_(context, thinking_level, emit, stop_tok);
+        return factory_(context, options, emit, stop_tok);
     }
 
     std::string_view provider_name() const override { return "test"; }
@@ -244,7 +242,7 @@ public:
 
 private:
     std::function<std::shared_ptr<AssistantMessage>(
-        const AgentContext&, ThinkingLevel, StreamCallback, std::stop_token)>
+        const AgentContext&, const StreamOptions&, StreamCallback, std::stop_token)>
         factory_;
 };
 
@@ -265,7 +263,7 @@ void test_agent_loop_single_turn() {
         auto llm_client = std::make_shared<TestLLMClient>(
             [&message_events, &has_start, &has_end](
                 const AgentContext& context,
-                ThinkingLevel,
+                const StreamOptions&,
                 StreamCallback emit,
                 std::stop_token stop_tok) -> std::shared_ptr<AssistantMessage> {
             (void)context;
@@ -343,7 +341,7 @@ void test_agent_loop_with_tools() {
 
         auto llm_client = std::make_shared<TestLLMClient>(
             [&tool_start_count](const AgentContext& context,
-                                ThinkingLevel,
+                                const StreamOptions&,
                                 StreamCallback emit,
                                 std::stop_token stop_tok)
                 -> std::shared_ptr<AssistantMessage> {
@@ -423,7 +421,7 @@ void test_agent_loop_stop_after_turn() {
 
         auto llm_client = std::make_shared<TestLLMClient>(
             [&turn_count](const AgentContext& context,
-                          ThinkingLevel,
+                          const StreamOptions&,
                           StreamCallback emit,
                           std::stop_token stop_tok)
                 -> std::shared_ptr<AssistantMessage> {
@@ -489,7 +487,7 @@ void test_agent_loop_sequential_tools() {
 
         auto llm_client = std::make_shared<TestLLMClient>(
             [](const AgentContext& context,
-               ThinkingLevel,
+               const StreamOptions&,
                StreamCallback emit,
                std::stop_token stop_tok)
                 -> std::shared_ptr<AssistantMessage> {
@@ -626,7 +624,7 @@ void test_agent_loop_continue() {
 
         auto llm_client = std::make_shared<TestLLMClient>(
             [&turn_count](const AgentContext& context,
-                          ThinkingLevel,
+                          const StreamOptions&,
                           StreamCallback emit,
                           std::stop_token stop_tok)
                 -> std::shared_ptr<AssistantMessage> {
@@ -704,7 +702,7 @@ void test_agent_loop_before_tool_call_blocks_with_reason() {
 
         auto llm_client = std::make_shared<TestLLMClient>(
             [](const AgentContext&,
-               ThinkingLevel,
+               const StreamOptions&,
                StreamCallback,
                std::stop_token) -> std::shared_ptr<AssistantMessage> {
                 auto msg = std::make_shared<AssistantMessage>();
@@ -770,7 +768,7 @@ void test_agent_loop_after_tool_call_partial_override() {
 
         auto llm_client = std::make_shared<TestLLMClient>(
             [](const AgentContext&,
-               ThinkingLevel,
+               const StreamOptions&,
                StreamCallback,
                std::stop_token) -> std::shared_ptr<AssistantMessage> {
                 auto msg = std::make_shared<AssistantMessage>();
@@ -842,7 +840,7 @@ void test_agent_loop_steering_after_turn_continues() {
         int turn_count = 0;
         auto llm_client = std::make_shared<TestLLMClient>(
             [&turn_count](const AgentContext&,
-                          ThinkingLevel,
+                          const StreamOptions&,
                           StreamCallback,
                           std::stop_token) -> std::shared_ptr<AssistantMessage> {
                 turn_count++;
@@ -901,7 +899,7 @@ void test_agent_loop_argument_validation_blocks_execution() {
 
         auto llm_client = std::make_shared<TestLLMClient>(
             [](const AgentContext&,
-               ThinkingLevel,
+               const StreamOptions&,
                StreamCallback,
                std::stop_token) -> std::shared_ptr<AssistantMessage> {
                 auto msg = std::make_shared<AssistantMessage>();
@@ -961,7 +959,7 @@ void test_agent_loop_prepare_arguments_before_validation() {
 
         auto llm_client = std::make_shared<TestLLMClient>(
             [](const AgentContext&,
-               ThinkingLevel,
+               const StreamOptions&,
                StreamCallback,
                std::stop_token) -> std::shared_ptr<AssistantMessage> {
                 auto msg = std::make_shared<AssistantMessage>();
@@ -1087,7 +1085,7 @@ void test_parallel_completion_vs_source_order() {
         auto tool_b = std::make_shared<BlockingTool>("tool_b", release_b, end_order_counter, b_end_index);
 
         auto llm_client = std::make_shared<TestLLMClient>(
-            [](const AgentContext&, ThinkingLevel, StreamCallback, std::stop_token)
+            [](const AgentContext&, const StreamOptions&, StreamCallback, std::stop_token)
                 -> std::shared_ptr<AssistantMessage> {
                 auto msg = std::make_shared<AssistantMessage>();
                 msg->api = "test";
@@ -1181,7 +1179,7 @@ void test_parallel_mixed_immediate_source_order() {
         model.provider = "test";
 
         auto llm_client = std::make_shared<TestLLMClient>(
-            [](const AgentContext&, ThinkingLevel, StreamCallback, std::stop_token)
+            [](const AgentContext&, const StreamOptions&, StreamCallback, std::stop_token)
                 -> std::shared_ptr<AssistantMessage> {
                 auto msg = std::make_shared<AssistantMessage>();
                 msg->api = "test";
@@ -1308,7 +1306,7 @@ void test_per_tool_sequential_override() {
         auto tool_second = std::make_shared<SequentialTool>("seq_second", global_counter);
 
         auto llm_client = std::make_shared<TestLLMClient>(
-            [](const AgentContext&, ThinkingLevel, StreamCallback, std::stop_token)
+            [](const AgentContext&, const StreamOptions&, StreamCallback, std::stop_token)
                 -> std::shared_ptr<AssistantMessage> {
                 auto msg = std::make_shared<AssistantMessage>();
                 msg->api = "test";
@@ -1366,6 +1364,148 @@ void test_per_tool_sequential_override() {
     });
 }
 
+void test_stream_options_propagation() {
+    tests::register_test("StreamOptions: fields propagated from AgentLoopConfig", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        StreamOptions captured_opts;
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [&captured_opts](const AgentContext&,
+                             const StreamOptions& opts,
+                             StreamCallback,
+                             std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                captured_opts = opts;
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->stop_reason = StopReason::stop;
+                return msg;
+            });
+
+        AgentContext ctx;
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.temperature = 0.7;
+        config.max_tokens = std::uint32_t(2048);
+        config.session_id = "abc";
+        config.headers = {{"X-Test", "1"}};
+        config.cache_retention = "long";
+        config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.should_stop_after_turn = [](const Message&,
+                                           const std::vector<ToolResultMessage>&,
+                                           AgentContext&) { return true; };
+        config.get_steering_messages = [] { return std::vector<Message>{}; };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+
+        auto stream = run_agent_loop({}, ctx, config, [](const AgentEvent&) {});
+        for (auto& ev : stream) { (void)ev; }
+
+        CHECK(captured_opts.temperature.has_value());
+        CHECK_EQ(*captured_opts.temperature, 0.7);
+        CHECK(captured_opts.max_tokens.has_value());
+        CHECK_EQ(*captured_opts.max_tokens, std::uint32_t(2048));
+        CHECK(captured_opts.session_id.has_value());
+        CHECK_EQ(*captured_opts.session_id, std::string("abc"));
+        CHECK_EQ(captured_opts.headers.size(), std::size_t(1));
+        CHECK_EQ(captured_opts.headers.at("X-Test"), std::string("1"));
+        CHECK(captured_opts.cache_retention.has_value());
+        CHECK_EQ(*captured_opts.cache_retention, std::string("long"));
+    });
+}
+
+void test_api_key_resolution() {
+    tests::register_test("StreamOptions: api_key resolved from get_api_key callback", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        std::optional<std::string> captured_api_key;
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [&captured_api_key](const AgentContext&,
+                                const StreamOptions& opts,
+                                StreamCallback,
+                                std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                captured_api_key = opts.api_key;
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->stop_reason = StopReason::stop;
+                return msg;
+            });
+
+        AgentContext ctx;
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.get_api_key = [](std::string_view) -> std::optional<std::string> {
+            return "key-from-callback";
+        };
+        config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.should_stop_after_turn = [](const Message&,
+                                           const std::vector<ToolResultMessage>&,
+                                           AgentContext&) { return true; };
+        config.get_steering_messages = [] { return std::vector<Message>{}; };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+
+        auto stream = run_agent_loop({}, ctx, config, [](const AgentEvent&) {});
+        for (auto& ev : stream) { (void)ev; }
+
+        CHECK(captured_api_key.has_value());
+        CHECK_EQ(*captured_api_key, std::string("key-from-callback"));
+    });
+}
+
+void test_reasoning_forwarded() {
+    tests::register_test("StreamOptions: thinking_level forwarded as reasoning", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        ThinkingLevel captured_reasoning{ThinkingLevel::off};
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [&captured_reasoning](const AgentContext&,
+                                  const StreamOptions& opts,
+                                  StreamCallback,
+                                  std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                captured_reasoning = opts.reasoning;
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->stop_reason = StopReason::stop;
+                return msg;
+            });
+
+        AgentContext ctx;
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.thinking_level = ThinkingLevel::high;
+        config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.should_stop_after_turn = [](const Message&,
+                                           const std::vector<ToolResultMessage>&,
+                                           AgentContext&) { return true; };
+        config.get_steering_messages = [] { return std::vector<Message>{}; };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+
+        auto stream = run_agent_loop({}, ctx, config, [](const AgentEvent&) {});
+        for (auto& ev : stream) { (void)ev; }
+
+        CHECK_EQ(captured_reasoning, ThinkingLevel::high);
+    });
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -1385,6 +1525,9 @@ int main() {
     test_parallel_completion_vs_source_order();
     test_parallel_mixed_immediate_source_order();
     test_per_tool_sequential_override();
+    test_stream_options_propagation();
+    test_api_key_resolution();
+    test_reasoning_forwarded();
 
     tests::print_summary();
 

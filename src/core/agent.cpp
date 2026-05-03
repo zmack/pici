@@ -282,6 +282,18 @@ AgentLoopConfig Agent::create_loop_config() {
     AgentLoopConfig config;
     config.model = state_.model();
     config.thinking_level = state_.thinking_level();
+    config.temperature = options_.temperature;
+    config.max_tokens = options_.max_tokens;
+    config.cache_retention = options_.cache_retention;
+    config.session_id = options_.session_id;
+    config.transport = options_.transport;
+    config.headers = options_.headers;
+    config.timeout_ms = options_.timeout_ms;
+    config.max_retries = options_.max_retries;
+    config.max_retry_delay_ms = options_.max_retry_delay_ms;
+    config.metadata = options_.metadata;
+    config.on_payload = options_.on_payload;
+    config.on_response = options_.on_response;
     config.tool_execution = options_.tool_execution;
     config.convert_to_llm =
         options_.convert_to_llm ? options_.convert_to_llm
