@@ -18,9 +18,6 @@
 #include "core/message_types.h"
 #include "core/stream.h"
 
-#ifdef PI_CPP_HAVE_HTTP
-#include "http/http_client.h"
-#endif
 
 namespace pi::core {
 
@@ -101,11 +98,7 @@ namespace pi {
 void print_version() {
     std::cout << "pi-cpp " PI_CPP_VERSION
               << " - C++23 agent loop runtime\n";
-#ifdef PI_CPP_HAVE_HTTP
     std::cout << "  HTTP client: enabled\n";
-#else
-    std::cout << "  HTTP client: disabled\n";
-#endif
     std::cout << "  C++ standard: C++23\n";
     std::cout << "  Thread lib: "
               << (std::thread::hardware_concurrency() ? std::to_string(

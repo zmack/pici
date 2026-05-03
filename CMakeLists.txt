@@ -5,9 +5,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Option to build with HTTP client (libcurl) support
 option(PI_CPP_BUILD_TESTS "Build tests" ON)
-option(PI_CPP_ENABLE_HTTP "Enable HTTP client support" OFF)
 
 # ─── FetchContent dependencies ───
 include(FetchContent)
@@ -29,6 +27,30 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json_schema_validator)
 
+find_package(CURL QUIET)
+if(NOT CURL_FOUND)
+    set(CURL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(CURL_DISABLE_TESTS ON CACHE BOOL "" FORCE)
+    set(CURL_USE_OPENSSL OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_MBEDTLS OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_WOLFSSL OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_BEARSSL OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_RUSTLS OFF CACHE BOOL "" FORCE)
+    set(CMAKE_USE_OPENSSL OFF CACHE BOOL "" FORCE)
+    set(CMAKE_USE_SECTRANSP OFF CACHE BOOL "" FORCE)
+    set(CMAKE_USE_SCHANNEL OFF CACHE BOOL "" FORCE)
+    set(CMAKE_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
+    set(CURL_DISABLE_ALTSVC ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        curl
+        GIT_REPOSITORY https://github.com/curl/curl.git
+        GIT_TAG        curl-8_7_1
+    )
+    FetchContent_MakeAvailable(curl)
+endif()
+
 # ─── libpi-core ───
 add_library(pi-core
     src/core/message_types.cpp
@@ -39,6 +61,7 @@ add_library(pi-core
     src/core/agent.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
+    src/core/providers/faux.cpp
 )
 
 target_include_directories(pi-core PUBLIC
@@ -59,7 +82,7 @@ add_executable(pi-cli
     src/main.cpp
 )
 
-target_link_libraries(pi-cli PRIVATE pi-core)
+target_link_libraries(pi-cli PRIVATE pi-core pi-http)
 
 # ─── Tests ───
 if(PI_CPP_BUILD_TESTS)
@@ -73,17 +96,14 @@ if(PI_CPP_BUILD_TESTS)
         target_link_libraries(test-${test_name} PRIVATE pi-core)
         add_test(NAME test-${test_name} COMMAND test-${test_name})
     endforeach()
+
+    add_executable(test-faux_client test/test_faux_client.cpp)
+    target_link_libraries(test-faux_client PRIVATE pi-core)
+    add_test(NAME test-faux_client COMMAND test-faux_client)
 endif()
 
-# ─── HTTP client (optional) ───
-if(PI_CPP_ENABLE_HTTP)
-    find_package(CURL REQUIRED)
-
-    add_library(pi-http
-        src/http/http_client.cpp
-    )
-
-    target_include_directories(pi-http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl)
-    target_compile_definitions(pi-http PUBLIC PI_CPP_HAVE_HTTP)
-endif()
+add_library(pi-http
+    src/http/http_client.cpp
+)
+target_include_directories(pi-http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl)
