@@ -47,11 +47,12 @@ ToolResultMessage make_tool_result_message(
                         std::chrono::steady_clock::now().time_since_epoch())
                         .count();
 
-    auto content_str = result->content();
-    if (!content_str.empty()) {
-        TextContent tc_text;
-        tc_text.text = std::move(content_str);
-        msg.content.push_back(std::move(tc_text));
+    for (auto& block : result->content_blocks()) {
+        std::visit(
+            [&msg](auto&& value) {
+                msg.content.push_back(std::forward<decltype(value)>(value));
+            },
+            std::move(block));
     }
 
     auto details = result->details();
@@ -68,16 +69,34 @@ public:
                      bool is_error,
                      bool terminate = false,
                      std::optional<std::string> details = std::nullopt)
-        : content_(std::move(content)), is_error_(is_error),
+        : content_blocks_({TextContent{.text = std::move(content)}}),
+          is_error_(is_error),
+          terminate_(terminate), details_(std::move(details)) {}
+    StaticToolResult(std::vector<ToolResultContentBlock> content,
+                     bool is_error,
+                     bool terminate = false,
+                     std::optional<std::string> details = std::nullopt)
+        : content_blocks_(std::move(content)), is_error_(is_error),
           terminate_(terminate), details_(std::move(details)) {}
 
     bool is_error() const override { return is_error_; }
-    std::string content() const override { return content_; }
+    std::string content() const override {
+        std::string text;
+        for (const auto& block : content_blocks_) {
+            if (const auto* tc = std::get_if<TextContent>(&block)) {
+                text += tc->text;
+            }
+        }
+        return text;
+    }
+    std::vector<ToolResultContentBlock> content_blocks() const override {
+        return content_blocks_;
+    }
     std::optional<std::string> details() const override { return details_; }
     bool terminate() const override { return terminate_; }
 
 private:
-    std::string content_;
+    std::vector<ToolResultContentBlock> content_blocks_;
     bool is_error_{false};
     bool terminate_{false};
     std::optional<std::string> details_;
@@ -87,6 +106,12 @@ struct FinalizedToolCall {
     ToolCall tool_call;
     std::shared_ptr<ToolResult> result;
     bool is_error{false};
+};
+
+struct PreparedToolCall {
+    ToolCall tool_call;
+    std::shared_ptr<const ToolDefinition> tool;
+    std::string args_json;
 };
 
 // Helper: emit a tool result message pair (start + end)
@@ -150,45 +175,6 @@ std::shared_ptr<ToolResult> make_error_tool_result(std::string message) {
     return std::make_shared<StaticToolResult>(std::move(message), true);
 }
 
-std::optional<FinalizedToolCall> prepare_immediate_tool_result(
-    AgentContext& context,
-    const AssistantMessage& assistant_message,
-    const ToolCall& tc,
-    const AgentLoopConfig& config,
-    std::string_view args_json,
-    std::stop_token stop_tok) {
-    auto tool_it =
-        std::find_if(context.tools.begin(), context.tools.end(),
-                     [&tc](const auto& t) {
-                         return t->name() == tc.name;
-                     });
-
-    if (tool_it == context.tools.end()) {
-        return FinalizedToolCall{
-            tc, make_error_tool_result("Tool " + tc.name + " not found"), true};
-    }
-
-    if (config.before_tool_call) {
-        auto before = config.before_tool_call(
-            BeforeToolCallContext{
-                assistant_message,
-                tc,
-                std::string(args_json),
-                context,
-            },
-            stop_tok);
-        if (before && before->block) {
-            auto reason = before->reason.empty()
-                              ? std::string{"Tool execution was blocked"}
-                              : before->reason;
-            return FinalizedToolCall{
-                tc, make_error_tool_result(std::move(reason)), true};
-        }
-    }
-
-    return std::nullopt;
-}
-
 std::shared_ptr<const ToolDefinition> find_tool(
     const AgentContext& context,
     const ToolCall& tc) {
@@ -201,6 +187,58 @@ std::shared_ptr<const ToolDefinition> find_tool(
         return nullptr;
     }
     return *tool_it;
+}
+
+std::variant<PreparedToolCall, FinalizedToolCall> prepare_tool_call(
+    AgentContext& context,
+    const AssistantMessage& assistant_message,
+    const ToolCall& tc,
+    const AgentLoopConfig& config,
+    std::stop_token stop_tok) {
+    auto tool = find_tool(context, tc);
+    if (!tool) {
+        return FinalizedToolCall{
+            tc, make_error_tool_result("Tool " + tc.name + " not found"), true};
+    }
+
+    ToolCall prepared_tc = tc;
+    try {
+        prepared_tc.arguments = tool->prepare_arguments(tc.arguments);
+    } catch (const std::exception& e) {
+        return FinalizedToolCall{tc, make_error_tool_result(e.what()), true};
+    } catch (...) {
+        return FinalizedToolCall{
+            tc, make_error_tool_result("Unknown tool argument preparation error"),
+            true};
+    }
+
+    if (auto validation_error =
+            tool->schema().validate_arguments(prepared_tc.arguments)) {
+        return FinalizedToolCall{
+            prepared_tc, make_error_tool_result(*validation_error), true};
+    }
+
+    auto args_json = tool_call_args_json(prepared_tc);
+    if (config.before_tool_call) {
+        auto before = config.before_tool_call(
+            BeforeToolCallContext{
+                assistant_message,
+                prepared_tc,
+                args_json,
+                context,
+            },
+            stop_tok);
+        if (before && before->block) {
+            auto reason = before->reason.empty()
+                              ? std::string{"Tool execution was blocked"}
+                              : before->reason;
+            return FinalizedToolCall{
+                prepared_tc, make_error_tool_result(std::move(reason)), true};
+        }
+    }
+
+    return PreparedToolCall{std::move(prepared_tc), std::move(tool),
+                            std::move(args_json)};
 }
 
 FinalizedToolCall finalize_tool_call(
@@ -230,7 +268,8 @@ FinalizedToolCall finalize_tool_call(
                 },
                 stop_tok);
             if (after) {
-                auto content = after->content.value_or(tool_result->content());
+                auto content = after->content.value_or(
+                    tool_result->content_blocks());
                 auto details = after->details.has_value()
                                    ? after->details
                                    : tool_result->details();
@@ -345,29 +384,31 @@ static ToolCallResult execute_tool_calls_sequential(
     std::vector<FinalizedToolCall> finalized_calls;
 
     for (const auto& tc : tool_calls) {
-        auto args_json = tool_call_args_json(tc);
         emit(ToolExecutionStartEvent(
-            tc.id, tc.name, args_json, std::source_location::current()));
+            tc.id, tc.name, tool_call_args_json(tc),
+            std::source_location::current()));
 
-        auto immediate = prepare_immediate_tool_result(
-            context, assistant_message, tc, config, args_json, stop_tok);
-        FinalizedToolCall finalized;
-        if (immediate) {
-            finalized = std::move(*immediate);
-        } else {
-            auto tool = find_tool(context, tc);
-            auto tool_result = tool->execute(
-                tc.id, args_json, stop_tok,
-                [&emit, &tc, args_json](std::shared_ptr<ToolResult> partial) {
-                    emit(ToolExecutionUpdateEvent(
-                        tc.id, tc.name, args_json,
-                        partial ? partial->content() : std::string{},
-                        std::source_location::current()));
-                });
-            finalized = finalize_tool_call(
-                context, assistant_message, tc, std::move(tool_result), false,
-                config, args_json, stop_tok);
+        auto prepared = prepare_tool_call(
+            context, assistant_message, tc, config, stop_tok);
+        if (auto* immediate = std::get_if<FinalizedToolCall>(&prepared)) {
+            result.messages.push_back(emit_finalized_tool_call(*immediate, emit));
+            finalized_calls.push_back(std::move(*immediate));
+            continue;
         }
+
+        auto call = std::get<PreparedToolCall>(std::move(prepared));
+
+        auto tool_result = call.tool->execute(
+            call.tool_call.id, call.args_json, stop_tok,
+            [&emit, &call](std::shared_ptr<ToolResult> partial) {
+                emit(ToolExecutionUpdateEvent(
+                    call.tool_call.id, call.tool_call.name, call.args_json,
+                    partial ? partial->content() : std::string{},
+                    std::source_location::current()));
+            });
+        auto finalized = finalize_tool_call(
+            context, assistant_message, call.tool_call, std::move(tool_result),
+            false, config, call.args_json, stop_tok);
 
         result.messages.push_back(emit_finalized_tool_call(finalized, emit));
         finalized_calls.push_back(std::move(finalized));
@@ -389,58 +430,69 @@ static ToolCallResult execute_tool_calls_parallel(
     StreamCallback emit,
     std::stop_token stop_tok) {
     ToolCallResult result;
-    std::vector<FinalizedToolCall> finalized_calls;
-    std::vector<std::future<FinalizedToolCall>> pending;
+    const std::size_t n = tool_calls.size();
+    std::vector<std::optional<FinalizedToolCall>> slots(n);
+    std::vector<std::future<std::pair<std::size_t, FinalizedToolCall>>> pending;
 
-    for (const auto& tc : tool_calls) {
-        auto args_json = tool_call_args_json(tc);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& tc = tool_calls[i];
         emit(ToolExecutionStartEvent(
-            tc.id, tc.name, args_json, std::source_location::current()));
+            tc.id, tc.name, tool_call_args_json(tc),
+            std::source_location::current()));
 
-        auto immediate = prepare_immediate_tool_result(
-            context, assistant_message, tc, config, args_json, stop_tok);
-        if (immediate) {
+        auto prepared = prepare_tool_call(
+            context, assistant_message, tc, config, stop_tok);
+        if (auto* immediate = std::get_if<FinalizedToolCall>(&prepared)) {
             emit(ToolExecutionEndEvent(
-                tc.id, tc.name, immediate->result, immediate->is_error,
+                immediate->tool_call.id, immediate->tool_call.name,
+                immediate->result, immediate->is_error,
                 std::source_location::current()));
-            finalized_calls.push_back(std::move(*immediate));
+            slots[i] = std::move(*immediate);
             continue;
         }
 
-        auto tool = find_tool(context, tc);
+        auto call = std::get<PreparedToolCall>(std::move(prepared));
         pending.push_back(std::async(
             std::launch::async,
             [&context, &assistant_message, &config, emit, stop_tok,
-             tc, args_json, tool]() mutable {
-                auto tool_result = tool->execute(
-                    tc.id, args_json, stop_tok,
-                    [emit, tc, args_json](std::shared_ptr<ToolResult> partial) {
+             call = std::move(call), idx = i]() mutable {
+                auto tool_result = call.tool->execute(
+                    call.tool_call.id, call.args_json, stop_tok,
+                    [emit, call](std::shared_ptr<ToolResult> partial) {
                         emit(ToolExecutionUpdateEvent(
-                            tc.id, tc.name, args_json,
+                            call.tool_call.id, call.tool_call.name,
+                            call.args_json,
                             partial ? partial->content() : std::string{},
                             std::source_location::current()));
                     });
                 auto finalized = finalize_tool_call(
-                    context, assistant_message, tc, std::move(tool_result),
-                    false, config, args_json, stop_tok);
+                    context, assistant_message, call.tool_call,
+                    std::move(tool_result), false, config, call.args_json,
+                    stop_tok);
                 emit(ToolExecutionEndEvent(
-                    tc.id, tc.name, finalized.result, finalized.is_error,
+                    call.tool_call.id, call.tool_call.name, finalized.result,
+                    finalized.is_error,
                     std::source_location::current()));
-                return finalized;
+                return std::make_pair(idx, std::move(finalized));
             }));
     }
 
     for (auto& future : pending) {
-        finalized_calls.push_back(future.get());
+        auto [idx, finalized] = future.get();
+        slots[idx] = std::move(finalized);
+    }
+
+    std::vector<FinalizedToolCall> finalized_calls;
+    finalized_calls.reserve(n);
+    for (auto& slot : slots) {
+        finalized_calls.push_back(std::move(*slot));
     }
 
     for (const auto& finalized : finalized_calls) {
-        result.messages.push_back(make_tool_result_message(
-            finalized.tool_call, finalized.result));
-    }
-    for (const auto& message : result.messages) {
-        emit(MessageStartEvent(message, std::source_location::current()));
-        emit(MessageEndEvent(message, std::source_location::current()));
+        auto msg = make_tool_result_message(finalized.tool_call, finalized.result);
+        emit(MessageStartEvent(msg, std::source_location::current()));
+        emit(MessageEndEvent(msg, std::source_location::current()));
+        result.messages.push_back(std::move(msg));
     }
 
     result.terminate = should_terminate_tool_batch(finalized_calls);

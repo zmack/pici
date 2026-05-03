@@ -64,6 +64,8 @@ struct ToolCall {
 };
 
 using ContentBlock = std::variant<TextContent, ThinkingContent, ImageContent, ToolCall>;
+using ToolResultContentBlock = std::variant<TextContent, ImageContent>;
+using ToolArguments = std::map<std::string, std::string>;
 
 // ─── Message types ──────────────────────────────────────────────────────────
 
@@ -180,6 +182,11 @@ public:
     virtual std::string serialize() const = 0;
     // Returns a JSON-like map representation for the tool definition
     virtual std::map<std::string, std::string> to_definition() const = 0;
+    virtual std::optional<std::string> validate_arguments(
+        const ToolArguments& arguments) const {
+        (void)arguments;
+        return std::nullopt;
+    }
 };
 
 class ToolResult {
@@ -187,6 +194,13 @@ public:
     virtual ~ToolResult() = default;
     virtual bool is_error() const = 0;
     virtual std::string content() const = 0;
+    virtual std::vector<ToolResultContentBlock> content_blocks() const {
+        auto text = content();
+        if (text.empty()) {
+            return {};
+        }
+        return {TextContent{.text = std::move(text)}};
+    }
     virtual std::optional<std::string> details() const = 0;
     virtual bool terminate() const { return false; }
 };
@@ -199,6 +213,10 @@ public:
     virtual std::string_view name() const = 0;
     virtual std::string_view description() const = 0;
     virtual ToolSchema& schema() const = 0;
+    virtual ToolArguments prepare_arguments(
+        const ToolArguments& arguments) const {
+        return arguments;
+    }
     // Execute the tool
     virtual std::shared_ptr<ToolResult> execute(
         std::string_view call_id,

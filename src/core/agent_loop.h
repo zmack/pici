@@ -49,7 +49,7 @@ struct AfterToolCallContext {
 };
 
 struct AfterToolCallResult {
-    std::optional<std::string> content;
+    std::optional<std::vector<ToolResultContentBlock>> content;
     std::optional<std::string> details;
     std::optional<bool> is_error;
     std::optional<bool> terminate;
