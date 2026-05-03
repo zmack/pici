@@ -1,0 +1,85 @@
+#include "core/event_types.h"
+
+#include <sstream>
+
+namespace pi::core {
+
+std::string_view event_type_to_string(EventType type) {
+    switch (type) {
+        case EventType::agent_start:
+            return "agent_start";
+        case EventType::agent_end:
+            return "agent_end";
+        case EventType::turn_start:
+            return "turn_start";
+        case EventType::turn_end:
+            return "turn_end";
+        case EventType::message_start:
+            return "message_start";
+        case EventType::message_update:
+            return "message_update";
+        case EventType::message_end:
+            return "message_end";
+        case EventType::tool_execution_start:
+            return "tool_execution_start";
+        case EventType::tool_execution_update:
+            return "tool_execution_update";
+        case EventType::tool_execution_end:
+            return "tool_execution_end";
+    }
+    return "unknown";
+}
+
+// ─── Debug output ──────────────────────────────────────────────────────────
+
+static std::string msg_type(const Message& msg) {
+    if (std::holds_alternative<UserMessage>(msg)) return "user";
+    if (std::holds_alternative<AssistantMessage>(msg)) return "assistant";
+    if (std::holds_alternative<ToolResultMessage>(msg)) return "toolResult";
+    return "unknown";
+}
+
+std::ostream& operator<<(std::ostream& os, const AgentEvent& event) {
+    os << "{";
+    std::visit(
+        [&](const auto& ev) {
+            using T = std::remove_cvref_t<decltype(ev)>;
+            if constexpr (std::same_as<T, AgentStartEvent>) {
+                os << "type:" << event_type_to_string(ev.type) << "}";
+            } else if constexpr (std::same_as<T, AgentEndEvent>) {
+                os << "type:" << event_type_to_string(ev.type)
+                   << ", messages: " << ev.messages.size() << "}";
+            } else if constexpr (std::same_as<T, TurnStartEvent>) {
+                os << "type:" << event_type_to_string(ev.type) << "}";
+            } else if constexpr (std::same_as<T, TurnEndEvent>) {
+                os << "type:" << event_type_to_string(ev.type)
+                   << ", msg: " << msg_type(ev.message)
+                   << ", tools: " << ev.tool_results.size() << "}";
+            } else if constexpr (std::same_as<T, MessageStartEvent>) {
+                os << "type:" << event_type_to_string(ev.type)
+                   << ", msg: " << msg_type(ev.message) << "}";
+            } else if constexpr (std::same_as<T, MessageUpdateEvent>) {
+                os << "type:" << event_type_to_string(ev.type)
+                   << ", msg: " << msg_type(ev.message)
+                   << ", delta: " << ev.delta << "}";
+            } else if constexpr (std::same_as<T, MessageEndEvent>) {
+                os << "type:" << event_type_to_string(ev.type)
+                   << ", msg: " << msg_type(ev.message) << "}";
+            } else if constexpr (std::same_as<T, ToolExecutionStartEvent>) {
+                os << "type:" << event_type_to_string(ev.type)
+                   << ", tool: " << ev.tool_name
+                   << ", call: " << ev.tool_call_id << "}";
+            } else if constexpr (std::same_as<T, ToolExecutionUpdateEvent>) {
+                os << "type:" << event_type_to_string(ev.type)
+                   << ", tool: " << ev.tool_name << "}";
+            } else if constexpr (std::same_as<T, ToolExecutionEndEvent>) {
+                os << "type:" << event_type_to_string(ev.type)
+                   << ", tool: " << ev.tool_name
+                   << ", error: " << ev.is_error << "}";
+            }
+        },
+        event);
+    return os;
+}
+
+} // namespace pi::core

@@ -1,0 +1,132 @@
+#pragma once
+
+#include <concepts>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <set>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "core/agent_loop.h"
+#include "core/agent_state.h"
+#include "core/event_types.h"
+#include "core/message_types.h"
+#include "core/stream.h"
+
+namespace pi::core {
+
+// ─── Agent: High-level stateful agent wrapper ──────────────────────────────
+
+class Agent {
+public:
+    struct Options {
+        std::string system_prompt;
+        Model model;
+        ThinkingLevel thinking_level{ThinkingLevel::off};
+        ToolExecutionMode tool_execution{ToolExecutionMode::parallel};
+        Options() = default;
+
+        // LLM
+        std::function<std::optional<std::string>(std::string_view provider)>
+            get_api_key;
+
+        // Context transform
+        std::function<std::vector<Message>(const std::vector<Message>&,
+                                           std::stop_token)>
+            transform_context;
+
+        // Message conversion
+        std::function<std::vector<Message>(const std::vector<Message>&)>
+            convert_to_llm;
+
+        // Tool callbacks
+        std::function<std::optional<bool>(const Message&,
+                                          const ToolCall&,
+                                          std::string_view args)>
+            before_tool_call;
+
+        std::function<std::optional<std::tuple<std::string, bool, bool>>(
+            const Message&,
+            const ToolCall&,
+            std::shared_ptr<ToolResult>)>
+            after_tool_call;
+
+        // Stop condition
+        std::function<bool(const Message&,
+                           const std::vector<ToolResultMessage>&,
+                           const AgentContext&)>
+            should_stop_after_turn;
+
+        // Steering / follow-up
+        std::function<std::vector<Message>()> get_steering_messages;
+        std::function<std::vector<Message>()> get_follow_up_messages;
+    };
+
+    explicit Agent(const Options& options);
+
+    // ── State access ───────────────────────────────────────────────────
+
+    const AgentState& state() const { return state_; }
+
+    // ── Tools ──────────────────────────────────────────────────────────
+
+    void add_tool(std::shared_ptr<const ToolDefinition> tool);
+    void set_tools(std::vector<std::shared_ptr<const ToolDefinition>> tools);
+
+    // ── Prompt / Continue ──────────────────────────────────────────────
+
+    // Start a new prompt from text
+    EventStream<AgentEvent, std::vector<Message>>
+    prompt(std::string text,
+           std::vector<ImageContent> images = {});
+
+    // Start a new prompt from messages
+    EventStream<AgentEvent, std::vector<Message>>
+    prompt(std::vector<Message> messages);
+
+    // Continue from current transcript
+    EventStream<AgentEvent, std::vector<Message>> continue_();
+
+    // ── Steering ───────────────────────────────────────────────────────
+
+    // Queue a message to be injected after the current turn
+    void steer(std::vector<Message> messages);
+    void clear_steering_queue();
+
+    // Queue a message to run only after the agent would otherwise stop
+    void follow_up(std::vector<Message> messages);
+    void clear_follow_up_queue();
+
+    // ── Control ────────────────────────────────────────────────────────
+
+    void abort();
+    void reset();
+
+    // Wait for the agent to become idle
+    void wait_for_idle();
+
+    // Check if agent is currently processing
+    bool is_streaming() const { return state_.is_streaming(); }
+
+private:
+    AgentState state_;
+    Options options_;
+
+    // Queue management
+    std::mutex steering_mutex_;
+    std::vector<Message> steering_queue_;
+
+    std::mutex followup_mutex_;
+    std::vector<Message> followup_queue_;
+
+    // Internal helpers
+    void run_with_lifecycle(std::function<void(std::stop_token)> executor);
+    AgentContext create_context_snapshot();
+    AgentLoopConfig create_loop_config();
+    void process_event(const AgentEvent& event);
+};
+
+} // namespace pi::core
