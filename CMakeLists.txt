@@ -163,3 +163,39 @@ if(CLANG_TIDY_BIN)
 else()
     message(STATUS "clang-tidy not found — skipping tidy target (install clang-tidy-23)")
 endif()
+
+# ─── clang-format ─────────────────────────────────────────────────────────────
+
+find_program(CLANG_FORMAT_BIN NAMES clang-format-23 clang-format-22 clang-format-20 clang-format)
+
+if(CLANG_FORMAT_BIN)
+    # Keep this aligned with tidy: only format our src/ tree, not tests or deps.
+    file(GLOB_RECURSE FORMAT_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
+    )
+
+    add_custom_target(format
+        COMMAND ${CLANG_FORMAT_BIN}
+            -i
+            ${FORMAT_SOURCES}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Running clang-format (${CLANG_FORMAT_BIN})"
+        VERBATIM
+    )
+
+    add_custom_target(format-check
+        COMMAND ${CLANG_FORMAT_BIN}
+            --dry-run
+            --Werror
+            ${FORMAT_SOURCES}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Checking clang-format (${CLANG_FORMAT_BIN})"
+        VERBATIM
+    )
+
+    message(STATUS "clang-format: ${CLANG_FORMAT_BIN}  →  'cmake --build build --target format'")
+else()
+    message(STATUS "clang-format not found — skipping format target (install clang-format-23)")
+endif()

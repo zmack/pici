@@ -15,26 +15,25 @@ namespace pi::core {
 
 class FauxClient : public LLMClient {
 public:
-    struct Script {
-        std::vector<AssistantMessageEvent> events;
-        std::optional<std::chrono::milliseconds> delay_between;
-    };
+  struct Script {
+    std::vector<AssistantMessageEvent> events;
+    std::optional<std::chrono::milliseconds> delay_between;
+  };
 
-    explicit FauxClient(std::vector<Script> scripts);
+  explicit FauxClient(std::vector<Script> scripts);
 
-    std::shared_ptr<AssistantMessage> stream(
-        const Model& model,
-        const AgentContext& context,
-        const StreamOptions& options,
-        AssistantEventCallback on_event,
-        std::stop_token stop_tok) override;
+  std::shared_ptr<AssistantMessage> stream(const Model &model,
+                                           const AgentContext &context,
+                                           const StreamOptions &options,
+                                           AssistantEventCallback on_event,
+                                           std::stop_token stop_tok) override;
 
-    std::string_view provider_name() const override { return "faux"; }
-    std::string_view api_id() const override { return "faux"; }
+  std::string_view provider_name() const override { return "faux"; }
+  std::string_view api_id() const override { return "faux"; }
 
 private:
-    std::vector<Script> scripts_;
-    std::atomic<std::size_t> call_count_{0};
+  std::vector<Script> scripts_;
+  std::atomic<std::size_t> call_count_{0};
 };
 
 } // namespace pi::core
