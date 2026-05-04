@@ -21,6 +21,8 @@ struct OpenAICompletionsCompat {
   std::string thinking_format{"openai"};
   bool supports_strict_mode{true};
   std::string cache_control_format;
+  bool disables_thinking_by_default{false};
+  bool uses_non_streaming{false};
 };
 
 class OpenAICompatibleClient : public LLMClient {
@@ -51,5 +53,7 @@ private:
   std::string base_url_;
   std::string model_id_;
 };
+
+void register_openai_completions_client();
 
 } // namespace pi::core

@@ -18,6 +18,7 @@
 #include "core/env_api_keys.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/providers/openai_completions.h"
 
 namespace pi::core {
 
@@ -88,6 +89,13 @@ private:
 
 namespace pi {
 
+namespace {
+constexpr std::string_view kDefaultLocalBaseUrl = "http://127.0.0.1:8080/v1";
+constexpr std::string_view kDefaultLocalModel =
+    "Qwen3.6-35B-A3B-UD-IQ4_NL.gguf";
+constexpr std::string_view kDefaultLocalProvider = "llamacpp";
+} // namespace
+
 static void print_version() {
   std::cout << "pi-cpp " PI_CPP_VERSION << " - C++23 agent loop runtime\n";
   std::cout << "  HTTP client: enabled\n";
@@ -106,8 +114,8 @@ static int demo() {
   model.id = "demo-model";
   model.name = "Demo Model";
   model.api = "openai-completions";
-  model.provider = "demo";
-  model.base_url = "http://localhost:11434/v1";
+  model.provider = std::string(kDefaultLocalProvider);
+  model.base_url = std::string(kDefaultLocalBaseUrl);
   model.context_window = 128000;
   model.max_tokens = 4096;
 
@@ -147,9 +155,9 @@ static int demo() {
 }
 
 static int chat(int argc, char *argv[]) {
-  std::string model_id = "llama3.2";
-  std::string provider = "openai";
-  std::string base_url = "http://localhost:11434/v1";
+  std::string model_id(kDefaultLocalModel);
+  std::string provider(kDefaultLocalProvider);
+  std::string base_url(kDefaultLocalBaseUrl);
   std::string system;
 
   for (int i = 2; i < argc; ++i) {
@@ -197,24 +205,53 @@ static int chat(int argc, char *argv[]) {
 
     auto stream = agent.prompt(line);
     bool done = false;
+    bool printed_text = false;
     for (const auto &ev : stream) {
       if (done)
         break;
       std::visit(
-          [&done](const auto &e) {
+          [&done, &printed_text](const auto &e) {
             using T = std::decay_t<decltype(e)>;
             if constexpr (std::is_same_v<T, pi::core::MessageUpdateEvent>) {
               std::visit(
-                  [](const auto &ae) {
+                  [&printed_text](const auto &ae) {
                     using AE = std::decay_t<decltype(ae)>;
                     if constexpr (std::is_same_v<
                                       AE, pi::core::
                                               AssistantMessageTextDeltaEvent>) {
                       std::cout << ae.delta << std::flush;
+                      printed_text = true;
+                    } else if constexpr (
+                        std::is_same_v<AE,
+                                       pi::core::AssistantMessageErrorEvent>) {
+                      std::cerr << "\nerror: "
+                                << ae.error.error_message.value_or(
+                                       "LLM request failed")
+                                << "\n";
                     }
                   },
                   e.assistant_message_event);
             } else if constexpr (std::is_same_v<T, pi::core::MessageEndEvent>) {
+              if (!printed_text) {
+                if (const auto *am =
+                        std::get_if<pi::core::AssistantMessage>(&e.message)) {
+                  if (am->error_message) {
+                    std::cerr << "\nerror: " << *am->error_message << "\n";
+                  } else {
+                    std::string final_text;
+                    for (const auto &block : am->content) {
+                      if (const auto *text =
+                              std::get_if<pi::core::TextContent>(&block)) {
+                        final_text += text->text;
+                      }
+                    }
+                    if (!final_text.empty()) {
+                      std::cout << final_text << std::flush;
+                      printed_text = true;
+                    }
+                  }
+                }
+              }
               std::cout << "\n" << std::flush;
             } else if constexpr (std::is_same_v<T, pi::core::AgentEndEvent>) {
               done = true;
@@ -232,7 +269,9 @@ static void print_help(const char *prog) {
             << "Commands:\n"
             << "  chat [--model <id>] [--provider <name>] [--base-url <url>] "
                "[--system <prompt>]\n"
-            << "             Interactive chat REPL\n"
+            << "             Interactive chat REPL. Defaults to "
+            << kDefaultLocalBaseUrl << " with model " << kDefaultLocalModel
+            << "\n"
             << "  demo       Run the demo (echo tool)\n"
             << "  version    Print version info\n"
             << "  help       Show this help\n";
@@ -243,6 +282,7 @@ static void print_help(const char *prog) {
 int main(int argc, char *argv[]) {
   std::signal(SIGINT, [](int) { std::exit(0); });
   std::signal(SIGTERM, [](int) { std::exit(0); });
+  pi::core::register_openai_completions_client();
 
   std::string command = argc > 1 ? argv[1] : "demo";
 

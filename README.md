@@ -110,6 +110,22 @@ cmake --build build
 ./build/test-stream
 ```
 
+## Local OpenAI-Compatible API
+
+The CLI defaults to the local API at `http://127.0.0.1:8080/v1` and the
+model currently exposed by that server:
+`Qwen3.6-35B-A3B-UD-IQ4_NL.gguf`.
+
+```bash
+./build/pi-cli chat
+```
+
+Override either value when needed:
+
+```bash
+./build/pi-cli chat --base-url http://127.0.0.1:8080/v1 --model Qwen3.6-35B-A3B-UD-IQ4_NL.gguf
+```
+
 ## Usage Example
 
 ```cpp

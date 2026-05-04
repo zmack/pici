@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -31,6 +32,12 @@ std::int64_t now_ms() {
 
 bool str_contains(const std::string &haystack, std::string_view needle) {
   return haystack.contains(needle);
+}
+
+bool is_local_endpoint(const std::string &base_url) {
+  return str_contains(base_url, "127.0.0.1") ||
+         str_contains(base_url, "localhost") ||
+         str_contains(base_url, "0.0.0.0");
 }
 
 void parse_chunk_usage(const nlohmann::json &usage_j, TokenUsage &out) {
@@ -263,7 +270,7 @@ void process_sse_line(const std::string &line, StreamingState &state) {
       choices_it->empty())
     return;
 
-  const auto &choice = *choices_it[0];
+  const auto &choice = (*choices_it)[0];
 
   if (auto fr_it = choice.find("finish_reason");
       fr_it != choice.end() && !fr_it->is_null()) {
@@ -421,6 +428,9 @@ OpenAICompatibleClient::detect_compat(const Model &model) {
   bool is_cloudflare_gateway =
       provider == "cloudflare-ai-gateway" ||
       str_contains(base_url, "gateway.ai.cloudflare.com");
+  bool is_llamacpp = provider == "llamacpp" || provider == "llama.cpp" ||
+                     str_contains(base_url, "llamacpp");
+  bool is_local = provider == "local" || is_local_endpoint(base_url);
 
   bool is_non_standard =
       provider == "cerebras" || str_contains(base_url, "cerebras.ai") ||
@@ -428,10 +438,10 @@ OpenAICompatibleClient::detect_compat(const Model &model) {
       str_contains(base_url, "chutes.ai") ||
       str_contains(base_url, "deepseek.com") || is_zai || is_moonshot ||
       provider == "opencode" || str_contains(base_url, "opencode.ai") ||
-      is_cloudflare_workers || is_cloudflare_gateway;
+      is_cloudflare_workers || is_cloudflare_gateway || is_llamacpp || is_local;
 
   bool use_max_tokens = str_contains(base_url, "chutes.ai") || is_moonshot ||
-                        is_cloudflare_gateway;
+                        is_cloudflare_gateway || is_llamacpp || is_local;
 
   bool is_grok = provider == "xai" || str_contains(base_url, "api.x.ai");
   bool is_deepseek =
@@ -458,17 +468,21 @@ OpenAICompatibleClient::detect_compat(const Model &model) {
   OpenAICompletionsCompat compat;
   compat.supports_store = !is_non_standard;
   compat.supports_developer_role = !is_non_standard;
-  compat.supports_reasoning_effort =
-      !is_grok && !is_zai && !is_moonshot && !is_cloudflare_gateway;
-  compat.supports_usage_in_streaming = true;
+  compat.supports_reasoning_effort = !is_grok && !is_zai && !is_moonshot &&
+                                     !is_cloudflare_gateway && !is_llamacpp &&
+                                     !is_local;
+  compat.supports_usage_in_streaming = !is_llamacpp && !is_local;
   compat.max_tokens_field =
       use_max_tokens ? "max_tokens" : "max_completion_tokens";
   compat.requires_tool_result_name = false;
   compat.requires_assistant_after_tool_result = false;
   compat.requires_thinking_as_text = false;
   compat.thinking_format = std::move(thinking_format);
-  compat.supports_strict_mode = !is_moonshot && !is_cloudflare_gateway;
+  compat.supports_strict_mode =
+      !is_moonshot && !is_cloudflare_gateway && !is_llamacpp && !is_local;
   compat.cache_control_format = std::move(cache_control_format);
+  compat.disables_thinking_by_default = is_llamacpp || is_local;
+  compat.uses_non_streaming = false;
   return compat;
 }
 
@@ -497,19 +511,25 @@ OpenAICompatibleClient::build_request_json(const Model &model,
       nlohmann::json schema = nlohmann::json::parse(schema_str, nullptr, false);
       if (schema.is_discarded())
         schema = nlohmann::json::object();
-      tools_arr.push_back({{"type", "function"},
-                           {"function",
-                            {{"name", std::string(t->name())},
-                             {"description", std::string(t->description())},
-                             {"parameters", schema},
-                             {"strict", false}}}});
+      nlohmann::json function = {{"name", std::string(t->name())},
+                                 {"description", std::string(t->description())},
+                                 {"parameters", schema}};
+      if (compat.supports_strict_mode) {
+        function["strict"] = false;
+      }
+      tools_arr.push_back({{"type", "function"}, {"function", function}});
     }
   }
 
   nlohmann::json params = {{"model", model.id},
                            {"messages", messages},
-                           {"stream", true},
-                           {"stream_options", {{"include_usage", true}}}};
+                           {"stream", !compat.uses_non_streaming}};
+  if (compat.supports_usage_in_streaming) {
+    params["stream_options"] = {{"include_usage", true}};
+  }
+  if (compat.disables_thinking_by_default) {
+    params["chat_template_kwargs"] = {{"enable_thinking", false}};
+  }
   if (compat.supports_store)
     params["store"] = false;
   if (options.max_tokens) {
@@ -548,12 +568,14 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
   result->stop_reason = StopReason::stop;
   result->timestamp = now_ms();
 
+  auto compat = detect_compat(model);
   auto request_json = build_request_json(model, context, options);
   auto request_body = request_json.dump();
 
   std::map<std::string, std::string> headers = options.headers;
   headers["Content-Type"] = "application/json";
-  headers["Accept"] = "text/event-stream";
+  headers["Accept"] =
+      compat.uses_non_streaming ? "application/json" : "text/event-stream";
 
   std::string url = base_url_.empty() ? model.base_url : base_url_;
   if (!url.empty() && url.back() == '/')
@@ -563,12 +585,112 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
   if (on_event)
     on_event(AssistantMessageStartEvent{*result});
 
+  if (compat.uses_non_streaming) {
+    auto response =
+        HttpClient::post(url, request_body, headers, options.api_key,
+                         options.timeout_ms, stop_tok);
+    if (!response || response->status_code < 200 ||
+        response->status_code >= 300 || stop_tok.stop_requested()) {
+      result->stop_reason =
+          stop_tok.stop_requested() ? StopReason::aborted : StopReason::error;
+      result->error_message = stop_tok.stop_requested() ? "Request was aborted"
+                                                        : "LLM request failed";
+      if (response) {
+        auto err = nlohmann::json::parse(response->body, nullptr, false);
+        if (!err.is_discarded() && err.contains("error")) {
+          const auto &error = err["error"];
+          if (error.is_object()) {
+            result->error_message =
+                error.value("message", *result->error_message);
+          } else if (error.is_string()) {
+            result->error_message = error.get<std::string>();
+          }
+        }
+      }
+      if (on_event)
+        on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
+                                            .error = *result});
+      return result;
+    }
+
+    auto body = nlohmann::json::parse(response->body, nullptr, false);
+    if (body.is_discarded() || !body.contains("choices") ||
+        !body["choices"].is_array() || body["choices"].empty()) {
+      result->stop_reason = StopReason::error;
+      result->error_message = "LLM response did not contain choices";
+      if (on_event)
+        on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
+                                            .error = *result});
+      return result;
+    }
+
+    if (auto id_it = body.find("id"); id_it != body.end() && id_it->is_string())
+      result->response_id = id_it->get<std::string>();
+    if (auto usage_it = body.find("usage");
+        usage_it != body.end() && usage_it->is_object()) {
+      parse_chunk_usage(*usage_it, result->usage);
+    }
+
+    const auto &choice = body["choices"][0];
+    if (auto fr_it = choice.find("finish_reason");
+        fr_it != choice.end() && !fr_it->is_null()) {
+      result->stop_reason =
+          OpenAICompatibleClient::map_finish_reason(fr_it->get<std::string>());
+    }
+
+    std::string text;
+    if (auto msg_it = choice.find("message"); msg_it != choice.end()) {
+      if (auto content_it = msg_it->find("content");
+          content_it != msg_it->end() && content_it->is_string()) {
+        text = content_it->get<std::string>();
+      }
+    }
+    if (!text.empty()) {
+      result->content.emplace_back(TextContent{.text = text});
+      if (on_event) {
+        on_event(AssistantMessageTextStartEvent{.content_index = 0,
+                                                .partial = *result});
+        on_event(AssistantMessageTextDeltaEvent{
+            .content_index = 0, .delta = text, .partial = *result});
+        on_event(AssistantMessageTextEndEvent{
+            .content_index = 0, .content = text, .partial = *result});
+      }
+    }
+    if (on_event)
+      on_event(AssistantMessageDoneEvent{.reason = result->stop_reason,
+                                         .message = *result});
+    return result;
+  }
+
   StreamingState state{.result = result, .on_event = on_event};
+  std::optional<std::string> response_error;
 
   bool ok = HttpClient::post_streaming(
       url, request_body,
-      [&state](const std::string &line) { process_sse_line(line, state); },
+      [&state, &response_error](const std::string &line) {
+        if (!line.starts_with("data: ")) {
+          auto err = nlohmann::json::parse(line, nullptr, false);
+          if (!err.is_discarded() && err.contains("error")) {
+            const auto &error = err["error"];
+            if (error.is_object()) {
+              response_error =
+                  error.value("message", std::string("LLM request failed"));
+            } else if (error.is_string()) {
+              response_error = error.get<std::string>();
+            }
+          }
+          return;
+        }
+        try {
+          process_sse_line(line, state);
+        } catch (const std::exception &e) {
+          response_error = e.what();
+        }
+      },
       headers, options.api_key, options.timeout_ms, stop_tok);
+  if (response_error) {
+    ok = false;
+  }
 
   for (auto &[idx, ptc] : state.partial_tool_calls) {
     if (state.current_block == BlockType::tool_call) {
@@ -585,8 +707,12 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
   if (!ok || stop_tok.stop_requested()) {
     result->stop_reason =
         stop_tok.stop_requested() ? StopReason::aborted : StopReason::error;
-    if (stop_tok.stop_requested())
+    if (stop_tok.stop_requested()) {
       result->error_message = "Request was aborted";
+    } else {
+      result->error_message =
+          response_error.value_or("LLM streaming request failed");
+    }
     if (on_event)
       on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
                                           .error = *result});
@@ -601,11 +727,15 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
 
 } // namespace pi::core
 
-namespace {
-const bool registered = [] {
+void pi::core::register_openai_completions_client() {
   pi::core::LLMClientRegistry::instance().register_client(
       "openai-completions",
       [] { return std::make_shared<pi::core::OpenAICompatibleClient>(); });
+}
+
+namespace {
+const bool registered = [] {
+  pi::core::register_openai_completions_client();
   return true;
 }();
 } // namespace

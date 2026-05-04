@@ -182,6 +182,27 @@ int main() {
         }
     });
 
+    tests::register_test("build_request_json: local llama.cpp compatibility", []() {
+        OpenAICompatibleClient client;
+        auto model = make_model("Qwen3.6-35B-A3B-UD-IQ4_NL.gguf", "llamacpp");
+        model.base_url = "http://127.0.0.1:8080/v1";
+        auto ctx = make_context();
+        StreamOptions opts;
+        opts.max_tokens = 128;
+
+        auto json = client.build_request_json(model, ctx, opts);
+
+        CHECK_EQ(json["model"].get<std::string>(),
+                 std::string("Qwen3.6-35B-A3B-UD-IQ4_NL.gguf"));
+        CHECK(json.contains("max_tokens"));
+        CHECK(!json.contains("max_completion_tokens"));
+        CHECK(!json.contains("store"));
+        CHECK(!json.contains("stream_options"));
+        CHECK_EQ(json["stream"].get<bool>(), true);
+        CHECK(json.contains("chat_template_kwargs"));
+        CHECK_EQ(json["chat_template_kwargs"]["enable_thinking"].get<bool>(), false);
+    });
+
     tests::register_test("map_finish_reason: stop", []() {
         CHECK_EQ(OpenAICompatibleClient::map_finish_reason("stop"), StopReason::stop);
         CHECK_EQ(OpenAICompatibleClient::map_finish_reason("end"), StopReason::stop);
