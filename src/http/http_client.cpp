@@ -1,6 +1,4 @@
 #include "http/http_client.h"
-#include "curl/easy.h"
-#include "curl/system.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -89,7 +87,7 @@ HttpClient::post(const std::string &url, const std::string &body,
 
   curl_easy_setopt(
       curl.handle, CURLOPT_WRITEFUNCTION,
-      [](char *ptr, size_t size, size_t nmemb, void *data) -> size_t {
+      +[](char *ptr, size_t size, size_t nmemb, void *data) -> size_t {
         auto *resp = static_cast<HttpClient::Response *>(data);
         resp->body.append(ptr, size * nmemb);
         return size * nmemb;
@@ -118,20 +116,28 @@ bool HttpClient::post_streaming(
   struct WriteState {
     std::string buffer;
     std::function<void(const std::string &)> callback;
+    std::optional<std::string> callback_error;
   };
 
-  auto write_callback = [](char *ptr, size_t size, size_t nmemb,
-                           void *data) -> size_t {
+  auto write_callback =
+      +[](char *ptr, size_t size, size_t nmemb, void *data) -> size_t {
     auto *state = static_cast<WriteState *>(data);
-    state->buffer.append(ptr, size * nmemb);
-
-    size_t pos = 0;
-    while ((pos = state->buffer.find('\n')) != std::string::npos) {
-      auto line = state->buffer.substr(0, pos);
-      state->buffer.erase(0, pos + 1);
-      if (!line.empty()) {
-        state->callback(line);
+    try {
+      state->buffer.append(ptr, size * nmemb);
+      size_t pos = 0;
+      while ((pos = state->buffer.find('\n')) != std::string::npos) {
+        auto line = state->buffer.substr(0, pos);
+        state->buffer.erase(0, pos + 1);
+        if (!line.empty()) {
+          state->callback(line);
+        }
       }
+    } catch (const std::exception &e) {
+      state->callback_error = e.what();
+      return static_cast<size_t>(0);
+    } catch (...) {
+      state->callback_error = "stream write callback failed";
+      return static_cast<size_t>(0);
     }
 
     return size * nmemb;
@@ -174,10 +180,35 @@ bool HttpClient::post_streaming(
   CURLcode res = curl_easy_perform(curl.handle);
 
   if (!state.buffer.empty()) {
-    state.callback(state.buffer);
+    try {
+      state.callback(state.buffer);
+    } catch (const std::exception &e) {
+      state.callback_error = e.what();
+    } catch (...) {
+      state.callback_error = "stream callback failed";
+    }
   }
 
-  return res == CURLE_OK;
+  long status = 0;
+  curl_easy_getinfo(curl.handle, CURLINFO_RESPONSE_CODE, &status);
+
+  if (state.callback_error) {
+    state.callback(std::string("{\"error\":{\"message\":\"") +
+                   *state.callback_error + "\"}}");
+    return false;
+  }
+  if (res != CURLE_OK) {
+    state.callback(std::string("{\"error\":{\"message\":\"") +
+                   curl_easy_strerror(res) + "\"}}");
+    return false;
+  }
+  if (status < 200 || status >= 300) {
+    state.callback(std::string("{\"error\":{\"message\":\"HTTP status ") +
+                   std::to_string(status) + "\"}}");
+    return false;
+  }
+
+  return true;
 }
 
 } // namespace pi::core

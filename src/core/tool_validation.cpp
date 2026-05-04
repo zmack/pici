@@ -238,11 +238,10 @@ njson coerce_with_schema(const njson &value, const njson &schema) {
   }
 
   if (!schema_types.empty()) {
-    bool matches_union =
-        schema_types.size() > 1 &&
-        std::ranges::any_of(schema_types, , [&](const auto &st) {
-          return matches_json_type(next, st);
-        });
+    bool matches_union = schema_types.size() > 1 &&
+                         std::ranges::any_of(schema_types, [&](const auto &st) {
+                           return matches_json_type(next, st);
+                         });
 
     if (!matches_union) {
       for (const auto &st : schema_types) {
@@ -256,13 +255,13 @@ njson coerce_with_schema(const njson &value, const njson &schema) {
   }
 
   bool is_object_type =
-      std::ranges::find(schema_types, , "object") != schema_types.end();
+      std::ranges::find(schema_types, "object") != schema_types.end();
   if (is_object_type && next.is_object()) {
     apply_object_coercion(next, schema);
   }
 
   bool is_array_type =
-      std::ranges::find(schema_types, , "array") != schema_types.end();
+      std::ranges::find(schema_types, "array") != schema_types.end();
   if (is_array_type && next.is_array()) {
     apply_array_coercion(next, schema);
   }

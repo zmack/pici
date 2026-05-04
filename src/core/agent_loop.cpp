@@ -154,7 +154,7 @@ std::shared_ptr<ToolResult> make_error_tool_result(std::string message) {
 std::shared_ptr<const ToolDefinition> find_tool(const AgentContext &context,
                                                 const ToolCall &tc) {
   auto tool_it = std::ranges::find_if(
-      context.tools, , [&tc](const auto &t) { return t->name() == tc.name; });
+      context.tools, [&tc](const auto &t) { return t->name() == tc.name; });
   if (tool_it == context.tools.end()) {
     return nullptr;
   }

@@ -207,9 +207,9 @@ void test_agent_prompt_stream() {
 
         auto stream = agent.prompt("Hello");
 
-        // Drain the stream
+        // Drain the stream until the async prompt turn completes.
         for (auto& ev : stream) {
-            if (auto* e = std::get_if<MessageEndEvent>(&ev)) {
+            if (std::holds_alternative<AgentEndEvent>(ev)) {
                 break;
             }
         }
