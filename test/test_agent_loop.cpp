@@ -1753,6 +1753,170 @@ void test_streaming_done_stop_reason() {
     });
 }
 
+// ─── Tool result fed back to LLM on second call ───────────────────────────
+
+void test_tool_result_in_context_on_second_llm_call() {
+    tests::register_test("Tool loop: tool result is in context on second LLM call", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        int call_count = 0;
+        std::string captured_tool_result_content;
+        bool captured_has_tool_result = false;
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [&](const AgentContext& context,
+                const StreamOptions&,
+                AssistantEventCallback,
+                std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                ++call_count;
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                if (call_count == 1) {
+                    msg->stop_reason = StopReason::tool_use;
+                    ToolCall tc;
+                    tc.id = "call_001";
+                    tc.name = "counter";
+                    tc.arguments["start"] = 5;
+                    msg->content.push_back(std::move(tc));
+                } else {
+                    // On second call, inspect context for the tool result
+                    for (const auto& m : context.messages) {
+                        if (const auto* trm = std::get_if<ToolResultMessage>(&m)) {
+                            captured_has_tool_result = true;
+                            for (const auto& cb : trm->content) {
+                                if (const auto* tc = std::get_if<TextContent>(&cb)) {
+                                    captured_tool_result_content = tc->text;
+                                }
+                            }
+                        }
+                    }
+                    msg->stop_reason = StopReason::stop;
+                    TextContent text;
+                    text.text = "done";
+                    msg->content.push_back(std::move(text));
+                }
+                return msg;
+            });
+
+        AgentContext ctx;
+        ctx.tools.push_back(std::make_shared<CounterTool>());
+
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.should_stop_after_turn = nullptr;
+        config.get_steering_messages = [] { return std::vector<Message>{}; };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+
+        auto stream = run_agent_loop({}, ctx, config, [](const AgentEvent&) {});
+        for (auto& ev : stream) { (void)ev; }
+
+        CHECK_EQ(call_count, 2);
+        CHECK(captured_has_tool_result);
+        CHECK_EQ(captured_tool_result_content, std::string("Counter: 6"));
+    });
+}
+
+// ─── Full tool round trip: correct final message sequence ─────────────────
+
+void test_tool_full_round_trip_message_sequence() {
+    tests::register_test("Tool loop: full round trip produces correct message sequence", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        int call_count = 0;
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [&](const AgentContext&,
+                const StreamOptions&,
+                AssistantEventCallback,
+                std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                ++call_count;
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                if (call_count == 1) {
+                    msg->stop_reason = StopReason::tool_use;
+                    ToolCall tc;
+                    tc.id = "call_abc";
+                    tc.name = "counter";
+                    tc.arguments["start"] = 0;
+                    msg->content.push_back(std::move(tc));
+                } else {
+                    msg->stop_reason = StopReason::stop;
+                    TextContent text;
+                    text.text = "final answer";
+                    msg->content.push_back(std::move(text));
+                }
+                return msg;
+            });
+
+        UserMessage user_msg;
+        TextContent uc;
+        uc.text = "use the counter";
+        user_msg.content.push_back(std::move(uc));
+
+        AgentContext ctx;
+        ctx.tools.push_back(std::make_shared<CounterTool>());
+
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.should_stop_after_turn = nullptr;
+        config.get_steering_messages = [] { return std::vector<Message>{}; };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+
+        std::vector<Message> final_messages;
+        auto stream = run_agent_loop({user_msg}, ctx, config,
+            [&final_messages](const AgentEvent& ev) {
+                if (const auto* e = std::get_if<AgentEndEvent>(&ev)) {
+                    final_messages = e->messages;
+                }
+            });
+        for (auto& ev : stream) { (void)ev; }
+
+        // Expected sequence: user, assistant(tool_use), tool_result, assistant(stop)
+        CHECK_EQ(final_messages.size(), std::size_t(4));
+
+        CHECK(std::holds_alternative<UserMessage>(final_messages[0]));
+
+        const auto* first_asst = std::get_if<AssistantMessage>(&final_messages[1]);
+        CHECK(first_asst != nullptr);
+        CHECK_EQ(first_asst->stop_reason, StopReason::tool_use);
+        CHECK(!first_asst->content.empty());
+        CHECK(std::holds_alternative<ToolCall>(first_asst->content[0]));
+
+        const auto* tool_result = std::get_if<ToolResultMessage>(&final_messages[2]);
+        CHECK(tool_result != nullptr);
+        CHECK(!tool_result->is_error);
+        CHECK_EQ(tool_result->tool_call_id, std::string("call_abc"));
+        CHECK(!tool_result->content.empty());
+        const auto* result_text = std::get_if<TextContent>(&tool_result->content[0]);
+        CHECK(result_text != nullptr);
+        CHECK_EQ(result_text->text, std::string("Counter: 1"));
+
+        const auto* second_asst = std::get_if<AssistantMessage>(&final_messages[3]);
+        CHECK(second_asst != nullptr);
+        CHECK_EQ(second_asst->stop_reason, StopReason::stop);
+    });
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -1779,6 +1943,8 @@ int main() {
     test_streaming_tool_call();
     test_streaming_error_path();
     test_streaming_done_stop_reason();
+    test_tool_result_in_context_on_second_llm_call();
+    test_tool_full_round_trip_message_sequence();
 
     tests::print_summary();
 

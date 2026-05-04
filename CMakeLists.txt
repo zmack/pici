@@ -28,6 +28,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json_schema_validator)
 
+# ─── Lua 5.4 ─────────────────────────────────────────────────────────────────
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LUA REQUIRED lua5.4)
+add_library(lua_pi INTERFACE)
+target_include_directories(lua_pi INTERFACE ${LUA_INCLUDE_DIRS})
+target_link_libraries(lua_pi INTERFACE ${LUA_LIBRARIES})
+message(STATUS "Lua: ${LUA_VERSION} (${LUA_INCLUDE_DIRS})")
+
 find_package(CURL QUIET)
 if(NOT CURL_FOUND)
     set(CURL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
@@ -61,6 +69,7 @@ add_library(pi-core
     src/core/agent_loop.cpp
     src/core/agent.cpp
     src/core/builtin_tools.cpp
+    src/core/lua_tool.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
     src/core/env_api_keys.cpp
@@ -79,6 +88,7 @@ target_compile_definitions(pi-core PUBLIC
 target_link_libraries(pi-core PUBLIC
     nlohmann_json::nlohmann_json
     nlohmann_json_schema_validator
+    lua_pi
 )
 
 # ─── pi-cli (main executable) ───
@@ -92,7 +102,7 @@ target_link_libraries(pi-cli PRIVATE pi-core pi-http)
 if(PI_CPP_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name IN ITEMS core agent_loop agent stream tool_validation builtin_tools)
+    foreach(test_name IN ITEMS core agent_loop agent stream tool_validation builtin_tools lua_tool)
         add_executable(test-${test_name}
             test/test_${test_name}.cpp
         )

@@ -17,6 +17,7 @@
 #include "core/agent_state.h"
 #include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
+#include "core/lua_tool.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/providers/openai_completions.h"
@@ -161,6 +162,7 @@ static int chat(int argc, char *argv[]) {
   std::string provider(kDefaultLocalProvider);
   std::string base_url(kDefaultLocalBaseUrl);
   std::string system;
+  std::string tools_dir;
 
   for (int i = 2; i < argc; ++i) {
     std::string_view arg = argv[i];
@@ -175,6 +177,8 @@ static int chat(int argc, char *argv[]) {
       base_url = next();
     else if (arg == "--system")
       system = next();
+    else if (arg == "--tools")
+      tools_dir = next();
   }
 
   pi::core::Model model;
@@ -195,6 +199,11 @@ static int chat(int argc, char *argv[]) {
 
   pi::core::Agent agent(opts);
   agent.set_tools(pi::core::create_all_tools());
+  if (!tools_dir.empty()) {
+    for (auto &t : pi::core::load_lua_tools(tools_dir)) {
+      agent.add_tool(t);
+    }
+  }
 
   std::string line;
   while (true) {
@@ -281,10 +290,11 @@ static void print_help(const char *prog) {
   std::cout << "Usage: " << prog << " [command]\n\n"
             << "Commands:\n"
             << "  chat [--model <id>] [--provider <name>] [--base-url <url>] "
-               "[--system <prompt>]\n"
+               "[--system <prompt>] [--tools <dir>]\n"
             << "             Interactive chat REPL. Defaults to "
             << kDefaultLocalBaseUrl << " with model " << kDefaultLocalModel
             << ". Built-in tools: read, bash, edit, write, grep, find, ls"
+            << ". Use --tools <dir> to load Lua tools from a directory."
             << "\n"
             << "  demo       Run the demo (echo tool)\n"
             << "  version    Print version info\n"
