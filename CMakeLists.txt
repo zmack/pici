@@ -60,6 +60,7 @@ add_library(pi-core
     src/core/stream.cpp
     src/core/agent_loop.cpp
     src/core/agent.cpp
+    src/core/builtin_tools.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
     src/core/env_api_keys.cpp
@@ -91,7 +92,7 @@ target_link_libraries(pi-cli PRIVATE pi-core pi-http)
 if(PI_CPP_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name IN ITEMS core agent_loop agent stream tool_validation)
+    foreach(test_name IN ITEMS core agent_loop agent stream tool_validation builtin_tools)
         add_executable(test-${test_name}
             test/test_${test_name}.cpp
         )

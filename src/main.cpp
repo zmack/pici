@@ -15,6 +15,7 @@
 
 #include "core/agent.h"
 #include "core/agent_state.h"
+#include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
@@ -132,6 +133,7 @@ static int demo() {
          const pi::core::AgentContext &) { return true; };
 
   pi::core::Agent agent(opts);
+  agent.set_tools(pi::core::create_all_tools());
 
   std::shared_ptr<const pi::core::ToolDefinition> echo =
       std::static_pointer_cast<const pi::core::ToolDefinition>(
@@ -192,6 +194,7 @@ static int chat(int argc, char *argv[]) {
   opts.should_stop_after_turn = nullptr;
 
   pi::core::Agent agent(opts);
+  agent.set_tools(pi::core::create_all_tools());
 
   std::string line;
   while (true) {
@@ -253,6 +256,16 @@ static int chat(int argc, char *argv[]) {
                 }
               }
               std::cout << "\n" << std::flush;
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     pi::core::ToolExecutionStartEvent>) {
+              std::cout << "\n[tool:" << e.tool_name << "]\n" << std::flush;
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     pi::core::ToolExecutionEndEvent>) {
+              if (e.result) {
+                std::cout << e.result->content() << "\n" << std::flush;
+              }
             } else if constexpr (std::is_same_v<T, pi::core::AgentEndEvent>) {
               done = true;
             }
@@ -271,6 +284,7 @@ static void print_help(const char *prog) {
                "[--system <prompt>]\n"
             << "             Interactive chat REPL. Defaults to "
             << kDefaultLocalBaseUrl << " with model " << kDefaultLocalModel
+            << ". Built-in tools: read, bash, edit, write, grep, find, ls"
             << "\n"
             << "  demo       Run the demo (echo tool)\n"
             << "  version    Print version info\n"
