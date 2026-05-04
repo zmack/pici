@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local API Integration Postmortem</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18242c;
+      --muted: #5d6a73;
+      --line: #d9e2e8;
+      --panel: #f6f9fb;
+      --panel-2: #edf4f7;
+      --accent: #0f766e;
+      --accent-2: #b45309;
+      --danger: #b42318;
+      --ok: #1d4ed8;
+      --page: #ffffff;
+      --code: #111b22;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--page);
+      line-height: 1.5;
+    }
+
+    nav {
+      position: fixed;
+      inset: 0 0 auto 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 12px 22px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(10px);
+    }
+
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    nav a:hover {
+      color: var(--accent);
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 14px;
+      max-width: 72vw;
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }
+
+    section {
+      min-height: 100vh;
+      display: grid;
+      align-items: center;
+      padding: 92px 7vw 56px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .wrap {
+      width: min(1120px, 100%);
+      margin: 0 auto;
+    }
+
+    .kicker {
+      margin: 0 0 14px;
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2 {
+      margin: 0;
+      line-height: 1.04;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      max-width: 940px;
+      font-size: clamp(42px, 7vw, 86px);
+    }
+
+    h2 {
+      max-width: 980px;
+      font-size: clamp(34px, 5vw, 64px);
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    p {
+      max-width: 900px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(18px, 2vw, 24px);
+    }
+
+    .lead {
+      color: #31414c;
+      font-size: clamp(20px, 2.4vw, 30px);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 34px;
+    }
+
+    .three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .card {
+      min-height: 154px;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .card p,
+    li {
+      margin: 0;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    ul {
+      max-width: 930px;
+      margin: 24px 0 0;
+      padding-left: 22px;
+    }
+
+    li {
+      margin: 12px 0;
+    }
+
+    code {
+      padding: 2px 5px;
+      border: 1px solid #d4e0e6;
+      border-radius: 5px;
+      background: #edf3f5;
+      color: #17313a;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 18px 0 0;
+      padding: 16px;
+      overflow-x: auto;
+      border: 1px solid #d4e0e6;
+      border-radius: 8px;
+      background: var(--code);
+      color: #e5edf2;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    pre code {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+    }
+
+    table {
+      width: 100%;
+      margin-top: 30px;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      background: var(--panel);
+    }
+
+    th,
+    td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 16px;
+    }
+
+    th {
+      color: #33434d;
+      background: var(--panel-2);
+      font-weight: 800;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .bad {
+      background: #fde8e4;
+      color: var(--danger);
+    }
+
+    .warn {
+      background: #fff3d6;
+      color: var(--accent-2);
+    }
+
+    .good {
+      background: #e8f2ff;
+      color: var(--ok);
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 34px;
+    }
+
+    .step {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .step strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink);
+      font-size: 15px;
+    }
+
+    .step span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .callout {
+      margin-top: 34px;
+      padding: 22px;
+      border-left: 5px solid var(--accent);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .callout p {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .small {
+      font-size: 15px;
+    }
+
+    @media (max-width: 820px) {
+      nav {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .nav-links {
+        max-width: 100%;
+      }
+
+      section {
+        padding-top: 130px;
+      }
+
+      .grid,
+      .three,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="#title">Local API Postmortem</a>
+    <div class="nav-links">
+      <a href="#problem">Problem</a>
+      <a href="#symptoms">Symptoms</a>
+      <a href="#root-causes">Root Causes</a>
+      <a href="#fixes">Fixes</a>
+      <a href="#verification">Verification</a>
+      <a href="#prevention">Prevention</a>
+    </div>
+  </nav>
+
+  <section id="title">
+    <div class="wrap">
+      <p class="kicker">Postmortem and follow-up plan</p>
+      <h1>Making pi-cpp work with the local OpenAI-compatible API</h1>
+      <p class="lead">
+        The target API was <code>http://127.0.0.1:8080/v1</code>, serving
+        <code>Qwen3.6-35B-A3B-UD-IQ4_NL.gguf</code> through a llama.cpp-style server.
+      </p>
+    </div>
+  </section>
+
+  <section id="problem">
+    <div class="wrap">
+      <p class="kicker">What was broken</p>
+      <h2>The project assumed a different OpenAI-compatible server profile.</h2>
+      <p>
+        The CLI defaulted to Ollama-style settings and the provider emitted OpenAI-specific
+        fields that the local llama.cpp endpoint did not want. Even when the endpoint was
+        reachable, the CLI either produced no text or crashed before the integration was usable.
+      </p>
+      <div class="grid">
+        <div class="card">
+          <h3>Wrong defaults</h3>
+          <p><code>chat</code> pointed at <code>localhost:11434</code> and model <code>llama3.2</code>, not the local <code>8080</code> server.</p>
+        </div>
+        <div class="card">
+          <h3>Wrong payload shape</h3>
+          <p>The provider always sent OpenAI-specific fields such as <code>store</code>, <code>stream_options</code>, and <code>max_completion_tokens</code>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="symptoms">
+    <div class="wrap">
+      <p class="kicker">What we observed</p>
+      <h2>The visible behavior hid several independent failures.</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Symptom</th>
+            <th>What it meant</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Build failed in core files</td>
+            <td>Existing stray commas in <code>std::ranges</code> calls blocked any verification.</td>
+            <td><span class="badge good">Fixed</span></td>
+          </tr>
+          <tr>
+            <td>HTTP target failed to compile</td>
+            <td><code>curl/easy.h</code> was included before public curl definitions.</td>
+            <td><span class="badge good">Fixed</span></td>
+          </tr>
+          <tr>
+            <td>CLI produced empty output</td>
+            <td>The provider was not registered reliably, and Qwen streamed reasoning-only chunks by default.</td>
+            <td><span class="badge good">Fixed</span></td>
+          </tr>
+          <tr>
+            <td>CLI waited, then printed everything at once</td>
+            <td><code>Agent::prompt()</code> discarded a <code>std::async</code> future, whose destructor blocked until the request completed.</td>
+            <td><span class="badge good">Fixed</span></td>
+          </tr>
+          <tr>
+            <td>CLI segfaulted</td>
+            <td>libcurl callbacks were passed through varargs without explicit function-pointer conversion.</td>
+            <td><span class="badge good">Fixed</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="root-causes">
+    <div class="wrap">
+      <p class="kicker">Root causes</p>
+      <h2>Compatibility was implicit instead of tested as a provider contract.</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>Provider compatibility drift</h3>
+          <p>OpenAI-compatible APIs differ in small but important ways. The local llama.cpp server wanted <code>max_tokens</code>, no usage stream options, and Qwen thinking disabled.</p>
+        </div>
+        <div class="card">
+          <h3>Static registration risk</h3>
+          <p>The CLI linked <code>pi-http</code>, but without an explicit symbol reference the provider registration path could be skipped.</p>
+        </div>
+        <div class="card">
+          <h3>Low-signal errors</h3>
+          <p>Streaming errors and non-SSE responses could collapse into an empty assistant message instead of an actionable CLI error.</p>
+        </div>
+        <div class="card">
+          <h3>Async boundary blocked</h3>
+          <p><code>std::async</code> looked asynchronous, but the discarded future forced the caller to wait for completion before consuming events.</p>
+        </div>
+        <div class="card">
+          <h3>Insufficient build hygiene</h3>
+          <p>Compile blockers and a curl varargs bug were only found after trying to exercise the integration end to end.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="fixes">
+    <div class="wrap">
+      <p class="kicker">What changed</p>
+      <h2>We made the local API a first-class compatibility profile.</h2>
+      <div class="flow">
+        <div class="step">
+          <strong>1. Discover</strong>
+          <span>Queried <code>/v1/models</code> and found the served Qwen model.</span>
+        </div>
+        <div class="step">
+          <strong>2. Default</strong>
+          <span>Pointed CLI defaults at <code>127.0.0.1:8080/v1</code>.</span>
+        </div>
+        <div class="step">
+          <strong>3. Normalize</strong>
+          <span>Added local llama.cpp compatibility detection and payload shaping.</span>
+        </div>
+        <div class="step">
+          <strong>4. Stabilize</strong>
+          <span>Fixed provider registration, curl callback safety, async stream forwarding, and visible errors.</span>
+        </div>
+        <div class="step">
+          <strong>5. Verify</strong>
+          <span>Added focused provider tests and ran the full CTest suite.</span>
+        </div>
+      </div>
+      <pre><code>./build/pi-cli chat
+
+# Defaults:
+#   base-url: http://127.0.0.1:8080/v1
+#   provider: llamacpp
+#   model:    Qwen3.6-35B-A3B-UD-IQ4_NL.gguf</code></pre>
+    </div>
+  </section>
+
+  <section id="payload">
+    <div class="wrap">
+      <p class="kicker">Payload contract</p>
+      <h2>The local request now avoids OpenAI-only assumptions.</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Field</th>
+            <th>OpenAI default</th>
+            <th>Local llama.cpp behavior</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>stream</code></td>
+            <td><span class="badge warn">true</span></td>
+            <td><span class="badge good">true</span>, with SSE lines parsed as curl receives them</td>
+          </tr>
+          <tr>
+            <td><code>max_completion_tokens</code></td>
+            <td><span class="badge warn">used</span></td>
+            <td><span class="badge good">replaced by <code>max_tokens</code></span></td>
+          </tr>
+          <tr>
+            <td><code>stream_options.include_usage</code></td>
+            <td><span class="badge warn">used</span></td>
+            <td><span class="badge good">omitted</span></td>
+          </tr>
+          <tr>
+            <td><code>chat_template_kwargs.enable_thinking</code></td>
+            <td><span class="badge warn">not needed</span></td>
+            <td><span class="badge good">set to <code>false</code></span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="verification">
+    <div class="wrap">
+      <p class="kicker">Verification</p>
+      <h2>The integration was checked at three levels.</h2>
+      <div class="grid three">
+        <div class="card">
+          <h3>Provider unit coverage</h3>
+          <p><code>test-openai_completions</code> asserts the local payload shape.</p>
+        </div>
+        <div class="card">
+          <h3>Full test suite</h3>
+          <p><code>ctest --test-dir build --output-on-failure</code> passes all seven tests.</p>
+        </div>
+        <div class="card">
+          <h3>Local smoke test</h3>
+          <p>The CLI successfully returns <code>OK</code> from the local server.</p>
+        </div>
+      </div>
+      <pre><code>printf 'Say OK.\n/quit\n' \
+  | timeout 20s ./build/pi-cli chat \
+      --system 'Answer with one short final sentence.'</code></pre>
+    </div>
+  </section>
+
+  <section id="prevention">
+    <div class="wrap">
+      <p class="kicker">Going forward</p>
+      <h2>Keep provider differences explicit, tested, and visible.</h2>
+      <ul>
+        <li>Add a compatibility test whenever a provider-specific flag is introduced or removed.</li>
+        <li>Keep CLI defaults aligned with the documented local development server.</li>
+        <li>Run <code>cmake --build build</code>, <code>ctest</code>, <code>format</code>, and <code>tidy</code> before publishing integration changes.</li>
+        <li>Prefer explicit registration calls over relying only on static initialization across libraries.</li>
+        <li>Surface provider and HTTP errors in CLI output instead of allowing empty assistant messages.</li>
+        <li>For curl callbacks, use named callbacks or explicit function-pointer conversion before passing them through varargs.</li>
+      </ul>
+      <div class="callout">
+        <p>
+          The durable fix is not just the llama.cpp profile. It is treating every
+          OpenAI-compatible backend as a versioned contract with tests.
+        </p>
+      </div>
+    </div>
+  </section>
+</body>
+</html>
