@@ -263,19 +263,29 @@ static int cmd_run(const cli::Args &args) {
   };
   opts.should_stop_after_turn = nullptr;
 
-  // Load Lua hooks before constructing agent
-  std::shared_ptr<core::LuaHooks> hooks;
-  if (!args.hooks_file.empty()) {
+  // Load and compose Lua hooks
+  std::vector<std::shared_ptr<core::LuaHooks>> hooks_list;
+  for (const auto &path : args.hooks_files) {
     try {
-      hooks = core::load_lua_hooks(args.hooks_file);
-      if (hooks->before_tool_call)       opts.before_tool_call       = hooks->before_tool_call;
-      if (hooks->after_tool_call)        opts.after_tool_call        = hooks->after_tool_call;
-      if (hooks->should_stop_after_turn) opts.should_stop_after_turn = hooks->should_stop_after_turn;
-      if (args.verbose)
-        std::cerr << "[hooks: " << args.hooks_file << "]\n";
+      hooks_list.push_back(core::load_lua_hooks(path));
+      if (args.verbose) std::cerr << "[hooks: " << path << "]\n";
     } catch (const std::exception &e) {
-      std::cerr << "warning: failed to load hooks file: " << e.what() << "\n";
+      std::cerr << "warning: failed to load hooks file " << path
+                << ": " << e.what() << "\n";
     }
+  }
+  if (!args.hooks_dir.empty()) {
+    auto dir_hooks = core::load_lua_hooks_dir(args.hooks_dir);
+    if (dir_hooks) {
+      hooks_list.push_back(dir_hooks);
+      if (args.verbose) std::cerr << "[hooks-dir: " << args.hooks_dir << "]\n";
+    }
+  }
+  auto hooks = core::compose_hooks(std::move(hooks_list));
+  if (hooks) {
+    if (hooks->before_tool_call)       opts.before_tool_call       = hooks->before_tool_call;
+    if (hooks->after_tool_call)        opts.after_tool_call        = hooks->after_tool_call;
+    if (hooks->should_stop_after_turn) opts.should_stop_after_turn = hooks->should_stop_after_turn;
   }
 
   core::Agent agent(opts);

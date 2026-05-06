@@ -100,4 +100,20 @@ struct LuaHooks {
 std::shared_ptr<LuaHooks>
 load_lua_hooks(const std::filesystem::path &path);
 
+// Load all .lua files from a directory as independent add-ons, then compose them.
+// Files that fail to load are skipped with a warning to stderr.
+// Returns nullptr if no files loaded successfully.
+std::shared_ptr<LuaHooks>
+load_lua_hooks_dir(const std::filesystem::path &directory);
+
+// Merge multiple LuaHooks into one with these composition rules:
+//   before_tool_call    — run all; first {block=true} short-circuits
+//   after_tool_call     — run all; first non-null return wins
+//   should_stop_after_turn — OR: stop if any returns true
+//   on_command          — first {handled=true} wins
+//   set_run_agent       — forwarded to all add-ons
+// Null entries in the list are ignored.
+std::shared_ptr<LuaHooks>
+compose_hooks(std::vector<std::shared_ptr<LuaHooks>> hooks_list);
+
 } // namespace pi::core

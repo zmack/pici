@@ -86,7 +86,10 @@ Args parse_args(int argc, char *argv[]) {
     } else if (arg == "--tools-dir") {
       result.tools_dir = std::string(need("--tools-dir"));
     } else if (arg == "--hooks-file") {
-      result.hooks_file = std::string(need("--hooks-file"));
+      auto v = need("--hooks-file");
+      if (!v.empty()) result.hooks_files.push_back(std::string(v));
+    } else if (arg == "--hooks-dir") {
+      result.hooks_dir = std::string(need("--hooks-dir"));
     } else if (arg == "--render") {
       result.render = std::string(need("--render"));
     } else if (arg == "--no-context-files" || arg == "-nc") {
@@ -122,7 +125,8 @@ void print_help(const char *prog) {
     "  --no-builtin-tools, -nbt    Disable built-in tools only\n"
     "  --tools, -t <names>         Comma-separated allowlist of tool names\n"
     "  --tools-dir <dir>           Load Lua tools from directory\n"
-    "  --hooks-file <file>         Lua hooks file (before/after tool, stop condition)\n"
+    "  --hooks-file <file>         Lua hooks file, repeatable to stack add-ons\n"
+    "  --hooks-dir <dir>           Load all .lua files from dir as add-ons\n"
     "  --render <mode>             Rendering: auto (default), markdown, raw\n"
     "  --print, -p                 Non-interactive: run prompt and exit\n"
     "  --no-context-files, -nc     Disable AGENTS.md / CLAUDE.md discovery\n"

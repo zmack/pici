@@ -444,6 +444,117 @@ return {
     CHECK(!hooks->should_stop_after_turn);
   });
 
+  tests::register_test("compose_hooks: before_tool_call short-circuits on block", [&]() {
+    auto p1 = write_hooks("comp_allow.lua", R"lua(
+return { before_tool_call = function(ctx) return nil end }
+)lua");
+    auto p2 = write_hooks("comp_block.lua", R"lua(
+return { before_tool_call = function(ctx)
+  if ctx.tool_name == "bash" then return {block=true, reason="no bash"} end
+end }
+)lua");
+    auto p3 = write_hooks("comp_never.lua", R"lua(
+-- this should never fire for bash due to short-circuit
+return { before_tool_call = function(ctx) return {block=true, reason="wrong"} end }
+)lua");
+
+    auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2), load_lua_hooks(p3)});
+    CHECK(composed != nullptr);
+    CHECK(composed->before_tool_call != nullptr);
+
+    ToolCall tc; tc.id = "x"; tc.name = "bash"; tc.arguments = nlohmann::json::object();
+    AgentContext ctx;
+    AssistantMessage am;
+    BeforeToolCallContext bctx{am, tc, "{}", ctx};
+
+    auto r = composed->before_tool_call(bctx, std::stop_token{});
+    CHECK(r.has_value());
+    CHECK(r->block);
+    CHECK(r->reason == "no bash");  // p2 fires, p3 never reached
+  });
+
+  tests::register_test("compose_hooks: on_command first-handled wins", [&]() {
+    auto p1 = write_hooks("cmd_a.lua", R"lua(
+return { on_command = function(cmd, args, t)
+  if cmd == "foo" then return {handled=true, prompt="foo handled"} end
+end }
+)lua");
+    auto p2 = write_hooks("cmd_b.lua", R"lua(
+return { on_command = function(cmd, args, t)
+  if cmd == "bar" then return {handled=true, prompt="bar handled"} end
+end }
+)lua");
+
+    auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
+    auto r1 = composed->on_command("foo", "", {});
+    CHECK(r1.handled);
+    CHECK(r1.prompt == "foo handled");
+
+    auto r2 = composed->on_command("bar", "", {});
+    CHECK(r2.handled);
+    CHECK(r2.prompt == "bar handled");
+
+    auto r3 = composed->on_command("unknown", "", {});
+    CHECK(!r3.handled);
+  });
+
+  tests::register_test("compose_hooks: should_stop_after_turn is OR", [&]() {
+    auto p1 = write_hooks("stop_never.lua", R"lua(
+return { should_stop_after_turn = function(ctx) return false end }
+)lua");
+    auto p2 = write_hooks("stop_on_done.lua", R"lua(
+return { should_stop_after_turn = function(ctx) return ctx.message:find("DONE") ~= nil end }
+)lua");
+    auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
+
+    AgentContext ctx;
+    AssistantMessage yes; yes.content.push_back(TextContent{"task DONE"});
+    CHECK(composed->should_stop_after_turn(yes, {}, ctx));
+
+    AssistantMessage no_; no_.content.push_back(TextContent{"still going"});
+    CHECK(!composed->should_stop_after_turn(no_, {}, ctx));
+  });
+
+  tests::register_test("compose_hooks: set_run_agent forwards to all", [&]() {
+    auto p1 = write_hooks("ra1.lua", R"lua(
+return { on_command = function(cmd, args, t)
+  if cmd ~= "sub1" then return {handled=false} end
+  local r = pici.run_agent({prompt="sub1"})
+  return {handled=true, prompt=r.text}
+end }
+)lua");
+    auto p2 = write_hooks("ra2.lua", R"lua(
+return { on_command = function(cmd, args, t)
+  if cmd ~= "sub2" then return {handled=false} end
+  local r = pici.run_agent({prompt="sub2"})
+  return {handled=true, prompt=r.text}
+end }
+)lua");
+
+    auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
+    std::string last_prompt;
+    composed->set_run_agent([&](const LuaHooks::AgentRunConfig &cfg) -> LuaHooks::AgentRunResult {
+      last_prompt = cfg.prompt;
+      return {.text = "ok:" + cfg.prompt};
+    });
+
+    auto r1 = composed->on_command("sub1", "", {});
+    CHECK(r1.handled);
+    CHECK(r1.prompt == "ok:sub1");
+
+    auto r2 = composed->on_command("sub2", "", {});
+    CHECK(r2.handled);
+    CHECK(r2.prompt == "ok:sub2");
+  });
+
+  tests::register_test("compose_hooks: null and single passthrough", [&]() {
+    CHECK(compose_hooks({}) == nullptr);
+    CHECK(compose_hooks({nullptr, nullptr}) == nullptr);
+    auto h = load_lua_hooks(write_hooks("single.lua", "return {}"));
+    auto composed = compose_hooks({nullptr, h, nullptr});
+    CHECK(composed == h);  // same pointer, no wrapping
+  });
+
   tests::register_test("LuaHooks: pici.run_agent calls C++ factory", [&]() {
     auto p = write_hooks("subagent.lua", R"lua(
 return {

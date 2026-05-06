@@ -6,7 +6,9 @@ extern "C" {
 #include <lualib.h>
 }
 
+#include <algorithm>
 #include <filesystem>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -801,6 +803,103 @@ load_lua_hooks(const std::filesystem::path &path) {
     impl->set_run_agent_fn(std::move(fn));
   };
   return hooks;
+}
+
+std::shared_ptr<LuaHooks>
+load_lua_hooks_dir(const std::filesystem::path &directory) {
+  std::vector<std::shared_ptr<LuaHooks>> list;
+  std::error_code ec;
+  for (const auto &entry : std::filesystem::directory_iterator(directory, ec)) {
+    if (!entry.is_regular_file(ec) || entry.path().extension() != ".lua")
+      continue;
+    try {
+      list.push_back(load_lua_hooks(entry.path()));
+    } catch (const std::exception &e) {
+      std::cerr << "warning: skipping hooks file " << entry.path()
+                << ": " << e.what() << "\n";
+    }
+  }
+  return compose_hooks(std::move(list));
+}
+
+std::shared_ptr<LuaHooks>
+compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
+  // Drop nulls
+  list.erase(std::remove_if(list.begin(), list.end(),
+                             [](const auto &h) { return !h; }),
+             list.end());
+  if (list.empty())  return nullptr;
+  if (list.size() == 1) return list[0];
+
+  auto out = std::make_shared<LuaHooks>();
+
+  // before_tool_call — run all; first block wins
+  if (std::any_of(list.begin(), list.end(),
+                  [](const auto &h) { return !!h->before_tool_call; })) {
+    out->before_tool_call =
+        [list](const BeforeToolCallContext &ctx,
+               std::stop_token st) -> std::optional<BeforeToolCallResult> {
+      for (const auto &h : list) {
+        if (!h->before_tool_call) continue;
+        auto r = h->before_tool_call(ctx, st);
+        if (r && r->block) return r;
+      }
+      return std::nullopt;
+    };
+  }
+
+  // after_tool_call — run all; first non-null wins
+  if (std::any_of(list.begin(), list.end(),
+                  [](const auto &h) { return !!h->after_tool_call; })) {
+    out->after_tool_call =
+        [list](const AfterToolCallContext &ctx,
+               std::stop_token st) -> std::optional<AfterToolCallResult> {
+      for (const auto &h : list) {
+        if (!h->after_tool_call) continue;
+        auto r = h->after_tool_call(ctx, st);
+        if (r) return r;
+      }
+      return std::nullopt;
+    };
+  }
+
+  // should_stop_after_turn — OR
+  if (std::any_of(list.begin(), list.end(),
+                  [](const auto &h) { return !!h->should_stop_after_turn; })) {
+    out->should_stop_after_turn =
+        [list](const Message &msg,
+               const std::vector<ToolResultMessage> &results,
+               const AgentContext &ctx) -> bool {
+      for (const auto &h : list) {
+        if (!h->should_stop_after_turn) continue;
+        if (h->should_stop_after_turn(msg, results, ctx)) return true;
+      }
+      return false;
+    };
+  }
+
+  // on_command — first handled wins
+  if (std::any_of(list.begin(), list.end(),
+                  [](const auto &h) { return !!h->on_command; })) {
+    out->on_command =
+        [list](std::string_view cmd, std::string_view args,
+               const std::vector<Message> &transcript) -> LuaHooks::CommandResult {
+      for (const auto &h : list) {
+        if (!h->on_command) continue;
+        auto r = h->on_command(cmd, args, transcript);
+        if (r.handled) return r;
+      }
+      return {};
+    };
+  }
+
+  // set_run_agent — forward to all
+  out->set_run_agent = [list](LuaHooks::RunAgentFn fn) {
+    for (const auto &h : list)
+      if (h->set_run_agent) h->set_run_agent(fn);
+  };
+
+  return out;
 }
 
 } // namespace pi::core
