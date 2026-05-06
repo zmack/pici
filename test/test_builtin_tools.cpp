@@ -114,6 +114,83 @@ void test_file_tools() {
     CHECK(final_result->content().find("there") != std::string::npos);
     std::filesystem::remove_all(root);
   });
+
+  tests::register_test("Edit tool: fuzzy match trailing whitespace", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-edit-fuzzy-ws";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto tools = create_all_tools(root);
+    auto write = find_tool(tools, "write");
+    auto edit  = find_tool(tools, "edit");
+    auto read  = find_tool(tools, "read");
+
+    // File has trailing spaces on lines; model's oldText won't include them
+    write->execute("1", R"({"path":"f.txt","content":"line one   \nline two  \nline three"})");
+    auto r = edit->execute("2",
+        R"({"path":"f.txt","edits":[{"oldText":"line one\nline two","newText":"LINE ONE\nLINE TWO"}]})");
+    CHECK(!r->is_error());
+    auto content = read->execute("3", R"({"path":"f.txt"})");
+    CHECK(content->content().find("LINE ONE") != std::string::npos);
+    std::filesystem::remove_all(root);
+  });
+
+  tests::register_test("Edit tool: fuzzy match smart quotes", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-edit-fuzzy-quotes";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto tools = create_all_tools(root);
+    auto write = find_tool(tools, "write");
+    auto edit  = find_tool(tools, "edit");
+    auto read  = find_tool(tools, "read");
+
+    // File contains smart curly quotes; model sends straight ASCII quotes
+    write->execute("1", R"({"path":"q.txt","content":"say “hello” to me"})");
+    auto r = edit->execute("2",
+        R"({"path":"q.txt","edits":[{"oldText":"say \"hello\" to me","newText":"say \"world\" to me"}]})");
+    CHECK(!r->is_error());
+    auto content = read->execute("3", R"({"path":"q.txt"})");
+    CHECK(content->content().find("world") != std::string::npos);
+    std::filesystem::remove_all(root);
+  });
+
+  tests::register_test("Edit tool: multiple edits applied to same base", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-edit-multi";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto tools = create_all_tools(root);
+    auto write = find_tool(tools, "write");
+    auto edit  = find_tool(tools, "edit");
+    auto read  = find_tool(tools, "read");
+
+    write->execute("1", R"({"path":"m.txt","content":"alpha\nbeta\ngamma"})");
+    auto r = edit->execute("2", R"({"path":"m.txt","edits":[
+      {"oldText":"alpha","newText":"ALPHA"},
+      {"oldText":"gamma","newText":"GAMMA"}
+    ]})");
+    CHECK(!r->is_error());
+    auto content = read->execute("3", R"({"path":"m.txt"})");
+    CHECK(content->content().find("ALPHA") != std::string::npos);
+    CHECK(content->content().find("GAMMA") != std::string::npos);
+    CHECK(content->content().find("beta")  != std::string::npos);
+    std::filesystem::remove_all(root);
+  });
+
+  tests::register_test("Edit tool: overlap detection", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-edit-overlap";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto tools = create_all_tools(root);
+    auto write = find_tool(tools, "write");
+    auto edit  = find_tool(tools, "edit");
+
+    write->execute("1", R"({"path":"o.txt","content":"abcdef"})");
+    auto r = edit->execute("2", R"({"path":"o.txt","edits":[
+      {"oldText":"abcd","newText":"X"},
+      {"oldText":"cdef","newText":"Y"}
+    ]})");
+    CHECK(r->is_error());
+    std::filesystem::remove_all(root);
+  });
 }
 
 void test_discovery_tools() {

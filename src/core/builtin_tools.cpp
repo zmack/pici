@@ -329,6 +329,216 @@ public:
   }
 };
 
+// ─── Edit helpers ────────────────────────────────────────────────────────────
+
+static std::string normalize_to_lf(const std::string &s) {
+  std::string out;
+  out.reserve(s.size());
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    if (s[i] == '\r') {
+      out += '\n';
+      if (i + 1 < s.size() && s[i + 1] == '\n') ++i;
+    } else {
+      out += s[i];
+    }
+  }
+  return out;
+}
+
+// Strip UTF-8 BOM if present, return remainder.
+static std::string strip_bom(const std::string &s, bool &had_bom) {
+  if (s.size() >= 3 &&
+      static_cast<unsigned char>(s[0]) == 0xEF &&
+      static_cast<unsigned char>(s[1]) == 0xBB &&
+      static_cast<unsigned char>(s[2]) == 0xBF) {
+    had_bom = true;
+    return s.substr(3);
+  }
+  had_bom = false;
+  return s;
+}
+
+// Normalize text for fuzzy matching:
+//   - strip trailing whitespace per line
+//   - smart single quotes  → '
+//   - smart double quotes  → "
+//   - Unicode dashes       → -
+//   - non-breaking / special spaces → regular space
+static std::string normalize_for_fuzzy_match(const std::string &text) {
+  // Pass 1: strip trailing whitespace per line
+  std::string pass1;
+  pass1.reserve(text.size());
+  std::size_t line_start = 0;
+  for (std::size_t i = 0; i <= text.size(); ++i) {
+    if (i == text.size() || text[i] == '\n') {
+      std::size_t end = i;
+      while (end > line_start &&
+             (text[end - 1] == ' ' || text[end - 1] == '\t'))
+        --end;
+      pass1.append(text, line_start, end - line_start);
+      if (i < text.size()) pass1 += '\n';
+      line_start = i + 1;
+    }
+  }
+
+  // Pass 2: replace known multi-byte Unicode sequences
+  std::string out;
+  out.reserve(pass1.size());
+  for (std::size_t i = 0; i < pass1.size(); ) {
+    auto b0 = static_cast<unsigned char>(pass1[i]);
+    auto b1 = i + 1 < pass1.size() ? static_cast<unsigned char>(pass1[i+1]) : 0u;
+    auto b2 = i + 2 < pass1.size() ? static_cast<unsigned char>(pass1[i+2]) : 0u;
+
+    // U+00A0 NBSP → space  (2-byte: C2 A0)
+    if (b0 == 0xC2 && b1 == 0xA0) { out += ' '; i += 2; continue; }
+
+    // 3-byte sequences starting with E2
+    if (b0 == 0xE2) {
+      if (b1 == 0x80) {
+        // Smart single quotes U+2018–U+201B  → '
+        if (b2 >= 0x98 && b2 <= 0x9B) { out += '\''; i += 3; continue; }
+        // Smart double quotes U+201C–U+201F  → "
+        if (b2 >= 0x9C && b2 <= 0x9F) { out += '"'; i += 3; continue; }
+        // Dashes U+2010–U+2015            → -
+        if (b2 >= 0x90 && b2 <= 0x95) { out += '-'; i += 3; continue; }
+        // Special spaces U+2002–U+200A    → space
+        if (b2 >= 0x82 && b2 <= 0x8A) { out += ' '; i += 3; continue; }
+        // U+202F narrow NBSP (E2 80 AF)   → space
+        if (b2 == 0xAF) { out += ' '; i += 3; continue; }
+      }
+      // U+2212 minus sign (E2 88 92)      → -
+      if (b1 == 0x88 && b2 == 0x92) { out += '-'; i += 3; continue; }
+      // U+205F medium math space (E2 81 9F) → space
+      if (b1 == 0x81 && b2 == 0x9F) { out += ' '; i += 3; continue; }
+    }
+    // U+3000 ideographic space (E3 80 80) → space
+    if (b0 == 0xE3 && b1 == 0x80 && b2 == 0x80) { out += ' '; i += 3; continue; }
+
+    out += pass1[i++];
+  }
+  return out;
+}
+
+struct FuzzyFindResult {
+  bool found{false};
+  std::size_t index{0};
+  std::size_t match_length{0};
+  bool used_fuzzy{false};
+};
+
+// Try exact match, fall back to fuzzy. Returns result in the space
+// (original or fuzzy-normalized) where the match was found.
+static FuzzyFindResult fuzzy_find(const std::string &content,
+                                  const std::string &old_text) {
+  auto pos = content.find(old_text);
+  if (pos != std::string::npos)
+    return {true, pos, old_text.size(), false};
+
+  const auto fc = normalize_for_fuzzy_match(content);
+  const auto fo = normalize_for_fuzzy_match(old_text);
+  pos = fc.find(fo);
+  if (pos != std::string::npos)
+    return {true, pos, fo.size(), true};
+
+  return {};
+}
+
+static std::size_t count_occurrences(const std::string &content,
+                                     const std::string &needle) {
+  const auto fc = normalize_for_fuzzy_match(content);
+  const auto fn = normalize_for_fuzzy_match(needle);
+  std::size_t count = 0;
+  std::size_t pos = 0;
+  while ((pos = fc.find(fn, pos)) != std::string::npos) {
+    ++count;
+    pos += fn.size();
+  }
+  return count;
+}
+
+struct MatchedEdit {
+  std::size_t edit_index;
+  std::size_t match_index;
+  std::size_t match_length;
+  std::string new_text; // LF-normalized
+};
+
+// Apply edits to LF-normalized content. All edits are matched against the same
+// base content. If any needed fuzzy matching, the base is normalized first.
+// Returns the new content (still LF-normalized).
+static std::string apply_edits(const std::string &lf_content,
+                                const std::vector<std::pair<std::string,std::string>> &edits,
+                                const std::string &path) {
+  // First pass: determine whether any edit needs fuzzy matching
+  bool any_fuzzy = false;
+  for (const auto &[old_text, _] : edits) {
+    if (lf_content.find(old_text) == std::string::npos) {
+      any_fuzzy = true;
+      break;
+    }
+  }
+  const std::string base = any_fuzzy ? normalize_for_fuzzy_match(lf_content) : lf_content;
+
+  // Second pass: match all edits against base
+  std::vector<MatchedEdit> matched;
+  matched.reserve(edits.size());
+  for (std::size_t i = 0; i < edits.size(); ++i) {
+    const auto &[old_text, new_text] = edits[i];
+    if (old_text.empty()) {
+      if (edits.size() == 1)
+        throw std::runtime_error("oldText must not be empty in " + path);
+      throw std::runtime_error("edits[" + std::to_string(i) + "].oldText must not be empty in " + path);
+    }
+    auto r = fuzzy_find(base, old_text);
+    if (!r.found) {
+      if (edits.size() == 1)
+        throw std::runtime_error(
+            "Could not find the text in " + path +
+            ". The old text must match exactly including all whitespace and newlines.");
+      throw std::runtime_error(
+          "Could not find edits[" + std::to_string(i) + "] in " + path +
+          ". The oldText must match exactly including all whitespace and newlines.");
+    }
+    auto occ = count_occurrences(base, old_text);
+    if (occ > 1) {
+      if (edits.size() == 1)
+        throw std::runtime_error(
+            "Found " + std::to_string(occ) + " occurrences of the text in " + path +
+            ". The text must be unique. Please provide more context to make it unique.");
+      throw std::runtime_error(
+          "Found " + std::to_string(occ) + " occurrences of edits[" + std::to_string(i) + "] in " + path +
+          ". Each oldText must be unique. Please provide more context to make it unique.");
+    }
+    matched.push_back({i, r.index, r.match_length, normalize_to_lf(new_text)});
+  }
+
+  // Sort by position and check for overlaps
+  std::sort(matched.begin(), matched.end(),
+            [](const MatchedEdit &a, const MatchedEdit &b) {
+              return a.match_index < b.match_index;
+            });
+  for (std::size_t i = 1; i < matched.size(); ++i) {
+    const auto &prev = matched[i - 1];
+    const auto &cur  = matched[i];
+    if (prev.match_index + prev.match_length > cur.match_index) {
+      throw std::runtime_error(
+          "edits[" + std::to_string(prev.edit_index) + "] and edits[" +
+          std::to_string(cur.edit_index) + "] overlap in " + path +
+          ". Merge them into one edit or target disjoint regions.");
+    }
+  }
+
+  // Apply in reverse order (stable offsets)
+  std::string result = base;
+  for (int i = static_cast<int>(matched.size()) - 1; i >= 0; --i) {
+    const auto &m = matched[static_cast<std::size_t>(i)];
+    result.replace(m.match_index, m.match_length, m.new_text);
+  }
+  return result;
+}
+
+// ─── EditTool ────────────────────────────────────────────────────────────────
+
 class EditTool final : public BuiltinTool {
 public:
   explicit EditTool(std::filesystem::path cwd)
@@ -366,31 +576,39 @@ public:
     try {
       auto json = parse_args(args);
       json = prepare_arguments(json);
-      const auto path = resolve_workspace_path(json.value("path", ""));
-      auto content = read_text_file(path);
-      int count = 0;
-      for (const auto &edit : json.at("edits")) {
-        const auto old_text = edit.value("oldText", std::string{});
-        const auto new_text = edit.value("newText", std::string{});
-        if (old_text.empty()) {
-          throw std::runtime_error("oldText must not be empty");
-        }
-        const auto pos = content.find(old_text);
-        if (pos == std::string::npos) {
-          throw std::runtime_error("oldText did not match file content");
-        }
-        if (content.find(old_text, pos + old_text.size()) !=
-            std::string::npos) {
-          throw std::runtime_error("oldText matched more than once");
-        }
-        content.replace(pos, old_text.size(), new_text);
-        ++count;
+      const auto rel_path = json.value("path", "");
+      const auto abs_path = resolve_workspace_path(rel_path);
+
+      bool had_bom = false;
+      const auto raw = read_text_file(abs_path);
+      const auto no_bom = strip_bom(raw, had_bom);
+      const auto lf_content = normalize_to_lf(no_bom);
+
+      std::vector<std::pair<std::string, std::string>> edits;
+      for (const auto &e : json.at("edits")) {
+        edits.emplace_back(normalize_to_lf(e.value("oldText", std::string{})),
+                           e.value("newText", std::string{}));
       }
-      write_text_file(path, content);
-      return std::make_shared<TextToolResult>("Successfully replaced " +
-                                              std::to_string(count) +
-                                              " block(s) in " +
-                                              json.value("path", ""));
+
+      auto result = apply_edits(lf_content, edits, rel_path);
+
+      // Restore BOM and original line endings
+      const bool crlf = !no_bom.empty() && no_bom.find("\r\n") != std::string::npos;
+      if (crlf) {
+        std::string restored;
+        restored.reserve(result.size() + result.size() / 40);
+        for (char c : result) {
+          if (c == '\n') restored += '\r';
+          restored += c;
+        }
+        result = std::move(restored);
+      }
+      if (had_bom) result = "\xEF\xBB\xBF" + result;
+
+      write_text_file(abs_path, result);
+      return std::make_shared<TextToolResult>(
+          "Successfully replaced " + std::to_string(edits.size()) +
+          " block(s) in " + rel_path);
     } catch (const std::exception &err) {
       return error_result(err);
     }
