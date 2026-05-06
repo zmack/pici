@@ -97,6 +97,8 @@ Args parse_args(int argc, char *argv[]) {
       if (!v.empty()) result.test_files.push_back(std::string(v));
     } else if (arg == "--no-context-files" || arg == "-nc") {
       result.no_context_files = true;
+    } else if (arg == "--config") {
+      result.config_path = std::string(need("--config"));
     } else if (arg == "--list-tools") {
       result.list_tools = true;
     } else if (arg == "--list-addons") {
@@ -138,6 +140,7 @@ void print_help(const char *prog) {
     "  --print, -p                 Non-interactive: run prompt and exit\n"
     "  --test <file>               Run Lua test file and exit (repeatable)\n"
     "  --no-context-files, -nc     Disable AGENTS.md / CLAUDE.md discovery\n"
+    "  --config <file>             Config file (default: ~/.config/pici/config.toml)\n"
     "  --list-tools                List active tools and their sources\n"
     "  --list-addons               List loaded add-ons and their hooks\n"
     "  --list-models [filter]      List known models (optional search filter)\n"

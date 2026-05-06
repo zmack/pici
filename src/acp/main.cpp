@@ -1,5 +1,6 @@
 #include "acp/server.h"
 #include "cli/args.h"
+#include "cli/config.h"
 #include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
 #include "core/lua_tool.h"
@@ -26,7 +27,7 @@ int main(int argc, char *argv[]) {
   pi::core::register_openai_completions_client();
 
   // Parse shared CLI flags
-  auto args = pi::cli::parse_args(argc, argv);
+  auto args = pi::cli::load_and_merge(argc, argv);
 
   for (const auto &d : args.diagnostics) {
     auto &out = d.is_error ? std::cerr : std::cout;

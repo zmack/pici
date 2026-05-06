@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "cli/args.h"
+#include "cli/config.h"
 #include "core/agent.h"
 #include "core/agent_state.h"
 #include "core/builtin_tools.h"
@@ -563,7 +564,7 @@ int main(int argc, char *argv[]) {
 
   pi::core::register_openai_completions_client();
 
-  auto args = pi::cli::parse_args(argc, argv);
+  auto args = pi::cli::load_and_merge(argc, argv);
 
   for (const auto &d : args.diagnostics) {
     auto &out = d.is_error ? std::cerr : std::cout;

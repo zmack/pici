@@ -1,0 +1,34 @@
+# pi-cli configuration file
+# Default location: ~/.config/pici/config.toml
+# Override with: --config <path>  or  PICI_CONFIG=<path>
+#
+# CLI flags always take precedence over values here.
+# Boolean flags (disabled, verbose, …) are OR-ed: true in either place → true.
+# List fields (files, list): CLI non-empty wins; hooks_files accumulates both.
+
+[model]
+# id       = "gpt-4o"               # --model
+# provider = "openai"               # --provider
+# base_url = "http://127.0.0.1:8080/v1"  # --base-url  (local server)
+# api_key  = ""                     # --api-key  (prefer env vars instead)
+
+[agent]
+# system_prompt = "You are a helpful coding assistant."  # --system-prompt
+# thinking      = "off"   # --thinking: off|minimal|low|medium|high|xhigh
+
+[tools]
+# dir        = "~/.config/pici/tools"  # --tools-dir  (Lua tool scripts)
+# disabled   = false                   # --no-tools
+# no_builtin = false                   # --no-builtin-tools
+# list       = ["read", "bash", "edit", "write", "grep", "find", "ls"]
+
+[addons]
+# files = ["~/.config/pici/rewind.lua"]  # --hooks-file (repeatable, loads in order)
+# dir   = "~/.config/pici/addons"        # --hooks-dir  (all .lua files in dir)
+
+[display]
+# render  = "auto"   # --render: auto|markdown|raw
+# verbose = false    # --verbose
+
+[context]
+# disabled = false   # --no-context-files  (skip AGENTS.md / CLAUDE.md discovery)

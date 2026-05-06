@@ -46,6 +46,9 @@ struct Args {
   // Context files
   bool no_context_files{false}; // disable AGENTS.md / CLAUDE.md discovery
 
+  // Config file
+  std::string config_path; // --config <path>; empty = use default location
+
   // Meta
   bool verbose{false};
   bool help{false};

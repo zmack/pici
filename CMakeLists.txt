@@ -110,6 +110,14 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-javascript.git
     GIT_SHALLOW    TRUE
 )
+FetchContent_Declare(
+    tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG        v3.4.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(tomlplusplus)
+
 set(HTTPLIB_REQUIRE_OPENSSL  OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_REQUIRE_ZLIB     OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
@@ -433,10 +441,11 @@ target_link_libraries(pi-core PUBLIC
 add_executable(pi-cli
     src/main.cpp
     src/cli/args.cpp
+    src/cli/config.cpp
     src/cli/readline.cpp
 )
 
-target_link_libraries(pi-cli PRIVATE pi-core pi-http)
+target_link_libraries(pi-cli PRIVATE pi-core pi-http tomlplusplus::tomlplusplus)
 
 # ─── pi-acp (ACP server) ───
 add_executable(pi-acp
@@ -447,10 +456,11 @@ add_executable(pi-acp
     src/acp/session_store.cpp
     src/acp/handlers.cpp
     src/cli/args.cpp
+    src/cli/config.cpp
     src/cli/readline.cpp
 )
 target_include_directories(pi-acp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(pi-acp PRIVATE pi-core pi-http httplib::httplib)
+target_link_libraries(pi-acp PRIVATE pi-core pi-http httplib::httplib tomlplusplus::tomlplusplus)
 
 # ─── Tests ───
 if(PI_CPP_BUILD_TESTS)
@@ -475,6 +485,11 @@ if(PI_CPP_BUILD_TESTS)
     add_executable(test-openai_completions test/test_openai_completions.cpp)
     target_link_libraries(test-openai_completions PRIVATE pi-http)
     add_test(NAME test-openai_completions COMMAND test-openai_completions)
+
+    add_executable(test-config test/test_config.cpp src/cli/config.cpp src/cli/args.cpp)
+    target_include_directories(test-config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus)
+    add_test(NAME test-config COMMAND test-config)
 
     add_executable(test-acp test/test_acp.cpp)
     target_include_directories(test-acp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
