@@ -264,11 +264,12 @@ static int cmd_run(const cli::Args &args) {
   opts.should_stop_after_turn = nullptr;
 
   // Load Lua hooks before constructing agent
+  std::shared_ptr<core::LuaHooks> hooks;
   if (!args.hooks_file.empty()) {
     try {
-      auto hooks = core::load_lua_hooks(args.hooks_file);
-      if (hooks->before_tool_call)     opts.before_tool_call     = hooks->before_tool_call;
-      if (hooks->after_tool_call)      opts.after_tool_call      = hooks->after_tool_call;
+      hooks = core::load_lua_hooks(args.hooks_file);
+      if (hooks->before_tool_call)       opts.before_tool_call       = hooks->before_tool_call;
+      if (hooks->after_tool_call)        opts.after_tool_call        = hooks->after_tool_call;
       if (hooks->should_stop_after_turn) opts.should_stop_after_turn = hooks->should_stop_after_turn;
       if (args.verbose)
         std::cerr << "[hooks: " << args.hooks_file << "]\n";
@@ -331,6 +332,31 @@ static int cmd_run(const cli::Args &args) {
     if (!std::getline(std::cin, line)) break;
     if (line.empty()) continue;
     if (line == "/exit" || line == "/quit") break;
+
+    // Slash command dispatch
+    if (line[0] == '/' && hooks && hooks->on_command) {
+      // Split "/cmd rest" → cmd="cmd", rest_args="rest"
+      auto space = line.find(' ');
+      std::string cmd  = line.substr(1, space == std::string::npos ? std::string::npos : space - 1);
+      std::string rest = space == std::string::npos ? "" : line.substr(space + 1);
+
+      auto result = hooks->on_command(cmd, rest, agent.state().messages());
+
+      if (result.handled) {
+        if (result.truncate_to) {
+          auto msgs = agent.state().messages();
+          auto n = std::min(*result.truncate_to, msgs.size());
+          msgs.resize(n);
+          agent.state().set_messages(std::move(msgs));
+        }
+        if (result.prompt) {
+          run_turn(agent, *result.prompt, *renderer, args.verbose);
+        }
+        continue;
+      }
+      // not handled — fall through and send to agent as text
+    }
+
     run_turn(agent, line, *renderer, args.verbose);
   }
   return 0;

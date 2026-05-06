@@ -50,6 +50,27 @@ struct LuaHooks {
                      const std::vector<ToolResultMessage> &,
                      const AgentContext &)>
       should_stop_after_turn;
+
+  // Result returned by on_command.
+  struct CommandResult {
+    bool handled{false};
+    // If set: truncate the transcript to this many messages (1-based, matches
+    // the index field in the transcript table passed to on_command).
+    std::optional<std::size_t> truncate_to;
+    // If set: send this as the next prompt after applying truncate_to.
+    std::optional<std::string> prompt;
+  };
+
+  // Called when the user types a slash command (/word ...) in the REPL.
+  // transcript is the full message history as a Lua array (role, content,
+  // index, turn fields).  Return nil/{handled=false} to fall through to the
+  // agent; return {handled=true, ...} to consume the command.
+  //
+  // Lua signature:
+  //   on_command(cmd, args, transcript) → nil | {handled, truncate_to, prompt}
+  std::function<CommandResult(std::string_view cmd, std::string_view args,
+                              const std::vector<Message> &transcript)>
+      on_command;
 };
 
 // Load hooks from a Lua file. Only functions present in the returned table are

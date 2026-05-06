@@ -353,6 +353,82 @@ return {
     CHECK(!hooks->should_stop_after_turn(am_cont, {}, ctx));
   });
 
+  tests::register_test("LuaHooks: on_command intercepts slash command", [&]() {
+    auto p = write_hooks("cmd_rewind.lua", R"lua(
+return {
+  on_command = function(cmd, args, transcript)
+    if cmd == "rewind" then
+      local n = tonumber(args) or 1
+      local turns = 0
+      local idx = 0
+      for i, msg in ipairs(transcript) do
+        if msg.role == "assistant" then
+          turns = turns + 1
+          idx = i
+          if turns >= n then break end
+        end
+      end
+      return {handled=true, truncate_to=idx}
+    end
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    CHECK(hooks->on_command != nullptr);
+    CHECK(!hooks->before_tool_call);
+
+    // Build a transcript: user → assistant(turn1) → tool_result → user → assistant(turn2)
+    std::vector<Message> transcript;
+    UserMessage u1; u1.content.push_back(TextContent{"hello"});
+    transcript.push_back(u1);
+    AssistantMessage a1; a1.content.push_back(TextContent{"hi there"});
+    transcript.push_back(a1);
+    ToolResultMessage tr; tr.tool_name = "bash"; tr.content.push_back(TextContent{"ok"});
+    transcript.push_back(tr);
+    UserMessage u2; u2.content.push_back(TextContent{"do more"});
+    transcript.push_back(u2);
+    AssistantMessage a2; a2.content.push_back(TextContent{"doing it"});
+    transcript.push_back(a2);
+
+    // /rewind 1 — keep through first assistant turn (index 2)
+    auto r = hooks->on_command("rewind", "1", transcript);
+    CHECK(r.handled);
+    CHECK(r.truncate_to.has_value());
+    CHECK(*r.truncate_to == std::size_t(2));
+    CHECK(!r.prompt.has_value());
+  });
+
+  tests::register_test("LuaHooks: on_command falls through when not handled", [&]() {
+    auto p = write_hooks("cmd_passthrough.lua", R"lua(
+return {
+  on_command = function(cmd, args, transcript)
+    -- only handle /rewind
+    if cmd ~= "rewind" then return {handled=false} end
+    return {handled=true}
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    auto r = hooks->on_command("help", "", {});
+    CHECK(!r.handled);
+  });
+
+  tests::register_test("LuaHooks: ctx.turn in before_tool_call", [&]() {
+    auto p = write_hooks("turn_capture.lua", R"lua(
+local captured_turn = -1
+return {
+  before_tool_call = function(ctx)
+    captured_turn = ctx.turn
+    _G.last_turn = ctx.turn
+  end
+}
+)lua");
+    // Just verify it loads without error — turn value is tested through
+    // the call_before path which requires a full AgentContext with messages
+    auto hooks = load_lua_hooks(p);
+    CHECK(hooks->before_tool_call != nullptr);
+  });
+
   tests::register_test("LuaHooks: syntax error throws", [&]() {
     auto p = write_hooks("bad_hooks.lua", "not valid lua !!!");
     bool threw = false;

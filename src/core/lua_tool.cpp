@@ -346,6 +346,73 @@ private:
   mutable std::mutex mutex_;
 };
 
+// ─── Message serialization ───────────────────────────────────────────────────
+
+static std::size_t count_turns(const std::vector<Message> &messages) {
+  std::size_t n = 0;
+  for (const auto &m : messages)
+    if (std::holds_alternative<AssistantMessage>(m)) ++n;
+  return n;
+}
+
+// Serialize message history to a Lua array.
+// Each element: {index, role, content, [turn], [tool_name], [is_error]}
+static void push_messages_to_lua(lua_State *L,
+                                 const std::vector<Message> &messages) {
+  lua_newtable(L);
+  std::size_t turn = 0;
+  for (std::size_t i = 0; i < messages.size(); ++i) {
+    lua_newtable(L);
+
+    // index (1-based)
+    lua_pushinteger(L, static_cast<lua_Integer>(i + 1));
+    lua_setfield(L, -2, "index");
+
+    std::visit(
+        [&](const auto &msg) {
+          using T = std::decay_t<decltype(msg)>;
+          if constexpr (std::is_same_v<T, UserMessage>) {
+            lua_pushstring(L, "user");
+            lua_setfield(L, -2, "role");
+            std::string text;
+            for (const auto &b : msg.content)
+              if (const auto *tc = std::get_if<TextContent>(&b))
+                text += tc->text;
+            lua_pushstring(L, text.c_str());
+            lua_setfield(L, -2, "content");
+          } else if constexpr (std::is_same_v<T, AssistantMessage>) {
+            ++turn;
+            lua_pushstring(L, "assistant");
+            lua_setfield(L, -2, "role");
+            std::string text;
+            for (const auto &b : msg.content)
+              if (const auto *tc = std::get_if<TextContent>(&b))
+                text += tc->text;
+            lua_pushstring(L, text.c_str());
+            lua_setfield(L, -2, "content");
+            lua_pushinteger(L, static_cast<lua_Integer>(turn));
+            lua_setfield(L, -2, "turn");
+          } else if constexpr (std::is_same_v<T, ToolResultMessage>) {
+            lua_pushstring(L, "tool_result");
+            lua_setfield(L, -2, "role");
+            lua_pushstring(L, msg.tool_name.c_str());
+            lua_setfield(L, -2, "tool_name");
+            std::string text;
+            for (const auto &b : msg.content)
+              if (const auto *tc = std::get_if<TextContent>(&b))
+                text += tc->text;
+            lua_pushstring(L, text.c_str());
+            lua_setfield(L, -2, "content");
+            lua_pushboolean(L, msg.is_error ? 1 : 0);
+            lua_setfield(L, -2, "is_error");
+          }
+        },
+        messages[i]);
+
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+  }
+}
+
 // ─── LuaHooksImpl ────────────────────────────────────────────────────────────
 
 class LuaHooksImpl {
@@ -385,6 +452,7 @@ public:
     before_ref_         = extract("before_tool_call");
     after_ref_          = extract("after_tool_call");
     stop_after_ref_     = extract("should_stop_after_turn");
+    command_ref_        = extract("on_command");
     lua_pop(L_, 1); // pop the module table
   }
 
@@ -393,6 +461,7 @@ public:
       if (before_ref_     != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, before_ref_);
       if (after_ref_      != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, after_ref_);
       if (stop_after_ref_ != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, stop_after_ref_);
+      if (command_ref_    != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, command_ref_);
       lua_close(L_);
     }
   }
@@ -403,6 +472,7 @@ public:
   bool has_before()     const { return before_ref_     != LUA_NOREF; }
   bool has_after()      const { return after_ref_      != LUA_NOREF; }
   bool has_stop_after() const { return stop_after_ref_ != LUA_NOREF; }
+  bool has_command()    const { return command_ref_    != LUA_NOREF; }
 
   std::optional<BeforeToolCallResult>
   call_before(const BeforeToolCallContext &ctx) {
@@ -417,6 +487,8 @@ public:
     lua_setfield(L_, -2, "call_id");
     json_to_lua(L_, ctx.tool_call.arguments);
     lua_setfield(L_, -2, "args");
+    lua_pushinteger(L_, static_cast<lua_Integer>(count_turns(ctx.context.messages)));
+    lua_setfield(L_, -2, "turn");
 
     if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
       lua_pop(L_, 1);
@@ -457,6 +529,8 @@ public:
     lua_setfield(L_, -2, "content");
     lua_pushboolean(L_, ctx.is_error ? 1 : 0);
     lua_setfield(L_, -2, "is_error");
+    lua_pushinteger(L_, static_cast<lua_Integer>(count_turns(ctx.context.messages)));
+    lua_setfield(L_, -2, "turn");
 
     if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
       lua_pop(L_, 1);
@@ -532,11 +606,49 @@ public:
     return stop;
   }
 
+  LuaHooks::CommandResult call_on_command(std::string_view cmd,
+                                          std::string_view args,
+                                          const std::vector<Message> &transcript) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, command_ref_);
+    lua_pushlstring(L_, cmd.data(), cmd.size());
+    lua_pushlstring(L_, args.data(), args.size());
+    push_messages_to_lua(L_, transcript);
+
+    if (lua_pcall(L_, 3, 1, 0) != LUA_OK) {
+      lua_pop(L_, 1);
+      return {};
+    }
+
+    LuaHooks::CommandResult result;
+    if (lua_istable(L_, -1)) {
+      lua_getfield(L_, -1, "handled");
+      result.handled = lua_toboolean(L_, -1) != 0;
+      lua_pop(L_, 1);
+
+      lua_getfield(L_, -1, "truncate_to");
+      if (lua_isinteger(L_, -1)) {
+        auto n = lua_tointeger(L_, -1);
+        if (n > 0)
+          result.truncate_to = static_cast<std::size_t>(n);
+      }
+      lua_pop(L_, 1);
+
+      lua_getfield(L_, -1, "prompt");
+      if (lua_isstring(L_, -1))
+        result.prompt = lua_tostring(L_, -1);
+      lua_pop(L_, 1);
+    }
+    lua_pop(L_, 1);
+    return result;
+  }
+
 private:
   lua_State *L_{nullptr};
   int before_ref_{LUA_NOREF};
   int after_ref_{LUA_NOREF};
   int stop_after_ref_{LUA_NOREF};
+  int command_ref_{LUA_NOREF};
   mutable std::mutex mutex_;
 };
 
@@ -595,6 +707,13 @@ load_lua_hooks(const std::filesystem::path &path) {
                const std::vector<ToolResultMessage> &results,
                const AgentContext &ctx) -> bool {
       return impl->call_stop_after(msg, results, ctx);
+    };
+  }
+  if (impl->has_command()) {
+    hooks->on_command =
+        [impl](std::string_view cmd, std::string_view args,
+               const std::vector<Message> &transcript) -> LuaHooks::CommandResult {
+      return impl->call_on_command(cmd, args, transcript);
     };
   }
   return hooks;
