@@ -1,4 +1,5 @@
 #include <functional>
+#include <fcntl.h>
 #include <iostream>
 #include <source_location>
 #include <string>
@@ -81,6 +82,122 @@ static bool has_ansi(std::string_view s) {
   }
   return false;
 }
+
+static std::string visible_markdown_plain(std::string_view input) {
+  auto plain = render_markdown_plain(input);
+  if (!plain.empty() && plain.back() == '\n') {
+    plain.pop_back();
+  }
+  std::size_t trailing = 0;
+  for (std::size_t i = input.size(); i > 0 && input[i - 1] == '\n'; --i) {
+    ++trailing;
+  }
+  plain.append(trailing, '\n');
+  return plain;
+}
+
+struct TerminalState {
+  std::vector<std::string> lines{1, ""};
+  int row{0};
+  int col{0};
+
+  void ensure_row(int r) {
+    while (static_cast<int>(lines.size()) <= r) {
+      lines.push_back("");
+    }
+  }
+
+  void put_char(char ch) {
+    ensure_row(row);
+    auto &line = lines[row];
+    if (static_cast<int>(line.size()) < col) {
+      line.resize(static_cast<std::size_t>(col), ' ');
+    }
+    if (static_cast<int>(line.size()) == col) {
+      line.push_back(ch);
+    } else {
+      line[static_cast<std::size_t>(col)] = ch;
+    }
+    ++col;
+  }
+
+  void newline() {
+    ++row;
+    col = 0;
+    ensure_row(row);
+  }
+
+  void carriage_return() { col = 0; }
+
+  void cursor_up(int n) {
+    row -= n;
+    if (row < 0) {
+      row = 0;
+    }
+  }
+
+  void clear_to_end() {
+    ensure_row(row);
+    auto &line = lines[row];
+    if (col < static_cast<int>(line.size())) {
+      line.resize(static_cast<std::size_t>(col));
+    }
+    lines.resize(static_cast<std::size_t>(row + 1));
+  }
+
+  void apply(std::string_view stream) {
+    for (std::size_t i = 0; i < stream.size(); ++i) {
+      const char ch = stream[i];
+      if (ch == '\033' && i + 1 < stream.size() && stream[i + 1] == '[') {
+        i += 2;
+        std::string params;
+        while (i < stream.size()) {
+          const char c = stream[i];
+          if ((c >= '0' && c <= '9') || c == ';' || c == '?') {
+            params += c;
+            ++i;
+            continue;
+          }
+          break;
+        }
+        if (i >= stream.size()) {
+          break;
+        }
+        int n = 0;
+        for (char c : params) {
+          if (c == ';' || c == '?') {
+            break;
+          }
+          n = n * 10 + (c - '0');
+        }
+        if (stream[i] == 'A') {
+          cursor_up(n > 0 ? n : 1);
+        } else if (stream[i] == 'J') {
+          clear_to_end();
+        }
+        continue;
+      }
+      if (ch == '\n') {
+        newline();
+      } else if (ch == '\r') {
+        carriage_return();
+      } else {
+        put_char(ch);
+      }
+    }
+  }
+
+  std::string plain() const {
+    std::string out;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+      if (i > 0) {
+        out += '\n';
+      }
+      out += lines[i];
+    }
+    return out;
+  }
+};
 
 void test_plain_text() {
   tests::register_test("Markdown: plain text passes through", []() {
@@ -243,6 +360,20 @@ static std::string read_fd_all(int fd) {
   return out;
 }
 
+static std::string read_fd_available(int fd) {
+  std::string out;
+  char buf[256];
+  while (true) {
+    const ssize_t n = ::read(fd, buf, sizeof(buf));
+    if (n > 0) {
+      out.append(buf, static_cast<std::size_t>(n));
+      continue;
+    }
+    break;
+  }
+  return out;
+}
+
 void test_stream_renderer_plain_append() {
   tests::register_test("Stream renderer: plain text appends without redraw", []() {
     int fds[2];
@@ -283,6 +414,112 @@ void test_stream_renderer_newline_append() {
   });
 }
 
+void test_stream_renderer_trailing_newlines_visible_immediately() {
+  tests::register_test("Stream renderer: trailing newlines are preserved between updates", []() {
+    int fds[2];
+    CHECK_EQ(::pipe(fds), 0);
+    CHECK(::fcntl(fds[0], F_SETFL, O_NONBLOCK) >= 0);
+
+    {
+      auto renderer = make_diff_renderer(fds[1]);
+      renderer->update("Hello");
+      CHECK_EQ(read_fd_available(fds[0]), std::string("Hello"));
+
+      renderer->update("\n\n");
+      CHECK_EQ(read_fd_available(fds[0]), std::string("\n\n"));
+
+      renderer->update("World");
+      CHECK_EQ(read_fd_available(fds[0]), std::string("World"));
+
+      renderer->finish();
+      CHECK_EQ(read_fd_available(fds[0]), std::string("\n"));
+    }
+
+    ::close(fds[1]);
+    auto out = read_fd_all(fds[0]);
+    ::close(fds[0]);
+
+    CHECK_EQ(out, std::string(""));
+  });
+}
+
+void test_stream_renderer_single_newline_delta() {
+  tests::register_test("Stream renderer: single newline delta stays visible", []() {
+    int fds[2];
+    CHECK_EQ(::pipe(fds), 0);
+    CHECK(::fcntl(fds[0], F_SETFL, O_NONBLOCK) >= 0);
+
+    {
+      auto renderer = make_diff_renderer(fds[1]);
+      renderer->update("Hello");
+      CHECK_EQ(read_fd_available(fds[0]), std::string("Hello"));
+
+      renderer->update("\n");
+      CHECK_EQ(read_fd_available(fds[0]), std::string("\n"));
+
+      renderer->update("World");
+      auto next = read_fd_available(fds[0]);
+      CHECK(!next.empty());
+    }
+
+    ::close(fds[1]);
+    (void)read_fd_all(fds[0]);
+    ::close(fds[0]);
+  });
+}
+
+void test_stream_renderer_matches_rendered_markdown_incrementally() {
+  tests::register_test("Stream renderer: visible state matches markdown render after each delta", []() {
+    const std::vector<std::vector<std::string>> cases = {
+        {"Hello", "\n", "World"},
+        {"# He", "ading", "\n\n", "Body"},
+        {"- item", " one", "\n", "- item two"},
+        {"```cpp\n", "int x = 1;\n", "```"},
+        {"Para", "\n\n", "> quote", "\n", "tail"},
+    };
+
+    for (const auto &parts : cases) {
+      std::size_t part_index = 0;
+      int fds[2];
+      CHECK_EQ(::pipe(fds), 0);
+      CHECK(::fcntl(fds[0], F_SETFL, O_NONBLOCK) >= 0);
+
+      TerminalState term;
+      auto renderer = make_diff_renderer(fds[1]);
+      std::string input;
+
+      for (const auto &part : parts) {
+        input += part;
+        renderer->update(part);
+        term.apply(read_fd_available(fds[0]));
+        const auto expected = visible_markdown_plain(input);
+        if (term.plain() != expected) {
+          std::cerr << "  stream case mismatch at part " << part_index
+                    << " input=[" << input << "]\n"
+                    << "    actual=[" << term.plain() << "]\n"
+                    << "    expect=[" << expected << "]\n";
+        }
+        CHECK_EQ(term.plain(), expected);
+        ++part_index;
+      }
+
+      renderer->finish();
+      term.apply(read_fd_available(fds[0]));
+      const auto expected_final = visible_markdown_plain(input) + "\n";
+      if (term.plain() != expected_final) {
+        std::cerr << "  stream final mismatch input=[" << input << "]\n"
+                  << "    actual=[" << term.plain() << "]\n"
+                  << "    expect=[" << expected_final << "]\n";
+      }
+      CHECK_EQ(term.plain(), expected_final);
+
+      ::close(fds[1]);
+      (void)read_fd_all(fds[0]);
+      ::close(fds[0]);
+    }
+  });
+}
+
 int main() {
   std::cout << "=== pi-cpp markdown tests ===\n\n";
 
@@ -303,6 +540,9 @@ int main() {
   test_empty_input();
   test_stream_renderer_plain_append();
   test_stream_renderer_newline_append();
+  test_stream_renderer_trailing_newlines_visible_immediately();
+  test_stream_renderer_single_newline_delta();
+  test_stream_renderer_matches_rendered_markdown_incrementally();
 
   tests::print_summary();
   return tests::failed == 0 ? 0 : 1;
