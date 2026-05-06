@@ -8,6 +8,7 @@ extern "C" {
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -457,8 +458,13 @@ public:
     command_ref_        = extract("on_command");
     lua_pop(L_, 1); // pop the module table
 
-    // Register pici global — run_agent is wired in later via set_run_agent_fn
+    // Register pici global — runtime fields filled in by configure_info()
     lua_newtable(L_);
+    // pici.log — available immediately
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_log, 1);
+    lua_setfield(L_, -2, "log");
+    // pici.run_agent — available after configure_info()
     lua_pushlightuserdata(L_, this);
     lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_run_agent, 1);
     lua_setfield(L_, -2, "run_agent");
@@ -615,77 +621,156 @@ public:
     return stop;
   }
 
-  void set_run_agent_fn(LuaHooks::RunAgentFn fn) {
-    std::lock_guard<std::mutex> lk(mutex_);
-    run_agent_fn_ = std::move(fn);
+  // ── Storage helpers ──────────────────────────────────────────────────
+
+  void load_storage() {
+    if (storage_path_.empty()) return;
+    std::ifstream f(storage_path_);
+    if (!f) { storage_ = nlohmann::json::object(); return; }
+    storage_ = nlohmann::json::parse(f, nullptr, false);
+    if (storage_.is_discarded()) storage_ = nlohmann::json::object();
+  }
+
+  void save_storage() {
+    if (storage_path_.empty()) return;
+    std::ofstream f(storage_path_);
+    f << storage_.dump(2);
+  }
+
+  // ── pici C closures ──────────────────────────────────────────────────
+
+  static LuaHooksImpl *impl_from(lua_State *L) {
+    return static_cast<LuaHooksImpl *>(lua_touserdata(L, lua_upvalueindex(1)));
+  }
+
+  static int lua_pici_log(lua_State *L) {
+    int n = lua_gettop(L);
+    for (int i = 1; i <= n; ++i) {
+      if (i > 1) std::cerr << '\t';
+      std::cerr << luaL_tolstring(L, i, nullptr);
+      lua_pop(L, 1);
+    }
+    std::cerr << '\n';
+    return 0;
   }
 
   static int lua_pici_run_agent(lua_State *L) {
-    auto *impl = static_cast<LuaHooksImpl *>(
-        lua_touserdata(L, lua_upvalueindex(1)));
-
-    // run_agent_fn_ is set once from main before any hook calls — no lock needed
-    // (acquiring mutex_ here would deadlock since call_on_command holds it)
+    auto *impl = impl_from(L);
+    // run_agent_fn_ set once before calls — no lock (would deadlock from on_command)
     const LuaHooks::RunAgentFn &fn = impl->run_agent_fn_;
     if (!fn) {
-      lua_pushnil(L);
-      lua_pushstring(L, "pici.run_agent not available");
-      return 2;
+      lua_pushnil(L); lua_pushstring(L, "pici.run_agent not available"); return 2;
     }
-
     LuaHooks::AgentRunConfig cfg;
     if (lua_istable(L, 1)) {
-      lua_getfield(L, 1, "prompt");
-      if (lua_isstring(L, -1)) cfg.prompt = lua_tostring(L, -1);
-      lua_pop(L, 1);
-
+      auto sfield = [&](const char *k) -> std::string {
+        lua_getfield(L, 1, k);
+        std::string s = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+        lua_pop(L, 1); return s;
+      };
+      cfg.prompt = sfield("prompt");
+      auto sp = sfield("system_prompt");
+      if (!sp.empty()) cfg.system_prompt = sp;
+      auto mid = sfield("model");
+      if (!mid.empty()) cfg.model_id = mid;
       lua_getfield(L, 1, "fork_at");
       if (lua_isinteger(L, -1)) {
         auto n = lua_tointeger(L, -1);
         if (n > 0) cfg.fork_at = static_cast<std::size_t>(n);
       }
       lua_pop(L, 1);
-
-      lua_getfield(L, 1, "system_prompt");
-      if (lua_isstring(L, -1)) cfg.system_prompt = lua_tostring(L, -1);
-      lua_pop(L, 1);
-
-      lua_getfield(L, 1, "model");
-      if (lua_isstring(L, -1)) cfg.model_id = lua_tostring(L, -1);
-      lua_pop(L, 1);
-
       lua_getfield(L, 1, "tools");
       if (lua_istable(L, -1)) {
         int n = static_cast<int>(lua_rawlen(L, -1));
         for (int i = 1; i <= n; ++i) {
           lua_rawgeti(L, -1, i);
-          if (lua_isstring(L, -1))
-            cfg.tools.push_back(lua_tostring(L, -1));
+          if (lua_isstring(L, -1)) cfg.tools.push_back(lua_tostring(L, -1));
           lua_pop(L, 1);
         }
       }
       lua_pop(L, 1);
     }
-
     if (cfg.prompt.empty()) {
-      lua_pushnil(L);
-      lua_pushstring(L, "pici.run_agent: prompt is required");
-      return 2;
+      lua_pushnil(L); lua_pushstring(L, "pici.run_agent: prompt is required"); return 2;
     }
-
-    LuaHooks::AgentRunResult result = fn(cfg);
-
+    auto result = fn(cfg);
     lua_newtable(L);
-    lua_pushstring(L, result.text.c_str());
-    lua_setfield(L, -2, "text");
-    if (result.error) {
-      lua_pushstring(L, result.error->c_str());
-      lua_setfield(L, -2, "error");
-    } else {
-      lua_pushnil(L);
-      lua_setfield(L, -2, "error");
-    }
+    lua_pushstring(L, result.text.c_str()); lua_setfield(L, -2, "text");
+    if (result.error) lua_pushstring(L, result.error->c_str()); else lua_pushnil(L);
+    lua_setfield(L, -2, "error");
     return 1;
+  }
+
+  // Storage closures are only ever called from within a Lua pcall, which means
+  // the outer hook-call mutex is already held by this thread — do not re-lock.
+  static int lua_storage_get(lua_State *L) {
+    auto *impl = impl_from(L);
+    const char *key = luaL_checkstring(L, 1);
+    if (!impl->storage_.contains(key)) { lua_pushnil(L); return 1; }
+    json_to_lua(L, impl->storage_[key]);
+    return 1;
+  }
+
+  static int lua_storage_set(lua_State *L) {
+    auto *impl = impl_from(L);
+    const char *key = luaL_checkstring(L, 1);
+    impl->storage_[key] = lua_to_json(L, 2);
+    impl->save_storage();
+    return 0;
+  }
+
+  static int lua_storage_clear(lua_State *L) {
+    auto *impl = impl_from(L);
+    impl->storage_ = nlohmann::json::object();
+    impl->save_storage();
+    return 0;
+  }
+
+  // ── configure_info ────────────────────────────────────────────────────
+
+  void configure_info(const LuaHooks::AgentInfo &info) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    run_agent_fn_ = info.run_agent;
+    storage_path_ = info.storage_path;
+    load_storage();
+
+    lua_getglobal(L_, "pici");
+
+    // pici.model → {id, provider, api}
+    lua_newtable(L_);
+    lua_pushstring(L_, info.model_id.c_str());       lua_setfield(L_, -2, "id");
+    lua_pushstring(L_, info.model_provider.c_str()); lua_setfield(L_, -2, "provider");
+    lua_pushstring(L_, info.model_api.c_str());      lua_setfield(L_, -2, "api");
+    lua_setfield(L_, -2, "model");
+
+    // pici.tools → array of strings
+    lua_newtable(L_);
+    for (std::size_t i = 0; i < info.tool_names.size(); ++i) {
+      lua_pushstring(L_, info.tool_names[i].c_str());
+      lua_rawseti(L_, -2, static_cast<lua_Integer>(i) + 1);
+    }
+    lua_setfield(L_, -2, "tools");
+
+    // pici.cwd → string
+    lua_pushstring(L_, info.cwd.c_str());
+    lua_setfield(L_, -2, "cwd");
+
+    // pici.storage → {get, set, clear, path}
+    lua_newtable(L_);
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_storage_get, 1);
+    lua_setfield(L_, -2, "get");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_storage_set, 1);
+    lua_setfield(L_, -2, "set");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_storage_clear, 1);
+    lua_setfield(L_, -2, "clear");
+    lua_pushstring(L_, storage_path_.string().c_str());
+    lua_setfield(L_, -2, "path");
+    lua_setfield(L_, -2, "storage");
+
+    lua_pop(L_, 1);  // pop pici
   }
 
   LuaHooks::CommandResult call_on_command(std::string_view cmd,
@@ -732,6 +817,8 @@ private:
   int stop_after_ref_{LUA_NOREF};
   int command_ref_{LUA_NOREF};
   LuaHooks::RunAgentFn run_agent_fn_;
+  nlohmann::json storage_{nlohmann::json::object()};
+  std::filesystem::path storage_path_;
   mutable std::mutex mutex_;
 };
 
@@ -799,8 +886,8 @@ load_lua_hooks(const std::filesystem::path &path) {
       return impl->call_on_command(cmd, args, transcript);
     };
   }
-  hooks->set_run_agent = [impl](LuaHooks::RunAgentFn fn) {
-    impl->set_run_agent_fn(std::move(fn));
+  hooks->configure = [impl](const LuaHooks::AgentInfo &info) {
+    impl->configure_info(info);
   };
   return hooks;
 }
@@ -893,10 +980,10 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
     };
   }
 
-  // set_run_agent — forward to all
-  out->set_run_agent = [list](LuaHooks::RunAgentFn fn) {
+  // configure — forward to all
+  out->configure = [list](const LuaHooks::AgentInfo &info) {
     for (const auto &h : list)
-      if (h->set_run_agent) h->set_run_agent(fn);
+      if (h->configure) h->configure(info);
   };
 
   return out;

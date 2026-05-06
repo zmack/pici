@@ -515,7 +515,7 @@ return { should_stop_after_turn = function(ctx) return ctx.message:find("DONE") 
     CHECK(!composed->should_stop_after_turn(no_, {}, ctx));
   });
 
-  tests::register_test("compose_hooks: set_run_agent forwards to all", [&]() {
+  tests::register_test("compose_hooks: configure forwards to all", [&]() {
     auto p1 = write_hooks("ra1.lua", R"lua(
 return { on_command = function(cmd, args, t)
   if cmd ~= "sub1" then return {handled=false} end
@@ -533,10 +533,12 @@ end }
 
     auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
     std::string last_prompt;
-    composed->set_run_agent([&](const LuaHooks::AgentRunConfig &cfg) -> LuaHooks::AgentRunResult {
+    LuaHooks::AgentInfo info;
+    info.run_agent = [&](const LuaHooks::AgentRunConfig &cfg) -> LuaHooks::AgentRunResult {
       last_prompt = cfg.prompt;
       return {.text = "ok:" + cfg.prompt};
-    });
+    };
+    composed->configure(info);
 
     auto r1 = composed->on_command("sub1", "", {});
     CHECK(r1.handled);
@@ -573,19 +575,20 @@ return {
 }
 )lua");
     auto hooks = load_lua_hooks(p);
-    CHECK(hooks->set_run_agent != nullptr);
+    CHECK(hooks->configure != nullptr);
 
-    // Wire a mock run_agent factory
     bool factory_called = false;
     std::string captured_prompt;
     std::size_t captured_fork_at = 999;
 
-    hooks->set_run_agent([&](const LuaHooks::AgentRunConfig &cfg) -> LuaHooks::AgentRunResult {
+    LuaHooks::AgentInfo info;
+    info.run_agent = [&](const LuaHooks::AgentRunConfig &cfg) -> LuaHooks::AgentRunResult {
       factory_called = true;
       captured_prompt = cfg.prompt;
       captured_fork_at = cfg.fork_at;
       return {.text = "mocked response", .error = std::nullopt};
-    });
+    };
+    hooks->configure(info);
 
     // Build transcript with 2 messages
     std::vector<Message> transcript;
@@ -601,6 +604,66 @@ return {
     CHECK(captured_fork_at == std::size_t(2));
     CHECK(r.prompt.has_value());
     CHECK(*r.prompt == "subagent said: mocked response");
+  });
+
+  tests::register_test("pici.model / pici.tools / pici.cwd after configure", [&]() {
+    auto p = write_hooks("info.lua", R"lua(
+return {
+  on_command = function(cmd, args, t)
+    if cmd == "info" then
+      return {handled=true, prompt=
+        pici.model.id .. "|" .. pici.model.provider ..
+        "|" .. tostring(#pici.tools) ..
+        "|" .. pici.cwd}
+    end
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    LuaHooks::AgentInfo info;
+    info.model_id       = "gpt-4o";
+    info.model_provider = "openai";
+    info.model_api      = "openai-completions";
+    info.tool_names     = {"read", "bash", "edit"};
+    info.cwd            = "/tmp/test";
+    hooks->configure(info);
+
+    auto r = hooks->on_command("info", "", {});
+    CHECK(r.handled);
+    CHECK(r.prompt.has_value());
+    CHECK(*r.prompt == "gpt-4o|openai|3|/tmp/test");
+  });
+
+  tests::register_test("pici.storage persists across calls", [&]() {
+    auto storage_file = dir / "persist.lua.storage.json";
+    std::filesystem::remove(storage_file);
+
+    auto p = write_hooks("persist.lua", R"lua(
+return {
+  on_command = function(cmd, args, t)
+    if cmd == "store" then
+      pici.storage.set("key", args)
+      return {handled=true}
+    elseif cmd == "load" then
+      local v = pici.storage.get("key")
+      return {handled=true, prompt=tostring(v)}
+    end
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    LuaHooks::AgentInfo info;
+    info.storage_path = storage_file;
+    hooks->configure(info);
+
+    hooks->on_command("store", "hello", {});
+    auto r = hooks->on_command("load", "", {});
+    CHECK(r.handled);
+    CHECK(r.prompt == "hello");
+
+    // Verify it actually wrote to disk
+    CHECK(std::filesystem::exists(storage_file));
+    std::filesystem::remove(storage_file);
   });
 
   std::filesystem::remove_all(dir);

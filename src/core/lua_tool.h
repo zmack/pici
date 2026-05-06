@@ -78,9 +78,22 @@ struct LuaHooks {
 
   using RunAgentFn = std::function<AgentRunResult(const AgentRunConfig &)>;
 
-  // Call this after the parent agent is constructed to enable pici.run_agent()
-  // in Lua. Injects the factory into the live Lua state.
-  std::function<void(RunAgentFn)> set_run_agent;
+  // Runtime info injected once after the parent agent is constructed.
+  // Enables pici.model(), pici.tools(), pici.cwd(), pici.storage, and
+  // pici.run_agent() in Lua.
+  struct AgentInfo {
+    std::string model_id;
+    std::string model_provider;
+    std::string model_api;
+    std::vector<std::string> tool_names;
+    std::string cwd;
+    // Where to persist pici.storage data. Empty = in-memory only.
+    std::filesystem::path storage_path;
+    RunAgentFn run_agent;
+  };
+
+  // Call once after the parent agent and tools are fully configured.
+  std::function<void(const AgentInfo &)> configure;
 
   // Called when the user types a slash command (/word ...) in the REPL.
   // transcript is the full message history as a Lua array (role, content,

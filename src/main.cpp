@@ -314,9 +314,26 @@ static int cmd_run(const cli::Args &args) {
     }
   }
 
-  // Wire pici.run_agent() now that agent + tools exist
-  if (hooks && hooks->set_run_agent) {
-    hooks->set_run_agent(
+  // Configure pici.* globals now that agent + tools exist
+  if (hooks && hooks->configure) {
+    // Build tool name list
+    std::vector<std::string> tool_names;
+    for (const auto &t : agent.state().tools())
+      tool_names.push_back(std::string(t->name()));
+
+    // Storage path: first explicit hooks file name + ".storage.json"
+    std::filesystem::path storage_path;
+    if (!args.hooks_files.empty())
+      storage_path = std::filesystem::path(args.hooks_files[0]).string() + ".storage.json";
+
+    core::LuaHooks::AgentInfo info;
+    info.model_id       = model.id;
+    info.model_provider = model.provider;
+    info.model_api      = model.api;
+    info.tool_names     = std::move(tool_names);
+    info.cwd            = std::filesystem::current_path().string();
+    info.storage_path   = std::move(storage_path);
+    info.run_agent      =
         [&agent, &opts](const core::LuaHooks::AgentRunConfig &cfg)
             -> core::LuaHooks::AgentRunResult {
           core::Agent::Options sub_opts = opts;
@@ -370,7 +387,8 @@ static int cmd_run(const cli::Args &args) {
             result.error = e.what();
           }
           return result;
-        });
+        };
+    hooks->configure(info);
   }
 
   auto renderer = make_renderer(args);
