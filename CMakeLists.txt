@@ -383,6 +383,7 @@ add_library(pi-core
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
     src/core/env_api_keys.cpp
+    src/core/models.cpp
     src/core/providers/faux.cpp
     src/core/providers/transform_messages.cpp
 )
@@ -419,6 +420,7 @@ target_link_libraries(pi-core PUBLIC
 # ─── pi-cli (main executable) ───
 add_executable(pi-cli
     src/main.cpp
+    src/cli/args.cpp
 )
 
 target_link_libraries(pi-cli PRIVATE pi-core pi-http)
