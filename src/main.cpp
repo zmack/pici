@@ -165,6 +165,7 @@ static int chat(int argc, char *argv[]) {
   std::string base_url(kDefaultLocalBaseUrl);
   std::string system;
   std::string tools_dir;
+  std::string render_mode = "markdown";
 
   for (int i = 2; i < argc; ++i) {
     std::string_view arg = argv[i];
@@ -181,6 +182,8 @@ static int chat(int argc, char *argv[]) {
       system = next();
     else if (arg == "--tools")
       tools_dir = next();
+    else if (arg == "--render")
+      render_mode = next();
   }
 
   pi::core::Model model;
@@ -207,7 +210,14 @@ static int chat(int argc, char *argv[]) {
     }
   }
 
-  auto renderer = pi::core::make_auto_renderer(STDOUT_FILENO);
+  std::unique_ptr<pi::core::StreamRenderer> renderer;
+  if (render_mode == "markdown") {
+    renderer = pi::core::make_diff_renderer(STDOUT_FILENO);
+  } else if (render_mode == "raw") {
+    renderer = pi::core::make_raw_renderer(STDOUT_FILENO);
+  } else {
+    renderer = pi::core::make_auto_renderer(STDOUT_FILENO);
+  }
 
   std::string line;
   while (true) {
@@ -279,11 +289,14 @@ static void print_help(const char *prog) {
   std::cout << "Usage: " << prog << " [command]\n\n"
             << "Commands:\n"
             << "  chat [--model <id>] [--provider <name>] [--base-url <url>] "
-               "[--system <prompt>] [--tools <dir>]\n"
+               "[--system <prompt>] [--tools <dir>] "
+               "[--render auto|markdown|raw]\n"
             << "             Interactive chat REPL. Defaults to "
             << kDefaultLocalBaseUrl << " with model " << kDefaultLocalModel
             << ". Built-in tools: read, bash, edit, write, grep, find, ls"
             << ". Use --tools <dir> to load Lua tools from a directory."
+            << " Markdown rendering is enabled by default; use --render raw "
+               "for plain delta output or --render auto for TTY detection."
             << "\n"
             << "  demo       Run the demo (echo tool)\n"
             << "  version    Print version info\n"

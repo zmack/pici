@@ -49,6 +49,11 @@ int main() {
        "```cpp\nstd::string greet(std::string_view name) {\n"
        "    return \"Hello, \" + std::string(name);\n}\n```");
 
+  show("fenced python block",
+       "```python\ndef greet(name):\n"
+       "    message = f\"Hello, {name}\"\n"
+       "    return message\n```");
+
   show("blockquote",
        "> The art of programming is the art of organizing complexity.\n"
        "> — Dijkstra");

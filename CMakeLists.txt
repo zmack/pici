@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(pi-cpp VERSION 0.1.0 LANGUAGES CXX)
+project(pi-cpp VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,12 +30,311 @@ FetchContent_MakeAvailable(json_schema_validator)
 
 find_package(PkgConfig REQUIRED)
 
-# ─── md4c (Markdown parser) ──────────────────────────────────────────────────
-pkg_check_modules(MD4C REQUIRED md4c)
-add_library(md4c_pi INTERFACE)
-target_include_directories(md4c_pi INTERFACE ${MD4C_INCLUDE_DIRS})
-target_link_libraries(md4c_pi INTERFACE ${MD4C_LIBRARIES})
-message(STATUS "md4c: ${MD4C_VERSION}")
+# ─── cmark (Markdown parser) ─────────────────────────────────────────────────
+FetchContent_Declare(
+    cmark_src
+    GIT_REPOSITORY https://github.com/commonmark/cmark.git
+    GIT_TAG        0.31.1
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(cmark_src)
+message(STATUS "cmark: 0.31.1")
+
+# ─── Tree-sitter (syntax highlighting) ───────────────────────────────────────
+FetchContent_Declare(
+    tree_sitter_runtime_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter.git
+    GIT_TAG        v0.25.10
+    GIT_SHALLOW    TRUE
+)
+
+FetchContent_Declare(
+    tree_sitter_c_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-c.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_cpp_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-cpp.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_python_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-python.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_bash_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-bash.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_json_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-json.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_typescript_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-typescript.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_rust_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-rust.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_go_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-go.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_markdown_src
+    GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-markdown.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_ruby_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-ruby.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_lua_src
+    GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-lua.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Declare(
+    tree_sitter_javascript_src
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-javascript.git
+    GIT_SHALLOW    TRUE
+)
+FetchContent_GetProperties(tree_sitter_runtime_src)
+if(NOT tree_sitter_runtime_src_POPULATED)
+    FetchContent_Populate(tree_sitter_runtime_src)
+endif()
+FetchContent_GetProperties(tree_sitter_c_src)
+if(NOT tree_sitter_c_src_POPULATED)
+    FetchContent_Populate(tree_sitter_c_src)
+endif()
+FetchContent_GetProperties(tree_sitter_cpp_src)
+if(NOT tree_sitter_cpp_src_POPULATED)
+    FetchContent_Populate(tree_sitter_cpp_src)
+endif()
+FetchContent_GetProperties(tree_sitter_python_src)
+if(NOT tree_sitter_python_src_POPULATED)
+    FetchContent_Populate(tree_sitter_python_src)
+endif()
+FetchContent_GetProperties(tree_sitter_bash_src)
+if(NOT tree_sitter_bash_src_POPULATED)
+    FetchContent_Populate(tree_sitter_bash_src)
+endif()
+FetchContent_GetProperties(tree_sitter_json_src)
+if(NOT tree_sitter_json_src_POPULATED)
+    FetchContent_Populate(tree_sitter_json_src)
+endif()
+FetchContent_GetProperties(tree_sitter_typescript_src)
+if(NOT tree_sitter_typescript_src_POPULATED)
+    FetchContent_Populate(tree_sitter_typescript_src)
+endif()
+FetchContent_GetProperties(tree_sitter_rust_src)
+if(NOT tree_sitter_rust_src_POPULATED)
+    FetchContent_Populate(tree_sitter_rust_src)
+endif()
+FetchContent_GetProperties(tree_sitter_go_src)
+if(NOT tree_sitter_go_src_POPULATED)
+    FetchContent_Populate(tree_sitter_go_src)
+endif()
+FetchContent_GetProperties(tree_sitter_markdown_src)
+if(NOT tree_sitter_markdown_src_POPULATED)
+    FetchContent_Populate(tree_sitter_markdown_src)
+endif()
+FetchContent_GetProperties(tree_sitter_ruby_src)
+if(NOT tree_sitter_ruby_src_POPULATED)
+    FetchContent_Populate(tree_sitter_ruby_src)
+endif()
+FetchContent_GetProperties(tree_sitter_lua_src)
+if(NOT tree_sitter_lua_src_POPULATED)
+    FetchContent_Populate(tree_sitter_lua_src)
+endif()
+FetchContent_GetProperties(tree_sitter_javascript_src)
+if(NOT tree_sitter_javascript_src_POPULATED)
+    FetchContent_Populate(tree_sitter_javascript_src)
+endif()
+
+add_library(tree_sitter_pi STATIC
+    ${tree_sitter_runtime_src_SOURCE_DIR}/lib/src/lib.c
+)
+target_include_directories(tree_sitter_pi PUBLIC
+    ${tree_sitter_runtime_src_SOURCE_DIR}/lib/include
+    ${tree_sitter_runtime_src_SOURCE_DIR}/lib/src
+)
+message(STATUS "tree-sitter runtime: v0.25.10")
+
+add_library(ts-lang-c STATIC
+    ${tree_sitter_c_src_SOURCE_DIR}/src/parser.c
+)
+target_include_directories(ts-lang-c PUBLIC
+    ${tree_sitter_c_src_SOURCE_DIR}/src
+)
+
+set(TS_CPP_SOURCES
+    ${tree_sitter_cpp_src_SOURCE_DIR}/src/parser.c
+)
+if(EXISTS ${tree_sitter_cpp_src_SOURCE_DIR}/src/scanner.c)
+    list(APPEND TS_CPP_SOURCES ${tree_sitter_cpp_src_SOURCE_DIR}/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_cpp_src_SOURCE_DIR}/src/scanner.cc)
+    list(APPEND TS_CPP_SOURCES ${tree_sitter_cpp_src_SOURCE_DIR}/src/scanner.cc)
+endif()
+add_library(ts-lang-cpp STATIC ${TS_CPP_SOURCES})
+target_include_directories(ts-lang-cpp PUBLIC
+    ${tree_sitter_cpp_src_SOURCE_DIR}/src
+)
+
+set(TS_PYTHON_SOURCES
+    ${tree_sitter_python_src_SOURCE_DIR}/src/parser.c
+)
+if(EXISTS ${tree_sitter_python_src_SOURCE_DIR}/src/scanner.c)
+    list(APPEND TS_PYTHON_SOURCES ${tree_sitter_python_src_SOURCE_DIR}/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_python_src_SOURCE_DIR}/src/scanner.cc)
+    list(APPEND TS_PYTHON_SOURCES ${tree_sitter_python_src_SOURCE_DIR}/src/scanner.cc)
+endif()
+add_library(ts-lang-python STATIC ${TS_PYTHON_SOURCES})
+target_include_directories(ts-lang-python PUBLIC
+    ${tree_sitter_python_src_SOURCE_DIR}/src
+)
+
+set(TS_BASH_SOURCES
+    ${tree_sitter_bash_src_SOURCE_DIR}/src/parser.c
+)
+if(EXISTS ${tree_sitter_bash_src_SOURCE_DIR}/src/scanner.c)
+    list(APPEND TS_BASH_SOURCES ${tree_sitter_bash_src_SOURCE_DIR}/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_bash_src_SOURCE_DIR}/src/scanner.cc)
+    list(APPEND TS_BASH_SOURCES ${tree_sitter_bash_src_SOURCE_DIR}/src/scanner.cc)
+endif()
+add_library(ts-lang-bash STATIC ${TS_BASH_SOURCES})
+target_include_directories(ts-lang-bash PUBLIC
+    ${tree_sitter_bash_src_SOURCE_DIR}/src
+)
+
+add_library(ts-lang-json STATIC
+    ${tree_sitter_json_src_SOURCE_DIR}/src/parser.c
+)
+target_include_directories(ts-lang-json PUBLIC
+    ${tree_sitter_json_src_SOURCE_DIR}/src
+)
+
+set(TS_TYPESCRIPT_SOURCES
+    ${tree_sitter_typescript_src_SOURCE_DIR}/typescript/src/parser.c
+)
+if(EXISTS ${tree_sitter_typescript_src_SOURCE_DIR}/typescript/src/scanner.c)
+    list(APPEND TS_TYPESCRIPT_SOURCES ${tree_sitter_typescript_src_SOURCE_DIR}/typescript/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_typescript_src_SOURCE_DIR}/typescript/src/scanner.cc)
+    list(APPEND TS_TYPESCRIPT_SOURCES ${tree_sitter_typescript_src_SOURCE_DIR}/typescript/src/scanner.cc)
+endif()
+add_library(ts-lang-typescript STATIC ${TS_TYPESCRIPT_SOURCES})
+target_include_directories(ts-lang-typescript PUBLIC
+    ${tree_sitter_typescript_src_SOURCE_DIR}/typescript/src
+    ${tree_sitter_typescript_src_SOURCE_DIR}/common
+)
+
+set(TS_TSX_SOURCES
+    ${tree_sitter_typescript_src_SOURCE_DIR}/tsx/src/parser.c
+)
+if(EXISTS ${tree_sitter_typescript_src_SOURCE_DIR}/tsx/src/scanner.c)
+    list(APPEND TS_TSX_SOURCES ${tree_sitter_typescript_src_SOURCE_DIR}/tsx/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_typescript_src_SOURCE_DIR}/tsx/src/scanner.cc)
+    list(APPEND TS_TSX_SOURCES ${tree_sitter_typescript_src_SOURCE_DIR}/tsx/src/scanner.cc)
+endif()
+add_library(ts-lang-tsx STATIC ${TS_TSX_SOURCES})
+target_include_directories(ts-lang-tsx PUBLIC
+    ${tree_sitter_typescript_src_SOURCE_DIR}/tsx/src
+    ${tree_sitter_typescript_src_SOURCE_DIR}/common
+)
+
+set(TS_RUST_SOURCES
+    ${tree_sitter_rust_src_SOURCE_DIR}/src/parser.c
+)
+if(EXISTS ${tree_sitter_rust_src_SOURCE_DIR}/src/scanner.c)
+    list(APPEND TS_RUST_SOURCES ${tree_sitter_rust_src_SOURCE_DIR}/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_rust_src_SOURCE_DIR}/src/scanner.cc)
+    list(APPEND TS_RUST_SOURCES ${tree_sitter_rust_src_SOURCE_DIR}/src/scanner.cc)
+endif()
+add_library(ts-lang-rust STATIC ${TS_RUST_SOURCES})
+target_include_directories(ts-lang-rust PUBLIC
+    ${tree_sitter_rust_src_SOURCE_DIR}/src
+)
+
+add_library(ts-lang-go STATIC
+    ${tree_sitter_go_src_SOURCE_DIR}/src/parser.c
+)
+target_include_directories(ts-lang-go PUBLIC
+    ${tree_sitter_go_src_SOURCE_DIR}/src
+)
+
+set(TS_MARKDOWN_SOURCES
+    ${tree_sitter_markdown_src_SOURCE_DIR}/src/parser.c
+)
+if(EXISTS ${tree_sitter_markdown_src_SOURCE_DIR}/src/scanner.c)
+    list(APPEND TS_MARKDOWN_SOURCES ${tree_sitter_markdown_src_SOURCE_DIR}/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_markdown_src_SOURCE_DIR}/src/scanner.cc)
+    list(APPEND TS_MARKDOWN_SOURCES ${tree_sitter_markdown_src_SOURCE_DIR}/src/scanner.cc)
+endif()
+add_library(ts-lang-markdown STATIC ${TS_MARKDOWN_SOURCES})
+target_include_directories(ts-lang-markdown PUBLIC
+    ${tree_sitter_markdown_src_SOURCE_DIR}/src
+    ${tree_sitter_markdown_src_SOURCE_DIR}/common
+)
+
+set(TS_RUBY_SOURCES
+    ${tree_sitter_ruby_src_SOURCE_DIR}/src/parser.c
+)
+if(EXISTS ${tree_sitter_ruby_src_SOURCE_DIR}/src/scanner.c)
+    list(APPEND TS_RUBY_SOURCES ${tree_sitter_ruby_src_SOURCE_DIR}/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_ruby_src_SOURCE_DIR}/src/scanner.cc)
+    list(APPEND TS_RUBY_SOURCES ${tree_sitter_ruby_src_SOURCE_DIR}/src/scanner.cc)
+endif()
+add_library(ts-lang-ruby STATIC ${TS_RUBY_SOURCES})
+target_include_directories(ts-lang-ruby PUBLIC
+    ${tree_sitter_ruby_src_SOURCE_DIR}/src
+)
+
+set(TS_LUA_SOURCES
+    ${tree_sitter_lua_src_SOURCE_DIR}/src/parser.c
+)
+if(EXISTS ${tree_sitter_lua_src_SOURCE_DIR}/src/scanner.c)
+    list(APPEND TS_LUA_SOURCES ${tree_sitter_lua_src_SOURCE_DIR}/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_lua_src_SOURCE_DIR}/src/scanner.cc)
+    list(APPEND TS_LUA_SOURCES ${tree_sitter_lua_src_SOURCE_DIR}/src/scanner.cc)
+endif()
+add_library(ts-lang-lua STATIC ${TS_LUA_SOURCES})
+target_include_directories(ts-lang-lua PUBLIC
+    ${tree_sitter_lua_src_SOURCE_DIR}/src
+)
+
+set(TS_JAVASCRIPT_SOURCES
+    ${tree_sitter_javascript_src_SOURCE_DIR}/src/parser.c
+)
+if(EXISTS ${tree_sitter_javascript_src_SOURCE_DIR}/src/scanner.c)
+    list(APPEND TS_JAVASCRIPT_SOURCES ${tree_sitter_javascript_src_SOURCE_DIR}/src/scanner.c)
+endif()
+if(EXISTS ${tree_sitter_javascript_src_SOURCE_DIR}/src/scanner.cc)
+    list(APPEND TS_JAVASCRIPT_SOURCES ${tree_sitter_javascript_src_SOURCE_DIR}/src/scanner.cc)
+endif()
+add_library(ts-lang-javascript STATIC ${TS_JAVASCRIPT_SOURCES})
+target_include_directories(ts-lang-javascript PUBLIC
+    ${tree_sitter_javascript_src_SOURCE_DIR}/src
+)
 
 # ─── Lua 5.4 ─────────────────────────────────────────────────────────────────
 pkg_check_modules(LUA REQUIRED lua5.4)
@@ -79,6 +378,7 @@ add_library(pi-core
     src/core/builtin_tools.cpp
     src/core/lua_tool.cpp
     src/core/markdown.cpp
+    src/core/syntax_highlight.cpp
     src/core/stream_renderer.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
@@ -99,7 +399,21 @@ target_link_libraries(pi-core PUBLIC
     nlohmann_json::nlohmann_json
     nlohmann_json_schema_validator
     lua_pi
-    md4c_pi
+    cmark
+    tree_sitter_pi
+    ts-lang-c
+    ts-lang-cpp
+    ts-lang-python
+    ts-lang-bash
+    ts-lang-json
+    ts-lang-typescript
+    ts-lang-tsx
+    ts-lang-rust
+    ts-lang-go
+    ts-lang-markdown
+    ts-lang-ruby
+    ts-lang-lua
+    ts-lang-javascript
 )
 
 # ─── pi-cli (main executable) ───

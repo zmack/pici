@@ -83,6 +83,20 @@ static bool has_ansi(std::string_view s) {
   return false;
 }
 
+static int count_ansi_sequences(std::string_view s) {
+  int count = 0;
+  for (std::size_t i = 0; i + 1 < s.size(); ++i) {
+    if (s[i] == '\033' && s[i + 1] == '[') {
+      ++count;
+      i += 2;
+      while (i < s.size() && s[i] < '@') {
+        ++i;
+      }
+    }
+  }
+  return count;
+}
+
 static std::string visible_markdown_plain(std::string_view input) {
   auto plain = render_markdown_plain(input);
   if (!plain.empty() && plain.back() == '\n') {
@@ -262,6 +276,87 @@ void test_code_block_language() {
     CHECK(plain.find("rust") != std::string::npos);
     CHECK(plain.find("let x = 1;") != std::string::npos);
   });
+}
+
+void test_code_block_syntax_highlighting() {
+  tests::register_test("Markdown: supported fenced code block gets syntax highlighting", []() {
+    const auto ansi =
+        render_markdown_ansi("```cpp\nint main() { return 42; }\n```");
+    const auto plain = strip_ansi(ansi);
+    CHECK(plain.find("cpp") != std::string::npos);
+    CHECK(plain.find("int main() { return 42; }") != std::string::npos);
+    CHECK(has_ansi(ansi));
+    CHECK(count_ansi_sequences(ansi) >= 4);
+  });
+}
+
+void test_code_block_syntax_highlighting_with_info_suffix() {
+  tests::register_test("Markdown: fenced language info ignores trailing metadata", []() {
+    const auto ansi = render_markdown_ansi(
+        "```cpp linenums title=demo\nint main() { return 42; }\n```");
+    const auto plain = strip_ansi(ansi);
+    CHECK(plain.find("cpp") != std::string::npos);
+    CHECK(plain.find("int main() { return 42; }") != std::string::npos);
+    CHECK(has_ansi(ansi));
+    CHECK(count_ansi_sequences(ansi) >= 4);
+  });
+}
+
+void test_python_code_block_syntax_highlighting() {
+  tests::register_test("Markdown: python fenced code block gets syntax highlighting", []() {
+    const auto ansi = render_markdown_ansi(
+        "```python\ndef greet(name):\n    return f\"Hello, {name}\"\n```");
+    const auto plain = strip_ansi(ansi);
+    CHECK(plain.find("python") != std::string::npos);
+    CHECK(plain.find("def greet(name):") != std::string::npos);
+    CHECK(plain.find("return f\"Hello, {name}\"") != std::string::npos);
+    CHECK(has_ansi(ansi));
+    CHECK(count_ansi_sequences(ansi) >= 4);
+  });
+}
+
+void test_requested_language_code_block_syntax_highlighting() {
+  struct Case {
+    std::string_view name;
+    std::string_view markdown;
+    std::string_view expected;
+  };
+
+  const Case cases[] = {
+      {"javascript",
+       "```javascript\nfunction greet(name) { return 'Hi ' + name; }\n```",
+       "function greet(name)"},
+      {"typescript",
+       "```typescript\ntype User = { name: string };\n"
+       "function greet(user: User) { return user.name; }\n```",
+       "function greet(user: User)"},
+      {"tsx",
+       "```tsx\nexport function Card() { return <div>{\"Hi\"}</div>; }\n```",
+       "export function Card()"},
+      {"rust", "```rust\nfn main() { let answer = 42; }\n```",
+       "fn main()"},
+      {"go", "```go\npackage main\nfunc main() { println(\"hi\") }\n```",
+       "func main()"},
+      {"markdown", "```markdown\n# Title\n\n- item\n```", "# Title"},
+      {"ruby", "```ruby\ndef greet(name)\n  puts \"Hi #{name}\"\nend\n```",
+       "def greet(name)"},
+      {"lua", "```lua\nlocal function greet(name)\n  return \"Hi \" .. name\nend\n```",
+       "local function greet(name)"},
+  };
+
+  for (const auto &c : cases) {
+    tests::register_test(
+        "Markdown: " + std::string(c.name) +
+            " fenced code block gets syntax highlighting",
+        [&c]() {
+          const auto ansi = render_markdown_ansi(c.markdown);
+          const auto plain = strip_ansi(ansi);
+          CHECK(plain.find(c.name) != std::string::npos);
+          CHECK(plain.find(c.expected) != std::string::npos);
+          CHECK(has_ansi(ansi));
+          CHECK(count_ansi_sequences(ansi) >= 4);
+        });
+  }
 }
 
 void test_unordered_list() {
@@ -468,6 +563,62 @@ void test_stream_renderer_single_newline_delta() {
   });
 }
 
+void test_stream_renderer_code_block_highlights_when_completed() {
+  tests::register_test("Stream renderer: fenced code block gains syntax highlighting when closed", []() {
+    int fds[2];
+    CHECK_EQ(::pipe(fds), 0);
+    CHECK(::fcntl(fds[0], F_SETFL, O_NONBLOCK) >= 0);
+
+    TerminalState term;
+    std::string raw_out;
+
+    {
+      auto renderer = make_diff_renderer(fds[1]);
+
+      renderer->update("```python\n");
+      auto chunk = read_fd_available(fds[0]);
+      raw_out += chunk;
+      term.apply(chunk);
+
+      renderer->update("def greet(name):\n");
+      chunk = read_fd_available(fds[0]);
+      raw_out += chunk;
+      term.apply(chunk);
+
+      renderer->update("    return f\"Hello, {name}\"\n");
+      chunk = read_fd_available(fds[0]);
+      raw_out += chunk;
+      term.apply(chunk);
+
+      CHECK_EQ(term.plain(),
+               visible_markdown_plain(
+                   "```python\ndef greet(name):\n    return f\"Hello, {name}\"\n"));
+
+      renderer->update("```");
+      chunk = read_fd_available(fds[0]);
+      raw_out += chunk;
+      term.apply(chunk);
+
+      const auto completed =
+          "```python\ndef greet(name):\n    return f\"Hello, {name}\"\n```";
+      CHECK_EQ(term.plain(), visible_markdown_plain(completed));
+      CHECK(chunk.find("\033[35mdef\033[0m") != std::string::npos);
+      CHECK(chunk.find("\033[1;36mgreet\033[0m") != std::string::npos);
+      CHECK(chunk.find("\033[35mreturn\033[0m") != std::string::npos);
+
+      renderer->finish();
+      chunk = read_fd_available(fds[0]);
+      raw_out += chunk;
+      term.apply(chunk);
+      CHECK_EQ(term.plain(), visible_markdown_plain(completed) + "\n");
+    }
+
+    ::close(fds[1]);
+    (void)read_fd_all(fds[0]);
+    ::close(fds[0]);
+  });
+}
+
 void test_stream_renderer_matches_rendered_markdown_incrementally() {
   tests::register_test("Stream renderer: visible state matches markdown render after each delta", []() {
     const std::vector<std::vector<std::string>> cases = {
@@ -530,6 +681,10 @@ int main() {
   test_heading_prefix();
   test_code_block();
   test_code_block_language();
+  test_code_block_syntax_highlighting();
+  test_code_block_syntax_highlighting_with_info_suffix();
+  test_python_code_block_syntax_highlighting();
+  test_requested_language_code_block_syntax_highlighting();
   test_unordered_list();
   test_ordered_list();
   test_strikethrough();
@@ -542,6 +697,7 @@ int main() {
   test_stream_renderer_newline_append();
   test_stream_renderer_trailing_newlines_visible_immediately();
   test_stream_renderer_single_newline_delta();
+  test_stream_renderer_code_block_highlights_when_completed();
   test_stream_renderer_matches_rendered_markdown_incrementally();
 
   tests::print_summary();
