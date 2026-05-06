@@ -477,5 +477,28 @@ int main(int argc, char *argv[]) {
     return pi::cmd_list_models(args);
   }
 
+  if (!args.test_files.empty()) {
+    int total_passed = 0, total_failed = 0;
+    for (const auto &f : args.test_files) {
+      std::cout << "=== " << f << " ===\n";
+      try {
+        auto r = pi::core::run_lua_test_file(f);
+        total_passed += r.passed;
+        total_failed += r.failed;
+        std::cout << r.passed << "/" << r.total << " passed";
+        if (r.failed > 0) std::cout << ", " << r.failed << " failed";
+        std::cout << "\n\n";
+      } catch (const std::exception &e) {
+        std::cerr << "error: " << e.what() << "\n\n";
+        ++total_failed;
+      }
+    }
+    if (total_failed == 0)
+      std::cout << "All tests passed.\n";
+    else
+      std::cout << total_failed << " test(s) failed.\n";
+    return total_failed > 0 ? 1 : 0;
+  }
+
   return pi::cmd_run(args);
 }

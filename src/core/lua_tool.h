@@ -107,6 +107,34 @@ struct LuaHooks {
       on_command;
 };
 
+// ─── Test runner ─────────────────────────────────────────────────────────────
+//
+// A test file calls pici.test.run(name, fn) to register tests. Inside fn:
+//   pici.test.eq(a, b [,msg])  — assert equality
+//   pici.test.ok(val [,msg])   — assert truthy
+//   pici.test.fail([msg])      — unconditional failure
+//
+// Use pici.mock_run_agent(fn) to stub pici.run_agent before calling the
+// add-on under test.  Use dofile("addon.lua") to load the add-on table.
+//
+// Example:
+//   local addon = dofile("rewind.lua")
+//   pici.test.run("rewind truncates", function()
+//     local r = addon.on_command("rewind", "1", {...})
+//     pici.test.eq(r.handled, true)
+//     pici.test.eq(r.truncate_to, 2)
+//   end)
+
+struct TestResult {
+  int passed{0};
+  int failed{0};
+  int total{0};
+};
+
+// Load and run a Lua test file. Prints PASS/FAIL for each pici.test.run()
+// call. Throws std::runtime_error on load or syntax errors.
+TestResult run_lua_test_file(const std::filesystem::path &path);
+
 // Load hooks from a Lua file. Only functions present in the returned table are
 // wired up; missing hooks are left as null std::functions.
 // Throws std::runtime_error on load/syntax errors.

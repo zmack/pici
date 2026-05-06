@@ -92,6 +92,9 @@ Args parse_args(int argc, char *argv[]) {
       result.hooks_dir = std::string(need("--hooks-dir"));
     } else if (arg == "--render") {
       result.render = std::string(need("--render"));
+    } else if (arg == "--test") {
+      auto v = need("--test");
+      if (!v.empty()) result.test_files.push_back(std::string(v));
     } else if (arg == "--no-context-files" || arg == "-nc") {
       result.no_context_files = true;
     } else if (arg == "--list-models") {
@@ -129,6 +132,7 @@ void print_help(const char *prog) {
     "  --hooks-dir <dir>           Load all .lua files from dir as add-ons\n"
     "  --render <mode>             Rendering: auto (default), markdown, raw\n"
     "  --print, -p                 Non-interactive: run prompt and exit\n"
+    "  --test <file>               Run Lua test file and exit (repeatable)\n"
     "  --no-context-files, -nc     Disable AGENTS.md / CLAUDE.md discovery\n"
     "  --list-models [filter]      List known models (optional search filter)\n"
     "  --verbose                   Verbose output\n"

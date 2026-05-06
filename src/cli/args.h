@@ -38,6 +38,9 @@ struct Args {
   bool list_models{false};
   std::string list_models_filter; // optional search pattern
 
+  // Test mode
+  std::vector<std::string> test_files; // --test <file>, run Lua test files and exit
+
   // Context files
   bool no_context_files{false}; // disable AGENTS.md / CLAUDE.md discovery
 

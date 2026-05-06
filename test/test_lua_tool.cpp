@@ -666,6 +666,38 @@ return {
     std::filesystem::remove(storage_file);
   });
 
+  tests::register_test("run_lua_test_file: pass and fail counts", [&]() {
+    auto p = write_hooks("suite.lua", R"lua(
+pici.test.run("passes",  function() pici.test.eq(1, 1) end)
+pici.test.run("also ok", function() pici.test.ok(true) end)
+pici.test.run("fails",   function() pici.test.fail("oops") end)
+)lua");
+    auto r = run_lua_test_file(p);
+    CHECK_EQ(r.passed, 2);
+    CHECK_EQ(r.failed, 1);
+    CHECK_EQ(r.total,  3);
+  });
+
+  tests::register_test("run_lua_test_file: mock_run_agent works", [&]() {
+    auto p = write_hooks("mock_test.lua", R"lua(
+pici.mock_run_agent(function(cfg) return {text="hi", error=nil} end)
+pici.test.run("mock works", function()
+  local r = pici.run_agent({prompt="hello"})
+  pici.test.eq(r.text, "hi")
+end)
+)lua");
+    auto r = run_lua_test_file(p);
+    CHECK_EQ(r.passed, 1);
+    CHECK_EQ(r.failed, 0);
+  });
+
+  tests::register_test("run_lua_test_file: syntax error throws", [&]() {
+    auto p = write_hooks("bad_test.lua", "not valid lua !!!");
+    bool threw = false;
+    try { run_lua_test_file(p); } catch (const std::exception &) { threw = true; }
+    CHECK(threw);
+  });
+
   std::filesystem::remove_all(dir);
 }
 

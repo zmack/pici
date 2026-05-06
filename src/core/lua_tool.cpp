@@ -892,6 +892,102 @@ load_lua_hooks(const std::filesystem::path &path) {
   return hooks;
 }
 
+// ─── Test runner ─────────────────────────────────────────────────────────────
+
+static const char kPiciTestLua[] = R"lua(
+do
+  local _r = {passed=0, failed=0, total=0}
+  pici.test = {}
+
+  function pici.test.run(name, fn)
+    _r.total = _r.total + 1
+    local ok, err = pcall(fn)
+    if ok then
+      _r.passed = _r.passed + 1
+      io.write("  PASS " .. name .. "\n")
+    else
+      _r.failed = _r.failed + 1
+      io.write("  FAIL " .. name .. ": " .. tostring(err) .. "\n")
+    end
+  end
+
+  function pici.test.eq(a, b, msg)
+    if a ~= b then
+      error((msg and (msg .. ": ") or "") ..
+            "expected " .. tostring(b) .. " got " .. tostring(a), 2)
+    end
+  end
+
+  function pici.test.ok(val, msg)
+    if not val then
+      error((msg or "expected truthy") .. " got " .. tostring(val), 2)
+    end
+  end
+
+  function pici.test.fail(msg) error(msg or "explicit failure", 2) end
+
+  function pici.test.results() return _r.passed, _r.failed, _r.total end
+
+  -- Override pici.run_agent with a Lua function for testing
+  pici.mock_run_agent = function(fn) pici.run_agent = fn end
+end
+)lua";
+
+TestResult run_lua_test_file(const std::filesystem::path &path) {
+  lua_State *L = luaL_newstate();
+  if (!L) throw std::runtime_error("Failed to create Lua state for test runner");
+  luaL_openlibs(L);
+  register_json_module(L);
+
+  // Minimal pici global: log + stub run_agent (overridden by mock_run_agent)
+  lua_newtable(L);
+  lua_pushcfunction(L, [](lua_State *l) -> int {
+    int n = lua_gettop(l);
+    for (int i = 1; i <= n; ++i) {
+      if (i > 1) std::cerr << '\t';
+      std::cerr << luaL_tolstring(l, i, nullptr);
+      lua_pop(l, 1);
+    }
+    std::cerr << '\n';
+    return 0;
+  });
+  lua_setfield(L, -2, "log");
+  lua_pushcfunction(L, [](lua_State *l) -> int {
+    lua_pushnil(l);
+    lua_pushstring(l, "pici.run_agent: use pici.mock_run_agent() in tests");
+    return 2;
+  });
+  lua_setfield(L, -2, "run_agent");
+  lua_setglobal(L, "pici");
+
+  // Bootstrap pici.test and pici.mock_run_agent
+  if (luaL_dostring(L, kPiciTestLua) != LUA_OK) {
+    std::string err = lua_tostring(L, -1);
+    lua_close(L);
+    throw std::runtime_error("pici.test bootstrap error: " + err);
+  }
+
+  // Load and run the test file
+  if (luaL_dofile(L, path.c_str()) != LUA_OK) {
+    std::string err = lua_tostring(L, -1);
+    lua_close(L);
+    throw std::runtime_error(std::string(path) + ": " + err);
+  }
+
+  // Collect results via pici.test.results()
+  TestResult r;
+  lua_getglobal(L, "pici");
+  lua_getfield(L, -1, "test");
+  lua_getfield(L, -1, "results");
+  if (lua_pcall(L, 0, 3, 0) == LUA_OK) {
+    r.passed = static_cast<int>(lua_tointeger(L, -3));
+    r.failed = static_cast<int>(lua_tointeger(L, -2));
+    r.total  = static_cast<int>(lua_tointeger(L, -1));
+  }
+  lua_close(L);
+  return r;
+}
+
 std::shared_ptr<LuaHooks>
 load_lua_hooks_dir(const std::filesystem::path &directory) {
   std::vector<std::shared_ptr<LuaHooks>> list;
