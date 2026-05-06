@@ -1,10 +1,13 @@
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <source_location>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "core/builtin_tools.h"
 
@@ -232,6 +235,47 @@ void test_bash_tool() {
     CHECK(!result->is_error());
     CHECK_EQ(result->content(), "ok");
     std::filesystem::remove_all(root);
+  });
+
+  tests::register_test("Bash tool: timeout kills command", []() {
+    const auto tools = create_all_tools(std::filesystem::temp_directory_path());
+    auto bash = find_tool(tools, "bash");
+    auto start = std::chrono::steady_clock::now();
+    auto result = bash->execute("1", R"({"command":"sleep 60","timeout":1})");
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - start).count();
+    CHECK(result->is_error());
+    CHECK(result->content().find("timed out") != std::string::npos);
+    CHECK(elapsed < 5); // must not wait 60s
+  });
+
+  tests::register_test("Bash tool: stop_token aborts command", []() {
+    const auto tools = create_all_tools(std::filesystem::temp_directory_path());
+    auto bash = find_tool(tools, "bash");
+
+    std::stop_source src;
+    std::thread killer([&src]() {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      src.request_stop();
+    });
+
+    auto start = std::chrono::steady_clock::now();
+    auto result = bash->execute("1", R"({"command":"sleep 60"})", src.get_token(), {});
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - start).count();
+    killer.join();
+
+    CHECK(result->is_error());
+    CHECK(result->content().find("aborted") != std::string::npos);
+    CHECK(elapsed < 5);
+  });
+
+  tests::register_test("Bash tool: exit code propagated", []() {
+    const auto tools = create_all_tools(std::filesystem::temp_directory_path());
+    auto bash = find_tool(tools, "bash");
+    auto result = bash->execute("1", R"({"command":"exit 42"})");
+    CHECK(result->is_error());
+    CHECK(result->content().find("42") != std::string::npos);
   });
 }
 

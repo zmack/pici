@@ -21,6 +21,13 @@
 #include <utility>
 #include <vector>
 
+#include <chrono>
+#include <thread>
+
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <unistd.h>
 #include <sys/wait.h>
 
 namespace pi::core {
@@ -858,40 +865,114 @@ public:
             std::move(cwd)) {}
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
-                                      std::stop_token,
+                                      std::stop_token stop_tok,
                                       ToolUpdateCallback) const override {
     try {
       const auto json = parse_args(args);
       const auto command = json.value("command", std::string{});
-      if (command.empty()) {
+      if (command.empty())
         throw std::runtime_error("command must not be empty");
+
+      const int timeout_secs = json.value("timeout", 120);
+      const std::string shell_cmd =
+          "cd " + shell_quote(cwd().string()) + " && " + command;
+
+      // Create pipe for stdout+stderr
+      int pipefd[2];
+      if (::pipe(pipefd) != 0)
+        throw std::runtime_error("Failed to create pipe");
+
+      const pid_t pid = ::fork();
+      if (pid < 0) {
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        throw std::runtime_error("Failed to fork");
       }
-      std::string wrapped = "cd " + shell_quote(cwd().string()) + " && ";
-      if (json.contains("timeout")) {
-        wrapped += "timeout " +
-                   std::to_string(std::max(1, json.value("timeout", 0))) + " ";
+
+      if (pid == 0) {
+        // Child: new process group so we can kill the whole tree
+        ::setpgid(0, 0);
+        ::close(pipefd[0]);
+        ::dup2(pipefd[1], STDOUT_FILENO);
+        ::dup2(pipefd[1], STDERR_FILENO);
+        ::close(pipefd[1]);
+        ::execl("/bin/sh", "sh", "-c", shell_cmd.c_str(), nullptr);
+        ::_exit(127);
       }
-      wrapped += command + " 2>&1";
-      FILE *pipe = ::popen(wrapped.c_str(), "r");
-      if (pipe == nullptr) {
-        throw std::runtime_error("Failed to start bash command");
-      }
-      std::array<char, 4096> buffer{};
+
+      // Parent
+      ::close(pipefd[1]);
+
+      auto kill_tree = [pid]() {
+        ::kill(-pid, SIGTERM);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        ::kill(-pid, SIGKILL);
+      };
+
+      // Non-blocking reads so we can poll stop_token
+      ::fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+
       std::string output;
-      while (std::fgets(buffer.data(), static_cast<int>(buffer.size()),
-                        pipe) != nullptr) {
-        output += buffer.data();
-      }
-      const int status = ::pclose(pipe);
-      if (output.empty()) {
-        output = "(no output)";
-      }
-      output = truncate_head(output, kMaxBytes, kMaxBytes);
-      if (status != 0) {
-        if (WIFEXITED(status)) {
-          output += "\n\nCommand exited with code " +
-                    std::to_string(WEXITSTATUS(status));
+      output.reserve(4096);
+      std::array<char, 4096> buf{};
+      auto start = std::chrono::steady_clock::now();
+      bool aborted = false;
+      bool timed_out = false;
+
+      while (true) {
+        if (stop_tok.stop_requested()) {
+          kill_tree();
+          aborted = true;
+          break;
         }
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= timeout_secs) {
+          kill_tree();
+          timed_out = true;
+          break;
+        }
+
+        struct pollfd pfd{pipefd[0], POLLIN, 0};
+        const int n = ::poll(&pfd, 1, 50); // 50 ms wake interval
+        if (n > 0) {
+          const ssize_t nr = ::read(pipefd[0], buf.data(),
+                                    static_cast<std::size_t>(buf.size()));
+          if (nr <= 0) break; // EOF
+          output.append(buf.data(), static_cast<std::size_t>(nr));
+          if (output.size() >= kMaxBytes) break;
+        } else if (n < 0 && errno != EINTR) {
+          break;
+        }
+      }
+
+      // Drain any remaining buffered output (non-blocking)
+      while (output.size() < kMaxBytes) {
+        const ssize_t nr = ::read(pipefd[0], buf.data(),
+                                  static_cast<std::size_t>(buf.size()));
+        if (nr <= 0) break;
+        output.append(buf.data(), static_cast<std::size_t>(nr));
+      }
+      ::close(pipefd[0]);
+
+      int status = 0;
+      ::waitpid(pid, &status, 0);
+
+      if (output.empty()) output = "(no output)";
+      output = truncate_head(output, kMaxBytes, kMaxBytes);
+
+      if (aborted) {
+        output += "\n\n[Command aborted]";
+        return std::make_shared<TextToolResult>(output, true);
+      }
+      if (timed_out) {
+        output += "\n\n[Command timed out after " +
+                  std::to_string(timeout_secs) + "s]";
+        return std::make_shared<TextToolResult>(output, true);
+      }
+      if (status != 0 && WIFEXITED(status)) {
+        output += "\n\nCommand exited with code " +
+                  std::to_string(WEXITSTATUS(status));
         return std::make_shared<TextToolResult>(output, true);
       }
       return std::make_shared<TextToolResult>(output);
