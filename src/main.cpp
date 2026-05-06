@@ -9,6 +9,7 @@
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <unistd.h>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
 #include "core/lua_tool.h"
+#include "core/stream_renderer.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/providers/openai_completions.h"
@@ -205,6 +207,8 @@ static int chat(int argc, char *argv[]) {
     }
   }
 
+  auto renderer = pi::core::make_auto_renderer(STDOUT_FILENO);
+
   std::string line;
   while (true) {
     std::cout << "\n> " << std::flush;
@@ -215,24 +219,23 @@ static int chat(int argc, char *argv[]) {
     if (line == "/exit" || line == "/quit")
       break;
 
+    renderer->reset();
     auto stream = agent.prompt(line);
     bool done = false;
-    bool printed_text = false;
     for (const auto &ev : stream) {
       if (done)
         break;
       std::visit(
-          [&done, &printed_text](const auto &e) {
+          [&done, &renderer](const auto &e) {
             using T = std::decay_t<decltype(e)>;
             if constexpr (std::is_same_v<T, pi::core::MessageUpdateEvent>) {
               std::visit(
-                  [&printed_text](const auto &ae) {
+                  [&renderer](const auto &ae) {
                     using AE = std::decay_t<decltype(ae)>;
                     if constexpr (std::is_same_v<
                                       AE, pi::core::
                                               AssistantMessageTextDeltaEvent>) {
-                      std::cout << ae.delta << std::flush;
-                      printed_text = true;
+                      renderer->update(ae.delta);
                     } else if constexpr (
                         std::is_same_v<AE,
                                        pi::core::AssistantMessageErrorEvent>) {
@@ -244,27 +247,13 @@ static int chat(int argc, char *argv[]) {
                   },
                   e.assistant_message_event);
             } else if constexpr (std::is_same_v<T, pi::core::MessageEndEvent>) {
-              if (!printed_text) {
-                if (const auto *am =
-                        std::get_if<pi::core::AssistantMessage>(&e.message)) {
-                  if (am->error_message) {
-                    std::cerr << "\nerror: " << *am->error_message << "\n";
-                  } else {
-                    std::string final_text;
-                    for (const auto &block : am->content) {
-                      if (const auto *text =
-                              std::get_if<pi::core::TextContent>(&block)) {
-                        final_text += text->text;
-                      }
-                    }
-                    if (!final_text.empty()) {
-                      std::cout << final_text << std::flush;
-                      printed_text = true;
-                    }
-                  }
+              if (const auto *am =
+                      std::get_if<pi::core::AssistantMessage>(&e.message)) {
+                if (am->error_message) {
+                  std::cerr << "\nerror: " << *am->error_message << "\n";
                 }
               }
-              std::cout << "\n" << std::flush;
+              renderer->finish();
             } else if constexpr (std::is_same_v<
                                      T,
                                      pi::core::ToolExecutionStartEvent>) {

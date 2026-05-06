@@ -28,8 +28,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json_schema_validator)
 
-# ─── Lua 5.4 ─────────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
+
+# ─── md4c (Markdown parser) ──────────────────────────────────────────────────
+pkg_check_modules(MD4C REQUIRED md4c)
+add_library(md4c_pi INTERFACE)
+target_include_directories(md4c_pi INTERFACE ${MD4C_INCLUDE_DIRS})
+target_link_libraries(md4c_pi INTERFACE ${MD4C_LIBRARIES})
+message(STATUS "md4c: ${MD4C_VERSION}")
+
+# ─── Lua 5.4 ─────────────────────────────────────────────────────────────────
 pkg_check_modules(LUA REQUIRED lua5.4)
 add_library(lua_pi INTERFACE)
 target_include_directories(lua_pi INTERFACE ${LUA_INCLUDE_DIRS})
@@ -70,6 +78,8 @@ add_library(pi-core
     src/core/agent.cpp
     src/core/builtin_tools.cpp
     src/core/lua_tool.cpp
+    src/core/markdown.cpp
+    src/core/stream_renderer.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
     src/core/env_api_keys.cpp
@@ -89,6 +99,7 @@ target_link_libraries(pi-core PUBLIC
     nlohmann_json::nlohmann_json
     nlohmann_json_schema_validator
     lua_pi
+    md4c_pi
 )
 
 # ─── pi-cli (main executable) ───
@@ -102,7 +113,7 @@ target_link_libraries(pi-cli PRIVATE pi-core pi-http)
 if(PI_CPP_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name IN ITEMS core agent_loop agent stream tool_validation builtin_tools lua_tool)
+    foreach(test_name IN ITEMS core agent_loop agent stream tool_validation builtin_tools lua_tool markdown)
         add_executable(test-${test_name}
             test/test_${test_name}.cpp
         )
@@ -110,6 +121,9 @@ if(PI_CPP_BUILD_TESTS)
         target_link_libraries(test-${test_name} PRIVATE pi-core)
         add_test(NAME test-${test_name} COMMAND test-${test_name})
     endforeach()
+
+    add_executable(test-markdown-display test/test_markdown_display.cpp)
+    target_link_libraries(test-markdown-display PRIVATE pi-core)
 
     add_executable(test-faux_client test/test_faux_client.cpp)
     target_link_libraries(test-faux_client PRIVATE pi-core)
