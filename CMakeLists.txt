@@ -110,6 +110,18 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-javascript.git
     GIT_SHALLOW    TRUE
 )
+set(HTTPLIB_REQUIRE_OPENSSL  OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_ZLIB     OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE    OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_COMPILE          OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    cpp_httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG        v0.18.5
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(cpp_httplib)
 FetchContent_GetProperties(tree_sitter_runtime_src)
 if(NOT tree_sitter_runtime_src_POPULATED)
     FetchContent_Populate(tree_sitter_runtime_src)
@@ -426,6 +438,20 @@ add_executable(pi-cli
 
 target_link_libraries(pi-cli PRIVATE pi-core pi-http)
 
+# ─── pi-acp (ACP server) ───
+add_executable(pi-acp
+    src/acp/main.cpp
+    src/acp/server.cpp
+    src/acp/types.cpp
+    src/acp/sse.cpp
+    src/acp/session_store.cpp
+    src/acp/handlers.cpp
+    src/cli/args.cpp
+    src/cli/readline.cpp
+)
+target_include_directories(pi-acp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(pi-acp PRIVATE pi-core pi-http httplib::httplib)
+
 # ─── Tests ───
 if(PI_CPP_BUILD_TESTS)
     enable_testing()
@@ -449,6 +475,14 @@ if(PI_CPP_BUILD_TESTS)
     add_executable(test-openai_completions test/test_openai_completions.cpp)
     target_link_libraries(test-openai_completions PRIVATE pi-http)
     add_test(NAME test-openai_completions COMMAND test-openai_completions)
+
+    add_executable(test-acp test/test_acp.cpp)
+    target_include_directories(test-acp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-acp PRIVATE pi-core pi-http httplib::httplib)
+    target_sources(test-acp PRIVATE
+        src/acp/server.cpp src/acp/handlers.cpp src/acp/types.cpp
+        src/acp/sse.cpp src/acp/session_store.cpp)
+    add_test(NAME test-acp COMMAND test-acp)
 endif()
 
 add_library(pi-http
