@@ -27,6 +27,7 @@ struct Args {
   bool no_builtin_tools{false};
   std::vector<std::string> tools;  // allowlist of tool names
   std::string tools_dir;           // directory for Lua tools
+  std::string hooks_file;          // Lua hooks file
 
   // Output / rendering
   bool print_mode{false}; // -p: run prompt and exit

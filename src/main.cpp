@@ -263,6 +263,20 @@ static int cmd_run(const cli::Args &args) {
   };
   opts.should_stop_after_turn = nullptr;
 
+  // Load Lua hooks before constructing agent
+  if (!args.hooks_file.empty()) {
+    try {
+      auto hooks = core::load_lua_hooks(args.hooks_file);
+      if (hooks->before_tool_call)     opts.before_tool_call     = hooks->before_tool_call;
+      if (hooks->after_tool_call)      opts.after_tool_call      = hooks->after_tool_call;
+      if (hooks->should_stop_after_turn) opts.should_stop_after_turn = hooks->should_stop_after_turn;
+      if (args.verbose)
+        std::cerr << "[hooks: " << args.hooks_file << "]\n";
+    } catch (const std::exception &e) {
+      std::cerr << "warning: failed to load hooks file: " << e.what() << "\n";
+    }
+  }
+
   core::Agent agent(opts);
 
   if (!args.no_tools && !args.no_builtin_tools) {

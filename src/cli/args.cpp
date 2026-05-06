@@ -85,6 +85,8 @@ Args parse_args(int argc, char *argv[]) {
       if (!tok.empty()) result.tools.push_back(tok);
     } else if (arg == "--tools-dir") {
       result.tools_dir = std::string(need("--tools-dir"));
+    } else if (arg == "--hooks-file") {
+      result.hooks_file = std::string(need("--hooks-file"));
     } else if (arg == "--render") {
       result.render = std::string(need("--render"));
     } else if (arg == "--no-context-files" || arg == "-nc") {
@@ -120,6 +122,7 @@ void print_help(const char *prog) {
     "  --no-builtin-tools, -nbt    Disable built-in tools only\n"
     "  --tools, -t <names>         Comma-separated allowlist of tool names\n"
     "  --tools-dir <dir>           Load Lua tools from directory\n"
+    "  --hooks-file <file>         Lua hooks file (before/after tool, stop condition)\n"
     "  --render <mode>             Rendering: auto (default), markdown, raw\n"
     "  --print, -p                 Non-interactive: run prompt and exit\n"
     "  --no-context-files, -nc     Disable AGENTS.md / CLAUDE.md discovery\n"
