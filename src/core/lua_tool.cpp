@@ -457,6 +457,31 @@ public:
     stop_after_ref_     = extract("should_stop_after_turn");
     command_ref_        = extract("on_command");
     complete_ref_       = extract("complete");
+
+    // Extract commands array (data, not a function)
+    lua_getfield(L_, -1, "commands");
+    if (lua_istable(L_, -1)) {
+      int n = static_cast<int>(lua_rawlen(L_, -1));
+      for (int i = 1; i <= n; ++i) {
+        lua_rawgeti(L_, -1, i);
+        if (lua_istable(L_, -1)) {
+          LuaHooks::Command cmd;
+          lua_getfield(L_, -1, "name");
+          if (lua_isstring(L_, -1)) cmd.name = lua_tostring(L_, -1);
+          lua_pop(L_, 1);
+          lua_getfield(L_, -1, "description");
+          if (lua_isstring(L_, -1)) cmd.description = lua_tostring(L_, -1);
+          lua_pop(L_, 1);
+          lua_getfield(L_, -1, "args_hint");
+          if (lua_isstring(L_, -1)) cmd.args_hint = lua_tostring(L_, -1);
+          lua_pop(L_, 1);
+          if (!cmd.name.empty()) commands_.push_back(std::move(cmd));
+        }
+        lua_pop(L_, 1);
+      }
+    }
+    lua_pop(L_, 1);
+
     lua_pop(L_, 1); // pop the module table
 
     // Register pici global — runtime fields filled in by configure_info()
@@ -491,6 +516,7 @@ public:
   bool has_stop_after() const { return stop_after_ref_ != LUA_NOREF; }
   bool has_command()    const { return command_ref_    != LUA_NOREF; }
   bool has_complete()   const { return complete_ref_   != LUA_NOREF; }
+  const std::vector<LuaHooks::Command> &commands() const { return commands_; }
 
   std::optional<BeforeToolCallResult>
   call_before(const BeforeToolCallContext &ctx) {
@@ -846,6 +872,7 @@ private:
   int stop_after_ref_{LUA_NOREF};
   int command_ref_{LUA_NOREF};
   int complete_ref_{LUA_NOREF};
+  std::vector<LuaHooks::Command> commands_;
   LuaHooks::RunAgentFn run_agent_fn_;
   nlohmann::json storage_{nlohmann::json::object()};
   std::filesystem::path storage_path_;
@@ -919,6 +946,7 @@ load_lua_hooks(const std::filesystem::path &path) {
   hooks->configure = [impl](const LuaHooks::AgentInfo &info) {
     impl->configure_info(info);
   };
+  hooks->commands = impl->commands();
   if (impl->has_complete()) {
     hooks->complete =
         [impl](std::string_view partial,
@@ -1112,6 +1140,10 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
       return {};
     };
   }
+
+  // commands — union
+  for (const auto &h : list)
+    out->commands.insert(out->commands.end(), h->commands.begin(), h->commands.end());
 
   // configure — forward to all
   out->configure = [list](const LuaHooks::AgentInfo &info) {

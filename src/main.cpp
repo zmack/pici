@@ -413,13 +413,37 @@ static int cmd_run(const cli::Args &args) {
     if (args.print_mode) return 0;
   }
 
-  // Build completion function
-  cli::CompleteFn complete_fn;
-  if (hooks && hooks->complete) {
-    complete_fn = [&hooks, &agent](std::string_view partial) {
+  // Build completion function.
+  // Command-name completion (/... with no space) is handled here from the
+  // declared commands list — no Lua needed.  Argument completion (/cmd ...
+  // with a space) is delegated to hooks->complete.
+  cli::CompleteFn complete_fn = [&hooks, &agent](std::string_view partial)
+      -> std::vector<std::string> {
+    std::vector<std::string> result;
+    const bool is_slash = !partial.empty() && partial[0] == '/';
+    const bool has_space = partial.find(' ') != std::string_view::npos;
+
+    if (is_slash && !has_space) {
+      // Complete command names: builtins + declared add-on commands
+      for (std::string_view b : {std::string_view("/exit"), std::string_view("/quit")}) {
+        if (b.substr(0, partial.size()) == partial)
+          result.emplace_back(b);
+      }
+      if (hooks) {
+        for (const auto &cmd : hooks->commands) {
+          std::string full = '/' + cmd.name;
+          if (std::string_view(full).substr(0, partial.size()) == partial)
+            result.push_back(std::move(full));
+        }
+      }
+      return result;
+    }
+
+    // Argument completion — delegate to hook
+    if (hooks && hooks->complete)
       return hooks->complete(partial, agent.state().messages());
-    };
-  }
+    return {};
+  };
 
   // Interactive REPL
   while (true) {

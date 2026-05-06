@@ -95,9 +95,19 @@ struct LuaHooks {
   // Call once after the parent agent and tools are fully configured.
   std::function<void(const AgentInfo &)> configure;
 
-  // Tab completion hook.
-  // partial is the current buffer when Tab is pressed.
-  // Returns candidate strings; compose_hooks unions all add-ons' results.
+  // Slash commands declared by this add-on.
+  // pici uses these to complete command names automatically when the user
+  // types /... with no space yet — no Lua needed for that case.
+  struct Command {
+    std::string name;        // e.g. "rewind"
+    std::string description; // shown in help / completion list
+    std::string args_hint;   // e.g. "<turn>", optional
+  };
+  std::vector<Command> commands;
+
+  // Argument completion hook — called only when partial already contains a
+  // space (command name is settled).  Return candidate strings for the args.
+  // compose_hooks unions all add-ons' results.
   //
   // Lua signature:
   //   complete(partial, transcript) → nil | {string, ...}

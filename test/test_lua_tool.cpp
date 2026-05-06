@@ -666,6 +666,35 @@ return {
     std::filesystem::remove(storage_file);
   });
 
+  tests::register_test("LuaHooks: commands declared in table", [&]() {
+    auto p = write_hooks("with_cmds.lua", R"lua(
+return {
+  commands = {
+    {name="rewind", description="Rewind to a turn", args_hint="<turn>"},
+    {name="fork",   description="Fork the session"},
+  },
+  on_command = function(cmd, args, t) return {handled=false} end,
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    CHECK_EQ(hooks->commands.size(), std::size_t(2));
+    CHECK(hooks->commands[0].name == "rewind");
+    CHECK(hooks->commands[0].description == "Rewind to a turn");
+    CHECK(hooks->commands[0].args_hint == "<turn>");
+    CHECK(hooks->commands[1].name == "fork");
+  });
+
+  tests::register_test("compose_hooks: commands are unioned", [&]() {
+    auto p1 = write_hooks("cmds_a.lua", R"lua(
+return { commands = {{name="rewind"}, {name="fork"}} }
+)lua");
+    auto p2 = write_hooks("cmds_b.lua", R"lua(
+return { commands = {{name="search"}} }
+)lua");
+    auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
+    CHECK_EQ(composed->commands.size(), std::size_t(3));
+  });
+
   tests::register_test("LuaHooks: complete returns candidates", [&]() {
     auto p = write_hooks("completer.lua", R"lua(
 return {
