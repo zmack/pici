@@ -909,47 +909,75 @@ public:
         ::kill(-pid, SIGKILL);
       };
 
-      // Non-blocking reads so we can poll stop_token
       ::fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+
+      // Self-pipe: stop_token callback writes here to unblock poll immediately.
+      int wakeup[2];
+      if (::pipe(wakeup) != 0) {
+        ::close(pipefd[0]);
+        ::waitpid(pid, nullptr, 0);
+        throw std::runtime_error("Failed to create wakeup pipe");
+      }
 
       std::string output;
       output.reserve(4096);
       std::array<char, 4096> buf{};
-      auto start = std::chrono::steady_clock::now();
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(timeout_secs);
       bool aborted = false;
       bool timed_out = false;
 
-      while (true) {
-        if (stop_tok.stop_requested()) {
-          kill_tree();
-          aborted = true;
-          break;
-        }
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed >= timeout_secs) {
-          kill_tree();
-          timed_out = true;
-          break;
-        }
+      {
+        // stop_callback writes to the wakeup pipe; destructor unregisters it
+        // and synchronises with any in-progress invocation before we close.
+        std::stop_callback sc(stop_tok, [wfd = wakeup[1]] {
+          char b = 1;
+          ::write(wfd, &b, 1);
+        });
 
-        struct pollfd pfd{pipefd[0], POLLIN, 0};
-        const int n = ::poll(&pfd, 1, 50); // 50 ms wake interval
-        if (n > 0) {
-          const ssize_t nr = ::read(pipefd[0], buf.data(),
-                                    static_cast<std::size_t>(buf.size()));
-          if (nr <= 0) break; // EOF
-          output.append(buf.data(), static_cast<std::size_t>(nr));
-          if (output.size() >= kMaxBytes) break;
-        } else if (n < 0 && errno != EINTR) {
-          break;
-        }
-      }
+        while (true) {
+          const auto now = std::chrono::steady_clock::now();
+          if (now >= deadline) {
+            kill_tree();
+            timed_out = true;
+            break;
+          }
+          const auto remaining_ms =
+              std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+                  .count();
 
-      // Drain any remaining buffered output (non-blocking)
+          struct pollfd fds[2] = {
+              {pipefd[0], POLLIN | POLLHUP, 0},
+              {wakeup[0], POLLIN,           0},
+          };
+          const int n = ::poll(fds, 2, static_cast<int>(remaining_ms));
+
+          if (n == 0) { kill_tree(); timed_out = true; break; }
+          if (n < 0 && errno == EINTR) continue;
+          if (n < 0) break;
+
+          if ((fds[1].revents & POLLIN) != 0) {
+            kill_tree();
+            aborted = true;
+            break;
+          }
+          if ((fds[0].revents & POLLIN) != 0) {
+            const ssize_t nr = ::read(pipefd[0], buf.data(), buf.size());
+            if (nr <= 0) break;
+            output.append(buf.data(), static_cast<std::size_t>(nr));
+            if (output.size() >= kMaxBytes) break;
+          } else if ((fds[0].revents & POLLHUP) != 0) {
+            break;
+          }
+        }
+      } // sc destroyed here — safe to close wakeup pipe
+
+      ::close(wakeup[0]);
+      ::close(wakeup[1]);
+
+      // Drain any data that arrived between the last read and process exit
       while (output.size() < kMaxBytes) {
-        const ssize_t nr = ::read(pipefd[0], buf.data(),
-                                  static_cast<std::size_t>(buf.size()));
+        const ssize_t nr = ::read(pipefd[0], buf.data(), buf.size());
         if (nr <= 0) break;
         output.append(buf.data(), static_cast<std::size_t>(nr));
       }
