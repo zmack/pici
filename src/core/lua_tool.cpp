@@ -460,6 +460,7 @@ public:
     stop_after_ref_     = extract("should_stop_after_turn");
     command_ref_        = extract("on_command");
     complete_ref_       = extract("complete");
+    prompt_line_ref_    = extract("prompt_line");
 
     // Extract commands array (data, not a function)
     lua_getfield(L_, -1, "commands");
@@ -502,11 +503,12 @@ public:
 
   ~LuaHooksImpl() {
     if (L_) {
-      if (before_ref_     != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, before_ref_);
-      if (after_ref_      != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, after_ref_);
-      if (stop_after_ref_ != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, stop_after_ref_);
-      if (command_ref_    != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, command_ref_);
-      if (complete_ref_   != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, complete_ref_);
+      if (before_ref_      != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, before_ref_);
+      if (after_ref_       != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, after_ref_);
+      if (stop_after_ref_  != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, stop_after_ref_);
+      if (command_ref_     != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, command_ref_);
+      if (complete_ref_    != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, complete_ref_);
+      if (prompt_line_ref_ != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, prompt_line_ref_);
       lua_close(L_);
     }
   }
@@ -520,7 +522,33 @@ public:
   bool has_after()      const { return after_ref_      != LUA_NOREF; }
   bool has_stop_after() const { return stop_after_ref_ != LUA_NOREF; }
   bool has_command()    const { return command_ref_    != LUA_NOREF; }
-  bool has_complete()   const { return complete_ref_   != LUA_NOREF; }
+  bool has_complete()    const { return complete_ref_    != LUA_NOREF; }
+  bool has_prompt_line() const { return prompt_line_ref_ != LUA_NOREF; }
+
+  std::optional<std::string> call_prompt_line(std::size_t turn,
+                                               std::string_view model_id,
+                                               std::size_t tools_count) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, prompt_line_ref_);
+
+    lua_newtable(L_);
+    lua_pushinteger(L_, static_cast<lua_Integer>(turn));
+    lua_setfield(L_, -2, "turn");
+    lua_pushlstring(L_, model_id.data(), model_id.size());
+    lua_setfield(L_, -2, "model");
+    lua_pushinteger(L_, static_cast<lua_Integer>(tools_count));
+    lua_setfield(L_, -2, "tools");
+
+    if (lua_pcall(L_, 1, 1, 0) != LUA_OK) { lua_pop(L_, 1); return std::nullopt; }
+
+    std::optional<std::string> result;
+    if (lua_isstring(L_, -1)) {
+      std::string s = lua_tostring(L_, -1);
+      if (!s.empty()) result = std::move(s);
+    }
+    lua_pop(L_, 1);
+    return result;
+  }
   const std::vector<LuaHooks::Command> &commands() const { return commands_; }
 
   std::optional<BeforeToolCallResult>
@@ -877,6 +905,7 @@ private:
   int stop_after_ref_{LUA_NOREF};
   int command_ref_{LUA_NOREF};
   int complete_ref_{LUA_NOREF};
+  int prompt_line_ref_{LUA_NOREF};
   std::string source_path_;
   std::vector<LuaHooks::Command> commands_;
   LuaHooks::RunAgentFn run_agent_fn_;
@@ -960,6 +989,13 @@ load_lua_hooks(const std::filesystem::path &path) {
         [impl](std::string_view partial,
                const std::vector<Message> &transcript) -> std::vector<std::string> {
       return impl->call_complete(partial, transcript);
+    };
+  }
+  if (impl->has_prompt_line()) {
+    hooks->prompt_line =
+        [impl](std::size_t turn, std::string_view model_id,
+               std::size_t tools_count) -> std::optional<std::string> {
+      return impl->call_prompt_line(turn, model_id, tools_count);
     };
   }
   return hooks;
@@ -1158,6 +1194,22 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
     for (const auto &h : list)
       if (h->configure) h->configure(info);
   };
+
+  // prompt_line — last non-nil wins (override semantics)
+  if (std::any_of(list.begin(), list.end(),
+                  [](const auto &h) { return !!h->prompt_line; })) {
+    out->prompt_line =
+        [list](std::size_t turn, std::string_view model_id,
+               std::size_t tools_count) -> std::optional<std::string> {
+      std::optional<std::string> result;
+      for (const auto &h : list) {
+        if (!h->prompt_line) continue;
+        auto r = h->prompt_line(turn, model_id, tools_count);
+        if (r) result = std::move(r);
+      }
+      return result;
+    };
+  }
 
   // complete — union of all results
   if (std::any_of(list.begin(), list.end(),

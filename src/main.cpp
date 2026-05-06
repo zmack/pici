@@ -507,7 +507,18 @@ static int cmd_run(const cli::Args &args) {
 
   // Interactive REPL
   while (true) {
-    auto maybe_line = cli::readline("\n> ", complete_fn);
+    // Build the prompt — let add-ons customise it
+    std::string prompt = "\n> ";
+    if (hooks && hooks->prompt_line) {
+      const auto &msgs = agent.state().messages();
+      std::size_t turns = 0;
+      for (const auto &m : msgs)
+        if (std::holds_alternative<core::AssistantMessage>(m)) ++turns;
+      auto tools_cnt  = agent.state().tools().size();
+      auto custom     = hooks->prompt_line(turns, model.id, tools_cnt);
+      if (custom) prompt = "\n" + *custom;
+    }
+    auto maybe_line = cli::readline(prompt, complete_fn);
     if (!maybe_line) break;
     const std::string &line = *maybe_line;
     if (line.empty()) continue;

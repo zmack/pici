@@ -99,6 +99,18 @@ struct LuaHooks {
   std::function<void(const AgentInfo &)> configure;
 
   // Slash commands declared by this add-on.
+  // Prompt line hook — called before each REPL input to produce the prompt string.
+  // Return a non-empty string to replace the default "> "; return nullopt for default.
+  // compose_hooks: last non-nil result wins (later-loaded add-ons override earlier ones).
+  //
+  // Lua signature:
+  //   prompt_line(ctx) → string | nil
+  //   ctx: {turn, model, tools}
+  std::function<std::optional<std::string>(std::size_t turn,
+                                            std::string_view model_id,
+                                            std::size_t tools_count)>
+      prompt_line;
+
   // pici uses these to complete command names automatically when the user
   // types /... with no space yet — no Lua needed for that case.
   struct Command {

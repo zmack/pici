@@ -557,6 +557,44 @@ end }
     CHECK(composed == h);  // same pointer, no wrapping
   });
 
+  tests::register_test("LuaHooks: prompt_line returns custom prompt", [&]() {
+    auto p = write_hooks("prompt.lua", R"lua(
+return {
+  prompt_line = function(ctx)
+    return "[turn " .. ctx.turn .. "/" .. ctx.model .. "] > "
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    CHECK(hooks->prompt_line != nullptr);
+    auto r = hooks->prompt_line(3, "gpt-4o", 7);
+    CHECK(r.has_value());
+    CHECK(*r == "[turn 3/gpt-4o] > ");
+  });
+
+  tests::register_test("LuaHooks: prompt_line nil returns nullopt", [&]() {
+    auto p = write_hooks("prompt_nil.lua", R"lua(
+return { prompt_line = function(ctx) return nil end }
+)lua");
+    auto hooks = load_lua_hooks(p);
+    auto r = hooks->prompt_line(0, "model", 0);
+    CHECK(!r.has_value());
+  });
+
+  tests::register_test("compose_hooks: prompt_line last non-nil wins", [&]() {
+    auto p1 = write_hooks("pl1.lua", R"lua(
+return { prompt_line = function(ctx) return "first> " end }
+)lua");
+    auto p2 = write_hooks("pl2.lua", R"lua(
+return { prompt_line = function(ctx) return "second> " end }
+)lua");
+    auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
+    CHECK(composed->prompt_line != nullptr);
+    auto r = composed->prompt_line(0, "m", 0);
+    CHECK(r.has_value());
+    CHECK(*r == "second> ");
+  });
+
   tests::register_test("LuaHooks: pici.run_agent calls C++ factory", [&]() {
     auto p = write_hooks("subagent.lua", R"lua(
 return {
