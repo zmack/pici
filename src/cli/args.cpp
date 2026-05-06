@@ -97,6 +97,10 @@ Args parse_args(int argc, char *argv[]) {
       if (!v.empty()) result.test_files.push_back(std::string(v));
     } else if (arg == "--no-context-files" || arg == "-nc") {
       result.no_context_files = true;
+    } else if (arg == "--list-tools") {
+      result.list_tools = true;
+    } else if (arg == "--list-addons") {
+      result.list_addons = true;
     } else if (arg == "--list-models") {
       result.list_models = true;
       // optional next arg that isn't a flag
@@ -134,6 +138,8 @@ void print_help(const char *prog) {
     "  --print, -p                 Non-interactive: run prompt and exit\n"
     "  --test <file>               Run Lua test file and exit (repeatable)\n"
     "  --no-context-files, -nc     Disable AGENTS.md / CLAUDE.md discovery\n"
+    "  --list-tools                List active tools and their sources\n"
+    "  --list-addons               List loaded add-ons and their hooks\n"
     "  --list-models [filter]      List known models (optional search filter)\n"
     "  --verbose                   Verbose output\n"
     "  --version, -v               Show version\n"

@@ -36,6 +36,53 @@ static void print_version() {
   std::cout << "pi-cpp " PI_CPP_VERSION "\n";
 }
 
+static void print_tools(
+    const std::vector<std::shared_ptr<const core::ToolDefinition>> &tools) {
+  if (tools.empty()) { std::cout << "(no tools loaded)\n"; return; }
+  std::size_t wsrc = 7, wname = 4;
+  for (const auto &t : tools) {
+    wsrc  = std::max(wsrc,  t->source_path().size());
+    wname = std::max(wname, t->name().size());
+  }
+  std::cout << std::left
+            << std::setw(static_cast<int>(wsrc + 2))  << "source"
+            << std::setw(static_cast<int>(wname + 2)) << "name"
+            << "description\n";
+  for (const auto &t : tools) {
+    std::cout << std::left
+              << std::setw(static_cast<int>(wsrc + 2))  << t->source_path()
+              << std::setw(static_cast<int>(wname + 2)) << t->name()
+              << t->description() << "\n";
+  }
+}
+
+static void print_addons(
+    const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
+  if (hooks_list.empty()) { std::cout << "(no add-ons loaded)\n"; return; }
+  for (const auto &h : hooks_list) {
+    std::cout << (h->source_path.empty() ? "<composed>" : h->source_path) << "\n";
+    std::vector<std::string> active;
+    if (h->before_tool_call)       active.push_back("before_tool_call");
+    if (h->after_tool_call)        active.push_back("after_tool_call");
+    if (h->should_stop_after_turn) active.push_back("should_stop_after_turn");
+    if (h->on_command)             active.push_back("on_command");
+    if (h->complete)               active.push_back("complete");
+    if (!active.empty()) {
+      std::cout << "  hooks:";
+      for (const auto &a : active) std::cout << "  " << a;
+      std::cout << "\n";
+    }
+    if (!h->commands.empty()) {
+      for (const auto &cmd : h->commands) {
+        std::cout << "  /" << cmd.name;
+        if (!cmd.args_hint.empty()) std::cout << " " << cmd.args_hint;
+        if (!cmd.description.empty()) std::cout << "  — " << cmd.description;
+        std::cout << "\n";
+      }
+    }
+  }
+}
+
 static std::string format_tokens(std::uint64_t n) {
   std::ostringstream ss;
   if (n >= 1'000'000) {
@@ -282,6 +329,8 @@ static int cmd_run(const cli::Args &args) {
       if (args.verbose) std::cerr << "[hooks-dir: " << args.hooks_dir << "]\n";
     }
   }
+  // Keep a copy for --list-addons / /addons before moving into compose
+  auto hooks_list_saved = hooks_list;
   auto hooks = core::compose_hooks(std::move(hooks_list));
   if (hooks) {
     if (hooks->before_tool_call)       opts.before_tool_call       = hooks->before_tool_call;
@@ -313,6 +362,16 @@ static int cmd_run(const cli::Args &args) {
           if (t->name() == name) { agent.add_tool(t); break; }
       }
     }
+  }
+
+  // --list-tools / --list-addons (exit immediately after printing)
+  if (args.list_tools) {
+    print_tools(agent.state().tools());
+    return 0;
+  }
+  if (args.list_addons) {
+    print_addons(hooks_list_saved);
+    return 0;
   }
 
   // Configure pici.* globals now that agent + tools exist
@@ -425,7 +484,8 @@ static int cmd_run(const cli::Args &args) {
 
     if (is_slash && !has_space) {
       // Complete command names: builtins + declared add-on commands
-      for (std::string_view b : {std::string_view("/exit"), std::string_view("/quit")}) {
+      for (std::string_view b : {std::string_view("/exit"), std::string_view("/quit"),
+                                  std::string_view("/tools"), std::string_view("/addons")}) {
         if (b.substr(0, partial.size()) == partial)
           result.emplace_back(b);
       }
@@ -452,6 +512,8 @@ static int cmd_run(const cli::Args &args) {
     const std::string &line = *maybe_line;
     if (line.empty()) continue;
     if (line == "/exit" || line == "/quit") break;
+    if (line == "/tools")  { print_tools(agent.state().tools()); continue; }
+    if (line == "/addons") { print_addons(hooks_list_saved); continue; }
 
     // Slash command dispatch
     if (line[0] == '/' && hooks && hooks->on_command) {

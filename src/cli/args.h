@@ -37,6 +37,8 @@ struct Args {
   // Listing
   bool list_models{false};
   std::string list_models_filter; // optional search pattern
+  bool list_tools{false};
+  bool list_addons{false};
 
   // Test mode
   std::vector<std::string> test_files; // --test <file>, run Lua test files and exit

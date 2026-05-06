@@ -219,6 +219,8 @@ public:
   virtual ~ToolDefinition() = default;
   virtual std::string_view name() const = 0;
   virtual std::string_view description() const = 0;
+  // Returns "builtin" for C++ tools, or the source file path for Lua tools.
+  virtual std::string_view source_path() const { return "builtin"; }
   virtual ToolSchema &schema() const = 0;
   virtual ToolArguments
   prepare_arguments(const ToolArguments &arguments) const {

@@ -38,6 +38,9 @@ load_lua_tools(const std::filesystem::path &directory);
 //     ctx: {message, tool_results=[{tool_name,content,is_error},...]}
 
 struct LuaHooks {
+  // Path of the file this hooks object was loaded from (empty for composed).
+  std::string source_path;
+
   std::function<std::optional<BeforeToolCallResult>(
       const BeforeToolCallContext &, std::stop_token)>
       before_tool_call;

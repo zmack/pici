@@ -271,6 +271,7 @@ public:
                                path.string());
     }
     execute_ref_ = luaL_ref(L_, LUA_REGISTRYINDEX);
+    source_path_ = path.string();
 
     lua_pop(L_, 1); // pop the module table
   }
@@ -287,6 +288,7 @@ public:
 
   std::string_view name() const override { return name_; }
   std::string_view description() const override { return description_; }
+  std::string_view source_path() const override { return source_path_; }
   ToolSchema &schema() const override { return *schema_; }
 
   std::shared_ptr<ToolResult> execute(std::string_view,
@@ -345,6 +347,7 @@ private:
   int execute_ref_{LUA_NOREF};
   std::string name_;
   std::string description_;
+  std::string source_path_;
   std::unique_ptr<LuaToolSchema> schema_;
   mutable std::mutex mutex_;
 };
@@ -511,6 +514,8 @@ public:
   LuaHooksImpl(const LuaHooksImpl &) = delete;
   LuaHooksImpl &operator=(const LuaHooksImpl &) = delete;
 
+  void set_source_path(std::string p) { source_path_ = std::move(p); }
+  const std::string &source_path() const { return source_path_; }
   bool has_before()     const { return before_ref_     != LUA_NOREF; }
   bool has_after()      const { return after_ref_      != LUA_NOREF; }
   bool has_stop_after() const { return stop_after_ref_ != LUA_NOREF; }
@@ -872,6 +877,7 @@ private:
   int stop_after_ref_{LUA_NOREF};
   int command_ref_{LUA_NOREF};
   int complete_ref_{LUA_NOREF};
+  std::string source_path_;
   std::vector<LuaHooks::Command> commands_;
   LuaHooks::RunAgentFn run_agent_fn_;
   nlohmann::json storage_{nlohmann::json::object()};
@@ -946,7 +952,9 @@ load_lua_hooks(const std::filesystem::path &path) {
   hooks->configure = [impl](const LuaHooks::AgentInfo &info) {
     impl->configure_info(info);
   };
-  hooks->commands = impl->commands();
+  impl->set_source_path(path.string());
+  hooks->source_path = impl->source_path();
+  hooks->commands    = impl->commands();
   if (impl->has_complete()) {
     hooks->complete =
         [impl](std::string_view partial,
