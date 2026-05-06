@@ -666,6 +666,50 @@ return {
     std::filesystem::remove(storage_file);
   });
 
+  tests::register_test("LuaHooks: complete returns candidates", [&]() {
+    auto p = write_hooks("completer.lua", R"lua(
+return {
+  complete = function(partial, transcript)
+    if partial:sub(1,1) ~= "/" then return {} end
+    local cmd = partial:sub(2)
+    local cmds = {"/rewind", "/fork", "/sub"}
+    local result = {}
+    for _, c in ipairs(cmds) do
+      if c:sub(1, #partial) == partial then
+        table.insert(result, c)
+      end
+    end
+    return result
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    CHECK(hooks->complete != nullptr);
+
+    auto r1 = hooks->complete("/r", {});
+    CHECK_EQ(r1.size(), std::size_t(1));
+    CHECK(r1[0] == "/rewind");
+
+    auto r2 = hooks->complete("/", {});
+    CHECK_EQ(r2.size(), std::size_t(3));
+
+    auto r3 = hooks->complete("hello", {});
+    CHECK(r3.empty());
+  });
+
+  tests::register_test("compose_hooks: complete unions all results", [&]() {
+    auto p1 = write_hooks("comp1.lua", R"lua(
+return { complete = function(partial, t) return {"/rewind", "/fork"} end }
+)lua");
+    auto p2 = write_hooks("comp2.lua", R"lua(
+return { complete = function(partial, t) return {"/search"} end }
+)lua");
+    auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
+    CHECK(composed->complete != nullptr);
+    auto r = composed->complete("/", {});
+    CHECK_EQ(r.size(), std::size_t(3));
+  });
+
   tests::register_test("run_lua_test_file: pass and fail counts", [&]() {
     auto p = write_hooks("suite.lua", R"lua(
 pici.test.run("passes",  function() pici.test.eq(1, 1) end)

@@ -456,6 +456,7 @@ public:
     after_ref_          = extract("after_tool_call");
     stop_after_ref_     = extract("should_stop_after_turn");
     command_ref_        = extract("on_command");
+    complete_ref_       = extract("complete");
     lua_pop(L_, 1); // pop the module table
 
     // Register pici global — runtime fields filled in by configure_info()
@@ -477,6 +478,7 @@ public:
       if (after_ref_      != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, after_ref_);
       if (stop_after_ref_ != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, stop_after_ref_);
       if (command_ref_    != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, command_ref_);
+      if (complete_ref_   != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, complete_ref_);
       lua_close(L_);
     }
   }
@@ -488,6 +490,7 @@ public:
   bool has_after()      const { return after_ref_      != LUA_NOREF; }
   bool has_stop_after() const { return stop_after_ref_ != LUA_NOREF; }
   bool has_command()    const { return command_ref_    != LUA_NOREF; }
+  bool has_complete()   const { return complete_ref_   != LUA_NOREF; }
 
   std::optional<BeforeToolCallResult>
   call_before(const BeforeToolCallContext &ctx) {
@@ -773,6 +776,32 @@ public:
     lua_pop(L_, 1);  // pop pici
   }
 
+  std::vector<std::string> call_complete(std::string_view partial,
+                                         const std::vector<Message> &transcript) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, complete_ref_);
+    lua_pushlstring(L_, partial.data(), partial.size());
+    push_messages_to_lua(L_, transcript);
+
+    if (lua_pcall(L_, 2, 1, 0) != LUA_OK) {
+      lua_pop(L_, 1);
+      return {};
+    }
+
+    std::vector<std::string> result;
+    if (lua_istable(L_, -1)) {
+      int n = static_cast<int>(lua_rawlen(L_, -1));
+      for (int i = 1; i <= n; ++i) {
+        lua_rawgeti(L_, -1, i);
+        if (lua_isstring(L_, -1))
+          result.push_back(lua_tostring(L_, -1));
+        lua_pop(L_, 1);
+      }
+    }
+    lua_pop(L_, 1);
+    return result;
+  }
+
   LuaHooks::CommandResult call_on_command(std::string_view cmd,
                                           std::string_view args,
                                           const std::vector<Message> &transcript) {
@@ -816,6 +845,7 @@ private:
   int after_ref_{LUA_NOREF};
   int stop_after_ref_{LUA_NOREF};
   int command_ref_{LUA_NOREF};
+  int complete_ref_{LUA_NOREF};
   LuaHooks::RunAgentFn run_agent_fn_;
   nlohmann::json storage_{nlohmann::json::object()};
   std::filesystem::path storage_path_;
@@ -889,6 +919,13 @@ load_lua_hooks(const std::filesystem::path &path) {
   hooks->configure = [impl](const LuaHooks::AgentInfo &info) {
     impl->configure_info(info);
   };
+  if (impl->has_complete()) {
+    hooks->complete =
+        [impl](std::string_view partial,
+               const std::vector<Message> &transcript) -> std::vector<std::string> {
+      return impl->call_complete(partial, transcript);
+    };
+  }
   return hooks;
 }
 
@@ -1081,6 +1118,22 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
     for (const auto &h : list)
       if (h->configure) h->configure(info);
   };
+
+  // complete — union of all results
+  if (std::any_of(list.begin(), list.end(),
+                  [](const auto &h) { return !!h->complete; })) {
+    out->complete =
+        [list](std::string_view partial,
+               const std::vector<Message> &transcript) -> std::vector<std::string> {
+      std::vector<std::string> result;
+      for (const auto &h : list) {
+        if (!h->complete) continue;
+        auto r = h->complete(partial, transcript);
+        result.insert(result.end(), r.begin(), r.end());
+      }
+      return result;
+    };
+  }
 
   return out;
 }

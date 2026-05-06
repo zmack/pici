@@ -421,6 +421,7 @@ target_link_libraries(pi-core PUBLIC
 add_executable(pi-cli
     src/main.cpp
     src/cli/args.cpp
+    src/cli/readline.cpp
 )
 
 target_link_libraries(pi-cli PRIVATE pi-core pi-http)

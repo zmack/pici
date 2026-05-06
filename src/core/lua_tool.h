@@ -95,6 +95,16 @@ struct LuaHooks {
   // Call once after the parent agent and tools are fully configured.
   std::function<void(const AgentInfo &)> configure;
 
+  // Tab completion hook.
+  // partial is the current buffer when Tab is pressed.
+  // Returns candidate strings; compose_hooks unions all add-ons' results.
+  //
+  // Lua signature:
+  //   complete(partial, transcript) → nil | {string, ...}
+  std::function<std::vector<std::string>(std::string_view partial,
+                                         const std::vector<Message> &transcript)>
+      complete;
+
   // Called when the user types a slash command (/word ...) in the REPL.
   // transcript is the full message history as a Lua array (role, content,
   // index, turn fields).  Return nil/{handled=false} to fall through to the

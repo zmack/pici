@@ -26,6 +26,7 @@
 #include "core/lua_tool.h"
 #include "core/message_types.h"
 #include "core/models.h"
+#include "cli/readline.h"
 #include "core/providers/openai_completions.h"
 #include "core/stream_renderer.h"
 
@@ -412,11 +413,19 @@ static int cmd_run(const cli::Args &args) {
     if (args.print_mode) return 0;
   }
 
+  // Build completion function
+  cli::CompleteFn complete_fn;
+  if (hooks && hooks->complete) {
+    complete_fn = [&hooks, &agent](std::string_view partial) {
+      return hooks->complete(partial, agent.state().messages());
+    };
+  }
+
   // Interactive REPL
-  std::string line;
   while (true) {
-    std::cout << "\n> " << std::flush;
-    if (!std::getline(std::cin, line)) break;
+    auto maybe_line = cli::readline("\n> ", complete_fn);
+    if (!maybe_line) break;
+    const std::string &line = *maybe_line;
     if (line.empty()) continue;
     if (line == "/exit" || line == "/quit") break;
 
