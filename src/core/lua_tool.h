@@ -61,6 +61,27 @@ struct LuaHooks {
     std::optional<std::string> prompt;
   };
 
+  // ── Sub-agent support ──────────────────────────────────────────────
+
+  struct AgentRunConfig {
+    std::string prompt;              // text to send to the sub-agent
+    std::size_t fork_at{0};         // 0 = empty history; N = copy parent's first N messages
+    std::optional<std::string> system_prompt; // override system prompt
+    std::optional<std::string> model_id;      // override model id only
+    std::vector<std::string> tools;           // empty = inherit all from parent
+  };
+
+  struct AgentRunResult {
+    std::string text;                // concatenated final assistant text
+    std::optional<std::string> error;
+  };
+
+  using RunAgentFn = std::function<AgentRunResult(const AgentRunConfig &)>;
+
+  // Call this after the parent agent is constructed to enable pici.run_agent()
+  // in Lua. Injects the factory into the live Lua state.
+  std::function<void(RunAgentFn)> set_run_agent;
+
   // Called when the user types a slash command (/word ...) in the REPL.
   // transcript is the full message history as a Lua array (role, content,
   // index, turn fields).  Return nil/{handled=false} to fall through to the

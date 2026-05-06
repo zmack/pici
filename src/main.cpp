@@ -304,6 +304,65 @@ static int cmd_run(const cli::Args &args) {
     }
   }
 
+  // Wire pici.run_agent() now that agent + tools exist
+  if (hooks && hooks->set_run_agent) {
+    hooks->set_run_agent(
+        [&agent, &opts](const core::LuaHooks::AgentRunConfig &cfg)
+            -> core::LuaHooks::AgentRunResult {
+          core::Agent::Options sub_opts = opts;
+          sub_opts.before_tool_call       = nullptr;
+          sub_opts.after_tool_call        = nullptr;
+          sub_opts.should_stop_after_turn = nullptr;
+          if (cfg.system_prompt) sub_opts.system_prompt = *cfg.system_prompt;
+          if (cfg.model_id)      sub_opts.model.id      = *cfg.model_id;
+
+          core::Agent sub(sub_opts);
+
+          if (cfg.fork_at > 0) {
+            auto msgs = agent.state().messages();
+            msgs.resize(std::min(cfg.fork_at, msgs.size()));
+            sub.state().set_messages(std::move(msgs));
+          }
+
+          if (cfg.tools.empty()) {
+            sub.set_tools(agent.state().tools());
+          } else {
+            for (const auto &t : agent.state().tools())
+              for (const auto &name : cfg.tools)
+                if (t->name() == name) { sub.add_tool(t); break; }
+          }
+
+          core::LuaHooks::AgentRunResult result;
+          try {
+            auto stream = sub.prompt(cfg.prompt);
+            for (const auto &ev : stream) {
+              std::visit(
+                  [&result](const auto &e) {
+                    using T = std::decay_t<decltype(e)>;
+                    if constexpr (std::is_same_v<T, core::MessageUpdateEvent>) {
+                      std::visit(
+                          [&result](const auto &ae) {
+                            using AE = std::decay_t<decltype(ae)>;
+                            if constexpr (std::is_same_v<
+                                              AE, core::AssistantMessageTextDeltaEvent>)
+                              result.text += ae.delta;
+                          },
+                          e.assistant_message_event);
+                    } else if constexpr (std::is_same_v<T, core::MessageEndEvent>) {
+                      if (const auto *am =
+                              std::get_if<core::AssistantMessage>(&e.message))
+                        if (am->error_message) result.error = *am->error_message;
+                    }
+                  },
+                  ev);
+            }
+          } catch (const std::exception &e) {
+            result.error = e.what();
+          }
+          return result;
+        });
+  }
+
   auto renderer = make_renderer(args);
 
   if (args.verbose) {

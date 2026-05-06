@@ -444,6 +444,54 @@ return {
     CHECK(!hooks->should_stop_after_turn);
   });
 
+  tests::register_test("LuaHooks: pici.run_agent calls C++ factory", [&]() {
+    auto p = write_hooks("subagent.lua", R"lua(
+return {
+  on_command = function(cmd, args, transcript)
+    if cmd ~= "sub" then return {handled=false} end
+    local result = pici.run_agent({
+      prompt = "hello from sub",
+      fork_at = #transcript,
+    })
+    if result.error then
+      return {handled=true, prompt="subagent error: " .. result.error}
+    end
+    -- inject the subagent response as a steering prompt
+    return {handled=true, prompt="subagent said: " .. result.text}
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    CHECK(hooks->set_run_agent != nullptr);
+
+    // Wire a mock run_agent factory
+    bool factory_called = false;
+    std::string captured_prompt;
+    std::size_t captured_fork_at = 999;
+
+    hooks->set_run_agent([&](const LuaHooks::AgentRunConfig &cfg) -> LuaHooks::AgentRunResult {
+      factory_called = true;
+      captured_prompt = cfg.prompt;
+      captured_fork_at = cfg.fork_at;
+      return {.text = "mocked response", .error = std::nullopt};
+    });
+
+    // Build transcript with 2 messages
+    std::vector<Message> transcript;
+    UserMessage u; u.content.push_back(TextContent{"hi"});
+    transcript.push_back(u);
+    AssistantMessage a; a.content.push_back(TextContent{"hello"});
+    transcript.push_back(a);
+
+    auto r = hooks->on_command("sub", "", transcript);
+    CHECK(r.handled);
+    CHECK(factory_called);
+    CHECK(captured_prompt == "hello from sub");
+    CHECK(captured_fork_at == std::size_t(2));
+    CHECK(r.prompt.has_value());
+    CHECK(*r.prompt == "subagent said: mocked response");
+  });
+
   std::filesystem::remove_all(dir);
 }
 

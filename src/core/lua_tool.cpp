@@ -454,6 +454,13 @@ public:
     stop_after_ref_     = extract("should_stop_after_turn");
     command_ref_        = extract("on_command");
     lua_pop(L_, 1); // pop the module table
+
+    // Register pici global — run_agent is wired in later via set_run_agent_fn
+    lua_newtable(L_);
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_run_agent, 1);
+    lua_setfield(L_, -2, "run_agent");
+    lua_setglobal(L_, "pici");
   }
 
   ~LuaHooksImpl() {
@@ -606,6 +613,79 @@ public:
     return stop;
   }
 
+  void set_run_agent_fn(LuaHooks::RunAgentFn fn) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    run_agent_fn_ = std::move(fn);
+  }
+
+  static int lua_pici_run_agent(lua_State *L) {
+    auto *impl = static_cast<LuaHooksImpl *>(
+        lua_touserdata(L, lua_upvalueindex(1)));
+
+    // run_agent_fn_ is set once from main before any hook calls — no lock needed
+    // (acquiring mutex_ here would deadlock since call_on_command holds it)
+    const LuaHooks::RunAgentFn &fn = impl->run_agent_fn_;
+    if (!fn) {
+      lua_pushnil(L);
+      lua_pushstring(L, "pici.run_agent not available");
+      return 2;
+    }
+
+    LuaHooks::AgentRunConfig cfg;
+    if (lua_istable(L, 1)) {
+      lua_getfield(L, 1, "prompt");
+      if (lua_isstring(L, -1)) cfg.prompt = lua_tostring(L, -1);
+      lua_pop(L, 1);
+
+      lua_getfield(L, 1, "fork_at");
+      if (lua_isinteger(L, -1)) {
+        auto n = lua_tointeger(L, -1);
+        if (n > 0) cfg.fork_at = static_cast<std::size_t>(n);
+      }
+      lua_pop(L, 1);
+
+      lua_getfield(L, 1, "system_prompt");
+      if (lua_isstring(L, -1)) cfg.system_prompt = lua_tostring(L, -1);
+      lua_pop(L, 1);
+
+      lua_getfield(L, 1, "model");
+      if (lua_isstring(L, -1)) cfg.model_id = lua_tostring(L, -1);
+      lua_pop(L, 1);
+
+      lua_getfield(L, 1, "tools");
+      if (lua_istable(L, -1)) {
+        int n = static_cast<int>(lua_rawlen(L, -1));
+        for (int i = 1; i <= n; ++i) {
+          lua_rawgeti(L, -1, i);
+          if (lua_isstring(L, -1))
+            cfg.tools.push_back(lua_tostring(L, -1));
+          lua_pop(L, 1);
+        }
+      }
+      lua_pop(L, 1);
+    }
+
+    if (cfg.prompt.empty()) {
+      lua_pushnil(L);
+      lua_pushstring(L, "pici.run_agent: prompt is required");
+      return 2;
+    }
+
+    LuaHooks::AgentRunResult result = fn(cfg);
+
+    lua_newtable(L);
+    lua_pushstring(L, result.text.c_str());
+    lua_setfield(L, -2, "text");
+    if (result.error) {
+      lua_pushstring(L, result.error->c_str());
+      lua_setfield(L, -2, "error");
+    } else {
+      lua_pushnil(L);
+      lua_setfield(L, -2, "error");
+    }
+    return 1;
+  }
+
   LuaHooks::CommandResult call_on_command(std::string_view cmd,
                                           std::string_view args,
                                           const std::vector<Message> &transcript) {
@@ -649,6 +729,7 @@ private:
   int after_ref_{LUA_NOREF};
   int stop_after_ref_{LUA_NOREF};
   int command_ref_{LUA_NOREF};
+  LuaHooks::RunAgentFn run_agent_fn_;
   mutable std::mutex mutex_;
 };
 
@@ -716,6 +797,9 @@ load_lua_hooks(const std::filesystem::path &path) {
       return impl->call_on_command(cmd, args, transcript);
     };
   }
+  hooks->set_run_agent = [impl](LuaHooks::RunAgentFn fn) {
+    impl->set_run_agent_fn(std::move(fn));
+  };
   return hooks;
 }
 
