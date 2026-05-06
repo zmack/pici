@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <variant>
 
 #include "core/builtin_tools.h"
 
@@ -196,6 +197,118 @@ void test_file_tools() {
   });
 }
 
+void test_truncation_detail() {
+  tests::register_test("Truncation detail: line limit message", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-trunc-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto tools = create_all_tools(root);
+    auto write = find_tool(tools, "write");
+    auto read  = find_tool(tools, "read");
+
+    // Write 2500 lines (exceeds default 2000-line limit)
+    std::string content;
+    for (int i = 1; i <= 2500; ++i)
+      content += "line " + std::to_string(i) + "\n";
+    write->execute("1", R"({"path":"big.txt","content":)" +
+                         nlohmann::json(content).dump() + "}");
+
+    auto r = read->execute("2", R"({"path":"big.txt"})");
+    CHECK(!r->is_error());
+    // Read tool shows "N more lines... Use offset=X" for its own line limit
+    CHECK(r->content().find("more lines in file") != std::string::npos);
+    CHECK(r->content().find("offset=") != std::string::npos);
+    // And truncate_head adds detail when byte limit is hit on the assembled output
+    // (this file is small enough to not hit byte limit, so just verify line limit works)
+    CHECK(r->content().find("line 2500") == std::string::npos); // line 2500 not shown
+    std::filesystem::remove_all(root);
+  });
+}
+
+void test_gitignore() {
+  tests::register_test("GitIgnore: find respects .gitignore", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-gitignore-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "src");
+    std::filesystem::create_directories(root / "dist");
+    std::filesystem::create_directories(root / "node_modules" / "pkg");
+    std::ofstream(root / "src" / "main.cpp") << "int main() {}";
+    std::ofstream(root / "dist" / "out.js") << "output";
+    std::ofstream(root / "node_modules" / "pkg" / "index.js") << "pkg";
+    std::ofstream(root / ".gitignore") << "dist/\nnode_modules/\n";
+
+    const auto tools = create_all_tools(root);
+    auto find = find_tool(tools, "find");
+    auto r = find->execute("1", R"({"pattern":"*.cpp","path":"."})");
+    CHECK(!r->is_error());
+    CHECK(r->content().find("main.cpp") != std::string::npos);
+
+    // dist and node_modules should be skipped
+    auto r2 = find->execute("2", R"({"pattern":"*.js","path":"."})");
+    CHECK(r2->content().find("out.js") == std::string::npos);
+    CHECK(r2->content().find("index.js") == std::string::npos);
+
+    std::filesystem::remove_all(root);
+  });
+
+  tests::register_test("GitIgnore: grep respects .gitignore", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-gitignore-grep";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "src");
+    std::filesystem::create_directories(root / "vendor");
+    std::ofstream(root / "src" / "main.cpp") << "needle";
+    std::ofstream(root / "vendor" / "lib.cpp") << "needle";
+    std::ofstream(root / ".gitignore") << "vendor/\n";
+
+    const auto tools = create_all_tools(root);
+    auto grep = find_tool(tools, "grep");
+    auto r = grep->execute("1", R"({"pattern":"needle"})");
+    CHECK(r->content().find("src/main.cpp") != std::string::npos);
+    CHECK(r->content().find("vendor") == std::string::npos);
+    std::filesystem::remove_all(root);
+  });
+}
+
+void test_image_read() {
+  tests::register_test("Read tool: image returns ImageContent block", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-image-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    // Write a tiny valid PNG (1x1 white pixel)
+    static const unsigned char kPng[] = {
+        0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,
+        0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,
+        0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,
+        0x08,0x02,0x00,0x00,0x00,0x90,0x77,0x53,
+        0xde,0x00,0x00,0x00,0x0c,0x49,0x44,0x41,
+        0x54,0x08,0xd7,0x63,0xf8,0xff,0xff,0x3f,
+        0x00,0x05,0xfe,0x02,0xfe,0xdc,0xcc,0x59,
+        0xe7,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,
+        0x44,0xae,0x42,0x60,0x82};
+    std::ofstream f(root / "img.png", std::ios::binary);
+    f.write(reinterpret_cast<const char*>(kPng), sizeof(kPng));
+    f.close();
+
+    const auto tools = create_all_tools(root);
+    auto read = find_tool(tools, "read");
+    auto r = read->execute("1", R"({"path":"img.png"})");
+    CHECK(!r->is_error());
+    // Should mention image in text content
+    CHECK(r->content().find("image/png") != std::string::npos);
+    // Should have two content blocks: text + image
+    auto blocks = r->content_blocks();
+    CHECK_EQ(blocks.size(), std::size_t(2));
+    CHECK(std::holds_alternative<TextContent>(blocks[0]));
+    CHECK(std::holds_alternative<ImageContent>(blocks[1]));
+    const auto &img = std::get<ImageContent>(blocks[1]);
+    CHECK(img.mime_type == "image/png");
+    CHECK(!img.data.empty());
+
+    std::filesystem::remove_all(root);
+  });
+}
+
 void test_discovery_tools() {
   tests::register_test("Builtin tools: ls find grep", []() {
     const auto root = std::filesystem::temp_directory_path() /
@@ -282,6 +395,9 @@ void test_bash_tool() {
 int main() {
   test_tool_factories();
   test_file_tools();
+  test_truncation_detail();
+  test_gitignore();
+  test_image_read();
   test_discovery_tools();
   test_bash_tool();
 

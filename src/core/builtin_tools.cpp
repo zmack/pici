@@ -191,16 +191,30 @@ std::vector<std::string> split_lines(const std::string &content) {
 
 std::string truncate_head(const std::string &content, std::size_t max_lines,
                           std::size_t max_bytes) {
+  std::size_t total_lines = 0;
+  for (char c : content)
+    if (c == '\n') ++total_lines;
+  if (!content.empty() && content.back() != '\n') ++total_lines;
+
   std::string out;
-  std::size_t lines = 0;
+  std::size_t out_lines = 0;
+  bool hit_lines = false;
+  bool hit_bytes = false;
+
   for (char ch : content) {
-    if (out.size() >= max_bytes || lines >= max_lines) {
-      out += "\n\n[Output truncated]";
-      break;
-    }
+    if (out_lines >= max_lines) { hit_lines = true; break; }
+    if (out.size() >= max_bytes) { hit_bytes = true; break; }
     out.push_back(ch);
-    if (ch == '\n') {
-      ++lines;
+    if (ch == '\n') ++out_lines;
+  }
+
+  if (hit_lines || hit_bytes) {
+    if (hit_lines) {
+      out += "\n\n[Truncated: showing " + std::to_string(max_lines) + " of " +
+             std::to_string(total_lines) + " lines]";
+    } else {
+      out += "\n\n[Truncated: " + std::to_string(out_lines) + " lines shown (" +
+             std::to_string(max_bytes / 1024) + "KB limit)]";
     }
   }
   return out;
@@ -250,6 +264,109 @@ bool should_skip_dir(const std::filesystem::path &path) {
          name == "build-asan";
 }
 
+// ─── GitIgnore ────────────────────────────────────────────────────────────────
+
+class GitIgnore {
+public:
+  void load(const std::filesystem::path &dir) {
+    auto path = dir / ".gitignore";
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return;
+    std::ifstream f(path);
+    if (!f) return;
+    std::string line;
+    while (std::getline(f, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      if (line.empty() || line[0] == '#' || line[0] == '!') continue;
+      add_pattern(line);
+    }
+  }
+
+  bool ignored(const std::filesystem::path &abs_path,
+               const std::filesystem::path &root,
+               bool is_dir) const {
+    if (patterns_.empty()) return false;
+    const std::string name = abs_path.filename().string();
+    const std::string rel  = abs_path.lexically_relative(root).generic_string();
+    for (const auto &p : patterns_) {
+      if (p.dirs_only && !is_dir) continue;
+      const std::string &subject = p.has_slash ? rel : name;
+      if (std::regex_match(subject, p.re)) return true;
+    }
+    return false;
+  }
+
+  bool empty() const { return patterns_.empty(); }
+
+private:
+  struct Pattern {
+    std::regex re;
+    bool dirs_only{false};
+    bool has_slash{false};
+  };
+
+  void add_pattern(std::string pat) {
+    Pattern p;
+    if (!pat.empty() && pat.back() == '/') { p.dirs_only = true; pat.pop_back(); }
+    if (!pat.empty() && pat.front() == '/') { p.has_slash = true; pat = pat.substr(1); }
+    else p.has_slash = pat.find('/') != std::string::npos;
+    try {
+      p.re = std::regex(glob_to_regex(pat));
+      patterns_.push_back(std::move(p));
+    } catch (...) {}
+  }
+
+  std::vector<Pattern> patterns_;
+};
+
+// ─── Image helpers ────────────────────────────────────────────────────────────
+
+static std::string image_mime_type(const std::filesystem::path &path) {
+  static const std::pair<std::string_view, std::string_view> kMimes[] = {
+      {".jpg",  "image/jpeg"}, {".jpeg", "image/jpeg"},
+      {".png",  "image/png"},  {".gif",  "image/gif"},
+      {".webp", "image/webp"}, {".bmp",  "image/bmp"},
+      {".ico",  "image/x-icon"},{".svg",  "image/svg+xml"},
+  };
+  std::string ext = path.extension().string();
+  for (char &c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  for (const auto &[e, m] : kMimes)
+    if (e == ext) return std::string(m);
+  return {};
+}
+
+static std::string base64_encode(const std::string &data) {
+  static constexpr std::string_view kTable =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve((data.size() + 2) / 3 * 4);
+  for (std::size_t i = 0; i < data.size(); i += 3) {
+    unsigned int b = static_cast<unsigned char>(data[i]) << 16u;
+    if (i + 1 < data.size()) b |= static_cast<unsigned char>(data[i + 1]) << 8u;
+    if (i + 2 < data.size()) b |= static_cast<unsigned char>(data[i + 2]);
+    out += kTable[(b >> 18u) & 63u];
+    out += kTable[(b >> 12u) & 63u];
+    out += (i + 1 < data.size()) ? kTable[(b >> 6u) & 63u] : '=';
+    out += (i + 2 < data.size()) ? kTable[b & 63u] : '=';
+  }
+  return out;
+}
+
+class ImageToolResult : public ToolResult {
+public:
+  ImageToolResult(std::string b64, std::string mime, std::string desc)
+      : b64_(std::move(b64)), mime_(std::move(mime)), desc_(std::move(desc)) {}
+  bool is_error() const override { return false; }
+  std::string content() const override { return desc_; }
+  std::optional<std::string> details() const override { return std::nullopt; }
+  std::vector<ToolResultContentBlock> content_blocks() const override {
+    return {TextContent{.text = desc_},
+            ImageContent{.data = b64_, .mime_type = mime_}};
+  }
+private:
+  std::string b64_, mime_, desc_;
+};
+
 std::string relative_posix(const std::filesystem::path &path,
                            const std::filesystem::path &base) {
   std::error_code ec;
@@ -277,6 +394,21 @@ public:
     try {
       const auto json = parse_args(args);
       const auto path = resolve_workspace_path(json.value("path", ""));
+
+      // Image detection — return as base64 content block
+      const auto mime = image_mime_type(path);
+      if (!mime.empty()) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) throw std::runtime_error("Cannot read file: " + path.string());
+        std::string raw((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+        const auto kb = raw.size() / 1024;
+        std::string desc = "[image: " + path.filename().string() + ", " +
+                           mime + ", " + std::to_string(kb) + "KB]";
+        return std::make_shared<ImageToolResult>(base64_encode(raw), mime,
+                                                  std::move(desc));
+      }
+
       const auto content = read_text_file(path);
       const auto lines = split_lines(content);
       const auto offset = std::max(1, json.value("offset", 1));
@@ -300,8 +432,9 @@ public:
             << " more lines in file. Use offset=" << (end + 1)
             << " to continue.]";
       }
+      // Line limit already applied above — only enforce byte limit here
       return std::make_shared<TextToolResult>(
-          truncate_head(out.str(), kReadMaxLines, kMaxBytes));
+          truncate_head(out.str(), std::numeric_limits<std::size_t>::max(), kMaxBytes));
     } catch (const std::exception &err) {
       return error_result(err);
     }
@@ -701,6 +834,9 @@ public:
       if (!std::filesystem::is_directory(root)) {
         throw std::runtime_error("Not a directory: " + root.string());
       }
+      GitIgnore gi;
+      gi.load(cwd());
+      if (root != cwd()) gi.load(root);
       const std::regex matcher(glob_to_regex(pattern));
       std::vector<std::string> results;
       std::error_code ec;
@@ -709,13 +845,15 @@ public:
                ec),
            end;
            it != end && !ec; it.increment(ec)) {
-        if (it->is_directory(ec) && should_skip_dir(it->path())) {
+        if (it->is_directory(ec) &&
+            (should_skip_dir(it->path()) || gi.ignored(it->path(), root, true))) {
           it.disable_recursion_pending();
           continue;
         }
         if (!it->is_regular_file(ec)) {
           continue;
         }
+        if (gi.ignored(it->path(), root, false)) continue;
         auto rel = relative_posix(it->path(), root);
         if (std::regex_match(rel, matcher) ||
             std::regex_match(it->path().filename().generic_string(), matcher)) {
@@ -781,6 +919,9 @@ public:
           glob.empty() ? std::nullopt
                        : std::optional<std::regex>(glob_to_regex(glob));
 
+      GitIgnore gi;
+      gi.load(cwd());
+      if (root != cwd()) gi.load(root);
       std::vector<std::filesystem::path> files;
       std::error_code ec;
       if (std::filesystem::is_regular_file(root, ec)) {
@@ -792,13 +933,13 @@ public:
                  ec),
              end;
              it != end && !ec; it.increment(ec)) {
-          if (it->is_directory(ec) && should_skip_dir(it->path())) {
+          if (it->is_directory(ec) &&
+              (should_skip_dir(it->path()) || gi.ignored(it->path(), root, true))) {
             it.disable_recursion_pending();
             continue;
           }
-          if (!it->is_regular_file(ec)) {
-            continue;
-          }
+          if (!it->is_regular_file(ec)) continue;
+          if (gi.ignored(it->path(), root, false)) continue;
           const auto rel = relative_posix(it->path(), root);
           if (!glob_matcher || std::regex_match(rel, *glob_matcher) ||
               std::regex_match(it->path().filename().generic_string(),
