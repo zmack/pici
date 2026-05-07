@@ -557,6 +557,45 @@ end }
     CHECK(composed == h);  // same pointer, no wrapping
   });
 
+  tests::register_test("pici.add_tool registers inline tool", [&]() {
+    auto p = write_hooks("inline_tool.lua", R"lua(
+pici.add_tool({
+  name        = "echo_test",
+  description = "Echoes the input back",
+  schema      = '{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}',
+  execute     = function(args)
+    return "ECHO: " .. (args.text or "")
+  end,
+})
+return {}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    CHECK_EQ(hooks->registered_tools.size(), std::size_t(1));
+    const auto &tool = hooks->registered_tools[0];
+    CHECK(tool->name() == "echo_test");
+    CHECK(tool->description() == "Echoes the input back");
+    CHECK(!tool->source_path().empty()); // should be the hooks file path
+
+    // Execute the tool
+    auto result = tool->execute("id", R"({"text":"hello"})", {}, {});
+    CHECK(!result->is_error());
+    CHECK(result->content() == "ECHO: hello");
+  });
+
+  tests::register_test("compose_hooks: registered_tools are unioned", [&]() {
+    auto p1 = write_hooks("rt1.lua", R"lua(
+pici.add_tool({name="tool_a", description="A", execute=function(a) return "a" end})
+return {}
+)lua");
+    auto p2 = write_hooks("rt2.lua", R"lua(
+pici.add_tool({name="tool_b", description="B", execute=function(a) return "b" end})
+pici.add_tool({name="tool_c", description="C", execute=function(a) return "c" end})
+return {}
+)lua");
+    auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
+    CHECK_EQ(composed->registered_tools.size(), std::size_t(3));
+  });
+
   tests::register_test("LuaHooks: prompt_line returns custom prompt", [&]() {
     auto p = write_hooks("prompt.lua", R"lua(
 return {

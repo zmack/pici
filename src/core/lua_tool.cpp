@@ -419,15 +419,61 @@ static void push_messages_to_lua(lua_State *L,
   }
 }
 
+// ─── InlineLuaTool ───────────────────────────────────────────────────────────
+// Forward-declared; defined after LuaHooksImpl.
+class LuaHooksImpl;
+
+class InlineLuaTool final : public ToolDefinition {
+public:
+  InlineLuaTool(std::shared_ptr<LuaHooksImpl> impl, int exec_ref,
+                std::string name, std::string description,
+                std::string schema_str, std::string source)
+      : impl_(std::move(impl)), exec_ref_(exec_ref),
+        name_(std::move(name)), description_(std::move(description)),
+        source_(std::move(source)),
+        schema_(std::make_unique<LuaToolSchema>(std::move(schema_str))) {}
+
+  ~InlineLuaTool() override;
+
+  std::string_view name() const override { return name_; }
+  std::string_view description() const override { return description_; }
+  std::string_view source_path() const override { return source_; }
+  ToolSchema &schema() const override { return *schema_; }
+
+  std::shared_ptr<ToolResult> execute(std::string_view call_id,
+                                       std::string_view args_json,
+                                       std::stop_token st,
+                                       ToolUpdateCallback cb) const override;
+
+private:
+  std::shared_ptr<LuaHooksImpl> impl_;
+  int exec_ref_;
+  std::string name_, description_, source_;
+  std::unique_ptr<LuaToolSchema> schema_;
+};
+
 // ─── LuaHooksImpl ────────────────────────────────────────────────────────────
 
-class LuaHooksImpl {
+class LuaHooksImpl : public std::enable_shared_from_this<LuaHooksImpl> {
 public:
   explicit LuaHooksImpl(const std::filesystem::path &path) {
     L_ = luaL_newstate();
     if (!L_) throw std::runtime_error("Failed to create Lua state for hooks");
     luaL_openlibs(L_);
     register_json_module(L_);
+
+    // Register pici global BEFORE executing the file so pici.add_tool() works
+    lua_newtable(L_);
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_log, 1);
+    lua_setfield(L_, -2, "log");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_run_agent, 1);
+    lua_setfield(L_, -2, "run_agent");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_add_tool, 1);
+    lua_setfield(L_, -2, "add_tool");
+    lua_setglobal(L_, "pici");
 
     if (luaL_loadfile(L_, path.c_str()) != LUA_OK) {
       std::string err = lua_tostring(L_, -1);
@@ -487,18 +533,6 @@ public:
     lua_pop(L_, 1);
 
     lua_pop(L_, 1); // pop the module table
-
-    // Register pici global — runtime fields filled in by configure_info()
-    lua_newtable(L_);
-    // pici.log — available immediately
-    lua_pushlightuserdata(L_, this);
-    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_log, 1);
-    lua_setfield(L_, -2, "log");
-    // pici.run_agent — available after configure_info()
-    lua_pushlightuserdata(L_, this);
-    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_run_agent, 1);
-    lua_setfield(L_, -2, "run_agent");
-    lua_setglobal(L_, "pici");
   }
 
   ~LuaHooksImpl() {
@@ -861,6 +895,106 @@ public:
     return result;
   }
 
+  // ── Inline tool support ──────────────────────────────────────────────
+
+  std::shared_ptr<ToolResult> execute_inline_tool(int ref,
+                                                   std::string_view args_json) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
+    auto args = nlohmann::json::parse(args_json, nullptr, false);
+    if (args.is_discarded() || !args.is_object()) args = nlohmann::json::object();
+    json_to_lua(L_, args);
+    if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
+      std::string err = lua_tostring(L_, -1);
+      lua_pop(L_, 1);
+      return std::make_shared<LuaToolResult>(std::move(err), true);
+    }
+    std::shared_ptr<ToolResult> result;
+    if (lua_isstring(L_, -1)) {
+      result = std::make_shared<LuaToolResult>(
+          std::string(lua_tostring(L_, -1)), false);
+    } else if (lua_istable(L_, -1)) {
+      lua_getfield(L_, -1, "content");
+      std::string content =
+          lua_isstring(L_, -1) ? lua_tostring(L_, -1) : std::string{};
+      lua_pop(L_, 1);
+      lua_getfield(L_, -1, "is_error");
+      bool is_err = lua_toboolean(L_, -1) != 0;
+      lua_pop(L_, 1);
+      result = std::make_shared<LuaToolResult>(std::move(content), is_err);
+    } else {
+      result = std::make_shared<LuaToolResult>(std::string{}, false);
+    }
+    lua_pop(L_, 1);
+    return result;
+  }
+
+  void unref_tool(int ref) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (L_) luaL_unref(L_, LUA_REGISTRYINDEX, ref);
+  }
+
+  // Phase 1: called from lua_pici_add_tool during construction.
+  // Stores specs; InlineLuaTool objects created in finalize_inline_tools().
+  struct PendingTool { int exec_ref; std::string name, description, schema; };
+
+  void add_pending_tool(PendingTool spec) {
+    pending_tools_.push_back(std::move(spec));
+  }
+
+  // Phase 2: called from load_lua_hooks after make_shared returns.
+  void finalize_inline_tools() {
+    for (auto &spec : pending_tools_) {
+      auto tool = std::make_shared<InlineLuaTool>(
+          shared_from_this(), spec.exec_ref,
+          std::move(spec.name), std::move(spec.description),
+          std::move(spec.schema), source_path_);
+      inline_tools_.push_back(std::move(tool));
+    }
+    pending_tools_.clear();
+  }
+
+  const std::vector<std::shared_ptr<const ToolDefinition>> &inline_tools() const {
+    return inline_tools_;
+  }
+
+  static int lua_pici_add_tool(lua_State *L) {
+    auto *impl = impl_from(L);
+    if (!lua_istable(L, 1)) {
+      lua_pushboolean(L, 0);
+      lua_pushstring(L, "pici.add_tool: expected a table");
+      return 2;
+    }
+    auto sfield = [&](const char *k) {
+      lua_getfield(L, 1, k);
+      std::string s = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+      lua_pop(L, 1);
+      return s;
+    };
+    std::string name   = sfield("name");
+    std::string desc   = sfield("description");
+    std::string schema = sfield("schema");
+    if (schema.empty()) schema = R"({"type":"object","additionalProperties":true})";
+
+    lua_getfield(L, 1, "execute");
+    if (!lua_isfunction(L, -1)) {
+      lua_pop(L, 1);
+      lua_pushboolean(L, 0);
+      lua_pushstring(L, "pici.add_tool: execute must be a function");
+      return 2;
+    }
+    int exec_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    if (name.empty()) {
+      luaL_unref(L, LUA_REGISTRYINDEX, exec_ref);
+      lua_pushboolean(L, 0);
+      lua_pushstring(L, "pici.add_tool: name is required");
+      return 2;
+    }
+    impl->add_pending_tool({exec_ref, std::move(name), std::move(desc), std::move(schema)});
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+
   LuaHooks::CommandResult call_on_command(std::string_view cmd,
                                           std::string_view args,
                                           const std::vector<Message> &transcript) {
@@ -907,12 +1041,27 @@ private:
   int complete_ref_{LUA_NOREF};
   int prompt_line_ref_{LUA_NOREF};
   std::string source_path_;
+  std::vector<PendingTool> pending_tools_;
+  std::vector<std::shared_ptr<const ToolDefinition>> inline_tools_;
   std::vector<LuaHooks::Command> commands_;
   LuaHooks::RunAgentFn run_agent_fn_;
   nlohmann::json storage_{nlohmann::json::object()};
   std::filesystem::path storage_path_;
   mutable std::mutex mutex_;
 };
+
+// ─── InlineLuaTool method definitions ────────────────────────────────────────
+
+InlineLuaTool::~InlineLuaTool() {
+  if (impl_ && exec_ref_ != LUA_NOREF)
+    impl_->unref_tool(exec_ref_);
+}
+
+std::shared_ptr<ToolResult>
+InlineLuaTool::execute(std::string_view, std::string_view args_json,
+                       std::stop_token, ToolUpdateCallback) const {
+  return impl_->execute_inline_tool(exec_ref_, args_json);
+}
 
 } // namespace
 
@@ -982,8 +1131,10 @@ load_lua_hooks(const std::filesystem::path &path) {
     impl->configure_info(info);
   };
   impl->set_source_path(path.string());
-  hooks->source_path = impl->source_path();
-  hooks->commands    = impl->commands();
+  impl->finalize_inline_tools(); // needs shared_ptr; safe here post-make_shared
+  hooks->source_path      = impl->source_path();
+  hooks->commands         = impl->commands();
+  hooks->registered_tools = impl->inline_tools();
   if (impl->has_complete()) {
     hooks->complete =
         [impl](std::string_view partial,
@@ -1185,9 +1336,13 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
     };
   }
 
-  // commands — union
-  for (const auto &h : list)
+  // commands + registered_tools — union
+  for (const auto &h : list) {
     out->commands.insert(out->commands.end(), h->commands.begin(), h->commands.end());
+    out->registered_tools.insert(out->registered_tools.end(),
+                                  h->registered_tools.begin(),
+                                  h->registered_tools.end());
+  }
 
   // configure — forward to all
   out->configure = [list](const LuaHooks::AgentInfo &info) {

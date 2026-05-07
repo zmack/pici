@@ -41,6 +41,10 @@ struct LuaHooks {
   // Path of the file this hooks object was loaded from (empty for composed).
   std::string source_path;
 
+  // Tools registered via pici.add_tool() inside this add-on.
+  // compose_hooks unions these from all add-ons.
+  std::vector<std::shared_ptr<const core::ToolDefinition>> registered_tools;
+
   std::function<std::optional<BeforeToolCallResult>(
       const BeforeToolCallContext &, std::stop_token)>
       before_tool_call;

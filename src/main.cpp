@@ -182,8 +182,9 @@ static std::unique_ptr<core::StreamRenderer> make_renderer(const cli::Args &args
   return core::make_auto_renderer(STDOUT_FILENO);
 }
 
-static void run_turn(core::Agent &agent, const std::string &input,
-                     core::StreamRenderer &renderer, bool verbose) {
+static core::TokenUsage run_turn(core::Agent &agent, const std::string &input,
+                                  core::StreamRenderer &renderer, bool verbose) {
+  core::TokenUsage usage;
   renderer.reset();
   auto stream = agent.prompt(input);
   bool done = false;
@@ -206,27 +207,42 @@ static void run_turn(core::Agent &agent, const std::string &input,
                 e.assistant_message_event);
           } else if constexpr (std::is_same_v<T, core::MessageEndEvent>) {
             if (const auto *am = std::get_if<core::AssistantMessage>(&e.message)) {
-              if (am->error_message) {
+              usage = am->usage;
+              if (am->error_message)
                 std::cerr << "\nerror: " << *am->error_message << "\n";
-              }
-              if (verbose) {
+              if (verbose)
                 std::cerr << "[usage: in=" << am->usage.input
                           << " out=" << am->usage.output << "]\n";
-              }
             }
             renderer.finish();
           } else if constexpr (std::is_same_v<T, core::ToolExecutionStartEvent>) {
             std::cout << "\n[tool: " << e.tool_name << "]\n" << std::flush;
           } else if constexpr (std::is_same_v<T, core::ToolExecutionEndEvent>) {
-            if (e.result && verbose) {
+            if (e.result && verbose)
               std::cout << e.result->content() << "\n" << std::flush;
-            }
           } else if constexpr (std::is_same_v<T, core::AgentEndEvent>) {
             done = true;
           }
         },
         ev);
   }
+  return usage;
+}
+
+static void print_usage(const core::TokenUsage &last,
+                        const core::TokenUsage &session,
+                        std::size_t turns) {
+  auto row = [](std::string_view label, std::uint64_t in, std::uint64_t out,
+                std::uint64_t total) {
+    std::cout << std::left << std::setw(10) << label
+              << "  in=" << std::setw(8) << in
+              << "  out=" << std::setw(8) << out
+              << "  total=" << total << "\n";
+  };
+  std::cout << "\n";
+  row("last turn:", last.input, last.output, last.total_tokens);
+  row("session:",  session.input, session.output, session.total_tokens);
+  std::cout << "  turns: " << turns << "\n";
 }
 
 struct ContextFile {
@@ -375,6 +391,12 @@ static int cmd_run(const cli::Args &args) {
     return 0;
   }
 
+  // Tools registered via pici.add_tool() in hooks files
+  if (hooks) {
+    for (const auto &t : hooks->registered_tools)
+      agent.add_tool(t);
+  }
+
   // Configure pici.* globals now that agent + tools exist
   if (hooks && hooks->configure) {
     // Build tool name list
@@ -485,8 +507,9 @@ static int cmd_run(const cli::Args &args) {
 
     if (is_slash && !has_space) {
       // Complete command names: builtins + declared add-on commands
-      for (std::string_view b : {std::string_view("/exit"), std::string_view("/quit"),
-                                  std::string_view("/tools"), std::string_view("/addons")}) {
+      for (std::string_view b : {std::string_view("/exit"),   std::string_view("/quit"),
+                                  std::string_view("/tools"),  std::string_view("/addons"),
+                                  std::string_view("/usage")}) {
         if (b.substr(0, partial.size()) == partial)
           result.emplace_back(b);
       }
@@ -506,7 +529,20 @@ static int cmd_run(const cli::Args &args) {
     return {};
   };
 
-  // Interactive REPL
+  // Interactive REPL — track usage across turns
+  core::TokenUsage last_usage, session_usage;
+  std::size_t session_turns = 0;
+
+  auto accumulate = [&](const core::TokenUsage &u) {
+    last_usage = u;
+    session_usage.input        += u.input;
+    session_usage.output       += u.output;
+    session_usage.cache_read   += u.cache_read;
+    session_usage.cache_write  += u.cache_write;
+    session_usage.total_tokens += u.total_tokens;
+    ++session_turns;
+  };
+
   while (true) {
     // Build the prompt — let add-ons customise it
     std::string prompt = "\n> ";
@@ -515,8 +551,7 @@ static int cmd_run(const cli::Args &args) {
       std::size_t turns = 0;
       for (const auto &m : msgs)
         if (std::holds_alternative<core::AssistantMessage>(m)) ++turns;
-      auto tools_cnt  = agent.state().tools().size();
-      auto custom     = hooks->prompt_line(turns, model.id, tools_cnt);
+      auto custom = hooks->prompt_line(turns, model.id, agent.state().tools().size());
       if (custom) prompt = "\n" + *custom;
     }
     auto maybe_line = cli::readline(prompt, complete_fn);
@@ -526,32 +561,28 @@ static int cmd_run(const cli::Args &args) {
     if (line == "/exit" || line == "/quit") break;
     if (line == "/tools")  { print_tools(agent.state().tools()); continue; }
     if (line == "/addons") { print_addons(hooks_list_saved); continue; }
+    if (line == "/usage")  { print_usage(last_usage, session_usage, session_turns); continue; }
 
     // Slash command dispatch
     if (line[0] == '/' && hooks && hooks->on_command) {
-      // Split "/cmd rest" → cmd="cmd", rest_args="rest"
       auto space = line.find(' ');
       std::string cmd  = line.substr(1, space == std::string::npos ? std::string::npos : space - 1);
       std::string rest = space == std::string::npos ? "" : line.substr(space + 1);
 
       auto result = hooks->on_command(cmd, rest, agent.state().messages());
-
       if (result.handled) {
         if (result.truncate_to) {
           auto msgs = agent.state().messages();
-          auto n = std::min(*result.truncate_to, msgs.size());
-          msgs.resize(n);
+          msgs.resize(std::min(*result.truncate_to, msgs.size()));
           agent.state().set_messages(std::move(msgs));
         }
-        if (result.prompt) {
-          run_turn(agent, *result.prompt, *renderer, args.verbose);
-        }
+        if (result.prompt)
+          accumulate(run_turn(agent, *result.prompt, *renderer, args.verbose));
         continue;
       }
-      // not handled — fall through and send to agent as text
     }
 
-    run_turn(agent, line, *renderer, args.verbose);
+    accumulate(run_turn(agent, line, *renderer, args.verbose));
   }
   return 0;
 }
