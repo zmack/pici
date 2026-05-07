@@ -177,8 +177,13 @@ static std::optional<core::Model> resolve_model(const cli::Args &args) {
 }
 
 static std::unique_ptr<core::StreamRenderer> make_renderer(const cli::Args &args) {
-  if (args.render == "markdown") return core::make_diff_renderer(STDOUT_FILENO);
-  if (args.render == "raw")      return core::make_raw_renderer(STDOUT_FILENO);
+  if (!args.render.empty()) {
+    auto r = core::StreamRendererRegistry::instance().make(args.render, STDOUT_FILENO);
+    if (r) return r;
+    // Unknown name — warn and fall through to auto
+    std::cerr << "warning: unknown renderer \"" << args.render
+              << "\", using auto\n";
+  }
   return core::make_auto_renderer(STDOUT_FILENO);
 }
 

@@ -343,4 +343,35 @@ std::unique_ptr<StreamRenderer> make_auto_renderer(int fd) {
   return make_raw_renderer(fd);
 }
 
+// ─── StreamRendererRegistry ───────────────────────────────────────────────────
+
+StreamRendererRegistry::StreamRendererRegistry() {
+  factories_["raw"]      = [](int fd) { return make_raw_renderer(fd); };
+  factories_["markdown"] = [](int fd) { return make_diff_renderer(fd); };
+  factories_["auto"]     = [](int fd) { return make_auto_renderer(fd); };
+}
+
+StreamRendererRegistry &StreamRendererRegistry::instance() {
+  static StreamRendererRegistry reg;
+  return reg;
+}
+
+void StreamRendererRegistry::register_renderer(std::string name, Factory factory) {
+  std::lock_guard<std::mutex> lk(mutex_);
+  factories_[std::move(name)] = std::move(factory);
+}
+
+std::unique_ptr<StreamRenderer>
+StreamRendererRegistry::make(const std::string &name, int fd) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  auto it = factories_.find(name);
+  if (it != factories_.end()) return it->second(fd);
+  return nullptr;
+}
+
+bool StreamRendererRegistry::has(const std::string &name) const {
+  std::lock_guard<std::mutex> lk(mutex_);
+  return factories_.count(name) > 0;
+}
+
 } // namespace pi::core
