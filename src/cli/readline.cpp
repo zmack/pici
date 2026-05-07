@@ -43,8 +43,10 @@ struct RawMode {
 };
 
 // Redraw the whole line in place (handles partial completion rewrites).
+// Leading newlines in prompt are stripped: \r already moves to line start
+// and re-emitting a \n would push the cursor down to a new line.
 void redraw(std::string_view prompt, const std::string &buf) {
-  // \r to line start, prompt+buf, \033[K clears the rest of the line
+  while (!prompt.empty() && prompt[0] == '\n') prompt.remove_prefix(1);
   std::cout << '\r' << prompt << buf << "\033[K" << std::flush;
 }
 
