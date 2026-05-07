@@ -80,6 +80,89 @@ A C++23 implementation of the [pi-mono](https://github.com/badlogic/pi-mono) cor
 - **ToolResult** — abstract result from tool execution
 - Support for sequential and parallel tool execution modes
 
+## Renderer
+
+The `Renderer` interface is a pure presentation observer decoupled from the
+agent loop.  The agent produces `AgentEvent` variants; `dispatch_event`
+translates them into typed `Renderer` calls.  The two are orthogonal — swap
+either without touching the other.
+
+### Interface (`src/core/stream_renderer.h`)
+
+```cpp
+class Renderer {
+public:
+  // A new user → assistant turn is beginning.
+  virtual void on_turn_start() {}
+
+  // Streaming assistant answer text.  Only pure-virtual method.
+  virtual void on_text_delta(std::string_view delta) = 0;
+
+  // Streaming model reasoning (emitted separately by some models).
+  virtual void on_thinking_start() {}
+  virtual void on_thinking_delta(std::string_view delta) {}
+  virtual void on_thinking_end() {}
+
+  // Tool call lifecycle.  call_id correlates start↔end for parallel tools.
+  virtual void on_tool_start(std::string_view call_id,
+                              std::string_view tool_name,
+                              std::string_view args_json) {}
+  virtual void on_tool_end(std::string_view call_id,
+                            std::string_view tool_name,
+                            const ToolResult &result,
+                            bool is_error) {}
+
+  // One assistant message fully received (several per turn when tools run).
+  virtual void on_message_end(const TokenUsage &usage) {}
+
+  // Entire agent turn complete (all messages + tool results).
+  virtual void on_turn_end() {}
+
+  // LLM, transport, tool, or abort error.
+  virtual void on_error(RendererErrorKind kind, std::string_view message) {}
+};
+```
+
+All methods except `on_text_delta` have default no-op implementations, so an
+implementation only overrides what it cares about.
+
+### Wiring to the event stream
+
+```cpp
+// dispatch_event translates one AgentEvent into the appropriate Renderer call.
+void dispatch_event(const AgentEvent &ev, Renderer &renderer);
+
+// Use inside any EventStream iteration loop:
+for (const auto &ev : agent.prompt(text))
+    dispatch_event(ev, *my_renderer);
+```
+
+### Built-in renderers
+
+| Name | Factory | Behaviour |
+|------|---------|-----------|
+| `"auto"` | `make_auto_renderer(fd)` | Markdown on TTY, raw on pipes |
+| `"markdown"` | `make_diff_renderer(fd)` | In-place markdown with scrollback-safe committed regions |
+| `"raw"` | `make_raw_renderer(fd)` | Plain text append, no escape codes |
+
+### Custom renderers
+
+Implement `Renderer` and register with the global registry:
+
+```cpp
+StreamRendererRegistry::instance().register_renderer(
+    "my-renderer",
+    [](int fd) { return std::make_unique<MyRenderer>(fd); });
+```
+
+Select via `--render my-renderer` on the CLI.
+
+### Error kinds
+
+```cpp
+enum class RendererErrorKind { llm, transport, tool, abort, unknown };
+```
+
 ## Dependencies
 
 - **CMake 3.28+** (for C++23 support)
