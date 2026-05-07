@@ -176,7 +176,7 @@ static std::optional<core::Model> resolve_model(const cli::Args &args) {
   return m;
 }
 
-static std::unique_ptr<core::StreamRenderer> make_renderer(const cli::Args &args) {
+static std::unique_ptr<core::Renderer> make_renderer(const cli::Args &args) {
   if (!args.render.empty()) {
     auto r = core::StreamRendererRegistry::instance().make(args.render, STDOUT_FILENO);
     if (r) return r;
@@ -187,51 +187,54 @@ static std::unique_ptr<core::StreamRenderer> make_renderer(const cli::Args &args
   return core::make_auto_renderer(STDOUT_FILENO);
 }
 
-static core::TokenUsage run_turn(core::Agent &agent, const std::string &input,
-                                  core::StreamRenderer &renderer, bool verbose) {
-  core::TokenUsage usage;
-  renderer.reset();
-  auto stream = agent.prompt(input);
-  bool done = false;
-  for (const auto &ev : stream) {
-    if (done) break;
-    std::visit(
-        [&](const auto &e) {
-          using T = std::decay_t<decltype(e)>;
-          if constexpr (std::is_same_v<T, core::MessageUpdateEvent>) {
-            std::visit(
-                [&](const auto &ae) {
-                  using AE = std::decay_t<decltype(ae)>;
-                  if constexpr (std::is_same_v<AE, core::AssistantMessageTextDeltaEvent>) {
-                    renderer.update(ae.delta);
-                  } else if constexpr (std::is_same_v<AE, core::AssistantMessageErrorEvent>) {
-                    std::cerr << "\nerror: "
-                              << ae.error.error_message.value_or("LLM request failed") << "\n";
-                  }
-                },
-                e.assistant_message_event);
-          } else if constexpr (std::is_same_v<T, core::MessageEndEvent>) {
-            if (const auto *am = std::get_if<core::AssistantMessage>(&e.message)) {
-              usage = am->usage;
-              if (am->error_message)
-                std::cerr << "\nerror: " << *am->error_message << "\n";
-              if (verbose)
-                std::cerr << "[usage: in=" << am->usage.input
-                          << " out=" << am->usage.output << "]\n";
-            }
-            renderer.finish();
-          } else if constexpr (std::is_same_v<T, core::ToolExecutionStartEvent>) {
-            std::cout << "\n[tool: " << e.tool_name << "]\n" << std::flush;
-          } else if constexpr (std::is_same_v<T, core::ToolExecutionEndEvent>) {
-            if (e.result && verbose)
-              std::cout << e.result->content() << "\n" << std::flush;
-          } else if constexpr (std::is_same_v<T, core::AgentEndEvent>) {
-            done = true;
-          }
-        },
-        ev);
+// A renderer adapter that adds verbose tool/usage output on top of any base renderer.
+class VerboseRenderer final : public core::Renderer {
+public:
+  VerboseRenderer(core::Renderer &base, bool verbose)
+      : base_(base), verbose_(verbose) {}
+
+  void on_turn_start() override               { base_.on_turn_start(); }
+  void on_text_delta(std::string_view d) override { base_.on_text_delta(d); }
+  void on_thinking_start() override           { base_.on_thinking_start(); }
+  void on_thinking_delta(std::string_view d) override { base_.on_thinking_delta(d); }
+  void on_thinking_end() override             { base_.on_thinking_end(); }
+
+  void on_tool_start(std::string_view, std::string_view name,
+                     std::string_view) override {
+    std::cout << "\n[tool: " << name << "]\n" << std::flush;
   }
-  return usage;
+  void on_tool_end(std::string_view, std::string_view,
+                   const core::ToolResult &result, bool) override {
+    if (verbose_) std::cout << result.content() << "\n" << std::flush;
+  }
+
+  void on_message_end(const core::TokenUsage &u) override {
+    base_.on_message_end(u);
+    if (verbose_)
+      std::cerr << "[usage: in=" << u.input << " out=" << u.output << "]\n";
+    last_usage_ = u;
+  }
+
+  void on_turn_end() override { base_.on_turn_end(); }
+
+  void on_error(core::RendererErrorKind, std::string_view msg) override {
+    std::cerr << "\nerror: " << msg << "\n";
+  }
+
+  const core::TokenUsage &last_usage() const { return last_usage_; }
+
+private:
+  core::Renderer &base_;
+  bool verbose_;
+  core::TokenUsage last_usage_;
+};
+
+static core::TokenUsage run_turn(core::Agent &agent, const std::string &input,
+                                  core::Renderer &renderer, bool verbose) {
+  VerboseRenderer vr(renderer, verbose);
+  for (const auto &ev : agent.prompt(input))
+    core::dispatch_event(ev, vr);
+  return vr.last_usage();
 }
 
 static void print_usage(const core::TokenUsage &last,

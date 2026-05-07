@@ -127,20 +127,18 @@ static std::string render_visible_markdown(std::string_view input) {
 
 // ─── RawStreamRenderer ────────────────────────────────────────────────────────
 
-class RawStreamRenderer final : public StreamRenderer {
+class RawStreamRenderer final : public Renderer {
 public:
   explicit RawStreamRenderer(int fd) : fd_(fd) {}
 
-  void update(std::string_view delta) override {
+  void on_text_delta(std::string_view delta) override {
     ::write(fd_, delta.data(), delta.size());
   }
 
-  void finish() override {
+  void on_message_end(const TokenUsage &) override {
     const char nl = '\n';
     ::write(fd_, &nl, 1);
   }
-
-  void reset() override {}
 
 private:
   int fd_;
@@ -166,11 +164,11 @@ private:
 //   2. Otherwise, advance the commit point as far as possible, output any
 //      newly-committed text as a plain append, then redraw only the live tail.
 
-class DiffMarkdownRenderer final : public StreamRenderer {
+class DiffMarkdownRenderer final : public Renderer {
 public:
   explicit DiffMarkdownRenderer(int fd) : fd_(fd) {}
 
-  void update(std::string_view delta) override {
+  void on_text_delta(std::string_view delta) override {
     text_buffer_ += delta;
 
     auto rendered = render_visible_markdown(text_buffer_);
@@ -275,13 +273,15 @@ public:
     prev_cursor_rows_ = cursor_rows_for_rendered(prev_rendered_, w);
   }
 
-  void finish() override {
+  void on_message_end(const TokenUsage &) override {
     const char nl = '\n';
     ::write(fd_, &nl, 1);
-    reset();
+    clear_state();
   }
 
-  void reset() override {
+  void on_turn_start() override { clear_state(); }
+
+  void clear_state() {
     text_buffer_.clear();
     prev_rendered_.clear();
     committed_bytes_ = 0;
@@ -289,7 +289,6 @@ public:
     prev_cursor_rows_ = 0;
   }
 
-private:
   int fd_;
   std::string text_buffer_;
   std::string prev_rendered_;
@@ -328,15 +327,84 @@ private:
 
 } // namespace
 
-std::unique_ptr<StreamRenderer> make_raw_renderer(int fd) {
+// ─── dispatch_event ───────────────────────────────────────────────────────────
+
+void dispatch_event(const AgentEvent &ev, Renderer &r) {
+  std::visit(
+      [&r](const auto &e) {
+        using T = std::decay_t<decltype(e)>;
+
+        // ── Turn boundaries ──────────────────────────────────────────────────
+        if constexpr (std::is_same_v<T, TurnStartEvent>) {
+          r.on_turn_start();
+
+        } else if constexpr (std::is_same_v<T, TurnEndEvent>) {
+          r.on_turn_end();
+
+        // ── Streaming assistant message ──────────────────────────────────────
+        } else if constexpr (std::is_same_v<T, MessageUpdateEvent>) {
+          std::visit(
+              [&r](const auto &ae) {
+                using AE = std::decay_t<decltype(ae)>;
+
+                if constexpr (std::is_same_v<AE, AssistantMessageTextDeltaEvent>) {
+                  r.on_text_delta(ae.delta);
+
+                } else if constexpr (std::is_same_v<AE, AssistantMessageThinkingStartEvent>) {
+                  r.on_thinking_start();
+
+                } else if constexpr (std::is_same_v<AE, AssistantMessageThinkingDeltaEvent>) {
+                  r.on_thinking_delta(ae.delta);
+
+                } else if constexpr (std::is_same_v<AE, AssistantMessageThinkingEndEvent>) {
+                  r.on_thinking_end();
+
+                } else if constexpr (std::is_same_v<AE, AssistantMessageErrorEvent>) {
+                  auto msg = ae.error.error_message.value_or("LLM error");
+                  r.on_error(RendererErrorKind::llm, msg);
+                }
+              },
+              e.assistant_message_event);
+
+        // ── Message complete ─────────────────────────────────────────────────
+        } else if constexpr (std::is_same_v<T, MessageEndEvent>) {
+          if (const auto *am = std::get_if<AssistantMessage>(&e.message)) {
+            if (am->error_message)
+              r.on_error(RendererErrorKind::llm, *am->error_message);
+            r.on_message_end(am->usage);
+          }
+
+        // ── Tool execution ───────────────────────────────────────────────────
+        } else if constexpr (std::is_same_v<T, ToolExecutionStartEvent>) {
+          r.on_tool_start(e.tool_call_id, e.tool_name, e.args);
+
+        } else if constexpr (std::is_same_v<T, ToolExecutionEndEvent>) {
+          if (e.result)
+            r.on_tool_end(e.tool_call_id, e.tool_name, *e.result, e.is_error);
+
+        // ── Agent abort ──────────────────────────────────────────────────────
+        } else if constexpr (std::is_same_v<T, AgentEndEvent>) {
+          // check for aborted stop reason in any final assistant message
+          for (const auto &msg : e.messages) {
+            if (const auto *am = std::get_if<AssistantMessage>(&msg)) {
+              if (am->stop_reason == StopReason::aborted)
+                r.on_error(RendererErrorKind::abort, "agent aborted");
+            }
+          }
+        }
+      },
+      ev);
+}
+
+std::unique_ptr<Renderer> make_raw_renderer(int fd) {
   return std::make_unique<RawStreamRenderer>(fd);
 }
 
-std::unique_ptr<StreamRenderer> make_diff_renderer(int fd) {
+std::unique_ptr<Renderer> make_diff_renderer(int fd) {
   return std::make_unique<DiffMarkdownRenderer>(fd);
 }
 
-std::unique_ptr<StreamRenderer> make_auto_renderer(int fd) {
+std::unique_ptr<Renderer> make_auto_renderer(int fd) {
   if (::isatty(fd)) {
     return make_diff_renderer(fd);
   }
@@ -361,7 +429,7 @@ void StreamRendererRegistry::register_renderer(std::string name, Factory factory
   factories_[std::move(name)] = std::move(factory);
 }
 
-std::unique_ptr<StreamRenderer>
+std::unique_ptr<Renderer>
 StreamRendererRegistry::make(const std::string &name, int fd) const {
   std::lock_guard<std::mutex> lk(mutex_);
   auto it = factories_.find(name);

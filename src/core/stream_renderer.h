@@ -1,5 +1,8 @@
 #pragma once
 
+#include "core/event_types.h"
+#include "core/message_types.h"
+
 #include <functional>
 #include <map>
 #include <memory>
@@ -9,41 +12,97 @@
 
 namespace pi::core {
 
-class StreamRenderer {
-public:
-  virtual ~StreamRenderer() = default;
+// ─── Error kind ──────────────────────────────────────────────────────────────
 
-  // Called for each incoming text delta.
-  virtual void update(std::string_view delta) = 0;
-
-  // Called when the message is complete.
-  virtual void finish() = 0;
-
-  // Reset state between messages.
-  virtual void reset() = 0;
+enum class RendererErrorKind {
+  llm,        // LLM returned an error response
+  transport,  // network / HTTP error
+  tool,       // tool execution error (also surfaces via on_tool_end)
+  abort,      // agent was cancelled via stop_token
+  unknown,
 };
 
-// Writes raw text deltas as they arrive. Suitable for non-TTY output.
-std::unique_ptr<StreamRenderer> make_raw_renderer(int fd = 1);
+// ─── Renderer ────────────────────────────────────────────────────────────────
+//
+// Receives presentation-level events derived from the agent's AgentEvent
+// stream.  All methods except on_text_delta have default no-op
+// implementations, so implementations only override what they care about.
+//
+// Threading: dispatch_event() may be called from the thread that drives the
+// EventStream iterator (usually the agent worker thread).  Implementations
+// that touch UI state must marshal to the appropriate thread themselves.
 
-// Re-renders accumulated markdown on each delta, diffing against the previous
-// frame and only redrawing lines that changed.
-std::unique_ptr<StreamRenderer> make_diff_renderer(int fd = 1);
+class Renderer {
+public:
+  virtual ~Renderer() = default;
 
-// Picks make_diff_renderer when fd is a TTY, otherwise make_raw_renderer.
-std::unique_ptr<StreamRenderer> make_auto_renderer(int fd = 1);
+  // A new user → assistant turn is beginning.
+  virtual void on_turn_start() {}
+
+  // Streaming assistant answer text.  The only pure-virtual method.
+  virtual void on_text_delta(std::string_view delta) = 0;
+
+  // Streaming model reasoning / thinking (emitted by some models separately
+  // from the answer).
+  virtual void on_thinking_start() {}
+  virtual void on_thinking_delta(std::string_view delta) {}
+  virtual void on_thinking_end() {}
+
+  // Tool call lifecycle.  call_id correlates start with end — important for
+  // parallel tool execution where multiple calls may interleave.
+  virtual void on_tool_start(std::string_view call_id,
+                              std::string_view tool_name,
+                              std::string_view args_json) {}
+  virtual void on_tool_end(std::string_view call_id,
+                            std::string_view tool_name,
+                            const ToolResult &result,
+                            bool is_error) {}
+
+  // One assistant message is fully received (there may be several per turn
+  // when tool calls are involved).  usage is the token count for this message.
+  virtual void on_message_end(const TokenUsage &usage) {}
+
+  // The entire agent turn is complete (all messages + tool results).
+  virtual void on_turn_end() {}
+
+  // An error occurred.  kind distinguishes LLM / transport / abort errors.
+  virtual void on_error(RendererErrorKind kind, std::string_view message) {}
+};
+
+// ─── dispatch_event ──────────────────────────────────────────────────────────
+//
+// Translates one AgentEvent into the appropriate Renderer call(s).
+// Call this inside any EventStream iteration loop to wire a renderer without
+// coupling it to the agent internals.
+//
+//   for (const auto &ev : agent.prompt(text))
+//     dispatch_event(ev, *renderer);
+//
+void dispatch_event(const AgentEvent &ev, Renderer &renderer);
+
+// ─── Built-in renderer factories ─────────────────────────────────────────────
+
+// Writes raw text deltas as they arrive (suitable for non-TTY / pipes).
+std::unique_ptr<Renderer> make_raw_renderer(int fd = 1);
+
+// Re-renders accumulated markdown on each delta, committed-region aware to
+// avoid duplicating content in the terminal scrollback buffer.
+std::unique_ptr<Renderer> make_diff_renderer(int fd = 1);
+
+// Selects make_diff_renderer on a TTY, make_raw_renderer otherwise.
+std::unique_ptr<Renderer> make_auto_renderer(int fd = 1);
+
+// Legacy alias — kept for code that still refers to StreamRenderer.
+using StreamRenderer = Renderer;
 
 // ─── Registry ────────────────────────────────────────────────────────────────
 
-// Global registry mapping renderer names to factories.
-// Built-in names ("auto", "markdown", "raw") are pre-registered.
-// Call register_renderer() to add custom renderers (e.g. from Lua add-ons).
 class StreamRendererRegistry {
 public:
-  using Factory = std::function<std::unique_ptr<StreamRenderer>(int fd)>;
+  using Factory = std::function<std::unique_ptr<Renderer>(int fd)>;
 
   void register_renderer(std::string name, Factory factory);
-  std::unique_ptr<StreamRenderer> make(const std::string &name, int fd) const;
+  std::unique_ptr<Renderer> make(const std::string &name, int fd) const;
   bool has(const std::string &name) const;
 
   static StreamRendererRegistry &instance();

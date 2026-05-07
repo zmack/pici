@@ -476,9 +476,9 @@ void test_stream_renderer_plain_append() {
 
     {
       auto renderer = make_diff_renderer(fds[1]);
-      renderer->update("Hel");
-      renderer->update("lo");
-      renderer->finish();
+      renderer->on_text_delta("Hel");
+      renderer->on_text_delta("lo");
+      renderer->on_message_end({});
     }
 
     ::close(fds[1]);
@@ -496,9 +496,9 @@ void test_stream_renderer_newline_append() {
 
     {
       auto renderer = make_diff_renderer(fds[1]);
-      renderer->update("Hello");
-      renderer->update("\n\nWorld");
-      renderer->finish();
+      renderer->on_text_delta("Hello");
+      renderer->on_text_delta("\n\nWorld");
+      renderer->on_message_end({});
     }
 
     ::close(fds[1]);
@@ -517,16 +517,16 @@ void test_stream_renderer_trailing_newlines_visible_immediately() {
 
     {
       auto renderer = make_diff_renderer(fds[1]);
-      renderer->update("Hello");
+      renderer->on_text_delta("Hello");
       CHECK_EQ(read_fd_available(fds[0]), std::string("Hello"));
 
-      renderer->update("\n\n");
+      renderer->on_text_delta("\n\n");
       CHECK_EQ(read_fd_available(fds[0]), std::string("\n\n"));
 
-      renderer->update("World");
+      renderer->on_text_delta("World");
       CHECK_EQ(read_fd_available(fds[0]), std::string("World"));
 
-      renderer->finish();
+      renderer->on_message_end({});
       CHECK_EQ(read_fd_available(fds[0]), std::string("\n"));
     }
 
@@ -546,13 +546,13 @@ void test_stream_renderer_single_newline_delta() {
 
     {
       auto renderer = make_diff_renderer(fds[1]);
-      renderer->update("Hello");
+      renderer->on_text_delta("Hello");
       CHECK_EQ(read_fd_available(fds[0]), std::string("Hello"));
 
-      renderer->update("\n");
+      renderer->on_text_delta("\n");
       CHECK_EQ(read_fd_available(fds[0]), std::string("\n"));
 
-      renderer->update("World");
+      renderer->on_text_delta("World");
       auto next = read_fd_available(fds[0]);
       CHECK(!next.empty());
     }
@@ -575,17 +575,17 @@ void test_stream_renderer_code_block_highlights_when_completed() {
     {
       auto renderer = make_diff_renderer(fds[1]);
 
-      renderer->update("```python\n");
+      renderer->on_text_delta("```python\n");
       auto chunk = read_fd_available(fds[0]);
       raw_out += chunk;
       term.apply(chunk);
 
-      renderer->update("def greet(name):\n");
+      renderer->on_text_delta("def greet(name):\n");
       chunk = read_fd_available(fds[0]);
       raw_out += chunk;
       term.apply(chunk);
 
-      renderer->update("    return f\"Hello, {name}\"\n");
+      renderer->on_text_delta("    return f\"Hello, {name}\"\n");
       chunk = read_fd_available(fds[0]);
       raw_out += chunk;
       term.apply(chunk);
@@ -594,7 +594,7 @@ void test_stream_renderer_code_block_highlights_when_completed() {
                visible_markdown_plain(
                    "```python\ndef greet(name):\n    return f\"Hello, {name}\"\n"));
 
-      renderer->update("```");
+      renderer->on_text_delta("```");
       chunk = read_fd_available(fds[0]);
       raw_out += chunk;
       term.apply(chunk);
@@ -606,7 +606,7 @@ void test_stream_renderer_code_block_highlights_when_completed() {
       CHECK(chunk.find("\033[1;36mgreet\033[0m") != std::string::npos);
       CHECK(chunk.find("\033[35mreturn\033[0m") != std::string::npos);
 
-      renderer->finish();
+      renderer->on_message_end({});
       chunk = read_fd_available(fds[0]);
       raw_out += chunk;
       term.apply(chunk);
@@ -641,7 +641,7 @@ void test_stream_renderer_matches_rendered_markdown_incrementally() {
 
       for (const auto &part : parts) {
         input += part;
-        renderer->update(part);
+        renderer->on_text_delta(part);
         term.apply(read_fd_available(fds[0]));
         const auto expected = visible_markdown_plain(input);
         if (term.plain() != expected) {
@@ -654,7 +654,7 @@ void test_stream_renderer_matches_rendered_markdown_incrementally() {
         ++part_index;
       }
 
-      renderer->finish();
+      renderer->on_message_end({});
       term.apply(read_fd_available(fds[0]));
       const auto expected_final = visible_markdown_plain(input) + "\n";
       if (term.plain() != expected_final) {

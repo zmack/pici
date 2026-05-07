@@ -3,6 +3,7 @@
 #include "core/agent.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/stream_renderer.h"
 
 #include <atomic>
 #include <chrono>
@@ -17,6 +18,90 @@
 namespace pi::acp {
 
 namespace {
+
+// ─── AcpSseRenderer ──────────────────────────────────────────────────────────
+// Translates Renderer callbacks into ACP SSE events.
+
+class AcpSseRenderer final : public core::Renderer {
+public:
+  AcpSseRenderer(SseWriter &sse, std::string agent_name)
+      : sse_(sse), agent_name_(std::move(agent_name)) {}
+
+  void on_turn_start() override {
+    in_message_ = false;
+    accumulated_.clear();
+    status_  = RunStatus::completed;
+    error_   = {};
+  }
+
+  void on_text_delta(std::string_view delta) override {
+    if (!in_message_) {
+      sse_.emit("message.created",
+                {{"type", "message.created"},
+                 {"message", {{"role", agent_name_},
+                              {"parts", nlohmann::json::array()}}}});
+      in_message_ = true;
+    }
+    accumulated_ += delta;
+    sse_.emit("message.part",
+              {{"type", "message.part"},
+               {"part", {{"content_type", "text/plain"},
+                         {"content", std::string(delta)}}}});
+  }
+
+  void on_tool_start(std::string_view call_id, std::string_view name,
+                     std::string_view args) override {
+    sse_.emit("message.part",
+              {{"type", "message.part"},
+               {"part", {{"content_type", "application/json"},
+                         {"content",
+                          nlohmann::json({{"tool_call_id", std::string(call_id)},
+                                          {"tool", std::string(name)},
+                                          {"args", std::string(args)}})
+                              .dump()}}}});
+  }
+
+  void on_message_end(const core::TokenUsage &) override {
+    if (in_message_) {
+      Message msg;
+      msg.role = agent_name_;
+      msg.parts.push_back({"text/plain", accumulated_});
+      sse_.emit("message.completed",
+                {{"type", "message.completed"},
+                 {"message", nlohmann::json(msg)}});
+      in_message_ = false;
+    }
+  }
+
+  void on_turn_end() override {} // run.completed emitted in emit_run_final
+
+  void on_error(core::RendererErrorKind, std::string_view msg) override {
+    status_ = RunStatus::failed;
+    error_  = std::string(msg);
+  }
+
+  // Call once after the agent loop completes to emit the final run event.
+  void emit_run_final(Run &r) {
+    r.status = status_;
+    if (!accumulated_.empty())
+      r.output.push_back({agent_name_, {{"text/plain", accumulated_}}});
+    if (status_ == RunStatus::failed) {
+      r.error = error_;
+      sse_.emit("run.failed", {{"type","run.failed"},{"run",nlohmann::json(r)}});
+    } else {
+      r.status = RunStatus::completed;
+      sse_.emit("run.completed", {{"type","run.completed"},{"run",nlohmann::json(r)}});
+    }
+  }
+
+private:
+  SseWriter &sse_;
+  std::string agent_name_;
+  std::string accumulated_;
+  std::string error_;
+  RunStatus status_{RunStatus::completed};
+  bool in_message_{false};
+};
 
 // ─── ID generation ───────────────────────────────────────────────────────────
 
@@ -68,56 +153,23 @@ std::vector<Message> messages_from_run(
   return out;
 }
 
-// ─── Core run logic ───────────────────────────────────────────────────────────
+// ─── SyncRenderer: collects output without emitting SSE ──────────────────────
 
-struct RunResult {
-  RunStatus status{RunStatus::completed};
-  std::string accumulated_text;
-  std::vector<core::ToolResultMessage> tool_results;
-  std::string error;
-};
-
-// Drive one agent turn; call on_event for each AgentEvent.
-// Returns the accumulated text and tool results.
-RunResult drive_agent(core::Agent &agent,
-                      const std::string &prompt,
-                      const std::function<void(const core::AgentEvent &)> &on_event) {
-  RunResult result;
-  try {
-    auto stream = agent.prompt(prompt);
-    for (const auto &ev : stream) {
-      if (on_event) on_event(ev);
-      std::visit(
-          [&result](const auto &e) {
-            using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<T, core::MessageUpdateEvent>) {
-              std::visit(
-                  [&result](const auto &ae) {
-                    using AE = std::decay_t<decltype(ae)>;
-                    if constexpr (std::is_same_v<AE, core::AssistantMessageTextDeltaEvent>)
-                      result.accumulated_text += ae.delta;
-                    else if constexpr (std::is_same_v<AE, core::AssistantMessageErrorEvent>) {
-                      result.status = RunStatus::failed;
-                      result.error  = ae.error.error_message.value_or("LLM error");
-                    }
-                  },
-                  e.assistant_message_event);
-            } else if constexpr (std::is_same_v<T, core::MessageEndEvent>) {
-              if (const auto *am = std::get_if<core::AssistantMessage>(&e.message))
-                if (am->error_message) {
-                  result.status = RunStatus::failed;
-                  result.error  = *am->error_message;
-                }
-            }
-          },
-          ev);
-    }
-  } catch (const std::exception &ex) {
-    result.status = RunStatus::failed;
-    result.error  = ex.what();
+class SyncRenderer final : public core::Renderer {
+public:
+  void on_text_delta(std::string_view d) override { accumulated_ += d; }
+  void on_error(core::RendererErrorKind, std::string_view msg) override {
+    status_ = RunStatus::failed;
+    error_  = std::string(msg);
   }
-  return result;
-}
+  const std::string &accumulated() const { return accumulated_; }
+  RunStatus status() const { return status_; }
+  const std::string &error() const { return error_; }
+
+private:
+  std::string accumulated_, error_;
+  RunStatus status_{RunStatus::completed};
+};
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 
@@ -213,117 +265,43 @@ void register_routes(httplib::Server &svr,
           [&cfg, sessions, run_id, prompt, rcr,
            agent_ptr](std::size_t /*offset*/,
                       httplib::DataSink &sink) mutable -> bool {
-            auto &agent = *agent_ptr;
             SseWriter sse(sink);
 
-            // run.created
             Run r;
             r.run_id     = run_id;
             r.agent_name = cfg.agent_name;
             r.status     = RunStatus::created;
             if (rcr.session_id) r.session_id = rcr.session_id;
-            sse.emit("run.created",
-                     {{"type", "run.created"}, {"run", nlohmann::json(r)}});
-
-            // run.in-progress
+            sse.emit("run.created", {{"type","run.created"},{"run",nlohmann::json(r)}});
             r.status = RunStatus::in_progress;
-            sse.emit("run.in-progress",
-                     {{"type", "run.in-progress"}, {"run", nlohmann::json(r)}});
+            sse.emit("run.in-progress", {{"type","run.in-progress"},{"run",nlohmann::json(r)}});
 
-            // Drive the agent, emitting message.part for each text delta
-            std::string accumulated;
-            bool in_message = false;
-            RunResult result;
+            AcpSseRenderer renderer(sse, cfg.agent_name);
             try {
-              auto stream = agent.prompt(prompt);
-              for (const auto &ev : stream) {
-                std::visit(
-                    [&](const auto &e) {
-                      using T = std::decay_t<decltype(e)>;
-                      if constexpr (std::is_same_v<T, core::MessageUpdateEvent>) {
-                        std::visit(
-                            [&](const auto &ae) {
-                              using AE = std::decay_t<decltype(ae)>;
-                              if constexpr (std::is_same_v<AE, core::AssistantMessageTextDeltaEvent>) {
-                                if (!in_message) {
-                                  // Emit message.created on first delta
-                                  sse.emit("message.created",
-                                           {{"type", "message.created"},
-                                            {"message", {{"role", cfg.agent_name},
-                                                         {"parts", nlohmann::json::array()}}}});
-                                  in_message = true;
-                                }
-                                accumulated += ae.delta;
-                                sse.emit("message.part",
-                                         {{"type", "message.part"},
-                                          {"part", {{"content_type", "text/plain"},
-                                                    {"content", ae.delta}}}});
-                              } else if constexpr (std::is_same_v<AE, core::AssistantMessageErrorEvent>) {
-                                result.status = RunStatus::failed;
-                                result.error  = ae.error.error_message.value_or("LLM error");
-                              }
-                            },
-                            e.assistant_message_event);
-                      } else if constexpr (std::is_same_v<T, core::ToolExecutionStartEvent>) {
-                        sse.emit("message.part",
-                                 {{"type", "message.part"},
-                                  {"part", {{"content_type", "application/json"},
-                                            {"content", nlohmann::json({{"tool", e.tool_name},
-                                                                         {"args", e.args}}).dump()}}}});
-                      } else if constexpr (std::is_same_v<T, core::MessageEndEvent>) {
-                        if (const auto *am = std::get_if<core::AssistantMessage>(&e.message)) {
-                          if (am->error_message) {
-                            result.status = RunStatus::failed;
-                            result.error  = *am->error_message;
-                          }
-                          result.accumulated_text = accumulated;
-                        }
-                      }
-                    },
-                    ev);
-              }
+              for (const auto &ev : agent_ptr->prompt(prompt))
+                core::dispatch_event(ev, renderer);
             } catch (const std::exception &ex) {
-              result.status = RunStatus::failed;
-              result.error  = ex.what();
+              renderer.on_error(core::RendererErrorKind::unknown, ex.what());
             }
 
-            // Emit message.completed
-            if (in_message) {
-              Message completed_msg;
-              completed_msg.role = cfg.agent_name;
-              completed_msg.parts.push_back({"text/plain", accumulated});
-              sse.emit("message.completed",
-                       {{"type", "message.completed"},
-                        {"message", nlohmann::json(completed_msg)}});
-            }
+            if (rcr.session_id)
+              sessions->save(*rcr.session_id, agent_ptr->state().messages());
 
-            // Persist session
-            if (rcr.session_id) {
-              sessions->save(*rcr.session_id, agent.state().messages());
-            }
-
-            // Final run event
-            r.status = result.status;
-            if (!result.accumulated_text.empty())
-              r.output.push_back({cfg.agent_name,
-                                   {{"text/plain", result.accumulated_text}}});
-            if (result.status == RunStatus::failed) {
-              r.error = result.error;
-              sse.emit("run.failed",
-                       {{"type", "run.failed"}, {"run", nlohmann::json(r)}});
-            } else {
-              r.status = RunStatus::completed;
-              sse.emit("run.completed",
-                       {{"type", "run.completed"}, {"run", nlohmann::json(r)}});
-            }
-            sink.done(); // signal clean end of chunked stream
+            renderer.emit_run_final(r);
+            sink.done();
             return true;
           });
       return;
     }
 
     // ── Sync mode ──────────────────────────────────────────────────────────
-    auto result = drive_agent(*agent_ptr, prompt, nullptr);
+    SyncRenderer sr;
+    try {
+      for (const auto &ev : agent_ptr->prompt(prompt))
+        core::dispatch_event(ev, sr);
+    } catch (const std::exception &ex) {
+      sr.on_error(core::RendererErrorKind::unknown, ex.what());
+    }
 
     if (rcr.session_id)
       sessions->save(*rcr.session_id, agent_ptr->state().messages());
@@ -331,13 +309,12 @@ void register_routes(httplib::Server &svr,
     Run r;
     r.run_id     = run_id;
     r.agent_name = cfg.agent_name;
-    r.status     = result.status;
+    r.status     = sr.status();
     r.session_id = rcr.session_id;
-    if (!result.accumulated_text.empty())
-      r.output.push_back(
-          {cfg.agent_name, {{"text/plain", result.accumulated_text}}});
-    if (result.status == RunStatus::failed)
-      r.error = result.error;
+    if (!sr.accumulated().empty())
+      r.output.push_back({cfg.agent_name, {{"text/plain", sr.accumulated()}}});
+    if (sr.status() == RunStatus::failed)
+      r.error = sr.error();
 
     json_response(res, 200, nlohmann::json(r));
   });
