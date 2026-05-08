@@ -1,8 +1,12 @@
 #include "core/stream_renderer.h"
 
+#include <csignal>
+#include <cstdlib>
+#include <cstring>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -18,6 +22,14 @@ static int term_width(int fd) {
     return static_cast<int>(ws.ws_col);
   }
   return 80;
+}
+
+static int term_height(int fd) {
+  struct winsize ws{};
+  if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) {
+    return static_cast<int>(ws.ws_row);
+  }
+  return 24;
 }
 
 static std::size_t skip_ansi_sgr(std::string_view s, std::size_t i) {
@@ -125,8 +137,6 @@ static std::string render_visible_markdown(std::string_view input) {
   return rendered;
 }
 
-// ─── RawStreamRenderer ────────────────────────────────────────────────────────
-
 class RawStreamRenderer final : public Renderer {
 public:
   explicit RawStreamRenderer(int fd) : fd_(fd) {}
@@ -144,8 +154,6 @@ private:
   int fd_;
 };
 
-// ─── DiffMarkdownRenderer ─────────────────────────────────────────────────────
-//
 // Scrollback-safe streaming renderer.
 //
 // The key insight: cursor-up + \033[J overwrites the terminal viewport but
@@ -325,9 +333,255 @@ public:
   }
 };
 
-} // namespace
+// Full-screen compositor using the alternate screen buffer.
+//
+// repaint() strategy: set scroll region to rows 1..h-1 (DECSTBM), home the
+// cursor, erase to end of screen, then write rendered lines separated by \r\n.
+// Because the scroll region excludes row h, newlines never touch the status bar.
+// DECSTBM is reset in leave() before exiting the alternate screen.
 
-// ─── dispatch_event ───────────────────────────────────────────────────────────
+class ViewportRenderer final : public Renderer {
+public:
+  explicit ViewportRenderer(int fd) : fd_(fd) { enter(); }
+
+  ~ViewportRenderer() {
+    leave();
+    if (current_ == this) current_ = nullptr;
+  }
+
+  void on_turn_start() override {
+    raw_buffer_.clear();
+    thinking_buffer_.clear();
+    in_thinking_ = false;
+    total_tokens_ = 0;
+    status_text_.clear();
+    active_tools_.clear();
+    set_scroll_region();
+    write_seq("\033[H\033[J"); // home + erase content region
+    paint_status();
+  }
+
+  void on_text_delta(std::string_view delta) override {
+    raw_buffer_ += delta;
+    repaint();
+  }
+
+  void on_thinking_start() override {
+    in_thinking_ = true;
+    thinking_buffer_.clear();
+  }
+
+  void on_thinking_delta(std::string_view delta) override {
+    thinking_buffer_ += delta;
+    status_text_ = "[thinking\xe2\x80\xa6]";
+    paint_status();
+  }
+
+  void on_thinking_end() override {
+    in_thinking_ = false;
+    status_text_.clear();
+    repaint();
+  }
+
+  void on_tool_start(std::string_view call_id, std::string_view name,
+                     std::string_view) override {
+    active_tools_[std::string(call_id)] = std::string(name);
+    paint_status();
+  }
+
+  void on_tool_end(std::string_view call_id, std::string_view,
+                   const ToolResult &, bool) override {
+    active_tools_.erase(std::string(call_id));
+    paint_status();
+  }
+
+  void on_message_end(const TokenUsage &u) override {
+    total_tokens_ += u.output;
+    paint_status();
+  }
+
+  void on_turn_end() override {
+    status_text_ = "tokens: " + std::to_string(total_tokens_) + "  done";
+    paint_status();
+  }
+
+  void on_error(RendererErrorKind, std::string_view msg) override {
+    status_text_ = "error: ";
+    status_text_.append(msg.substr(0, 60));
+    paint_status();
+  }
+
+private:
+  void enter() {
+    if (in_alt_) return;
+    in_alt_ = true;
+    current_ = this;
+    std::atexit(atexit_fn);
+    struct sigaction sa{};
+    sa.sa_handler = sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT,  &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGHUP,  &sa, nullptr);
+    write_seq("\033[?1049h" // enter alternate screen
+              "\033[?25l"   // hide cursor
+              "\033[H\033[2J"); // home + clear
+    set_scroll_region();
+  }
+
+  void leave() {
+    if (!in_alt_) return;
+    in_alt_ = false;
+    write_seq("\033[r"       // reset scroll region
+              "\033[?25h"   // show cursor (must precede ?1049l)
+              "\033[?1049l"); // exit alternate screen
+    if (!raw_buffer_.empty()) {
+      auto r = render_visible_markdown(raw_buffer_);
+      ::write(fd_, r.data(), r.size());
+      if (r.empty() || r.back() != '\n') ::write(fd_, "\n", 1);
+    }
+  }
+
+  // Set DECSTBM scroll region to rows 1..h-1, keeping row h for the status bar.
+  void set_scroll_region() {
+    const int h = term_height(fd_);
+    std::string s = "\033[1;";
+    s += std::to_string(h - 1);
+    s += "r";
+    write_seq(s.c_str());
+  }
+
+  void repaint() {
+    const int w = term_width(fd_);
+    const int h = term_height(fd_);
+    const int content_rows = h - 1;
+    if (content_rows <= 0) return;
+
+    // Build the text to render.  Thinking block (if present) comes first so
+    // the live response is always visible at the top of the tail window.
+    std::string content;
+    if (!thinking_buffer_.empty()) {
+      content += "[thinking]\n";
+      content += thinking_buffer_;
+      content += "\n\n";
+    }
+    content += raw_buffer_;
+
+    auto rendered = render_visible_markdown(content);
+
+    // Split into lines, take the last content_rows to auto-follow the tail.
+    auto lines = split_lines(rendered, w);
+    const int total = static_cast<int>(lines.size());
+    const int first = std::max(0, total - content_rows);
+
+    // Home cursor (inside scroll region), erase to end, write visible lines.
+    // \r\n is safe here because DECSTBM prevents scrolling past row h-1.
+    std::string frame;
+    frame.reserve(rendered.size() + static_cast<std::size_t>(content_rows) * 8);
+    frame += "\033[H\033[J"; // home + erase content region
+
+    for (int i = first; i < std::min(total, first + content_rows); ++i) {
+      frame += lines[static_cast<std::size_t>(i)];
+      if (i + 1 < std::min(total, first + content_rows))
+        frame += "\r\n";
+    }
+
+    ::write(fd_, frame.data(), frame.size());
+    paint_status();
+  }
+
+  void paint_status() {
+    const int w = term_width(fd_);
+    const int h = term_height(fd_);
+
+    std::string text;
+    if (!active_tools_.empty()) {
+      text = "[";
+      bool first = true;
+      for (const auto &[id, name] : active_tools_) {
+        if (!first) text += ", ";
+        text += name;
+        first = false;
+      }
+      text += "]";
+    } else {
+      text = status_text_;
+    }
+    if (static_cast<int>(text.size()) > w)
+      text.resize(static_cast<std::size_t>(w));
+
+    // Paint status bar outside the scroll region (row h is always writable).
+    std::string bar;
+    bar += "\033[s";          // save cursor (inside scroll region)
+    bar += "\033[r";          // temporarily reset scroll region so we can
+                              // address row h freely
+    bar += "\033[";
+    bar += std::to_string(h);
+    bar += ";1H\033[2K\033[2m";
+    bar += text;
+    bar += "\033[0m";
+    // Restore scroll region and cursor position
+    bar += "\033[1;";
+    bar += std::to_string(h - 1);
+    bar += "r";
+    bar += "\033[u";          // restore cursor
+    write_seq(bar.c_str());
+  }
+
+  // Split rendered ANSI string into wrapped physical rows of `width` columns.
+  // ANSI escapes pass through without counting toward width.
+  static std::vector<std::string> split_lines(std::string_view s, int width) {
+    std::vector<std::string> out;
+    std::string cur;
+    int col = 0;
+    for (std::size_t i = 0; i < s.size();) {
+      if (s[i] == '\n') {
+        out.push_back(std::move(cur)); cur.clear(); col = 0; ++i; continue;
+      }
+      if (s[i] == '\033') {
+        const auto nxt = skip_ansi_sgr(s, i);
+        if (nxt > i) { cur.append(s.data() + i, nxt - i); i = nxt; continue; }
+      }
+      const auto nxt = advance_utf8(s, i);
+      if (col >= width) { out.push_back(std::move(cur)); cur.clear(); col = 0; }
+      cur.append(s.data() + i, nxt - i);
+      ++col;
+      i = nxt;
+    }
+    if (!cur.empty()) out.push_back(std::move(cur));
+    return out;
+  }
+
+  void write_seq(const char *s) { ::write(fd_, s, std::strlen(s)); }
+
+  static void atexit_fn() { if (current_) current_->leave(); }
+
+  static void sig_handler(int sig) {
+    if (current_) current_->leave();
+    struct sigaction sa{};
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(sig, &sa, nullptr);
+    raise(sig);
+  }
+
+  int fd_;
+  bool in_alt_{false};
+  std::string raw_buffer_;
+  std::string thinking_buffer_;
+  bool in_thinking_{false};
+  std::map<std::string, std::string> active_tools_;
+  std::string status_text_;
+  std::uint64_t total_tokens_{0};
+
+  static ViewportRenderer *current_;
+};
+
+ViewportRenderer *ViewportRenderer::current_ = nullptr;
+
+} // namespace
 
 void dispatch_event(const AgentEvent &ev, Renderer &r) {
   std::visit(
@@ -404,6 +658,10 @@ std::unique_ptr<Renderer> make_diff_renderer(int fd) {
   return std::make_unique<DiffMarkdownRenderer>(fd);
 }
 
+std::unique_ptr<Renderer> make_viewport_renderer(int fd) {
+  return std::make_unique<ViewportRenderer>(fd);
+}
+
 std::unique_ptr<Renderer> make_auto_renderer(int fd) {
   if (::isatty(fd)) {
     return make_diff_renderer(fd);
@@ -411,11 +669,10 @@ std::unique_ptr<Renderer> make_auto_renderer(int fd) {
   return make_raw_renderer(fd);
 }
 
-// ─── StreamRendererRegistry ───────────────────────────────────────────────────
-
 StreamRendererRegistry::StreamRendererRegistry() {
   factories_["raw"]      = [](int fd) { return make_raw_renderer(fd); };
   factories_["markdown"] = [](int fd) { return make_diff_renderer(fd); };
+  factories_["viewport"] = [](int fd) { return make_viewport_renderer(fd); };
   factories_["auto"]     = [](int fd) { return make_auto_renderer(fd); };
 }
 

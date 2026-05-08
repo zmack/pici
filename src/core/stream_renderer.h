@@ -89,6 +89,10 @@ std::unique_ptr<Renderer> make_raw_renderer(int fd = 1);
 // avoid duplicating content in the terminal scrollback buffer.
 std::unique_ptr<Renderer> make_diff_renderer(int fd = 1);
 
+// Clears and repaints the full live viewport on every delta (Textual-style
+// immediate-mode full-screen compositor).
+std::unique_ptr<Renderer> make_viewport_renderer(int fd = 1);
+
 // Selects make_diff_renderer on a TTY, make_raw_renderer otherwise.
 std::unique_ptr<Renderer> make_auto_renderer(int fd = 1);
 

@@ -136,7 +136,7 @@ void print_help(const char *prog) {
     "  --tools-dir <dir>           Load Lua tools from directory\n"
     "  --hooks-file <file>         Lua hooks file, repeatable to stack add-ons\n"
     "  --hooks-dir <dir>           Load all .lua files from dir as add-ons\n"
-    "  --render <mode>             Rendering: auto (default), markdown, raw\n"
+    "  --render <mode>             Rendering: auto (default), markdown, raw, viewport\n"
     "  --print, -p                 Non-interactive: run prompt and exit\n"
     "  --test <file>               Run Lua test file and exit (repeatable)\n"
     "  --no-context-files, -nc     Disable AGENTS.md / CLAUDE.md discovery\n"
