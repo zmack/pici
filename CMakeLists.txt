@@ -399,6 +399,7 @@ add_library(pi-core
     src/core/lua_tool.cpp
     src/core/markdown.cpp
     src/core/syntax_highlight.cpp
+    src/core/terminal.cpp
     src/core/stream_renderer.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
@@ -466,7 +467,7 @@ target_link_libraries(pi-acp PRIVATE pi-core pi-http httplib::httplib tomlpluspl
 if(PI_CPP_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name IN ITEMS core agent_loop agent stream tool_validation builtin_tools lua_tool markdown)
+    foreach(test_name IN ITEMS core agent_loop agent stream tool_validation builtin_tools lua_tool markdown terminal)
         add_executable(test-${test_name}
             test/test_${test_name}.cpp
         )
