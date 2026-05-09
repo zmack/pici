@@ -6,112 +6,30 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
 #include <string_view>
 
 #include "core/markdown.h"
+#include "core/terminal.h"
 
 namespace pi::core {
 namespace {
 
 static int term_width(int fd) {
   struct winsize ws{};
-  if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+  if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
     return static_cast<int>(ws.ws_col);
-  }
   return 80;
 }
 
 static int term_height(int fd) {
   struct winsize ws{};
-  if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) {
+  if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
     return static_cast<int>(ws.ws_row);
-  }
   return 24;
-}
-
-static std::size_t skip_ansi_sgr(std::string_view s, std::size_t i) {
-  if (i + 1 < s.size() && s[i] == '\033' && s[i + 1] == '[') {
-    i += 2;
-    while (i < s.size()) {
-      const char c = s[i];
-      if ((c >= '@' && c <= '~')) {
-        return i + 1;
-      }
-      ++i;
-    }
-  }
-  return i;
-}
-
-static std::size_t advance_utf8(std::string_view s, std::size_t i) {
-  if (i >= s.size()) {
-    return i;
-  }
-  const unsigned char c = static_cast<unsigned char>(s[i]);
-  if ((c & 0x80) == 0x00) {
-    return i + 1;
-  }
-  if ((c & 0xE0) == 0xC0) {
-    return std::min(i + 2, s.size());
-  }
-  if ((c & 0xF0) == 0xE0) {
-    return std::min(i + 3, s.size());
-  }
-  if ((c & 0xF8) == 0xF0) {
-    return std::min(i + 4, s.size());
-  }
-  return i + 1;
-}
-
-// Visual rows a single line (no embedded \n) occupies, accounting for
-// ANSI escape sequences, UTF-8 glyphs, and terminal wrapping.
-static int rows_for_line(std::string_view line, int width) {
-  int col = 0;
-  int rows = 1;
-  for (std::size_t i = 0; i < line.size();) {
-    if (line[i] == '\033') {
-      const auto next = skip_ansi_sgr(line, i);
-      if (next > i) {
-        i = next;
-        continue;
-      }
-    }
-    i = advance_utf8(line, i);
-    if (++col >= width) {
-      ++rows;
-      col = 0;
-    }
-  }
-  return rows;
-}
-
-static int cursor_rows_for_rendered(std::string_view rendered, int width) {
-  int rows = 1;
-  int col = 0;
-  for (std::size_t i = 0; i < rendered.size();) {
-    if (rendered[i] == '\033') {
-      const auto next = skip_ansi_sgr(rendered, i);
-      if (next > i) {
-        i = next;
-        continue;
-      }
-    }
-    if (rendered[i] == '\n') {
-      ++rows;
-      col = 0;
-      ++i;
-      continue;
-    }
-    i = advance_utf8(rendered, i);
-    if (++col >= width) {
-      ++rows;
-      col = 0;
-    }
-  }
-  return rows;
 }
 
 // Split on '\n', discarding the trailing empty element from a final newline.
@@ -228,36 +146,38 @@ public:
            old_committed[shared] == rv[shared])
       ++shared;
 
-    // If committed prefix is intact, we only need to redraw the live part.
-    // Find what the new committed prefix will be (advance further if possible).
-    std::size_t new_commit = committed_bytes_;
+    // Effective live-region start. Normally this is committed_bytes_ (the
+    // committed prefix is intact and on screen verbatim). If the new render
+    // diverges before committed_bytes_ (shared < committed_bytes_), the on-
+    // screen committed content is stale — we must redraw further back.
+    //
+    // "Further back" = the last \n\n boundary before the divergence point in
+    // the new render. Writing from there is always safe because \n\n is a
+    // block boundary, never the interior of an ANSI escape sequence.
+    // Without this, committed_bytes_ can point one byte past a \033 into a
+    // [1;96m... sequence, emitting the [ literally instead of as ESC+[.
+    std::size_t live_start = committed_bytes_;
+    int         live_rows  = committed_rows_;
+
+    if (shared < committed_bytes_) {
+      live_start = 0;
+      for (std::size_t s = 0; s + 1 < shared; ++s) {
+        if (rv[s] == '\n' && rv[s + 1] == '\n')
+          live_start = s + 2;
+      }
+      live_rows = cursor_rows_for_rendered(rv.substr(0, live_start), w);
+    }
+
+    std::size_t new_commit = live_start;
     {
-      // Scan forward from the current commit point for new commit boundaries
-      auto candidate = find_commit_boundary(rv, committed_bytes_);
+      auto candidate = find_commit_boundary(rv, live_start);
       if (candidate > new_commit) new_commit = candidate;
     }
 
-    // Bytes newly committed since last render
-    const std::size_t extra_committed =
-        new_commit > committed_bytes_ ? new_commit - committed_bytes_ : 0;
-
-    // New live tail (everything after the new commit point)
-    const std::string_view new_live = rv.substr(new_commit);
-
-    // rows_up: how far to move the cursor back from the end of the previous
-    // render to the start of the live region.
-    //
-    // committed_rows_ is the row the cursor sits on after writing the
-    // committed portion (1 = start of content, N = start of row N).
-    // When nothing is committed yet, committed_rows_ = 0 so we treat it as 1
-    // (the cursor starts on row 1).
-    //
-    // To go from row prev_cursor_rows_ to row max(committed_rows_,1):
-    //   rows_up = prev_cursor_rows_ - max(committed_rows_, 1)
-    const int rows_up = prev_cursor_rows_ - std::max(committed_rows_, 1);
+    const int rows_up = std::max(0, prev_cursor_rows_ - std::max(live_rows, 1));
 
     std::string frame;
-    frame.reserve(64 + rendered.size() - committed_bytes_);
+    frame.reserve(64 + rendered.size() - live_start);
 
     frame += '\r';
     if (rows_up > 0) {
@@ -265,15 +185,11 @@ public:
       frame += std::to_string(rows_up);
       frame += 'A';
     }
-    frame += "\033[J"; // erase from the start of live region to end of screen
-
-    // Write committed tail (everything after the old commit point)
-    frame.append(rendered.data() + committed_bytes_,
-                 rendered.size() - committed_bytes_);
+    frame += "\033[J";
+    frame.append(rendered.data() + live_start, rendered.size() - live_start);
 
     ::write(fd_, frame.data(), frame.size());
 
-    // Update state
     committed_bytes_  = new_commit;
     committed_rows_   = cursor_rows_for_rendered(
         std::string_view(rendered).substr(0, committed_bytes_), w);
@@ -335,10 +251,13 @@ public:
 
 // Full-screen compositor using the alternate screen buffer.
 //
-// repaint() strategy: set scroll region to rows 1..h-1 (DECSTBM), home the
-// cursor, erase to end of screen, then write rendered lines separated by \r\n.
-// Because the scroll region excludes row h, newlines never touch the status bar.
-// DECSTBM is reset in leave() before exiting the alternate screen.
+// Layout (h = terminal height):
+//   rows 1..h-2  — content (DECSTBM scroll region)
+//   row h-1      — status bar (token count, tool activity)
+//   row h        — readline prompt; never written by this renderer
+//
+// Reserving row h for readline means the prompt's leading \n lands there
+// without overlapping the status bar.
 
 class ViewportRenderer final : public Renderer {
 public:
@@ -356,6 +275,8 @@ public:
     total_tokens_ = 0;
     status_text_.clear();
     active_tools_.clear();
+    scanner_   = {};
+    fin_cache_ = {};
     set_scroll_region();
     write_seq("\033[H\033[J"); // home + erase content region
     paint_status();
@@ -380,6 +301,12 @@ public:
   void on_thinking_end() override {
     in_thinking_ = false;
     status_text_.clear();
+    // The thinking prefix length just became fixed.  Any scan_pos that was
+    // advanced while raw_buffer_ was empty (or while thinking was growing)
+    // may point into a stale content layout — reset both so the next repaint
+    // scans cleanly from the beginning.
+    scanner_   = {};
+    fin_cache_ = {};
     repaint();
   }
 
@@ -416,7 +343,10 @@ private:
     if (in_alt_) return;
     in_alt_ = true;
     current_ = this;
-    std::atexit(atexit_fn);
+    if (!atexit_registered_) {
+      std::atexit(atexit_fn);
+      atexit_registered_ = true;
+    }
     struct sigaction sa{};
     sa.sa_handler = sig_handler;
     sigemptyset(&sa.sa_mask);
@@ -430,12 +360,23 @@ private:
     set_scroll_region();
   }
 
-  void leave() {
+  // Restore the terminal to the main screen — async-signal-safe.
+  // Only writes escape codes; does not call malloc or cmark.
+  void restore_terminal() {
     if (!in_alt_) return;
     in_alt_ = false;
-    write_seq("\033[r"       // reset scroll region
-              "\033[?25h"   // show cursor (must precede ?1049l)
-              "\033[?1049l"); // exit alternate screen
+    static constexpr char kRestore[] =
+        "\033[r"       // reset scroll region
+        "\033[?25h"   // show cursor (must precede ?1049l)
+        "\033[?1049l"; // exit alternate screen
+    ::write(fd_, kRestore, sizeof(kRestore) - 1);
+  }
+
+  void leave() {
+    if (!in_alt_) return;
+    restore_terminal(); // sets in_alt_ = false, writes escapes
+    // Print last response to main-screen scrollback (may allocate — not
+    // signal-safe, but leave() is only called from atexit or destructor).
     if (!raw_buffer_.empty()) {
       auto r = render_visible_markdown(raw_buffer_);
       ::write(fd_, r.data(), r.size());
@@ -443,23 +384,24 @@ private:
     }
   }
 
-  // Set DECSTBM scroll region to rows 1..h-1, keeping row h for the status bar.
+  // Scroll region covers rows 1..h-2 (content only).
+  // Row h-1 is the status bar; row h is left for readline's prompt.
   void set_scroll_region() {
     const int h = term_height(fd_);
+    if (h < 3) return; // degenerate terminal: no room for content+status+input
     std::string s = "\033[1;";
-    s += std::to_string(h - 1);
+    s += std::to_string(h - 2);
     s += "r";
     write_seq(s.c_str());
   }
 
   void repaint() {
-    const int w = term_width(fd_);
-    const int h = term_height(fd_);
-    const int content_rows = h - 1;
+    const int w            = term_width(fd_);
+    const int h            = term_height(fd_);
+    const int content_rows = h - 2;
     if (content_rows <= 0) return;
 
-    // Build the text to render.  Thinking block (if present) comes first so
-    // the live response is always visible at the top of the tail window.
+    // Build raw content: thinking block (if present) then the live response.
     std::string content;
     if (!thinking_buffer_.empty()) {
       content += "[thinking]\n";
@@ -468,23 +410,68 @@ private:
     }
     content += raw_buffer_;
 
-    auto rendered = render_visible_markdown(content);
+    // ── Advance scanner (O(new bytes) only) ──────────────────────────────────
+    scanner_.advance(content);
+    const std::size_t boundary = scanner_.last_stable;
 
-    // Split into lines, take the last content_rows to auto-follow the tail.
-    auto lines = split_lines(rendered, w);
-    const int total = static_cast<int>(lines.size());
-    const int first = std::max(0, total - content_rows);
+    // ── Invalidate finalized cache on terminal width change ───────────────────
+    if (fin_cache_.width != w) {
+      fin_cache_ = {};
+    }
 
-    // Home cursor (inside scroll region), erase to end, write visible lines.
-    // \r\n is safe here because DECSTBM prevents scrolling past row h-1.
+    std::string tail_rendered;
+
+    if (boundary > fin_cache_.raw_end) {
+      // ── Cache miss: boundary advanced (or first call after reset).
+      // Render the full content once and extract the finalized prefix from the
+      // actual output — this guarantees byte-exact correctness at the join point.
+      // render(prefix_raw) ≠ full_render[0..boundary] in general due to cmark's
+      // trailing-newline normalisation; using the real prefix avoids that.
+      const std::string full_rendered = render_visible_markdown(content);
+
+      // Find the last \n\n in the full rendered output.
+      std::size_t rendered_boundary = 0;
+      for (std::size_t i = 0; i + 1 < full_rendered.size(); ++i) {
+        if (full_rendered[i] == '\n' && full_rendered[i + 1] == '\n')
+          rendered_boundary = i + 2;
+      }
+
+      fin_cache_.rendered = full_rendered.substr(0, rendered_boundary);
+      fin_cache_.raw_end  = boundary;
+      fin_cache_.width    = w;
+
+      // The tail is the rest of the same render — no second parse needed.
+      tail_rendered = full_rendered.substr(rendered_boundary);
+
+    } else {
+      // ── Cache hit: hot path — render only the suffix (O(tail.size())) ────────
+      const std::string_view tail_raw(content.data() + fin_cache_.raw_end,
+                                      content.size()  - fin_cache_.raw_end);
+      tail_rendered = render_visible_markdown(tail_raw);
+    }
+
+    // ── Build viewport from finalized cache + tail ────────────────────────────
+    // fin_cache_.rendered ends at a \n\n in the rendered domain, so the join
+    // is clean: no extra blank line is injected at the boundary.
+    // When fin_cache_.rendered is empty (no boundary found yet), combined equals
+    // tail_rendered which equals render_visible_markdown(content) — same as before.
+    std::string combined;
+    combined.reserve(fin_cache_.rendered.size() + tail_rendered.size());
+    combined += fin_cache_.rendered;
+    combined += tail_rendered;
+
+    const auto  lines         = split_lines(combined, w);
+    const int   total         = static_cast<int>(lines.size());
+    const int   first         = std::max(0, total - content_rows);
+    const int   last_plus_one = std::min(total, first + content_rows);
+
     std::string frame;
-    frame.reserve(rendered.size() + static_cast<std::size_t>(content_rows) * 8);
+    frame.reserve(combined.size() + static_cast<std::size_t>(content_rows) * 8);
     frame += "\033[H\033[J"; // home + erase content region
 
-    for (int i = first; i < std::min(total, first + content_rows); ++i) {
+    for (int i = first; i < last_plus_one; ++i) {
       frame += lines[static_cast<std::size_t>(i)];
-      if (i + 1 < std::min(total, first + content_rows))
-        frame += "\r\n";
+      if (i + 1 < last_plus_one) frame += "\r\n";
     }
 
     ::write(fd_, frame.data(), frame.size());
@@ -511,26 +498,20 @@ private:
     if (static_cast<int>(text.size()) > w)
       text.resize(static_cast<std::size_t>(w));
 
-    // Paint status bar outside the scroll region (row h is always writable).
+    // CUP addresses any row regardless of DECSTBM, so row h-1 is reachable
+    // even though it's outside the scroll region.
     std::string bar;
-    bar += "\033[s";          // save cursor (inside scroll region)
-    bar += "\033[r";          // temporarily reset scroll region so we can
-                              // address row h freely
     bar += "\033[";
-    bar += std::to_string(h);
+    bar += std::to_string(h - 1);
     bar += ";1H\033[2K\033[2m";
     bar += text;
     bar += "\033[0m";
-    // Restore scroll region and cursor position
-    bar += "\033[1;";
-    bar += std::to_string(h - 1);
-    bar += "r";
-    bar += "\033[u";          // restore cursor
-    write_seq(bar.c_str());
+    ::write(fd_, bar.data(), bar.size());
   }
 
   // Split rendered ANSI string into wrapped physical rows of `width` columns.
-  // ANSI escapes pass through without counting toward width.
+  // ANSI/VT escapes (CSI, OSC, etc.) pass through without counting toward width.
+  // Wide characters (CJK, emoji) count as 2 columns.
   static std::vector<std::string> split_lines(std::string_view s, int width) {
     std::vector<std::string> out;
     std::string cur;
@@ -540,13 +521,15 @@ private:
         out.push_back(std::move(cur)); cur.clear(); col = 0; ++i; continue;
       }
       if (s[i] == '\033') {
-        const auto nxt = skip_ansi_sgr(s, i);
+        const auto nxt = skip_ansi_sequence(s, i);
         if (nxt > i) { cur.append(s.data() + i, nxt - i); i = nxt; continue; }
       }
+      const int cw  = codepoint_width(s, i);
       const auto nxt = advance_utf8(s, i);
-      if (col >= width) { out.push_back(std::move(cur)); cur.clear(); col = 0; }
+      if (col + cw > width && col > 0) { out.push_back(std::move(cur)); cur.clear(); col = 0; }
       cur.append(s.data() + i, nxt - i);
-      ++col;
+      col += cw;
+      if (col >= width) { out.push_back(std::move(cur)); cur.clear(); col = 0; }
       i = nxt;
     }
     if (!cur.empty()) out.push_back(std::move(cur));
@@ -555,10 +538,14 @@ private:
 
   void write_seq(const char *s) { ::write(fd_, s, std::strlen(s)); }
 
+  // atexit: full leave() — safe to allocate here.
   static void atexit_fn() { if (current_) current_->leave(); }
 
+  // Signal handler: restore_terminal() only — async-signal-safe (no malloc).
+  // Calling cmark/render_visible_markdown from a signal handler is UB because
+  // cmark calls malloc, which is not async-signal-safe and can deadlock.
   static void sig_handler(int sig) {
-    if (current_) current_->leave();
+    if (current_) current_->restore_terminal();
     struct sigaction sa{};
     sa.sa_handler = SIG_DFL;
     sigemptyset(&sa.sa_mask);
@@ -567,19 +554,32 @@ private:
     raise(sig);
   }
 
+  // Cached rendered ANSI for the finalized (complete-block) prefix of content.
+  // Populated when BlockBoundaryScanner finds a new stable boundary.  On the
+  // hot path (streaming mid-block), only the tail is re-rendered.
+  struct FinCache {
+    std::size_t  raw_end{0};   // scanner.last_stable when this cache was built
+    std::string  rendered;     // full_rendered[0..rendered_boundary] from that render
+    int          width{0};     // terminal width when rendered was computed
+  };
+
   int fd_;
   bool in_alt_{false};
+  static bool atexit_registered_;
   std::string raw_buffer_;
   std::string thinking_buffer_;
   bool in_thinking_{false};
   std::map<std::string, std::string> active_tools_;
   std::string status_text_;
   std::uint64_t total_tokens_{0};
+  BlockBoundaryScanner scanner_;
+  FinCache             fin_cache_;
 
   static ViewportRenderer *current_;
 };
 
-ViewportRenderer *ViewportRenderer::current_ = nullptr;
+ViewportRenderer *ViewportRenderer::current_           = nullptr;
+bool              ViewportRenderer::atexit_registered_ = false;
 
 } // namespace
 
