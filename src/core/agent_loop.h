@@ -19,8 +19,15 @@
 #include "core/stream.h"
 
 #ifdef PI_CPP_OTEL_ENABLED
+#include <opentelemetry/context/context.h>
 #include <opentelemetry/trace/provider.h>
 #include <opentelemetry/trace/tracer.h>
+// Opaque context token passed through the call stack so child spans can find
+// their parent without relying on thread-local state (which breaks across
+// std::async boundaries in the parallel tool path).
+using OtelCtx = opentelemetry::context::Context;
+#else
+struct OtelCtx {};  // zero-size placeholder; all OTel code is ifdef-guarded
 #endif
 
 namespace pi::core {
@@ -149,7 +156,8 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
 std::shared_ptr<AssistantMessage>
 stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
                           StreamCallback emit,
-                          const std::stop_token &stop_tok = std::stop_token{});
+                          const std::stop_token &stop_tok = std::stop_token{},
+                          OtelCtx otel_ctx = {});
 
 // ─── Tool execution ─────────────────────────────────────────────────────────
 
@@ -163,6 +171,7 @@ ToolCallResult
 execute_tool_calls(AgentContext &context,
                    const AssistantMessage &assistant_message,
                    const AgentLoopConfig &config, const StreamCallback &emit,
-                   const std::stop_token &stop_tok = std::stop_token{});
+                   const std::stop_token &stop_tok = std::stop_token{},
+                   OtelCtx otel_ctx = {});
 
 } // namespace pi::core
