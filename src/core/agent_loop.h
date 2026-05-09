@@ -18,6 +18,11 @@
 #include "core/message_types.h"
 #include "core/stream.h"
 
+#ifdef PI_CPP_OTEL_ENABLED
+#include <opentelemetry/trace/provider.h>
+#include <opentelemetry/trace/tracer.h>
+#endif
+
 namespace pi::core {
 
 // Forward declaration
@@ -113,6 +118,14 @@ struct AgentLoopConfig {
 
   // The LLM client to use
   std::shared_ptr<LLMClient> llm_client;
+
+#ifdef PI_CPP_OTEL_ENABLED
+  // OTel tracer. Defaults to the global provider's tracer — a noop unless
+  // init_otel() has been called. Set this on the config to override.
+  opentelemetry::nostd::shared_ptr<opentelemetry::trace::Tracer> tracer{
+      opentelemetry::trace::Provider::GetTracerProvider()
+          ->GetTracer("pi-agent", PI_CPP_VERSION)};
+#endif
 };
 
 // ─── Agent Loop Entry Points ───────────────────────────────────────────────

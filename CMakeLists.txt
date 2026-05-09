@@ -7,6 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PI_CPP_BUILD_TESTS "Build tests" ON)
+option(PI_CPP_OTEL_API   "Compile OpenTelemetry API instrumentation (noop when SDK absent)" ON)
+option(PI_CPP_OTEL_SDK   "Link OpenTelemetry SDK + OTLP/HTTP exporter for real trace export" OFF)
 
 # ─── FetchContent dependencies ───
 include(FetchContent)
@@ -15,6 +17,7 @@ FetchContent_Declare(
     nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
     GIT_TAG        v3.11.3
+    OVERRIDE_FIND_PACKAGE   # lets otel-cpp's find_package(nlohmann_json) use this copy
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
@@ -130,6 +133,32 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(cpp_httplib)
+
+# ─── OpenTelemetry (optional) ───────────────────────────────────────────────
+if(PI_CPP_OTEL_API)
+    # WITH_STL=ON replaces nostd:: with std:: aliases. Must be pinned globally —
+    # mismatched STL mode across TUs causes silent ABI corruption.
+    set(WITH_STL              ON  CACHE BOOL "" FORCE)
+    set(WITH_ABSEIL           OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING         OFF CACHE BOOL "" FORCE)
+    set(WITH_EXAMPLES         OFF CACHE BOOL "" FORCE)
+    set(WITH_BENCHMARK        OFF CACHE BOOL "" FORCE)
+    set(WITH_OTLP_HTTP        OFF CACHE BOOL "" FORCE)
+    set(WITH_OTLP_GRPC        OFF CACHE BOOL "" FORCE)
+    set(WITH_JAEGER           OFF CACHE BOOL "" FORCE)
+    set(OPENTELEMETRY_INSTALL OFF CACHE BOOL "" FORCE)
+    if(PI_CPP_OTEL_SDK)
+        set(WITH_OTLP_HTTP    ON  CACHE BOOL "" FORCE)
+    endif()
+    FetchContent_Declare(
+        opentelemetry-cpp
+        GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp
+        GIT_TAG        v1.17.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(opentelemetry-cpp)
+endif()
+
 FetchContent_GetProperties(tree_sitter_runtime_src)
 if(NOT tree_sitter_runtime_src_POPULATED)
     FetchContent_Populate(tree_sitter_runtime_src)
@@ -407,6 +436,7 @@ add_library(pi-core
     src/core/models.cpp
     src/core/providers/faux.cpp
     src/core/providers/transform_messages.cpp
+    src/core/otel_init.cpp
 )
 
 target_include_directories(pi-core PUBLIC
@@ -437,6 +467,21 @@ target_link_libraries(pi-core PUBLIC
     ts-lang-lua
     ts-lang-javascript
 )
+
+if(PI_CPP_OTEL_API)
+    # FetchContent exposes the raw CMake target names (underscores), not the
+    # installed alias names (opentelemetry-cpp::api). Use the raw names here.
+    target_link_libraries(pi-core PUBLIC opentelemetry_api)
+    target_compile_definitions(pi-core PUBLIC PI_CPP_OTEL_ENABLED)
+    if(PI_CPP_OTEL_SDK)
+        target_link_libraries(pi-core PUBLIC
+            opentelemetry_trace
+            opentelemetry_sdk
+            opentelemetry_exporter_otlp_http
+        )
+        target_compile_definitions(pi-core PUBLIC PI_CPP_OTEL_SDK_ENABLED)
+    endif()
+endif()
 
 # ─── pi-cli (main executable) ───
 add_executable(pi-cli
