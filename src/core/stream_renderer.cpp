@@ -436,9 +436,11 @@ private:
           rendered_boundary = i + 2;
       }
 
-      fin_cache_.rendered = full_rendered.substr(0, rendered_boundary);
-      fin_cache_.raw_end  = boundary;
-      fin_cache_.width    = w;
+      fin_cache_.rendered   = full_rendered.substr(0, rendered_boundary);
+      fin_cache_.raw_end    = boundary;
+      fin_cache_.width      = w;
+      // O(fin_rendered.size()) row count — paid once per boundary advance.
+      fin_cache_.row_count  = cursor_rows_for_rendered(fin_cache_.rendered, w);
 
       // The tail is the rest of the same render — no second parse needed.
       tail_rendered = full_rendered.substr(rendered_boundary);
@@ -451,27 +453,42 @@ private:
     }
 
     // ── Build viewport from finalized cache + tail ────────────────────────────
-    // fin_cache_.rendered ends at a \n\n in the rendered domain, so the join
-    // is clean: no extra blank line is injected at the boundary.
-    // When fin_cache_.rendered is empty (no boundary found yet), combined equals
-    // tail_rendered which equals render_visible_markdown(content) — same as before.
-    std::string combined;
-    combined.reserve(fin_cache_.rendered.size() + tail_rendered.size());
-    combined += fin_cache_.rendered;
-    combined += tail_rendered;
-
-    const auto  lines         = split_lines(combined, w);
-    const int   total         = static_cast<int>(lines.size());
-    const int   first         = std::max(0, total - content_rows);
-    const int   last_plus_one = std::min(total, first + content_rows);
+    // Count tail rows without allocating line strings (O(tail.size())).
+    const int tail_rows = cursor_rows_for_rendered(tail_rendered, w);
 
     std::string frame;
-    frame.reserve(combined.size() + static_cast<std::size_t>(content_rows) * 8);
     frame += "\033[H\033[J"; // home + erase content region
 
-    for (int i = first; i < last_plus_one; ++i) {
-      frame += lines[static_cast<std::size_t>(i)];
-      if (i + 1 < last_plus_one) frame += "\r\n";
+    if (tail_rows >= content_rows) {
+      // Fast path: all visible content is within the tail — finalized prefix is
+      // completely off-screen.  Skip the split_lines walk over fin_cache_.rendered.
+      const auto tail_lines_vec = split_lines(tail_rendered, w);
+      const int  total          = static_cast<int>(tail_lines_vec.size());
+      const int  first          = total - content_rows; // non-negative: tail_rows >= content_rows
+      frame.reserve(tail_rendered.size() + static_cast<std::size_t>(content_rows) * 8);
+      for (int i = first; i < total; ++i) {
+        frame += tail_lines_vec[static_cast<std::size_t>(i)];
+        if (i + 1 < total) frame += "\r\n";
+      }
+    } else {
+      // Mixed / short path: need finalized rows + all tail rows.
+      // fin_cache_.rendered ends at \n\n so concatenation is join-clean.
+      // When fin_cache_.rendered is empty (no boundary yet), combined equals
+      // tail_rendered == render_visible_markdown(content) — identical to before G2.
+      std::string combined;
+      combined.reserve(fin_cache_.rendered.size() + tail_rendered.size());
+      combined += fin_cache_.rendered;
+      combined += tail_rendered;
+
+      const auto lines         = split_lines(combined, w);
+      const int  total         = static_cast<int>(lines.size());
+      const int  first         = std::max(0, total - content_rows);
+      const int  last_plus_one = std::min(total, first + content_rows);
+      frame.reserve(combined.size() + static_cast<std::size_t>(content_rows) * 8);
+      for (int i = first; i < last_plus_one; ++i) {
+        frame += lines[static_cast<std::size_t>(i)];
+        if (i + 1 < last_plus_one) frame += "\r\n";
+      }
     }
 
     ::write(fd_, frame.data(), frame.size());
@@ -558,9 +575,10 @@ private:
   // Populated when BlockBoundaryScanner finds a new stable boundary.  On the
   // hot path (streaming mid-block), only the tail is re-rendered.
   struct FinCache {
-    std::size_t  raw_end{0};   // scanner.last_stable when this cache was built
-    std::string  rendered;     // full_rendered[0..rendered_boundary] from that render
-    int          width{0};     // terminal width when rendered was computed
+    std::size_t  raw_end{0};    // scanner.last_stable when this cache was built
+    std::string  rendered;      // full_rendered[0..rendered_boundary] from that render
+    int          width{0};      // terminal width when rendered was computed
+    int          row_count{0};  // visual rows of rendered at width (for G3 fast path)
   };
 
   int fd_;
