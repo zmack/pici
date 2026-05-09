@@ -28,6 +28,7 @@
 #include "core/message_types.h"
 #include "core/models.h"
 #include "cli/readline.h"
+#include "core/otel_init.h"
 #include "core/providers/openai_completions.h"
 #include "core/stream_renderer.h"
 
@@ -604,6 +605,16 @@ int main(int argc, char *argv[]) {
   pi::core::register_openai_completions_client();
 
   auto args = pi::cli::load_and_merge(argc, argv);
+
+  // Initialise OTel export if requested.  The RAII guard + atexit ensure
+  // BatchSpanProcessor is flushed before process exit (including Ctrl-C via
+  // the signal handler above which calls std::exit).
+  struct OtelGuard {
+    ~OtelGuard() { pi::core::shutdown_otel(); }
+  } otel_guard;
+  std::atexit([] { pi::core::shutdown_otel(); });
+  if (!args.otel_endpoint.empty())
+    pi::core::init_otel(args.otel_endpoint);
 
   for (const auto &d : args.diagnostics) {
     auto &out = d.is_error ? std::cerr : std::cout;

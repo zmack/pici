@@ -103,6 +103,8 @@ Args parse_args(int argc, char *argv[]) {
       result.list_tools = true;
     } else if (arg == "--list-addons") {
       result.list_addons = true;
+    } else if (arg == "--otel-endpoint") {
+      result.otel_endpoint = std::string(need("--otel-endpoint"));
     } else if (arg == "--list-models") {
       result.list_models = true;
       // optional next arg that isn't a flag
@@ -144,6 +146,7 @@ void print_help(const char *prog) {
     "  --list-tools                List active tools and their sources\n"
     "  --list-addons               List loaded add-ons and their hooks\n"
     "  --list-models [filter]      List known models (optional search filter)\n"
+    "  --otel-endpoint <url>       Export OpenTelemetry traces (e.g. http://localhost:4318)\n"
     "  --verbose                   Verbose output\n"
     "  --version, -v               Show version\n"
     "  --help, -h                  Show this help\n\n"

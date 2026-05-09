@@ -5,6 +5,7 @@
 #include "core/env_api_keys.h"
 #include "core/lua_tool.h"
 #include "core/models.h"
+#include "core/otel_init.h"
 #include "core/providers/openai_completions.h"
 
 #include <csignal>
@@ -28,6 +29,11 @@ int main(int argc, char *argv[]) {
 
   // Parse shared CLI flags
   auto args = pi::cli::load_and_merge(argc, argv);
+
+  struct OtelGuard { ~OtelGuard() { pi::core::shutdown_otel(); } } otel_guard;
+  std::atexit([] { pi::core::shutdown_otel(); });
+  if (!args.otel_endpoint.empty())
+    pi::core::init_otel(args.otel_endpoint);
 
   for (const auto &d : args.diagnostics) {
     auto &out = d.is_error ? std::cerr : std::cout;

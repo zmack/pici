@@ -49,6 +49,9 @@ struct Args {
   // Config file
   std::string config_path; // --config <path>; empty = use default location
 
+  // Observability
+  std::string otel_endpoint; // --otel-endpoint <url>; empty = no OTel export
+
   // Meta
   bool verbose{false};
   bool help{false};
