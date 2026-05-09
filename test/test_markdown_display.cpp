@@ -64,11 +64,46 @@ int main() {
   show("link",
        "See the [project readme](https://github.com/example/pici) for details.");
 
-  show("table",
+  show("table — basic",
        "| Name    | Role      | Score |\n"
        "| ------- | --------- | ----- |\n"
        "| Alice   | Engineer  | 98    |\n"
        "| Bob     | Designer  | 91    |");
+
+  show("table — right and center alignment",
+       "| Left    | Center    | Right |\n"
+       "| :------ | :-------: | ----: |\n"
+       "| Apple   | Banana    | 1234  |\n"
+       "| Carrot  | Durian    | 99    |");
+
+  show("table — inline code in cells",
+       "| Command | Effect          |\n"
+       "| ------- | --------------- |\n"
+       "| `ls`    | List files      |\n"
+       "| `cd`    | Change dir      |\n"
+       "| `rm`    | Remove files    |");
+
+  show("table — immediately followed by code block (no blank line)",
+       "| A | B |\n"
+       "| - | - |\n"
+       "| 1 | 2 |\n"
+       "```python\nprint('hello')\n```");
+
+  show("code block — immediately followed by table (no blank line)",
+       "```\nsome code\n```\n"
+       "| X | Y |\n"
+       "| - | - |\n"
+       "| a | b |");
+
+  show("table — mixed with prose and code",
+       "Here are the options:\n\n"
+       "| Flag      | Default | Description        |\n"
+       "| --------- | ------- | ------------------ |\n"
+       "| `--port`  | 8080    | TCP port to listen |\n"
+       "| `--host`  | 0.0.0.0 | Bind address       |\n"
+       "| `--debug` | false   | Enable debug mode  |\n\n"
+       "Run with `./server --port 9090` to override the port.\n\n"
+       "```bash\n./server --port 9090 --debug\n```");
 
   show("mixed — typical LLM response",
        "Here's how to reverse a string in C++:\n\n"

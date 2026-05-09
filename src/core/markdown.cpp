@@ -5,6 +5,7 @@ extern "C" {
 #include <cmark.h>
 }
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -270,22 +271,196 @@ static void render_children(Renderer &r, cmark_node *node) {
   }
 }
 
+// ── GFM table support ─────────────────────────────────────────────────────────
+//
+// cmark 0.31.1 does not parse GFM tables. We pre-process the input, detect
+// table blocks (header + separator + optional body), render them with
+// box-drawing characters, and pass everything else to cmark unchanged.
+
+static std::string_view trim_sv(std::string_view s) {
+  while (!s.empty() && (s.front() == ' ' || s.front() == '\t'))
+    s.remove_prefix(1);
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
+    s.remove_suffix(1);
+  return s;
+}
+
+// Split one table row on '|', stripping outer pipes and per-cell whitespace.
+static std::vector<std::string_view> split_row(std::string_view line) {
+  if (!line.empty() && line.front() == '|') line.remove_prefix(1);
+  if (!line.empty() && line.back() == '|') line.remove_suffix(1);
+  std::vector<std::string_view> cells;
+  std::size_t pos = 0;
+  while (true) {
+    const auto sep = line.find('|', pos);
+    cells.push_back(
+        trim_sv(line.substr(pos, sep == std::string_view::npos ? sep : sep - pos)));
+    if (sep == std::string_view::npos) break;
+    pos = sep + 1;
+  }
+  return cells;
+}
+
+// GFM separator row: only -, :, |, space/tab — and must contain both - and |.
+static bool is_table_sep(std::string_view line) {
+  bool has_dash = false, has_pipe = false;
+  for (char c : line) {
+    switch (c) {
+    case '-': has_dash = true; break;
+    case '|': has_pipe = true; break;
+    case ':': case ' ': case '\t': break;
+    default: return false;
+    }
+  }
+  return has_dash && has_pipe;
+}
+
+enum class Align { left, center, right };
+
+static Align parse_align(std::string_view cell) {
+  cell = trim_sv(cell);
+  const bool lc = !cell.empty() && cell.front() == ':';
+  const bool rc = !cell.empty() && cell.back()  == ':';
+  if (lc && rc) return Align::center;
+  if (rc)       return Align::right;
+  return Align::left;
+}
+
+static std::string render_table(const std::vector<std::string_view> &block) {
+  if (block.size() < 2) return {};
+
+  auto header = split_row(block[0]);
+  auto sep    = split_row(block[1]);
+  const std::size_t nc = header.size();
+
+  std::vector<Align> aligns(nc, Align::left);
+  for (std::size_t c = 0; c < std::min(nc, sep.size()); ++c)
+    aligns[c] = parse_align(sep[c]);
+
+  std::vector<std::vector<std::string_view>> rows;
+  for (std::size_t i = 2; i < block.size(); ++i) {
+    auto row = split_row(block[i]);
+    row.resize(nc);
+    rows.push_back(std::move(row));
+  }
+
+  std::vector<std::size_t> widths(nc, 1);
+  for (std::size_t c = 0; c < nc; ++c) {
+    widths[c] = std::max(widths[c], header[c].size());
+    for (const auto &row : rows) widths[c] = std::max(widths[c], row[c].size());
+  }
+
+  static constexpr const char *kH  = "\xe2\x94\x80"; // ─
+  static constexpr const char *kV  = "\xe2\x94\x82"; // │
+  static constexpr const char *kTL = "\xe2\x94\x8c"; // ┌
+  static constexpr const char *kTM = "\xe2\x94\xac"; // ┬
+  static constexpr const char *kTR = "\xe2\x94\x90"; // ┐
+  static constexpr const char *kML = "\xe2\x94\x9c"; // ├
+  static constexpr const char *kMM = "\xe2\x94\xbc"; // ┼
+  static constexpr const char *kMR = "\xe2\x94\xa4"; // ┤
+  static constexpr const char *kBL = "\xe2\x94\x94"; // └
+  static constexpr const char *kBM = "\xe2\x94\xb4"; // ┴
+  static constexpr const char *kBR = "\xe2\x94\x98"; // ┘
+
+  auto hline = [&](const char *l, const char *m, const char *r) {
+    std::string s = l;
+    for (std::size_t c = 0; c < nc; ++c) {
+      if (c) s += m;
+      for (std::size_t i = 0; i < widths[c] + 2; ++i) s += kH;
+    }
+    return s + r + '\n';
+  };
+
+  auto padded = [&](std::string_view text, std::size_t w, Align a) {
+    const std::size_t len = text.size();
+    const std::size_t pad = w > len ? w - len : 0;
+    std::string s;
+    if (a == Align::right) {
+      s.append(pad, ' '); s += text;
+    } else if (a == Align::center) {
+      const std::size_t lp = pad / 2;
+      s.append(lp, ' '); s += text; s.append(pad - lp, ' ');
+    } else {
+      s += text; s.append(pad, ' ');
+    }
+    return s;
+  };
+
+  auto dline = [&](const std::vector<std::string_view> &cells, bool bold) {
+    std::string s = kV;
+    for (std::size_t c = 0; c < nc; ++c) {
+      s += ' ';
+      if (bold) { s += kBold; }
+      s += padded(cells[c], widths[c], aligns[c]);
+      if (bold) { s += kReset; }
+      s += ' ';
+      s += kV;
+    }
+    return s + '\n';
+  };
+
+  std::string out;
+  out += hline(kTL, kTM, kTR);
+  out += dline(header, /*bold=*/true);
+  out += hline(kML, kMM, kMR);
+  for (const auto &row : rows) out += dline(row, /*bold=*/false);
+  out += hline(kBL, kBM, kBR);
+  out += '\n';
+  return out;
+}
+
 } // namespace
 
 std::string render_markdown_ansi(std::string_view input) {
+  // Split into lines for table detection.
+  std::vector<std::string_view> lines;
+  {
+    std::size_t pos = 0;
+    while (pos < input.size()) {
+      const auto nl = input.find('\n', pos);
+      const auto end = (nl == std::string_view::npos) ? input.size() : nl;
+      lines.push_back(input.substr(pos, end - pos));
+      pos = end + 1;
+    }
+  }
+
   Renderer r;
   r.out.reserve(input.size() * 2);
 
-  cmark_node *doc =
-      cmark_parse_document(input.data(), input.size(), CMARK_OPT_VALIDATE_UTF8);
-  if (doc != nullptr) {
-    render_node(r, doc);
-    cmark_node_free(doc);
+  // Non-table lines are buffered here and flushed to cmark in one call so that
+  // multi-paragraph structure is preserved.
+  std::string buf;
+
+  auto flush = [&]() {
+    if (buf.empty()) return;
+    cmark_node *doc =
+        cmark_parse_document(buf.data(), buf.size(), CMARK_OPT_VALIDATE_UTF8);
+    if (doc) { render_node(r, doc); cmark_node_free(doc); }
+    buf.clear();
+  };
+
+  std::size_t i = 0;
+  while (i < lines.size()) {
+    // Table detection: current line has '|' and next line is a GFM separator.
+    if (i + 1 < lines.size() &&
+        lines[i].find('|') != std::string_view::npos &&
+        is_table_sep(lines[i + 1])) {
+      flush();
+      // Collect contiguous non-blank lines as the table block.
+      const std::size_t start = i;
+      while (i < lines.size() && !lines[i].empty() &&
+             lines[i].find('|') != std::string_view::npos) ++i;
+      r.out += render_table({lines.begin() + start, lines.begin() + i});
+    } else {
+      buf += lines[i];
+      buf += '\n';
+      ++i;
+    }
   }
 
-  while (!r.out.empty() && r.out.back() == '\n') {
-    r.out.pop_back();
-  }
+  flush();
+
+  while (!r.out.empty() && r.out.back() == '\n') r.out.pop_back();
   r.out += '\n';
   return r.out;
 }
