@@ -12,6 +12,17 @@ namespace pi::cli {
 // Returns candidate completion strings.
 using CompleteFn = std::function<std::vector<std::string>(std::string_view)>;
 
+enum class ControlAction {
+  scroll_line_up,
+  scroll_line_down,
+  scroll_page_up,
+  scroll_page_down,
+  scroll_top,
+  scroll_bottom,
+};
+
+using ControlFn = std::function<void(ControlAction)>;
+
 // Read one line from stdin with optional tab completion.
 //
 // - When stdin is a TTY, enters raw mode so Tab is intercepted before the
@@ -24,6 +35,7 @@ using CompleteFn = std::function<std::vector<std::string>(std::string_view)>;
 // Returns nullopt on EOF (Ctrl+D on empty input) or read error.
 // Ctrl+C exits the process via SIGINT (same as before raw mode).
 std::optional<std::string> readline(std::string_view prompt,
-                                    CompleteFn complete_fn = {});
+                                    CompleteFn complete_fn = {},
+                                    ControlFn control_fn = {});
 
 } // namespace pi::cli

@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -53,6 +54,12 @@ static std::string render_visible_markdown(std::string_view input) {
   rendered.append(static_cast<std::size_t>(count_trailing_newlines(input)),
                   '\n');
   return rendered;
+}
+
+static constexpr std::string_view kViewportCursor = "\033[7m \033[0m";
+
+static void append_viewport_cursor(std::string &rendered) {
+  rendered.append(kViewportCursor);
 }
 
 class RawStreamRenderer final : public Renderer {
@@ -275,6 +282,8 @@ public:
     total_tokens_ = 0;
     status_text_.clear();
     active_tools_.clear();
+    scroll_offset_rows_ = 0;
+    max_scroll_rows_ = 0;
     scanner_   = {};
     fin_cache_ = {};
     set_scroll_region();
@@ -284,6 +293,34 @@ public:
 
   void on_text_delta(std::string_view delta) override {
     raw_buffer_ += delta;
+    repaint();
+  }
+
+  void on_scroll(RendererScrollCommand command) override {
+    const int content_rows = std::max(1, term_height(fd_) - 2);
+    const int page_rows = std::max(1, content_rows - 1);
+
+    switch (command) {
+    case RendererScrollCommand::line_up:
+      scroll_offset_rows_ += 1;
+      break;
+    case RendererScrollCommand::line_down:
+      scroll_offset_rows_ = std::max(0, scroll_offset_rows_ - 1);
+      break;
+    case RendererScrollCommand::page_up:
+      scroll_offset_rows_ += page_rows;
+      break;
+    case RendererScrollCommand::page_down:
+      scroll_offset_rows_ = std::max(0, scroll_offset_rows_ - page_rows);
+      break;
+    case RendererScrollCommand::top:
+      scroll_offset_rows_ = std::numeric_limits<int>::max();
+      break;
+    case RendererScrollCommand::bottom:
+      scroll_offset_rows_ = 0;
+      break;
+    }
+
     repaint();
   }
 
@@ -452,6 +489,8 @@ private:
       tail_rendered = render_visible_markdown(tail_raw);
     }
 
+    append_viewport_cursor(tail_rendered);
+
     // ── Build viewport from finalized cache + tail ────────────────────────────
     // Count tail rows without allocating line strings (O(tail.size())).
     const int tail_rows = cursor_rows_for_rendered(tail_rendered, w);
@@ -459,7 +498,7 @@ private:
     std::string frame;
     frame += "\033[H\033[J"; // home + erase content region
 
-    if (tail_rows >= content_rows) {
+    if (scroll_offset_rows_ == 0 && tail_rows >= content_rows) {
       // Fast path: all visible content is within the tail — finalized prefix is
       // completely off-screen.  Skip the split_lines walk over fin_cache_.rendered.
       const auto tail_lines_vec = split_lines(tail_rendered, w);
@@ -471,7 +510,7 @@ private:
         if (i + 1 < total) frame += "\r\n";
       }
     } else {
-      // Mixed / short path: need finalized rows + all tail rows.
+      // Mixed / short / scrolled path: need finalized rows + all tail rows.
       // fin_cache_.rendered ends at \n\n so concatenation is join-clean.
       // When fin_cache_.rendered is empty (no boundary yet), combined equals
       // tail_rendered == render_visible_markdown(content) — identical to before G2.
@@ -482,7 +521,9 @@ private:
 
       const auto lines         = split_lines(combined, w);
       const int  total         = static_cast<int>(lines.size());
-      const int  first         = std::max(0, total - content_rows);
+      max_scroll_rows_         = std::max(0, total - content_rows);
+      scroll_offset_rows_      = std::clamp(scroll_offset_rows_, 0, max_scroll_rows_);
+      const int  first         = std::max(0, total - content_rows - scroll_offset_rows_);
       const int  last_plus_one = std::min(total, first + content_rows);
       frame.reserve(combined.size() + static_cast<std::size_t>(content_rows) * 8);
       for (int i = first; i < last_plus_one; ++i) {
@@ -511,6 +552,13 @@ private:
       text += "]";
     } else {
       text = status_text_;
+    }
+    if (scroll_offset_rows_ > 0) {
+      if (!text.empty()) text += "  ";
+      text += "scroll ";
+      text += std::to_string(scroll_offset_rows_);
+      text += "/";
+      text += std::to_string(max_scroll_rows_);
     }
     if (static_cast<int>(text.size()) > w)
       text.resize(static_cast<std::size_t>(w));
@@ -590,6 +638,8 @@ private:
   std::map<std::string, std::string> active_tools_;
   std::string status_text_;
   std::uint64_t total_tokens_{0};
+  int scroll_offset_rows_{0};
+  int max_scroll_rows_{0};
   BlockBoundaryScanner scanner_;
   FinCache             fin_cache_;
 

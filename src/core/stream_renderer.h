@@ -22,6 +22,15 @@ enum class RendererErrorKind {
   unknown,
 };
 
+enum class RendererScrollCommand {
+  line_up,
+  line_down,
+  page_up,
+  page_down,
+  top,
+  bottom,
+};
+
 // ─── Renderer ────────────────────────────────────────────────────────────────
 //
 // Receives presentation-level events derived from the agent's AgentEvent
@@ -67,6 +76,10 @@ public:
 
   // An error occurred.  kind distinguishes LLM / transport / abort errors.
   virtual void on_error(RendererErrorKind kind, std::string_view message) {}
+
+  // Optional viewport/navigation input. Renderers without an addressable
+  // viewport can ignore it.
+  virtual void on_scroll(RendererScrollCommand command) {}
 };
 
 // ─── dispatch_event ──────────────────────────────────────────────────────────

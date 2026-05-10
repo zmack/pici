@@ -222,6 +222,10 @@ public:
     std::cerr << "\nerror: " << msg << "\n";
   }
 
+  void on_scroll(core::RendererScrollCommand command) override {
+    base_.on_scroll(command);
+  }
+
   const core::TokenUsage &last_usage() const { return last_usage_; }
 
 private:
@@ -538,6 +542,29 @@ static int cmd_run(const cli::Args &args) {
     return {};
   };
 
+  cli::ControlFn control_fn = [&renderer](cli::ControlAction action) {
+    switch (action) {
+    case cli::ControlAction::scroll_line_up:
+      renderer->on_scroll(core::RendererScrollCommand::line_up);
+      break;
+    case cli::ControlAction::scroll_line_down:
+      renderer->on_scroll(core::RendererScrollCommand::line_down);
+      break;
+    case cli::ControlAction::scroll_page_up:
+      renderer->on_scroll(core::RendererScrollCommand::page_up);
+      break;
+    case cli::ControlAction::scroll_page_down:
+      renderer->on_scroll(core::RendererScrollCommand::page_down);
+      break;
+    case cli::ControlAction::scroll_top:
+      renderer->on_scroll(core::RendererScrollCommand::top);
+      break;
+    case cli::ControlAction::scroll_bottom:
+      renderer->on_scroll(core::RendererScrollCommand::bottom);
+      break;
+    }
+  };
+
   // Interactive REPL — track usage across turns
   core::TokenUsage last_usage, session_usage;
   std::size_t session_turns = 0;
@@ -563,7 +590,7 @@ static int cmd_run(const cli::Args &args) {
       auto custom = hooks->prompt_line(turns, model.id, agent.state().tools().size());
       if (custom) prompt = "\n" + *custom;
     }
-    auto maybe_line = cli::readline(prompt, complete_fn);
+    auto maybe_line = cli::readline(prompt, complete_fn, control_fn);
     if (!maybe_line) break;
     const std::string &line = *maybe_line;
     if (line.empty()) continue;

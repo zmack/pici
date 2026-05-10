@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <termios.h>
 #include <unistd.h>
 #include <vector>
@@ -99,10 +100,58 @@ void apply_completions(std::string_view prompt, std::string &buf,
   redraw(prompt, buf);
 }
 
+std::string read_escape_sequence() {
+  std::string seq;
+  unsigned char c = 0;
+  if (::read(STDIN_FILENO, &c, 1) <= 0) return seq;
+  seq += static_cast<char>(c);
+
+  if (c != '[' && c != 'O') return seq;
+
+  while (seq.size() < 8) {
+    if (::read(STDIN_FILENO, &c, 1) <= 0) break;
+    seq += static_cast<char>(c);
+    if ((c >= '@' && c <= '~')) break;
+  }
+  return seq;
+}
+
+bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn) {
+  if (!control_fn) return false;
+
+  if (seq == "[A") {
+    control_fn(ControlAction::scroll_line_up);
+    return true;
+  }
+  if (seq == "[B") {
+    control_fn(ControlAction::scroll_line_down);
+    return true;
+  }
+  if (seq == "[5~") {
+    control_fn(ControlAction::scroll_page_up);
+    return true;
+  }
+  if (seq == "[6~") {
+    control_fn(ControlAction::scroll_page_down);
+    return true;
+  }
+  if (seq == "[H" || seq == "OH" || seq == "[1~") {
+    control_fn(ControlAction::scroll_top);
+    return true;
+  }
+  if (seq == "[F" || seq == "OF" || seq == "[4~") {
+    control_fn(ControlAction::scroll_bottom);
+    return true;
+  }
+
+  return false;
+}
+
 } // namespace
 
 std::optional<std::string> readline(std::string_view prompt,
-                                    CompleteFn complete_fn) {
+                                    CompleteFn complete_fn,
+                                    ControlFn control_fn) {
   // Non-TTY fallback: just use getline (pipes, scripts, tests)
   if (!isatty(STDIN_FILENO)) {
     std::cout << prompt << std::flush;
@@ -145,10 +194,10 @@ std::optional<std::string> readline(std::string_view prompt,
       return std::nullopt;
     }
 
-    if (c == '\x1b') { // ESC — consume ANSI escape sequence, ignore
-      unsigned char seq[2] = {0, 0};
-      if (::read(STDIN_FILENO, &seq[0], 1) > 0 && seq[0] == '[')
-        ::read(STDIN_FILENO, &seq[1], 1);
+    if (c == '\x1b') {
+      const auto seq = read_escape_sequence();
+      if (handle_escape_sequence(seq, control_fn))
+        redraw(prompt, buf);
       continue;
     }
 
