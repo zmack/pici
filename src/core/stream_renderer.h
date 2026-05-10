@@ -15,10 +15,10 @@ namespace pi::core {
 // ─── Error kind ──────────────────────────────────────────────────────────────
 
 enum class RendererErrorKind {
-  llm,        // LLM returned an error response
-  transport,  // network / HTTP error
-  tool,       // tool execution error (also surfaces via on_tool_end)
-  abort,      // agent was cancelled via stop_token
+  llm,       // LLM returned an error response
+  transport, // network / HTTP error
+  tool,      // tool execution error (also surfaces via on_tool_end)
+  abort,     // agent was cancelled via stop_token
   unknown,
 };
 
@@ -60,12 +60,10 @@ public:
   // Tool call lifecycle.  call_id correlates start with end — important for
   // parallel tool execution where multiple calls may interleave.
   virtual void on_tool_start(std::string_view call_id,
-                              std::string_view tool_name,
-                              std::string_view args_json) {}
-  virtual void on_tool_end(std::string_view call_id,
-                            std::string_view tool_name,
-                            const ToolResult &result,
-                            bool is_error) {}
+                             std::string_view tool_name,
+                             std::string_view args_json) {}
+  virtual void on_tool_end(std::string_view call_id, std::string_view tool_name,
+                           const ToolResult &result, bool is_error) {}
 
   // One assistant message is fully received (there may be several per turn
   // when tool calls are involved).  usage is the token count for this message.

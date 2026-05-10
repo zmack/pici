@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <future>
+#include <map>
 #include <memory>
 #include <optional>
 #include <source_location>
@@ -21,6 +23,10 @@
 #include "core/llm_client.h"
 #include "core/message_types.h"
 #include "core/stream.h"
+#include "opentelemetry/nostd/shared_ptr.h"
+#include "opentelemetry/nostd/string_view.h"
+#include "opentelemetry/trace/span.h"
+#include "opentelemetry/trace/span_metadata.h"
 
 #ifdef PI_CPP_OTEL_ENABLED
 #include <opentelemetry/context/context.h>
@@ -285,9 +291,9 @@ bool should_terminate_tool_batch(
 }
 
 ToolResultMessage emit_finalized_tool_call(const FinalizedToolCall &finalized,
-                                           StreamCallback emit) {
+                                           const StreamCallback &emit) {
   emit_tool_result(finalized.tool_call, finalized.result, finalized.is_error,
-                   std::move(emit));
+                   emit);
   return make_tool_result_message(finalized.tool_call, finalized.result);
 }
 
@@ -309,26 +315,26 @@ AssistantMessage get_partial(const AssistantMessageEvent &ev) {
 #ifdef PI_CPP_OTEL_ENABLED
 
 namespace otel = opentelemetry;
-using OtelSpan   = otel::nostd::shared_ptr<otel::trace::Span>;
+using OtelSpan = otel::nostd::shared_ptr<otel::trace::Span>;
 using OtelTracer = otel::nostd::shared_ptr<otel::trace::Tracer>;
 
 // Create a span whose parent is parent_ctx.
-static OtelSpan otel_child_span(const OtelTracer &tracer,
-                                 const otel::context::Context &parent_ctx,
-                                 otel::nostd::string_view name) {
+OtelSpan otel_child_span(const OtelTracer &tracer,
+                         const otel::context::Context &parent_ctx,
+                         otel::nostd::string_view name) {
   otel::trace::StartSpanOptions opts;
   opts.parent = parent_ctx;
   return tracer->StartSpan(name, opts);
 }
 
 // Build a Context that has span as its active span (parent_ctx is the base).
-static otel::context::Context otel_ctx_with(otel::context::Context parent,
-                                             const OtelSpan &span) {
+otel::context::Context otel_ctx_with(otel::context::Context parent,
+                                     const OtelSpan &span) {
   return otel::trace::SetSpan(parent, span);
 }
 
 // True if any content block is a thinking block.
-static bool otel_has_thinking(const std::vector<ContentBlock> &content) {
+bool otel_has_thinking(const std::vector<ContentBlock> &content) {
   return std::ranges::any_of(content, [](const ContentBlock &b) {
     return std::holds_alternative<ThinkingContent>(b);
   });
@@ -343,7 +349,7 @@ static bool otel_has_thinking(const std::vector<ContentBlock> &content) {
 std::shared_ptr<AssistantMessage>
 stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
                           StreamCallback emit, const std::stop_token &stop_tok,
-                          OtelCtx otel_ctx) {
+                          const OtelCtx &otel_ctx) {
   auto messages = context.messages;
 
 #ifdef PI_CPP_OTEL_ENABLED
@@ -352,14 +358,15 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
 
   if (config.transform_context) {
 #ifdef PI_CPP_OTEL_ENABLED
-    xform_span = otel_child_span(config.tracer, otel_ctx, "llm.transform_context");
+    xform_span =
+        otel_child_span(config.tracer, otel_ctx, "llm.transform_context");
     xform_span->SetAttribute("pi.transform.input_message_count",
-                              static_cast<int64_t>(messages.size()));
+                             static_cast<int64_t>(messages.size()));
 #endif
     messages = config.transform_context(messages, stop_tok);
 #ifdef PI_CPP_OTEL_ENABLED
     xform_span->SetAttribute("pi.transform.output_message_count",
-                              static_cast<int64_t>(messages.size()));
+                             static_cast<int64_t>(messages.size()));
     xform_span->End();
 #endif
   }
@@ -400,7 +407,7 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
 
 #ifdef PI_CPP_OTEL_ENABLED
   // Capture HTTP response metadata via on_response hook (compose with user's).
-  int         llm_http_status = 0;
+  int llm_http_status = 0;
   std::string llm_response_id;
   auto prev_on_response = std::move(opts.on_response);
   opts.on_response = [&, prev = std::move(prev_on_response)](
@@ -410,16 +417,17 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
     llm_http_status = status;
     if (auto it = hdrs.find("x-request-id"); it != hdrs.end())
       llm_response_id = it->second;
-    if (prev) prev(status, hdrs, model);
+    if (prev)
+      prev(status, hdrs, model);
   };
 
   auto llm_span = otel_child_span(config.tracer, otel_ctx, "llm.request");
-  llm_span->SetAttribute("gen_ai.system",         config.model.provider);
-  llm_span->SetAttribute("gen_ai.request.model",  config.model.id);
+  llm_span->SetAttribute("gen_ai.system", config.model.provider);
+  llm_span->SetAttribute("gen_ai.request.model", config.model.id);
   llm_span->SetAttribute("gen_ai.operation.name", "chat");
 
-  auto   llm_start        = std::chrono::steady_clock::now();
-  bool   llm_first_token  = false;
+  auto llm_start = std::chrono::steady_clock::now();
+  bool llm_first_token = false;
 #endif
 
   std::shared_ptr<AssistantMessage> partial;
@@ -471,22 +479,22 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
   emit(MessageEndEvent(*final_msg));
 
 #ifdef PI_CPP_OTEL_ENABLED
-  if (llm_http_status)
+  if (llm_http_status != 0)
     llm_span->SetAttribute("http.response.status_code",
-                            static_cast<int64_t>(llm_http_status));
+                           static_cast<int64_t>(llm_http_status));
   if (!llm_response_id.empty())
     llm_span->SetAttribute("gen_ai.response.id", llm_response_id);
-  llm_span->SetAttribute("gen_ai.response.model",       final_msg->model);
+  llm_span->SetAttribute("gen_ai.response.model", final_msg->model);
   llm_span->SetAttribute("gen_ai.usage.input_tokens",
-                          static_cast<int64_t>(final_msg->usage.input));
+                         static_cast<int64_t>(final_msg->usage.input));
   llm_span->SetAttribute("gen_ai.usage.output_tokens",
-                          static_cast<int64_t>(final_msg->usage.output));
+                         static_cast<int64_t>(final_msg->usage.output));
   llm_span->SetAttribute("anthropic.usage.cache_read_input_tokens",
-                          static_cast<int64_t>(final_msg->usage.cache_read));
+                         static_cast<int64_t>(final_msg->usage.cache_read));
   llm_span->SetAttribute("anthropic.usage.cache_creation_input_tokens",
-                          static_cast<int64_t>(final_msg->usage.cache_write));
+                         static_cast<int64_t>(final_msg->usage.cache_write));
   llm_span->SetAttribute("llm.has_thinking",
-                          otel_has_thinking(final_msg->content));
+                         otel_has_thinking(final_msg->content));
   {
     std::string_view finish_reason =
         stop_reason_to_string(final_msg->stop_reason);
@@ -510,7 +518,7 @@ static ToolCallResult execute_tool_calls_sequential(
     AgentContext &context, const AssistantMessage &assistant_message,
     const std::vector<ToolCall> &tool_calls, const AgentLoopConfig &config,
     StreamCallback emit, const std::stop_token &stop_tok,
-    OtelCtx otel_ctx) {
+    const OtelCtx &otel_ctx) {
   ToolCallResult result;
   std::vector<FinalizedToolCall> finalized_calls;
 
@@ -520,9 +528,9 @@ static ToolCallResult execute_tool_calls_sequential(
 
 #ifdef PI_CPP_OTEL_ENABLED
     auto tool_span = otel_child_span(config.tracer, otel_ctx, "tool.call");
-    tool_span->SetAttribute("gen_ai.tool.name",    tc.name);
+    tool_span->SetAttribute("gen_ai.tool.name", tc.name);
     tool_span->SetAttribute("gen_ai.tool.call.id", tc.id);
-    tool_span->SetAttribute("gen_ai.tool.type",    "function");
+    tool_span->SetAttribute("gen_ai.tool.type", "function");
     tool_span->AddEvent("tool.prepare.start");
 #endif
 
@@ -535,7 +543,7 @@ static ToolCallResult execute_tool_calls_sequential(
 
     if (auto *immediate = std::get_if<FinalizedToolCall>(&prepared)) {
 #ifdef PI_CPP_OTEL_ENABLED
-      tool_span->SetAttribute("tool.blocked",  immediate->is_error);
+      tool_span->SetAttribute("tool.blocked", immediate->is_error);
       tool_span->SetAttribute("tool.is_error", immediate->is_error);
       if (immediate->is_error)
         tool_span->SetStatus(opentelemetry::trace::StatusCode::kError, "");
@@ -569,7 +577,8 @@ static ToolCallResult execute_tool_calls_sequential(
     tool_span->AddEvent("tool.finalize.end");
     tool_span->SetAttribute("tool.is_error", finalized.is_error);
     if (finalized.result)
-      tool_span->SetAttribute("pi.tool.result_bytes",
+      tool_span->SetAttribute(
+          "pi.tool.result_bytes",
           static_cast<int64_t>(finalized.result->content().size()));
     if (finalized.is_error)
       tool_span->SetStatus(opentelemetry::trace::StatusCode::kError, "");
@@ -592,7 +601,7 @@ static ToolCallResult execute_tool_calls_parallel(
     AgentContext &context, const AssistantMessage &assistant_message,
     const std::vector<ToolCall> &tool_calls, const AgentLoopConfig &config,
     const StreamCallback &emit, const std::stop_token &stop_tok,
-    OtelCtx otel_ctx) {
+    const OtelCtx &otel_ctx) {
   ToolCallResult result;
   const std::size_t n = tool_calls.size();
   std::vector<std::optional<FinalizedToolCall>> slots(n);
@@ -608,9 +617,9 @@ static ToolCallResult execute_tool_calls_parallel(
     // async thread. tool_span (shared_ptr) is captured by value so it stays
     // alive. Span::End() is thread-safe per the OTel spec and SDK.
     auto tool_span = otel_child_span(config.tracer, otel_ctx, "tool.call");
-    tool_span->SetAttribute("gen_ai.tool.name",    tc.name);
+    tool_span->SetAttribute("gen_ai.tool.name", tc.name);
     tool_span->SetAttribute("gen_ai.tool.call.id", tc.id);
-    tool_span->SetAttribute("gen_ai.tool.type",    "function");
+    tool_span->SetAttribute("gen_ai.tool.type", "function");
     tool_span->AddEvent("tool.prepare.start");
     auto tool_ctx = otel_ctx_with(otel_ctx, tool_span);
 #endif
@@ -624,7 +633,7 @@ static ToolCallResult execute_tool_calls_parallel(
 
     if (auto *immediate = std::get_if<FinalizedToolCall>(&prepared)) {
 #ifdef PI_CPP_OTEL_ENABLED
-      tool_span->SetAttribute("tool.blocked",  immediate->is_error);
+      tool_span->SetAttribute("tool.blocked", immediate->is_error);
       tool_span->SetAttribute("tool.is_error", immediate->is_error);
       if (immediate->is_error)
         tool_span->SetStatus(opentelemetry::trace::StatusCode::kError, "");
@@ -639,13 +648,13 @@ static ToolCallResult execute_tool_calls_parallel(
 
     auto call = std::get<PreparedToolCall>(std::move(prepared));
     pending.push_back(std::async(
-        std::launch::async,
-        [&context, &assistant_message, &config, emit, stop_tok,
-         call = std::move(call), idx = i
+        std::launch::async, [&context, &assistant_message, &config, emit,
+                             stop_tok, call = std::move(call), idx = i
 #ifdef PI_CPP_OTEL_ENABLED
-         , tool_span, tool_ctx
+                             ,
+                             tool_span, tool_ctx
 #endif
-        ]() mutable {
+    ]() mutable {
 #ifdef PI_CPP_OTEL_ENABLED
           // Attach tool_ctx to this thread so inner instrumentation (e.g.
           // inside tool->execute) can find the parent via GetCurrent().
@@ -671,7 +680,8 @@ static ToolCallResult execute_tool_calls_parallel(
           tool_span->AddEvent("tool.finalize.end");
           tool_span->SetAttribute("tool.is_error", finalized.is_error);
           if (finalized.result)
-            tool_span->SetAttribute("pi.tool.result_bytes",
+            tool_span->SetAttribute(
+                "pi.tool.result_bytes",
                 static_cast<int64_t>(finalized.result->content().size()));
           if (finalized.is_error)
             tool_span->SetStatus(opentelemetry::trace::StatusCode::kError, "");
@@ -713,7 +723,7 @@ ToolCallResult execute_tool_calls(AgentContext &context,
                                   const AgentLoopConfig &config,
                                   const StreamCallback &emit,
                                   const std::stop_token &stop_tok,
-                                  OtelCtx otel_ctx) {
+                                  const OtelCtx &otel_ctx) {
   auto tool_calls = extract_tool_calls(assistant_message.content);
 
   if (tool_calls.empty()) {
@@ -764,7 +774,7 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
     auto session_span = otel_child_span(
         config.tracer, otel::context::RuntimeContext::GetCurrent(),
         "agent.session");
-    session_span->SetAttribute("agent.model",    config.model.id);
+    session_span->SetAttribute("agent.model", config.model.id);
     session_span->SetAttribute("agent.provider", config.model.provider);
     if (config.session_id)
       session_span->SetAttribute("session.id", *config.session_id);
@@ -775,17 +785,18 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
     otel::context::Context turn_ctx;
 
     auto begin_turn = [&] {
-      turn_span = otel_child_span(
-          config.tracer, otel::context::RuntimeContext::GetCurrent(),
-          "agent.turn");
-      turn_ctx = otel_ctx_with(otel::context::RuntimeContext::GetCurrent(),
-                               turn_span);
+      turn_span = otel_child_span(config.tracer,
+                                  otel::context::RuntimeContext::GetCurrent(),
+                                  "agent.turn");
+      turn_ctx =
+          otel_ctx_with(otel::context::RuntimeContext::GetCurrent(), turn_span);
     };
 
     auto end_turn = [&](const AssistantMessage &msg, std::size_t tool_count) {
-      if (!turn_span) return;
+      if (!turn_span)
+        return;
       turn_span->SetAttribute("agent.tool_calls_count",
-                               static_cast<int64_t>(tool_count));
+                              static_cast<int64_t>(tool_count));
       if (stop_tok.stop_requested()) {
         turn_span->AddEvent("cancelled");
         turn_span->SetStatus(otel::trace::StatusCode::kError, "cancelled");
@@ -844,12 +855,13 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
         }
 
         // Stream assistant response
-        auto assistant_msg = stream_assistant_response(
-            context, config, publish, stop_tok
+        auto assistant_msg =
+            stream_assistant_response(context, config, publish, stop_tok
 #ifdef PI_CPP_OTEL_ENABLED
-            , turn_ctx
+                                      ,
+                                      turn_ctx
 #endif
-        );
+            );
         if (!assistant_msg) {
           assistant_msg = std::make_shared<AssistantMessage>();
           assistant_msg->api = "none";
@@ -877,10 +889,11 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
 
         std::vector<ToolResultMessage> tool_results;
         if (!tool_calls.empty()) {
-          auto batch_result = execute_tool_calls(
-              context, *assistant_msg, config, publish, stop_tok
+          auto batch_result = execute_tool_calls(context, *assistant_msg,
+                                                 config, publish, stop_tok
 #ifdef PI_CPP_OTEL_ENABLED
-              , turn_ctx
+                                                 ,
+                                                 turn_ctx
 #endif
           );
           tool_results = std::move(batch_result.messages);
@@ -973,7 +986,7 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
     auto session_span = otel_child_span(
         config.tracer, otel::context::RuntimeContext::GetCurrent(),
         "agent.session");
-    session_span->SetAttribute("agent.model",    config.model.id);
+    session_span->SetAttribute("agent.model", config.model.id);
     session_span->SetAttribute("agent.provider", config.model.provider);
     if (config.session_id)
       session_span->SetAttribute("session.id", *config.session_id);
@@ -983,17 +996,18 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
     otel::context::Context turn_ctx;
 
     auto begin_turn = [&] {
-      turn_span = otel_child_span(
-          config.tracer, otel::context::RuntimeContext::GetCurrent(),
-          "agent.turn");
-      turn_ctx = otel_ctx_with(otel::context::RuntimeContext::GetCurrent(),
-                               turn_span);
+      turn_span = otel_child_span(config.tracer,
+                                  otel::context::RuntimeContext::GetCurrent(),
+                                  "agent.turn");
+      turn_ctx =
+          otel_ctx_with(otel::context::RuntimeContext::GetCurrent(), turn_span);
     };
 
     auto end_turn = [&](const AssistantMessage &msg, std::size_t tool_count) {
-      if (!turn_span) return;
+      if (!turn_span)
+        return;
       turn_span->SetAttribute("agent.tool_calls_count",
-                               static_cast<int64_t>(tool_count));
+                              static_cast<int64_t>(tool_count));
       if (stop_tok.stop_requested()) {
         turn_span->AddEvent("cancelled");
         turn_span->SetStatus(otel::trace::StatusCode::kError, "cancelled");
@@ -1042,12 +1056,13 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
         }
 
         // Stream assistant response
-        auto assistant_msg = stream_assistant_response(
-            context, config, publish, stop_tok
+        auto assistant_msg =
+            stream_assistant_response(context, config, publish, stop_tok
 #ifdef PI_CPP_OTEL_ENABLED
-            , turn_ctx
+                                      ,
+                                      turn_ctx
 #endif
-        );
+            );
         if (!assistant_msg) {
           assistant_msg = std::make_shared<AssistantMessage>();
           assistant_msg->api = "none";
@@ -1076,10 +1091,11 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
         has_more_tool_calls = false;
 
         if (!tool_calls.empty()) {
-          auto batch_result = execute_tool_calls(
-              context, *assistant_msg, config, publish, stop_tok
+          auto batch_result = execute_tool_calls(context, *assistant_msg,
+                                                 config, publish, stop_tok
 #ifdef PI_CPP_OTEL_ENABLED
-              , turn_ctx
+                                                 ,
+                                                 turn_ctx
 #endif
           );
           tool_results = std::move(batch_result.messages);

@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <cstdio>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <termios.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace pi::cli {
@@ -17,17 +19,20 @@ namespace {
 // ISIG is kept enabled so Ctrl+C still delivers SIGINT.
 struct RawMode {
   int fd{-1};
-  struct termios saved {};
+  struct termios saved{};
   bool active{false};
 
   bool enter(int fdesc) {
-    if (!isatty(fdesc)) return false;
-    if (tcgetattr(fdesc, &saved) != 0) return false;
+    if (isatty(fdesc) == 0)
+      return false;
+    if (tcgetattr(fdesc, &saved) != 0)
+      return false;
     struct termios raw = saved;
     raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
-    if (tcsetattr(fdesc, TCSAFLUSH, &raw) != 0) return false;
+    if (tcsetattr(fdesc, TCSAFLUSH, &raw) != 0)
+      return false;
     fd = fdesc;
     active = true;
     return true;
@@ -47,15 +52,18 @@ struct RawMode {
 // Leading newlines in prompt are stripped: \r already moves to line start
 // and re-emitting a \n would push the cursor down to a new line.
 void redraw(std::string_view prompt, const std::string &buf) {
-  while (!prompt.empty() && prompt[0] == '\n') prompt.remove_prefix(1);
+  while (!prompt.empty() && prompt[0] == '\n')
+    prompt.remove_prefix(1);
   std::cout << '\r' << prompt << buf << "\033[K" << std::flush;
 }
 
 // Remove the last UTF-8 character from buf (backs over continuation bytes).
 void pop_utf8(std::string &buf) {
-  if (buf.empty()) return;
+  if (buf.empty())
+    return;
   buf.pop_back();
-  while (!buf.empty() && (static_cast<unsigned char>(buf.back()) & 0xC0u) == 0x80u)
+  while (!buf.empty() &&
+         (static_cast<unsigned char>(buf.back()) & 0xC0U) == 0x80U)
     buf.pop_back();
 }
 
@@ -68,7 +76,7 @@ void apply_completions(std::string_view prompt, std::string &buf,
   }
 
   // Sort for stable display and prefix calculation
-  std::sort(completions.begin(), completions.end());
+  std::ranges::sort(completions, );
 
   if (completions.size() == 1) {
     buf = completions[0];
@@ -103,21 +111,26 @@ void apply_completions(std::string_view prompt, std::string &buf,
 std::string read_escape_sequence() {
   std::string seq;
   unsigned char c = 0;
-  if (::read(STDIN_FILENO, &c, 1) <= 0) return seq;
+  if (::read(STDIN_FILENO, &c, 1) <= 0)
+    return seq;
   seq += static_cast<char>(c);
 
-  if (c != '[' && c != 'O') return seq;
+  if (c != '[' && c != 'O')
+    return seq;
 
   while (seq.size() < 8) {
-    if (::read(STDIN_FILENO, &c, 1) <= 0) break;
+    if (::read(STDIN_FILENO, &c, 1) <= 0)
+      break;
     seq += static_cast<char>(c);
-    if ((c >= '@' && c <= '~')) break;
+    if ((c >= '@' && c <= '~'))
+      break;
   }
   return seq;
 }
 
 bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn) {
-  if (!control_fn) return false;
+  if (!control_fn)
+    return false;
 
   if (seq == "[A") {
     control_fn(ControlAction::scroll_line_up);
@@ -150,13 +163,14 @@ bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn) {
 } // namespace
 
 std::optional<std::string> readline(std::string_view prompt,
-                                    CompleteFn complete_fn,
-                                    ControlFn control_fn) {
+                                    const CompleteFn &complete_fn,
+                                    const ControlFn &control_fn) {
   // Non-TTY fallback: just use getline (pipes, scripts, tests)
-  if (!isatty(STDIN_FILENO)) {
+  if (isatty(STDIN_FILENO) == 0) {
     std::cout << prompt << std::flush;
     std::string line;
-    if (!std::getline(std::cin, line)) return std::nullopt;
+    if (!std::getline(std::cin, line))
+      return std::nullopt;
     return line;
   }
 
@@ -165,7 +179,8 @@ std::optional<std::string> readline(std::string_view prompt,
     // Couldn't enter raw mode — fall back
     std::cout << prompt << std::flush;
     std::string line;
-    if (!std::getline(std::cin, line)) return std::nullopt;
+    if (!std::getline(std::cin, line))
+      return std::nullopt;
     return line;
   }
 
@@ -217,7 +232,7 @@ std::optional<std::string> readline(std::string_view prompt,
       continue;
     }
 
-    if (c >= 0x20 || (c & 0x80u) != 0u) { // printable or UTF-8 continuation
+    if (c >= 0x20 || (c & 0x80U) != 0U) { // printable or UTF-8 continuation
       buf += static_cast<char>(c);
       std::cout << static_cast<char>(c) << std::flush;
       continue;

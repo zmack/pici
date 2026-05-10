@@ -1,4 +1,6 @@
 #include "core/syntax_highlight.h"
+#include <cstdint>
+#include <utility>
 
 extern "C" {
 #include <tree_sitter/api.h>
@@ -28,15 +30,15 @@ const TSLanguage *tree_sitter_typescript();
 namespace pi::core {
 namespace {
 
-static constexpr std::string_view kReset      = "\033[0m";
-static constexpr std::string_view kComment    = "\033[2;32m";
-static constexpr std::string_view kString     = "\033[33m";
-static constexpr std::string_view kKeyword    = "\033[35m";
-static constexpr std::string_view kNumber     = "\033[36m";
-static constexpr std::string_view kType       = "\033[34m";
-static constexpr std::string_view kFunction   = "\033[1;36m";
-static constexpr std::string_view kConstant   = "\033[1;33m";
-static constexpr std::string_view kProperty   = "\033[94m";
+constexpr std::string_view kReset = "\033[0m";
+constexpr std::string_view kComment = "\033[2;32m";
+constexpr std::string_view kString = "\033[33m";
+constexpr std::string_view kKeyword = "\033[35m";
+constexpr std::string_view kNumber = "\033[36m";
+constexpr std::string_view kType = "\033[34m";
+constexpr std::string_view kFunction = "\033[1;36m";
+constexpr std::string_view kConstant = "\033[1;33m";
+constexpr std::string_view kProperty = "\033[94m";
 
 struct HighlightSpan {
   uint32_t start;
@@ -61,16 +63,17 @@ enum class LanguageId {
   Lua,
 };
 
-static std::string to_lower(std::string_view s) {
+std::string to_lower(std::string_view s) {
   std::string out;
   out.reserve(s.size());
   for (char ch : s) {
-    out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    out.push_back(
+        static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
   }
   return out;
 }
 
-static LanguageId parse_language(std::string_view language) {
+LanguageId parse_language(std::string_view language) {
   const auto lang = to_lower(language);
   if (lang == "c") {
     return LanguageId::C;
@@ -114,7 +117,7 @@ static LanguageId parse_language(std::string_view language) {
   return LanguageId::Unknown;
 }
 
-static const TSLanguage *language_for(LanguageId id) {
+const TSLanguage *language_for(LanguageId id) {
   switch (id) {
   case LanguageId::C:
     return tree_sitter_c();
@@ -148,28 +151,32 @@ static const TSLanguage *language_for(LanguageId id) {
   return nullptr;
 }
 
-static bool is_keyword_token(LanguageId id, std::string_view type) {
+bool is_keyword_token(LanguageId id, std::string_view type) {
   static const std::unordered_set<std::string_view> common = {
-      "if",       "else",    "for",      "while",   "return", "break",
-      "continue", "switch",  "case",     "default", "do",     "goto",
-      "sizeof",   "typedef", "struct",   "class",   "enum",   "union",
-      "namespace","template","typename", "using",   "public", "private",
-      "protected","virtual", "override", "const",   "static", "inline",
-      "extern",   "volatile","constexpr","auto",    "new",    "delete",
-      "try",      "catch",   "throw",    "import",  "from",   "as",
-      "def",      "lambda",  "with",     "yield",   "await",  "async",
-      "elif",     "except",  "finally",  "pass",    "in",     "is",
-      "not",      "and",     "or",       "then",    "fi",     "done",
-      "function", "select",  "until",    "local",   "declare","export",
-      "unset",    "readonly","time",     "coproc",  "esac",   "let",
-      "const",    "var",     "interface","type",    "extends","implements",
-      "package",  "func",    "defer",    "go",      "chan",   "map",
-      "range",    "fallthrough",         "trait",   "impl",   "fn",
-      "mut",      "pub",     "crate",    "super",   "self",   "Self",
-      "match",    "where",   "loop",     "move",    "ref",    "mod",
-      "use",      "begin",   "rescue",   "ensure",  "end",    "module",
-      "unless",   "elsif",   "require",  "include", "extend", "nil",
-      "and",      "or",      "then",     "when",    "repeat", "elseif"};
+      "if",          "else",     "for",        "while",     "return",
+      "break",       "continue", "switch",     "case",      "default",
+      "do",          "goto",     "sizeof",     "typedef",   "struct",
+      "class",       "enum",     "union",      "namespace", "template",
+      "typename",    "using",    "public",     "private",   "protected",
+      "virtual",     "override", "const",      "static",    "inline",
+      "extern",      "volatile", "constexpr",  "auto",      "new",
+      "delete",      "try",      "catch",      "throw",     "import",
+      "from",        "as",       "def",        "lambda",    "with",
+      "yield",       "await",    "async",      "elif",      "except",
+      "finally",     "pass",     "in",         "is",        "not",
+      "and",         "or",       "then",       "fi",        "done",
+      "function",    "select",   "until",      "local",     "declare",
+      "export",      "unset",    "readonly",   "time",      "coproc",
+      "esac",        "let",      "const",      "var",       "interface",
+      "type",        "extends",  "implements", "package",   "func",
+      "defer",       "go",       "chan",       "map",       "range",
+      "fallthrough", "trait",    "impl",       "fn",        "mut",
+      "pub",         "crate",    "super",      "self",      "Self",
+      "match",       "where",    "loop",       "move",      "ref",
+      "mod",         "use",      "begin",      "rescue",    "ensure",
+      "end",         "module",   "unless",     "elsif",     "require",
+      "include",     "extend",   "nil",        "and",       "or",
+      "then",        "when",     "repeat",     "elseif"};
 
   if (common.contains(type)) {
     return true;
@@ -188,8 +195,8 @@ static bool is_keyword_token(LanguageId id, std::string_view type) {
   return false;
 }
 
-static std::string_view style_for_node(LanguageId id, std::string_view type,
-                                       bool named) {
+std::string_view style_for_node(LanguageId id, std::string_view type,
+                                bool named) {
   if (type == "comment") {
     return kComment;
   }
@@ -203,11 +210,10 @@ static std::string_view style_for_node(LanguageId id, std::string_view type,
   if (type == "link_destination" || type == "uri_autolink") {
     return kProperty;
   }
-  if (type.find("list_marker") != std::string_view::npos ||
-      type.find("delimiter") != std::string_view::npos) {
+  if (type.contains("list_marker") || type.contains("delimiter")) {
     return kKeyword;
   }
-  if (type.find("string") != std::string_view::npos || type == "char_literal") {
+  if (type.contains("string") || type == "char_literal") {
     return kString;
   }
   if (type == "regex" || type == "regex_literal" ||
@@ -215,11 +221,10 @@ static std::string_view style_for_node(LanguageId id, std::string_view type,
       type == "rune_literal") {
     return kString;
   }
-  if (type.find("escape") != std::string_view::npos) {
+  if (type.contains("escape")) {
     return kConstant;
   }
-  if (type.find("number") != std::string_view::npos || type == "integer" ||
-      type == "float") {
+  if (type.contains("number") || type == "integer" || type == "float") {
     return kNumber;
   }
   if (type == "primitive_type" || type == "type_identifier" ||
@@ -241,8 +246,8 @@ static std::string_view style_for_node(LanguageId id, std::string_view type,
       type == "member_identifier" || type == "label_name") {
     return kProperty;
   }
-  if (type == "true" || type == "false" || type == "null" ||
-      type == "none" || type == "None" || type == "nil") {
+  if (type == "true" || type == "false" || type == "null" || type == "none" ||
+      type == "None" || type == "nil") {
     return kConstant;
   }
   if (!named && is_keyword_token(id, type)) {
@@ -251,20 +256,21 @@ static std::string_view style_for_node(LanguageId id, std::string_view type,
   return {};
 }
 
-static bool node_covers_text(TSNode node) {
+bool node_covers_text(TSNode node) {
   if (ts_node_is_null(node)) {
     return false;
   }
   return ts_node_start_byte(node) < ts_node_end_byte(node);
 }
 
-static void collect_highlights(LanguageId id, TSNode node,
-                               std::vector<HighlightSpan> &spans) {
+void collect_highlights(LanguageId id, TSNode node,
+                        std::vector<HighlightSpan> &spans) {
   const auto type = std::string_view(ts_node_type(node));
   const bool named = ts_node_is_named(node);
   if (const auto style = style_for_node(id, type, named); !style.empty()) {
-    spans.push_back(
-        {ts_node_start_byte(node), ts_node_end_byte(node), style});
+    spans.push_back({.start = ts_node_start_byte(node),
+                     .end = ts_node_end_byte(node),
+                     .style = style});
     return;
   }
 
@@ -277,29 +283,32 @@ static void collect_highlights(LanguageId id, TSNode node,
   }
 }
 
-static void add_identifier_highlights(LanguageId id, TSNode node,
-                                      std::vector<HighlightSpan> &spans) {
+void add_identifier_highlights(LanguageId id, TSNode node,
+                               std::vector<HighlightSpan> &spans) {
   const auto type = std::string_view(ts_node_type(node));
   if (id == LanguageId::C || id == LanguageId::Cpp) {
     if (type == "function_declarator" || type == "call_expression") {
       const TSNode ident = ts_node_child_by_field_name(node, "function", 8);
       if (node_covers_text(ident)) {
-        spans.push_back({ts_node_start_byte(ident), ts_node_end_byte(ident),
-                         kFunction});
+        spans.push_back({.start = ts_node_start_byte(ident),
+                         .end = ts_node_end_byte(ident),
+                         .style = kFunction});
       }
     }
   } else if (id == LanguageId::Python) {
     if (type == "function_definition") {
       const TSNode ident = ts_node_child_by_field_name(node, "name", 4);
       if (node_covers_text(ident)) {
-        spans.push_back({ts_node_start_byte(ident), ts_node_end_byte(ident),
-                         kFunction});
+        spans.push_back({.start = ts_node_start_byte(ident),
+                         .end = ts_node_end_byte(ident),
+                         .style = kFunction});
       }
     } else if (type == "call") {
       const TSNode ident = ts_node_child_by_field_name(node, "function", 8);
       if (node_covers_text(ident)) {
-        spans.push_back({ts_node_start_byte(ident), ts_node_end_byte(ident),
-                         kFunction});
+        spans.push_back({.start = ts_node_start_byte(ident),
+                         .end = ts_node_end_byte(ident),
+                         .style = kFunction});
       }
     }
   } else if (id == LanguageId::TypeScript || id == LanguageId::Tsx ||
@@ -310,25 +319,29 @@ static void add_identifier_highlights(LanguageId id, TSNode node,
         type == "method" || type == "method_definition") {
       const TSNode ident = ts_node_child_by_field_name(node, "name", 4);
       if (node_covers_text(ident)) {
-        spans.push_back({ts_node_start_byte(ident), ts_node_end_byte(ident),
-                         kFunction});
+        spans.push_back({.start = ts_node_start_byte(ident),
+                         .end = ts_node_end_byte(ident),
+                         .style = kFunction});
       }
     } else if (type == "call_expression" || type == "call") {
       const TSNode ident = ts_node_child_by_field_name(node, "function", 8);
       if (node_covers_text(ident)) {
-        spans.push_back({ts_node_start_byte(ident), ts_node_end_byte(ident),
-                         kFunction});
+        spans.push_back({.start = ts_node_start_byte(ident),
+                         .end = ts_node_end_byte(ident),
+                         .style = kFunction});
       }
     }
   } else if (id == LanguageId::Json && type == "pair") {
     const TSNode key = ts_node_child_by_field_name(node, "key", 3);
     if (node_covers_text(key)) {
-      spans.push_back(
-          {ts_node_start_byte(key), ts_node_end_byte(key), kProperty});
+      spans.push_back({.start = ts_node_start_byte(key),
+                       .end = ts_node_end_byte(key),
+                       .style = kProperty});
     }
   } else if (id == LanguageId::Bash && type == "command_name") {
-    spans.push_back(
-        {ts_node_start_byte(node), ts_node_end_byte(node), kFunction});
+    spans.push_back({.start = ts_node_start_byte(node),
+                     .end = ts_node_end_byte(node),
+                     .style = kFunction});
   }
 
   const auto child_count = ts_node_child_count(node);
@@ -340,15 +353,15 @@ static void add_identifier_highlights(LanguageId id, TSNode node,
   }
 }
 
-static std::string render_highlighted(std::string_view code,
-                                      std::vector<HighlightSpan> spans) {
-  std::sort(spans.begin(), spans.end(), [](const HighlightSpan &a,
-                                           const HighlightSpan &b) {
-    if (a.start != b.start) {
-      return a.start < b.start;
-    }
-    return a.end > b.end;
-  });
+std::string render_highlighted(std::string_view code,
+                               std::vector<HighlightSpan> spans) {
+  std::ranges::sort(spans, ,
+                    [](const HighlightSpan &a, const HighlightSpan &b) {
+                      if (a.start != b.start) {
+                        return a.start < b.start;
+                      }
+                      return a.end > b.end;
+                    });
 
   std::vector<HighlightSpan> filtered;
   filtered.reserve(spans.size());
@@ -385,7 +398,8 @@ bool supports_code_language(std::string_view language) {
   return parse_language(language) != LanguageId::Unknown;
 }
 
-std::string highlight_code_ansi(std::string_view code, std::string_view language) {
+std::string highlight_code_ansi(std::string_view code,
+                                std::string_view language) {
   const LanguageId id = parse_language(language);
   const TSLanguage *lang = language_for(id);
   if (lang == nullptr) {

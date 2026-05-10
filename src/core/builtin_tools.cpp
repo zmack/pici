@@ -1,22 +1,33 @@
 #include "core/builtin_tools.h"
+#include "core/message_types.h"
+#include "nlohmann/json_fwd.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <cctype>
+#include <cerrno>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iterator>
+#include <limits>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <stdlib.h>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <sys/poll.h>
+#include <sys/types.h>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -24,16 +35,16 @@
 #include <chrono>
 #include <thread>
 
+#include <csignal>
 #include <fcntl.h>
 #include <poll.h>
-#include <signal.h>
-#include <unistd.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 namespace pi::core {
 namespace {
 
-constexpr std::size_t kMaxBytes = 64 * 1024;
+constexpr std::size_t kMaxBytes = static_cast<const std::size_t>(64 * 1024);
 constexpr std::size_t kReadMaxLines = 2000;
 constexpr int kLsDefaultLimit = 500;
 constexpr int kFindDefaultLimit = 1000;
@@ -86,7 +97,7 @@ private:
 class BuiltinTool : public ToolDefinition {
 public:
   BuiltinTool(std::string name, std::string description, std::string schema,
-              std::filesystem::path cwd)
+              const std::filesystem::path &cwd)
       : name_(std::move(name)), description_(std::move(description)),
         schema_(std::move(schema)), cwd_(std::filesystem::absolute(cwd)) {}
 
@@ -117,12 +128,14 @@ protected:
       existing_probe = existing_probe.parent_path();
     }
 
-    auto canonical_probe = std::filesystem::weakly_canonical(existing_probe, ec);
+    auto canonical_probe =
+        std::filesystem::weakly_canonical(existing_probe, ec);
     if (ec) {
       canonical_probe = existing_probe.lexically_normal();
     }
 
-    const auto rel = std::filesystem::relative(canonical_probe, canonical_cwd, ec);
+    const auto rel =
+        std::filesystem::relative(canonical_probe, canonical_cwd, ec);
     if (ec || rel.empty() || rel.native().starts_with("..")) {
       throw std::runtime_error("Path is outside the workspace: " + path);
     }
@@ -193,8 +206,10 @@ std::string truncate_head(const std::string &content, std::size_t max_lines,
                           std::size_t max_bytes) {
   std::size_t total_lines = 0;
   for (char c : content)
-    if (c == '\n') ++total_lines;
-  if (!content.empty() && content.back() != '\n') ++total_lines;
+    if (c == '\n')
+      ++total_lines;
+  if (!content.empty() && content.back() != '\n')
+    ++total_lines;
 
   std::string out;
   std::size_t out_lines = 0;
@@ -202,10 +217,17 @@ std::string truncate_head(const std::string &content, std::size_t max_lines,
   bool hit_bytes = false;
 
   for (char ch : content) {
-    if (out_lines >= max_lines) { hit_lines = true; break; }
-    if (out.size() >= max_bytes) { hit_bytes = true; break; }
+    if (out_lines >= max_lines) {
+      hit_lines = true;
+      break;
+    }
+    if (out.size() >= max_bytes) {
+      hit_bytes = true;
+      break;
+    }
     out.push_back(ch);
-    if (ch == '\n') ++out_lines;
+    if (ch == '\n')
+      ++out_lines;
   }
 
   if (hit_lines || hit_bytes) {
@@ -229,7 +251,7 @@ std::string shell_quote(const std::string &value) {
       quoted.push_back(ch);
     }
   }
-  quoted += "'";
+  quoted += '\'';
   return quoted;
 }
 
@@ -246,15 +268,14 @@ std::string glob_to_regex(std::string_view glob) {
       }
     } else if (ch == '?') {
       out += "[^/]";
-    } else if (std::string_view(".+()[]{}^$\\|").find(ch) !=
-               std::string_view::npos) {
+    } else if (std::string_view(".+()[]{}^$\\|").contains(ch)) {
       out.push_back('\\');
       out.push_back(ch);
     } else {
       out.push_back(ch);
     }
   }
-  out += "$";
+  out += '$';
   return out;
 }
 
@@ -264,34 +285,41 @@ bool should_skip_dir(const std::filesystem::path &path) {
          name == "build-asan";
 }
 
-// ─── GitIgnore ────────────────────────────────────────────────────────────────
+// ─── GitIgnore
+// ────────────────────────────────────────────────────────────────
 
 class GitIgnore {
 public:
   void load(const std::filesystem::path &dir) {
     auto path = dir / ".gitignore";
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) return;
+    if (!std::filesystem::exists(path, ec))
+      return;
     std::ifstream f(path);
-    if (!f) return;
+    if (!f)
+      return;
     std::string line;
     while (std::getline(f, line)) {
-      if (!line.empty() && line.back() == '\r') line.pop_back();
-      if (line.empty() || line[0] == '#' || line[0] == '!') continue;
+      if (!line.empty() && line.back() == '\r')
+        line.pop_back();
+      if (line.empty() || line[0] == '#' || line[0] == '!')
+        continue;
       add_pattern(line);
     }
   }
 
   bool ignored(const std::filesystem::path &abs_path,
-               const std::filesystem::path &root,
-               bool is_dir) const {
-    if (patterns_.empty()) return false;
+               const std::filesystem::path &root, bool is_dir) const {
+    if (patterns_.empty())
+      return false;
     const std::string name = abs_path.filename().string();
-    const std::string rel  = abs_path.lexically_relative(root).generic_string();
+    const std::string rel = abs_path.lexically_relative(root).generic_string();
     for (const auto &p : patterns_) {
-      if (p.dirs_only && !is_dir) continue;
+      if (p.dirs_only && !is_dir)
+        continue;
       const std::string &subject = p.has_slash ? rel : name;
-      if (std::regex_match(subject, p.re)) return true;
+      if (std::regex_match(subject, p.re))
+        return true;
     }
     return false;
   }
@@ -307,47 +335,60 @@ private:
 
   void add_pattern(std::string pat) {
     Pattern p;
-    if (!pat.empty() && pat.back() == '/') { p.dirs_only = true; pat.pop_back(); }
-    if (!pat.empty() && pat.front() == '/') { p.has_slash = true; pat = pat.substr(1); }
-    else p.has_slash = pat.find('/') != std::string::npos;
+    if (!pat.empty() && pat.back() == '/') {
+      p.dirs_only = true;
+      pat.pop_back();
+    }
+    if (!pat.empty() && pat.front() == '/') {
+      p.has_slash = true;
+      pat = pat.substr(1);
+    } else {
+      p.has_slash = pat.contains('/');
+    }
     try {
       p.re = std::regex(glob_to_regex(pat));
       patterns_.push_back(std::move(p));
-    } catch (...) {}
+    } catch (...) {
+    }
   }
 
   std::vector<Pattern> patterns_;
 };
 
-// ─── Image helpers ────────────────────────────────────────────────────────────
+// ─── Image helpers
+// ────────────────────────────────────────────────────────────
 
-static std::string image_mime_type(const std::filesystem::path &path) {
+std::string image_mime_type(const std::filesystem::path &path) {
   static const std::pair<std::string_view, std::string_view> kMimes[] = {
-      {".jpg",  "image/jpeg"}, {".jpeg", "image/jpeg"},
-      {".png",  "image/png"},  {".gif",  "image/gif"},
-      {".webp", "image/webp"}, {".bmp",  "image/bmp"},
-      {".ico",  "image/x-icon"},{".svg",  "image/svg+xml"},
+      {".jpg", "image/jpeg"},   {".jpeg", "image/jpeg"},
+      {".png", "image/png"},    {".gif", "image/gif"},
+      {".webp", "image/webp"},  {".bmp", "image/bmp"},
+      {".ico", "image/x-icon"}, {".svg", "image/svg+xml"},
   };
   std::string ext = path.extension().string();
-  for (char &c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  for (char &c : ext)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   for (const auto &[e, m] : kMimes)
-    if (e == ext) return std::string(m);
+    if (e == ext)
+      return std::string(m);
   return {};
 }
 
-static std::string base64_encode(const std::string &data) {
+std::string base64_encode(const std::string &data) {
   static constexpr std::string_view kTable =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   std::string out;
   out.reserve((data.size() + 2) / 3 * 4);
   for (std::size_t i = 0; i < data.size(); i += 3) {
-    unsigned int b = static_cast<unsigned char>(data[i]) << 16u;
-    if (i + 1 < data.size()) b |= static_cast<unsigned char>(data[i + 1]) << 8u;
-    if (i + 2 < data.size()) b |= static_cast<unsigned char>(data[i + 2]);
-    out += kTable[(b >> 18u) & 63u];
-    out += kTable[(b >> 12u) & 63u];
-    out += (i + 1 < data.size()) ? kTable[(b >> 6u) & 63u] : '=';
-    out += (i + 2 < data.size()) ? kTable[b & 63u] : '=';
+    unsigned int b = static_cast<unsigned char>(data[i]) << 16U;
+    if (i + 1 < data.size())
+      b |= static_cast<unsigned char>(data[i + 1]) << 8U;
+    if (i + 2 < data.size())
+      b |= static_cast<unsigned char>(data[i + 2]);
+    out += kTable[(b >> 18U) & 63U];
+    out += kTable[(b >> 12U) & 63U];
+    out += (i + 1 < data.size()) ? kTable[(b >> 6U) & 63U] : '=';
+    out += (i + 2 < data.size()) ? kTable[b & 63U] : '=';
   }
   return out;
 }
@@ -363,6 +404,7 @@ public:
     return {TextContent{.text = desc_},
             ImageContent{.data = b64_, .mime_type = mime_}};
   }
+
 private:
   std::string b64_, mime_, desc_;
 };
@@ -399,14 +441,15 @@ public:
       const auto mime = image_mime_type(path);
       if (!mime.empty()) {
         std::ifstream f(path, std::ios::binary);
-        if (!f) throw std::runtime_error("Cannot read file: " + path.string());
+        if (!f)
+          throw std::runtime_error("Cannot read file: " + path.string());
         std::string raw((std::istreambuf_iterator<char>(f)),
-                         std::istreambuf_iterator<char>());
+                        std::istreambuf_iterator<char>());
         const auto kb = raw.size() / 1024;
-        std::string desc = "[image: " + path.filename().string() + ", " +
-                           mime + ", " + std::to_string(kb) + "KB]";
+        std::string desc = "[image: " + path.filename().string() + ", " + mime +
+                           ", " + std::to_string(kb) + "KB]";
         return std::make_shared<ImageToolResult>(base64_encode(raw), mime,
-                                                  std::move(desc));
+                                                 std::move(desc));
       }
 
       const auto content = read_text_file(path);
@@ -419,7 +462,8 @@ public:
         throw std::runtime_error("Offset is beyond end of file");
       }
       const auto start = static_cast<std::size_t>(offset - 1);
-      const auto end = std::min(lines.size(), start + static_cast<std::size_t>(limit));
+      const auto end =
+          std::min(lines.size(), start + static_cast<std::size_t>(limit));
       std::ostringstream out;
       for (std::size_t i = start; i < end; ++i) {
         out << lines[i];
@@ -433,8 +477,8 @@ public:
             << " to continue.]";
       }
       // Line limit already applied above — only enforce byte limit here
-      return std::make_shared<TextToolResult>(
-          truncate_head(out.str(), std::numeric_limits<std::size_t>::max(), kMaxBytes));
+      return std::make_shared<TextToolResult>(truncate_head(
+          out.str(), std::numeric_limits<std::size_t>::max(), kMaxBytes));
     } catch (const std::exception &err) {
       return error_result(err);
     }
@@ -459,10 +503,9 @@ public:
       const auto path = resolve_workspace_path(json.value("path", ""));
       const auto content = json.value("content", std::string{});
       write_text_file(path, content);
-      return std::make_shared<TextToolResult>("Successfully wrote " +
-                                              std::to_string(content.size()) +
-                                              " bytes to " +
-                                              json.value("path", ""));
+      return std::make_shared<TextToolResult>(
+          "Successfully wrote " + std::to_string(content.size()) +
+          " bytes to " + json.value("path", ""));
     } catch (const std::exception &err) {
       return error_result(err);
     }
@@ -471,13 +514,14 @@ public:
 
 // ─── Edit helpers ────────────────────────────────────────────────────────────
 
-static std::string normalize_to_lf(const std::string &s) {
+std::string normalize_to_lf(const std::string &s) {
   std::string out;
   out.reserve(s.size());
   for (std::size_t i = 0; i < s.size(); ++i) {
     if (s[i] == '\r') {
       out += '\n';
-      if (i + 1 < s.size() && s[i + 1] == '\n') ++i;
+      if (i + 1 < s.size() && s[i + 1] == '\n')
+        ++i;
     } else {
       out += s[i];
     }
@@ -486,9 +530,8 @@ static std::string normalize_to_lf(const std::string &s) {
 }
 
 // Strip UTF-8 BOM if present, return remainder.
-static std::string strip_bom(const std::string &s, bool &had_bom) {
-  if (s.size() >= 3 &&
-      static_cast<unsigned char>(s[0]) == 0xEF &&
+std::string strip_bom(const std::string &s, bool &had_bom) {
+  if (s.size() >= 3 && static_cast<unsigned char>(s[0]) == 0xEF &&
       static_cast<unsigned char>(s[1]) == 0xBB &&
       static_cast<unsigned char>(s[2]) == 0xBF) {
     had_bom = true;
@@ -504,7 +547,7 @@ static std::string strip_bom(const std::string &s, bool &had_bom) {
 //   - smart double quotes  → "
 //   - Unicode dashes       → -
 //   - non-breaking / special spaces → regular space
-static std::string normalize_for_fuzzy_match(const std::string &text) {
+std::string normalize_for_fuzzy_match(const std::string &text) {
   // Pass 1: strip trailing whitespace per line
   std::string pass1;
   pass1.reserve(text.size());
@@ -516,7 +559,8 @@ static std::string normalize_for_fuzzy_match(const std::string &text) {
              (text[end - 1] == ' ' || text[end - 1] == '\t'))
         --end;
       pass1.append(text, line_start, end - line_start);
-      if (i < text.size()) pass1 += '\n';
+      if (i < text.size())
+        pass1 += '\n';
       line_start = i + 1;
     }
   }
@@ -524,35 +568,73 @@ static std::string normalize_for_fuzzy_match(const std::string &text) {
   // Pass 2: replace known multi-byte Unicode sequences
   std::string out;
   out.reserve(pass1.size());
-  for (std::size_t i = 0; i < pass1.size(); ) {
+  for (std::size_t i = 0; i < pass1.size();) {
     auto b0 = static_cast<unsigned char>(pass1[i]);
-    auto b1 = i + 1 < pass1.size() ? static_cast<unsigned char>(pass1[i+1]) : 0u;
-    auto b2 = i + 2 < pass1.size() ? static_cast<unsigned char>(pass1[i+2]) : 0u;
+    auto b1 =
+        i + 1 < pass1.size() ? static_cast<unsigned char>(pass1[i + 1]) : 0U;
+    auto b2 =
+        i + 2 < pass1.size() ? static_cast<unsigned char>(pass1[i + 2]) : 0U;
 
     // U+00A0 NBSP → space  (2-byte: C2 A0)
-    if (b0 == 0xC2 && b1 == 0xA0) { out += ' '; i += 2; continue; }
+    if (b0 == 0xC2 && b1 == 0xA0) {
+      out += ' ';
+      i += 2;
+      continue;
+    }
 
     // 3-byte sequences starting with E2
     if (b0 == 0xE2) {
       if (b1 == 0x80) {
         // Smart single quotes U+2018–U+201B  → '
-        if (b2 >= 0x98 && b2 <= 0x9B) { out += '\''; i += 3; continue; }
+        if (b2 >= 0x98 && b2 <= 0x9B) {
+          out += '\'';
+          i += 3;
+          continue;
+        }
         // Smart double quotes U+201C–U+201F  → "
-        if (b2 >= 0x9C && b2 <= 0x9F) { out += '"'; i += 3; continue; }
+        if (b2 >= 0x9C && b2 <= 0x9F) {
+          out += '"';
+          i += 3;
+          continue;
+        }
         // Dashes U+2010–U+2015            → -
-        if (b2 >= 0x90 && b2 <= 0x95) { out += '-'; i += 3; continue; }
+        if (b2 >= 0x90 && b2 <= 0x95) {
+          out += '-';
+          i += 3;
+          continue;
+        }
         // Special spaces U+2002–U+200A    → space
-        if (b2 >= 0x82 && b2 <= 0x8A) { out += ' '; i += 3; continue; }
+        if (b2 >= 0x82 && b2 <= 0x8A) {
+          out += ' ';
+          i += 3;
+          continue;
+        }
         // U+202F narrow NBSP (E2 80 AF)   → space
-        if (b2 == 0xAF) { out += ' '; i += 3; continue; }
+        if (b2 == 0xAF) {
+          out += ' ';
+          i += 3;
+          continue;
+        }
       }
       // U+2212 minus sign (E2 88 92)      → -
-      if (b1 == 0x88 && b2 == 0x92) { out += '-'; i += 3; continue; }
+      if (b1 == 0x88 && b2 == 0x92) {
+        out += '-';
+        i += 3;
+        continue;
+      }
       // U+205F medium math space (E2 81 9F) → space
-      if (b1 == 0x81 && b2 == 0x9F) { out += ' '; i += 3; continue; }
+      if (b1 == 0x81 && b2 == 0x9F) {
+        out += ' ';
+        i += 3;
+        continue;
+      }
     }
     // U+3000 ideographic space (E3 80 80) → space
-    if (b0 == 0xE3 && b1 == 0x80 && b2 == 0x80) { out += ' '; i += 3; continue; }
+    if (b0 == 0xE3 && b1 == 0x80 && b2 == 0x80) {
+      out += ' ';
+      i += 3;
+      continue;
+    }
 
     out += pass1[i++];
   }
@@ -568,23 +650,29 @@ struct FuzzyFindResult {
 
 // Try exact match, fall back to fuzzy. Returns result in the space
 // (original or fuzzy-normalized) where the match was found.
-static FuzzyFindResult fuzzy_find(const std::string &content,
-                                  const std::string &old_text) {
+FuzzyFindResult fuzzy_find(const std::string &content,
+                           const std::string &old_text) {
   auto pos = content.find(old_text);
   if (pos != std::string::npos)
-    return {true, pos, old_text.size(), false};
+    return {.found = true,
+            .index = pos,
+            .match_length = old_text.size(),
+            .used_fuzzy = false};
 
   const auto fc = normalize_for_fuzzy_match(content);
   const auto fo = normalize_for_fuzzy_match(old_text);
   pos = fc.find(fo);
   if (pos != std::string::npos)
-    return {true, pos, fo.size(), true};
+    return {.found = true,
+            .index = pos,
+            .match_length = fo.size(),
+            .used_fuzzy = true};
 
   return {};
 }
 
-static std::size_t count_occurrences(const std::string &content,
-                                     const std::string &needle) {
+std::size_t count_occurrences(const std::string &content,
+                              const std::string &needle) {
   const auto fc = normalize_for_fuzzy_match(content);
   const auto fn = normalize_for_fuzzy_match(needle);
   std::size_t count = 0;
@@ -606,18 +694,20 @@ struct MatchedEdit {
 // Apply edits to LF-normalized content. All edits are matched against the same
 // base content. If any needed fuzzy matching, the base is normalized first.
 // Returns the new content (still LF-normalized).
-static std::string apply_edits(const std::string &lf_content,
-                                const std::vector<std::pair<std::string,std::string>> &edits,
-                                const std::string &path) {
+std::string
+apply_edits(const std::string &lf_content,
+            const std::vector<std::pair<std::string, std::string>> &edits,
+            const std::string &path) {
   // First pass: determine whether any edit needs fuzzy matching
   bool any_fuzzy = false;
   for (const auto &[old_text, _] : edits) {
-    if (lf_content.find(old_text) == std::string::npos) {
+    if (!lf_content.contains(old_text)) {
       any_fuzzy = true;
       break;
     }
   }
-  const std::string base = any_fuzzy ? normalize_for_fuzzy_match(lf_content) : lf_content;
+  const std::string base =
+      any_fuzzy ? normalize_for_fuzzy_match(lf_content) : lf_content;
 
   // Second pass: match all edits against base
   std::vector<MatchedEdit> matched;
@@ -627,39 +717,46 @@ static std::string apply_edits(const std::string &lf_content,
     if (old_text.empty()) {
       if (edits.size() == 1)
         throw std::runtime_error("oldText must not be empty in " + path);
-      throw std::runtime_error("edits[" + std::to_string(i) + "].oldText must not be empty in " + path);
+      throw std::runtime_error("edits[" + std::to_string(i) +
+                               "].oldText must not be empty in " + path);
     }
     auto r = fuzzy_find(base, old_text);
     if (!r.found) {
       if (edits.size() == 1)
-        throw std::runtime_error(
-            "Could not find the text in " + path +
-            ". The old text must match exactly including all whitespace and newlines.");
-      throw std::runtime_error(
-          "Could not find edits[" + std::to_string(i) + "] in " + path +
-          ". The oldText must match exactly including all whitespace and newlines.");
+        throw std::runtime_error("Could not find the text in " + path +
+                                 ". The old text must match exactly including "
+                                 "all whitespace and newlines.");
+      throw std::runtime_error("Could not find edits[" + std::to_string(i) +
+                               "] in " + path +
+                               ". The oldText must match exactly including all "
+                               "whitespace and newlines.");
     }
     auto occ = count_occurrences(base, old_text);
     if (occ > 1) {
       if (edits.size() == 1)
-        throw std::runtime_error(
-            "Found " + std::to_string(occ) + " occurrences of the text in " + path +
-            ". The text must be unique. Please provide more context to make it unique.");
-      throw std::runtime_error(
-          "Found " + std::to_string(occ) + " occurrences of edits[" + std::to_string(i) + "] in " + path +
-          ". Each oldText must be unique. Please provide more context to make it unique.");
+        throw std::runtime_error("Found " + std::to_string(occ) +
+                                 " occurrences of the text in " + path +
+                                 ". The text must be unique. Please provide "
+                                 "more context to make it unique.");
+      throw std::runtime_error("Found " + std::to_string(occ) +
+                               " occurrences of edits[" + std::to_string(i) +
+                               "] in " + path +
+                               ". Each oldText must be unique. Please provide "
+                               "more context to make it unique.");
     }
-    matched.push_back({i, r.index, r.match_length, normalize_to_lf(new_text)});
+    matched.push_back({.edit_index = i,
+                       .match_index = r.index,
+                       .match_length = r.match_length,
+                       .new_text = normalize_to_lf(new_text)});
   }
 
   // Sort by position and check for overlaps
-  std::sort(matched.begin(), matched.end(),
-            [](const MatchedEdit &a, const MatchedEdit &b) {
-              return a.match_index < b.match_index;
-            });
+  std::ranges::sort(matched, , [](const MatchedEdit &a, const MatchedEdit &b) {
+    return a.match_index < b.match_index;
+  });
   for (std::size_t i = 1; i < matched.size(); ++i) {
     const auto &prev = matched[i - 1];
-    const auto &cur  = matched[i];
+    const auto &cur = matched[i];
     if (prev.match_index + prev.match_length > cur.match_index) {
       throw std::runtime_error(
           "edits[" + std::to_string(prev.edit_index) + "] and edits[" +
@@ -689,7 +786,8 @@ public:
             R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text to replace"},"newText":{"type":"string","description":"Replacement text"}},"required":["oldText","newText"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false})json",
             std::move(cwd)) {}
 
-  ToolArguments prepare_arguments(const ToolArguments &arguments) const override {
+  ToolArguments
+  prepare_arguments(const ToolArguments &arguments) const override {
     auto prepared = arguments;
     if (prepared.contains("oldText") && prepared.contains("newText") &&
         !prepared.contains("edits")) {
@@ -700,9 +798,8 @@ public:
       prepared.erase("newText");
     }
     if (prepared.contains("edits") && prepared["edits"].is_string()) {
-      auto parsed =
-          nlohmann::json::parse(prepared["edits"].get<std::string>(), nullptr,
-                                false);
+      auto parsed = nlohmann::json::parse(prepared["edits"].get<std::string>(),
+                                          nullptr, false);
       if (!parsed.is_discarded() && parsed.is_array()) {
         prepared["edits"] = std::move(parsed);
       }
@@ -733,22 +830,24 @@ public:
       auto result = apply_edits(lf_content, edits, rel_path);
 
       // Restore BOM and original line endings
-      const bool crlf = !no_bom.empty() && no_bom.find("\r\n") != std::string::npos;
+      const bool crlf = !no_bom.empty() && no_bom.contains("\r\n");
       if (crlf) {
         std::string restored;
-        restored.reserve(result.size() + result.size() / 40);
+        restored.reserve(result.size() + (result.size() / 40));
         for (char c : result) {
-          if (c == '\n') restored += '\r';
+          if (c == '\n')
+            restored += '\r';
           restored += c;
         }
         result = std::move(restored);
       }
-      if (had_bom) result = "\xEF\xBB\xBF" + result;
+      if (had_bom)
+        result = "\xEF\xBB\xBF" + result;
 
       write_text_file(abs_path, result);
-      return std::make_shared<TextToolResult>(
-          "Successfully replaced " + std::to_string(edits.size()) +
-          " block(s) in " + rel_path);
+      return std::make_shared<TextToolResult>("Successfully replaced " +
+                                              std::to_string(edits.size()) +
+                                              " block(s) in " + rel_path);
     } catch (const std::exception &err) {
       return error_result(err);
     }
@@ -779,14 +878,15 @@ public:
       for (const auto &entry : std::filesystem::directory_iterator(path)) {
         auto name = entry.path().filename().string();
         if (entry.is_directory()) {
-          name += "/";
+          name += '/';
         }
         entries.push_back(std::move(name));
       }
       std::ranges::sort(entries, {}, [](const std::string &value) {
         std::string lower = value;
-        std::ranges::transform(lower, lower.begin(),
-                               [](unsigned char ch) { return std::tolower(ch); });
+        std::ranges::transform(lower, lower.begin(), [](unsigned char ch) {
+          return std::tolower(ch);
+        });
         return lower;
       });
       if (entries.empty()) {
@@ -836,7 +936,8 @@ public:
       }
       GitIgnore gi;
       gi.load(cwd());
-      if (root != cwd()) gi.load(root);
+      if (root != cwd())
+        gi.load(root);
       const std::regex matcher(glob_to_regex(pattern));
       std::vector<std::string> results;
       std::error_code ec;
@@ -845,20 +946,21 @@ public:
                ec),
            end;
            it != end && !ec; it.increment(ec)) {
-        if (it->is_directory(ec) &&
-            (should_skip_dir(it->path()) || gi.ignored(it->path(), root, true))) {
+        if (it->is_directory(ec) && (should_skip_dir(it->path()) ||
+                                     gi.ignored(it->path(), root, true))) {
           it.disable_recursion_pending();
           continue;
         }
         if (!it->is_regular_file(ec)) {
           continue;
         }
-        if (gi.ignored(it->path(), root, false)) continue;
+        if (gi.ignored(it->path(), root, false))
+          continue;
         auto rel = relative_posix(it->path(), root);
         if (std::regex_match(rel, matcher) ||
             std::regex_match(it->path().filename().generic_string(), matcher)) {
           results.push_back(std::move(rel));
-          if (static_cast<int>(results.size()) >= limit) {
+          if (std::cmp_greater_equal(results.size(), limit)) {
             break;
           }
         }
@@ -875,11 +977,11 @@ public:
         }
         out << results[i];
       }
-      if (static_cast<int>(results.size()) >= limit) {
+      if (std::cmp_greater_equal(results.size(), limit)) {
         out << "\n\n[" << limit << " results limit reached]";
       }
-      return std::make_shared<TextToolResult>(truncate_head(out.str(), limit,
-                                                            kMaxBytes));
+      return std::make_shared<TextToolResult>(
+          truncate_head(out.str(), limit, kMaxBytes));
     } catch (const std::exception &err) {
       return error_result(err);
     }
@@ -908,38 +1010,41 @@ public:
       const auto literal = json.value("literal", false);
       const auto context = std::max(0, json.value("context", 0));
       const auto limit = std::max(1, json.value("limit", kGrepDefaultLimit));
-      const auto flags = ignore_case ? std::regex::icase : std::regex::ECMAScript;
-      const std::regex matcher(literal ? std::regex_replace(
-                                            pattern,
-                                            std::regex(R"([.^$|()\\[\]{}*+?])"),
-                                            R"(\$&)")
-                                      : pattern,
-                                  flags);
+      const auto flags =
+          ignore_case ? std::regex::icase : std::regex::ECMAScript;
+      const std::regex matcher(
+          literal ? std::regex_replace(
+                        pattern, std::regex(R"([.^$|()\\[\]{}*+?])"), R"(\$&)")
+                  : pattern,
+          flags);
       const std::optional<std::regex> glob_matcher =
           glob.empty() ? std::nullopt
                        : std::optional<std::regex>(glob_to_regex(glob));
 
       GitIgnore gi;
       gi.load(cwd());
-      if (root != cwd()) gi.load(root);
+      if (root != cwd())
+        gi.load(root);
       std::vector<std::filesystem::path> files;
       std::error_code ec;
       if (std::filesystem::is_regular_file(root, ec)) {
         files.push_back(root);
       } else if (std::filesystem::is_directory(root, ec)) {
-        for (std::filesystem::recursive_directory_iterator it(
-                 root,
-                 std::filesystem::directory_options::skip_permission_denied,
-                 ec),
+        for (std::filesystem::recursive_directory_iterator
+                 it(root,
+                    std::filesystem::directory_options::skip_permission_denied,
+                    ec),
              end;
              it != end && !ec; it.increment(ec)) {
-          if (it->is_directory(ec) &&
-              (should_skip_dir(it->path()) || gi.ignored(it->path(), root, true))) {
+          if (it->is_directory(ec) && (should_skip_dir(it->path()) ||
+                                       gi.ignored(it->path(), root, true))) {
             it.disable_recursion_pending();
             continue;
           }
-          if (!it->is_regular_file(ec)) continue;
-          if (gi.ignored(it->path(), root, false)) continue;
+          if (!it->is_regular_file(ec))
+            continue;
+          if (gi.ignored(it->path(), root, false))
+            continue;
           const auto rel = relative_posix(it->path(), root);
           if (!glob_matcher || std::regex_match(rel, *glob_matcher) ||
               std::regex_match(it->path().filename().generic_string(),
@@ -960,11 +1065,11 @@ public:
           if (!std::regex_search(lines[i], matcher)) {
             continue;
           }
-          const auto start = i > static_cast<std::size_t>(context)
+          const auto start = std::cmp_greater(i, context)
                                  ? i - static_cast<std::size_t>(context)
                                  : 0;
-          const auto end = std::min(lines.size() - 1,
-                                    i + static_cast<std::size_t>(context));
+          const auto end =
+              std::min(lines.size() - 1, i + static_cast<std::size_t>(context));
           for (std::size_t line = start; line <= end; ++line) {
             if (out.tellp() > 0) {
               out << '\n';
@@ -1084,18 +1189,25 @@ public:
             break;
           }
           const auto remaining_ms =
-              std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+              std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
+                                                                    now)
                   .count();
 
           struct pollfd fds[2] = {
-              {pipefd[0], POLLIN | POLLHUP, 0},
-              {wakeup[0], POLLIN,           0},
+              {.fd = pipefd[0], .events = POLLIN | POLLHUP, .revents = 0},
+              {.fd = wakeup[0], .events = POLLIN, .revents = 0},
           };
           const int n = ::poll(fds, 2, static_cast<int>(remaining_ms));
 
-          if (n == 0) { kill_tree(); timed_out = true; break; }
-          if (n < 0 && errno == EINTR) continue;
-          if (n < 0) break;
+          if (n == 0) {
+            kill_tree();
+            timed_out = true;
+            break;
+          }
+          if (n < 0 && errno == EINTR)
+            continue;
+          if (n < 0)
+            break;
 
           if ((fds[1].revents & POLLIN) != 0) {
             kill_tree();
@@ -1104,9 +1216,11 @@ public:
           }
           if ((fds[0].revents & POLLIN) != 0) {
             const ssize_t nr = ::read(pipefd[0], buf.data(), buf.size());
-            if (nr <= 0) break;
+            if (nr <= 0)
+              break;
             output.append(buf.data(), static_cast<std::size_t>(nr));
-            if (output.size() >= kMaxBytes) break;
+            if (output.size() >= kMaxBytes)
+              break;
           } else if ((fds[0].revents & POLLHUP) != 0) {
             break;
           }
@@ -1119,7 +1233,8 @@ public:
       // Drain any data that arrived between the last read and process exit
       while (output.size() < kMaxBytes) {
         const ssize_t nr = ::read(pipefd[0], buf.data(), buf.size());
-        if (nr <= 0) break;
+        if (nr <= 0)
+          break;
         output.append(buf.data(), static_cast<std::size_t>(nr));
       }
       ::close(pipefd[0]);
@@ -1127,7 +1242,8 @@ public:
       int status = 0;
       ::waitpid(pid, &status, 0);
 
-      if (output.empty()) output = "(no output)";
+      if (output.empty())
+        output = "(no output)";
       output = truncate_head(output, kMaxBytes, kMaxBytes);
 
       if (aborted) {
@@ -1154,7 +1270,7 @@ public:
 } // namespace
 
 std::vector<std::shared_ptr<const ToolDefinition>>
-create_coding_tools(std::filesystem::path cwd) {
+create_coding_tools(const std::filesystem::path &cwd) {
   std::vector<std::shared_ptr<const ToolDefinition>> tools;
   tools.push_back(std::make_shared<ReadTool>(cwd));
   tools.push_back(std::make_shared<BashTool>(cwd));
@@ -1164,7 +1280,7 @@ create_coding_tools(std::filesystem::path cwd) {
 }
 
 std::vector<std::shared_ptr<const ToolDefinition>>
-create_read_only_tools(std::filesystem::path cwd) {
+create_read_only_tools(const std::filesystem::path &cwd) {
   std::vector<std::shared_ptr<const ToolDefinition>> tools;
   tools.push_back(std::make_shared<ReadTool>(cwd));
   tools.push_back(std::make_shared<GrepTool>(cwd));
@@ -1174,7 +1290,7 @@ create_read_only_tools(std::filesystem::path cwd) {
 }
 
 std::vector<std::shared_ptr<const ToolDefinition>>
-create_all_tools(std::filesystem::path cwd) {
+create_all_tools(const std::filesystem::path &cwd) {
   auto tools = create_coding_tools(cwd);
   tools.push_back(std::make_shared<GrepTool>(cwd));
   tools.push_back(std::make_shared<FindTool>(cwd));

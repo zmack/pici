@@ -27,7 +27,7 @@
 // std::async boundaries in the parallel tool path).
 using OtelCtx = opentelemetry::context::Context;
 #else
-struct OtelCtx {};  // zero-size placeholder; all OTel code is ifdef-guarded
+struct OtelCtx {}; // zero-size placeholder; all OTel code is ifdef-guarded
 #endif
 
 namespace pi::core {
@@ -130,8 +130,8 @@ struct AgentLoopConfig {
   // OTel tracer. Defaults to the global provider's tracer — a noop unless
   // init_otel() has been called. Set this on the config to override.
   opentelemetry::nostd::shared_ptr<opentelemetry::trace::Tracer> tracer{
-      opentelemetry::trace::Provider::GetTracerProvider()
-          ->GetTracer("pi-agent", PI_CPP_VERSION)};
+      opentelemetry::trace::Provider::GetTracerProvider()->GetTracer(
+          "pi-agent", PI_CPP_VERSION)};
 #endif
 };
 
@@ -157,7 +157,7 @@ std::shared_ptr<AssistantMessage>
 stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
                           StreamCallback emit,
                           const std::stop_token &stop_tok = std::stop_token{},
-                          OtelCtx otel_ctx = {});
+                          const OtelCtx &otel_ctx = {});
 
 // ─── Tool execution ─────────────────────────────────────────────────────────
 
@@ -172,6 +172,6 @@ execute_tool_calls(AgentContext &context,
                    const AssistantMessage &assistant_message,
                    const AgentLoopConfig &config, const StreamCallback &emit,
                    const std::stop_token &stop_tok = std::stop_token{},
-                   OtelCtx otel_ctx = {});
+                   const OtelCtx &otel_ctx = {});
 
 } // namespace pi::core

@@ -4,14 +4,20 @@
 #include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
 #include "core/lua_tool.h"
+#include "core/message_types.h"
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/providers/openai_completions.h"
 
 #include <csignal>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <iostream>
-#include <stdexcept>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 
 static void print_usage(const char *prog) {
   std::cout << "Usage: " << prog
@@ -22,7 +28,7 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
-  std::signal(SIGINT,  [](int) { std::exit(0); });
+  std::signal(SIGINT, [](int) { std::exit(0); });
   std::signal(SIGTERM, [](int) { std::exit(0); });
 
   pi::core::register_openai_completions_client();
@@ -30,7 +36,9 @@ int main(int argc, char *argv[]) {
   // Parse shared CLI flags
   auto args = pi::cli::load_and_merge(argc, argv);
 
-  struct OtelGuard { ~OtelGuard() { pi::core::shutdown_otel(); } } otel_guard;
+  struct OtelGuard {
+    ~OtelGuard() { pi::core::shutdown_otel(); }
+  } otel_guard;
   std::atexit([] { pi::core::shutdown_otel(); });
   if (!args.otel_endpoint.empty())
     pi::core::init_otel(args.otel_endpoint);
@@ -38,11 +46,16 @@ int main(int argc, char *argv[]) {
   for (const auto &d : args.diagnostics) {
     auto &out = d.is_error ? std::cerr : std::cout;
     out << (d.is_error ? "error: " : "warning: ") << d.message << "\n";
-    if (d.is_error) return 1;
+    if (d.is_error)
+      return 1;
   }
-  if (args.help) { print_usage(argv[0]); return 0; }
+  if (args.help) {
+    print_usage(argv[0]);
+    return 0;
+  }
   if (args.version) {
-    std::cout << "pi-acp " PI_CPP_VERSION "\n"; return 0;
+    std::cout << "pi-acp " PI_CPP_VERSION "\n";
+    return 0;
   }
 
   // --port (not in shared Args, parse manually)
@@ -53,35 +66,39 @@ int main(int argc, char *argv[]) {
     auto next = [&]() -> std::string_view {
       return (i + 1 < argc) ? argv[++i] : "";
     };
-    if (a == "--port")        port        = std::stoi(std::string(next()));
-    if (a == "--acp-threads") acp_threads = std::stoi(std::string(next()));
+    if (a == "--port")
+      port = std::stoi(std::string(next()));
+    if (a == "--acp-threads")
+      acp_threads = std::stoi(std::string(next()));
   }
 
   // Resolve model (same logic as pi-cli)
   auto model_opt = pi::core::find_model(args.model, args.provider);
   pi::core::Model model = model_opt.value_or(pi::core::Model{});
   if (model.id.empty()) {
-    model.id       = args.model.empty() ? "default" : args.model;
-    model.name     = model.id;
-    model.api      = "openai-completions";
+    model.id = args.model.empty() ? "default" : args.model;
+    model.name = model.id;
+    model.api = "openai-completions";
     model.provider = args.provider.empty() ? "local" : args.provider;
-    model.base_url = args.base_url.empty() ? "http://127.0.0.1:8080/v1"
-                                            : args.base_url;
+    model.base_url =
+        args.base_url.empty() ? "http://127.0.0.1:8080/v1" : args.base_url;
     model.context_window = 128000;
-    model.max_tokens     = 4096;
+    model.max_tokens = 4096;
   }
-  if (!args.base_url.empty()) model.base_url = args.base_url;
+  if (!args.base_url.empty())
+    model.base_url = args.base_url;
 
   // Build agent options
   pi::acp::ServerConfig cfg;
   cfg.agent_description = "pi-cpp coding agent running " + model.id;
-  cfg.threads           = acp_threads;
+  cfg.threads = acp_threads;
 
-  cfg.agent_opts.model         = model;
+  cfg.agent_opts.model = model;
   cfg.agent_opts.system_prompt = args.system_prompt;
-  cfg.agent_opts.get_api_key   =
+  cfg.agent_opts.get_api_key =
       [&args, &model](std::string_view p) -> std::optional<std::string> {
-    if (!args.api_key.empty()) return args.api_key;
+    if (!args.api_key.empty())
+      return args.api_key;
     return pi::core::get_env_api_key(p.empty() ? model.provider : p);
   };
 

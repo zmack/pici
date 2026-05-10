@@ -42,7 +42,8 @@ int rows_for_line(std::string_view line, int width);
 // Counts every physical row, including those caused by terminal wrapping.
 int cursor_rows_for_rendered(std::string_view rendered, int width);
 
-// ── BlockBoundaryScanner ──────────────────────────────────────────────────────
+// ── BlockBoundaryScanner
+// ──────────────────────────────────────────────────────
 //
 // Incrementally scans raw markdown content (the append-only `content` string
 // that ViewportRenderer builds from thinking + raw buffers) to find the last
@@ -55,26 +56,27 @@ int cursor_rows_for_rendered(std::string_view rendered, int width);
 // bytes from scan_pos onward are processed (O(new bytes) per call).
 // Reset with `= {}` between turns or when the prefix becomes stale.
 struct BlockBoundaryScanner {
-    std::size_t scan_pos{0};           // bytes consumed in prior advance() calls
-    std::size_t last_stable{0};        // last confirmed stable boundary offset
+  std::size_t scan_pos{0};    // bytes consumed in prior advance() calls
+  std::size_t last_stable{0}; // last confirmed stable boundary offset
 
-    // Fence tracking (persists across advance() calls)
-    bool inside_fence{false};
-    char fence_char{0};                // '`' or '~' (valid when inside_fence)
-    int  fence_len{0};                 // opening run length (≥3 when inside_fence)
+  // Fence tracking (persists across advance() calls)
+  bool inside_fence{false};
+  char fence_char{0}; // '`' or '~' (valid when inside_fence)
+  int fence_len{0};   // opening run length (≥3 when inside_fence)
 
-    // Current-line analysis (reset at each '\n')
-    int  line_indent{0};               // leading spaces/tabs before first non-space
-    bool saw_nonspace{false};          // have we seen a non-space char on this line
-    int  fence_run{0};                 // consecutive fence_run_char at line start
-    char fence_run_char{0};            // the char being counted
-    bool line_only_fence{true};        // no non-fence, non-space chars after the run yet
+  // Current-line analysis (reset at each '\n')
+  int line_indent{0};         // leading spaces/tabs before first non-space
+  bool saw_nonspace{false};   // have we seen a non-space char on this line
+  int fence_run{0};           // consecutive fence_run_char at line start
+  char fence_run_char{0};     // the char being counted
+  bool line_only_fence{true}; // no non-fence, non-space chars after the run yet
 
-    // Cross-line state
-    bool last_nonblank_col0{true};     // last completed non-blank line had indent == 0
-    bool last_char_nl{false};          // previous byte processed was '\n'
+  // Cross-line state
+  bool last_nonblank_col0{
+      true};                // last completed non-blank line had indent == 0
+  bool last_char_nl{false}; // previous byte processed was '\n'
 
-    void advance(std::string_view s);
+  void advance(std::string_view s);
 };
 
 } // namespace pi::core

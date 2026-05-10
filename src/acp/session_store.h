@@ -21,8 +21,7 @@ public:
   std::vector<core::Message> load(const std::string &session_id);
 
   // Persist updated messages back to a session.
-  void save(const std::string &session_id,
-            std::vector<core::Message> messages);
+  void save(const std::string &session_id, std::vector<core::Message> messages);
 
 private:
   struct Entry {

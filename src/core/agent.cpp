@@ -12,7 +12,6 @@
 #include <stop_token>
 #include <string>
 #include <thread>
-#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -111,14 +110,14 @@ Agent::prompt(std::vector<Message> messages) {
   std::thread([this, messages, ctx, config, stream]() mutable {
     run_with_lifecycle([this, messages = std::move(messages),
                         ctx = std::move(ctx), config = std::move(config),
-                        stream](std::stop_token stop_tok) mutable {
+                        stream](const std::stop_token &stop_tok) mutable {
       auto event_stream = run_agent_loop(
           messages, ctx, config,
           [this](const AgentEvent &event) {
             process_event(event);
             // Also push to stream for the caller
           },
-          std::move(stop_tok));
+          stop_tok);
 
       // Forward events to the stream
       for (auto &event : event_stream) {
@@ -187,11 +186,10 @@ EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
                stream]() mutable {
     run_with_lifecycle([this, context = std::move(context),
                         config = std::move(config),
-                        stream](std::stop_token stop_tok) mutable {
+                        stream](const std::stop_token &stop_tok) mutable {
       auto event_stream = run_agent_loop_continue(
           context, config,
-          [this](const AgentEvent &event) { process_event(event); },
-          std::move(stop_tok));
+          [this](const AgentEvent &event) { process_event(event); }, stop_tok);
 
       for (auto &event : event_stream) {
         stream.push(std::move(event));

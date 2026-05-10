@@ -1,18 +1,25 @@
 #include "acp/session_store.h"
+#include "core/message_types.h"
+#include <list>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace pi::acp {
 
 std::vector<core::Message> SessionStore::load(const std::string &session_id) {
-  std::lock_guard<std::mutex> lk(mutex_);
+  std::scoped_lock lk(mutex_);
   auto it = index_.find(session_id);
-  if (it == index_.end()) return {};
+  if (it == index_.end())
+    return {};
   touch(it->second);
   return it->second->messages;
 }
 
 void SessionStore::save(const std::string &session_id,
                         std::vector<core::Message> messages) {
-  std::lock_guard<std::mutex> lk(mutex_);
+  std::scoped_lock lk(mutex_);
   auto it = index_.find(session_id);
   if (it != index_.end()) {
     it->second->messages = std::move(messages);
@@ -24,7 +31,7 @@ void SessionStore::save(const std::string &session_id,
     index_.erase(lru_.back().id);
     lru_.pop_back();
   }
-  lru_.push_front({session_id, std::move(messages)});
+  lru_.push_front({.id = session_id, .messages = std::move(messages)});
   index_[session_id] = lru_.begin();
 }
 

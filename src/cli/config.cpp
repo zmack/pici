@@ -2,44 +2,54 @@
 #include "cli/args.h"
 
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <toml++/impl/parse_error.hpp>
+#include <toml++/impl/parser.hpp>
+#include <toml++/impl/table.hpp>
+#include <vector>
 
 #define TOML_EXCEPTIONS 1
-#include <toml++/toml.hpp>
 
 namespace pi::cli {
 
-// ─── Path helpers ─────────────────────────────────────────────────────────────
+// ─── Path helpers
+// ─────────────────────────────────────────────────────────────
 
 static std::string expand_tilde(std::string path) {
-  if (path.empty() || path[0] != '~') return path;
+  if (path.empty() || path[0] != '~')
+    return path;
   const char *home = std::getenv("HOME");
-  if (!home) return path;
+  if (home == nullptr)
+    return path;
   return std::string(home) + path.substr(1);
 }
 
 std::filesystem::path default_config_path() {
   const char *xdg = std::getenv("XDG_CONFIG_HOME");
   std::filesystem::path base;
-  if (xdg && xdg[0] != '\0') {
+  if ((xdg != nullptr) && xdg[0] != '\0') {
     base = xdg;
   } else {
     const char *home = std::getenv("HOME");
-    base = home ? std::filesystem::path(home) / ".config" : ".";
+    base = (home != nullptr) ? std::filesystem::path(home) / ".config" : ".";
   }
   return base / "pici" / "config.toml";
 }
 
-// ─── TOML loading ─────────────────────────────────────────────────────────────
+// ─── TOML loading
+// ─────────────────────────────────────────────────────────────
 
 Args load_config(const std::filesystem::path &path) {
   Args cfg;
 
   std::ifstream f(path);
-  if (!f) return cfg; // file absent → empty config (not an error)
+  if (!f)
+    return cfg; // file absent → empty config (not an error)
 
   toml::table tbl;
   try {
@@ -48,45 +58,54 @@ Args load_config(const std::filesystem::path &path) {
     throw std::runtime_error(std::string("config parse error: ") + e.what());
   }
 
-  auto str = [&](std::string_view section, std::string_view key) -> std::string {
-    if (auto *s = tbl[section][key].as_string()) return s->get();
+  auto str = [&](std::string_view section,
+                 std::string_view key) -> std::string {
+    if (auto *s = tbl[section][key].as_string())
+      return s->get();
     return {};
   };
   auto boolean = [&](std::string_view section, std::string_view key) -> bool {
-    if (auto *b = tbl[section][key].as_boolean()) return b->get();
+    if (auto *b = tbl[section][key].as_boolean())
+      return b->get();
     return false;
   };
-  auto str_array = [&](std::string_view section, std::string_view key)
-      -> std::vector<std::string> {
+  auto str_array = [&](std::string_view section,
+                       std::string_view key) -> std::vector<std::string> {
     std::vector<std::string> result;
     if (auto *arr = tbl[section][key].as_array()) {
       for (const auto &v : *arr)
-        if (const auto *s = v.as_string()) result.push_back(expand_tilde(s->get()));
+        if (const auto *s = v.as_string())
+          result.push_back(expand_tilde(s->get()));
     }
     return result;
   };
 
   // [model]
-  cfg.model    = str("model", "id");
+  cfg.model = str("model", "id");
   cfg.provider = str("model", "provider");
   cfg.base_url = str("model", "base_url");
-  cfg.api_key  = str("model", "api_key");
+  cfg.api_key = str("model", "api_key");
 
   // [agent]
-  cfg.system_prompt         = str("agent", "system_prompt");
+  cfg.system_prompt = str("agent", "system_prompt");
   cfg.append_system_prompts = str_array("agent", "append_system_prompt");
   if (auto ts = str("agent", "thinking"); !ts.empty()) {
-    if      (ts == "minimal") cfg.thinking = ThinkingLevel::minimal;
-    else if (ts == "low")     cfg.thinking = ThinkingLevel::low;
-    else if (ts == "medium")  cfg.thinking = ThinkingLevel::medium;
-    else if (ts == "high")    cfg.thinking = ThinkingLevel::high;
-    else if (ts == "xhigh")   cfg.thinking = ThinkingLevel::xhigh;
+    if (ts == "minimal")
+      cfg.thinking = ThinkingLevel::minimal;
+    else if (ts == "low")
+      cfg.thinking = ThinkingLevel::low;
+    else if (ts == "medium")
+      cfg.thinking = ThinkingLevel::medium;
+    else if (ts == "high")
+      cfg.thinking = ThinkingLevel::high;
+    else if (ts == "xhigh")
+      cfg.thinking = ThinkingLevel::xhigh;
   }
 
   // [tools]
-  cfg.no_tools        = boolean("tools", "disabled");
+  cfg.no_tools = boolean("tools", "disabled");
   cfg.no_builtin_tools = boolean("tools", "no_builtin");
-  cfg.tools           = str_array("tools", "list");
+  cfg.tools = str_array("tools", "list");
   if (auto d = str("tools", "dir"); !d.empty())
     cfg.tools_dir = expand_tilde(d);
 
@@ -96,7 +115,7 @@ Args load_config(const std::filesystem::path &path) {
     cfg.hooks_dir = expand_tilde(d);
 
   // [display]
-  cfg.render  = str("display", "render");
+  cfg.render = str("display", "render");
   cfg.verbose = boolean("display", "verbose");
 
   // [context]
@@ -105,27 +124,31 @@ Args load_config(const std::filesystem::path &path) {
   return cfg;
 }
 
-// ─── Merge ────────────────────────────────────────────────────────────────────
+// ─── Merge
+// ────────────────────────────────────────────────────────────────────
 
 Args merge_args(const Args &config, const Args &cli) {
   Args out = config; // start with config defaults
 
   // String: CLI non-empty wins
-  auto merge_str = [](const std::string &conf, const std::string &c)
-      -> std::string { return c.empty() ? conf : c; };
+  auto merge_str = [](const std::string &conf,
+                      const std::string &c) -> std::string {
+    return c.empty() ? conf : c;
+  };
 
   // Vector: CLI non-empty wins; otherwise union of both (config first)
-  auto merge_vec = [](const std::vector<std::string> &conf,
-                      const std::vector<std::string> &c)
-      -> std::vector<std::string> {
-    if (!c.empty()) return c;
+  auto merge_vec =
+      [](const std::vector<std::string> &conf,
+         const std::vector<std::string> &c) -> std::vector<std::string> {
+    if (!c.empty())
+      return c;
     return conf;
   };
 
-  out.model    = merge_str(config.model,    cli.model);
+  out.model = merge_str(config.model, cli.model);
   out.provider = merge_str(config.provider, cli.provider);
   out.base_url = merge_str(config.base_url, cli.base_url);
-  out.api_key  = merge_str(config.api_key,  cli.api_key);
+  out.api_key = merge_str(config.api_key, cli.api_key);
 
   out.system_prompt = merge_str(config.system_prompt, cli.system_prompt);
   // append_system_prompt: accumulate both
@@ -134,39 +157,42 @@ Args merge_args(const Args &config, const Args &cli) {
     out.append_system_prompts.push_back(s);
 
   // thinking: CLI beats config if CLI is non-off (or if config is off)
-  if (cli.thinking != ThinkingLevel::off) out.thinking = cli.thinking;
+  if (cli.thinking != ThinkingLevel::off)
+    out.thinking = cli.thinking;
 
-  out.no_tools         = config.no_tools         || cli.no_tools;
-  out.no_builtin_tools = config.no_builtin_tools  || cli.no_builtin_tools;
-  out.tools            = merge_vec(config.tools,  cli.tools);
-  out.tools_dir        = merge_str(config.tools_dir, cli.tools_dir);
+  out.no_tools = config.no_tools || cli.no_tools;
+  out.no_builtin_tools = config.no_builtin_tools || cli.no_builtin_tools;
+  out.tools = merge_vec(config.tools, cli.tools);
+  out.tools_dir = merge_str(config.tools_dir, cli.tools_dir);
 
   // hooks_files: accumulate both (config first, then CLI)
   out.hooks_files = config.hooks_files;
-  for (const auto &f : cli.hooks_files) out.hooks_files.push_back(f);
+  for (const auto &f : cli.hooks_files)
+    out.hooks_files.push_back(f);
   out.hooks_dir = merge_str(config.hooks_dir, cli.hooks_dir);
 
-  out.render           = merge_str(config.render, cli.render);
-  out.verbose          = config.verbose || cli.verbose;
+  out.render = merge_str(config.render, cli.render);
+  out.verbose = config.verbose || cli.verbose;
   out.no_context_files = config.no_context_files || cli.no_context_files;
 
   // Pass-through CLI-only fields
-  out.messages    = cli.messages;
-  out.print_mode  = cli.print_mode;
+  out.messages = cli.messages;
+  out.print_mode = cli.print_mode;
   out.list_models = cli.list_models;
   out.list_models_filter = cli.list_models_filter;
-  out.list_tools  = cli.list_tools;
+  out.list_tools = cli.list_tools;
   out.list_addons = cli.list_addons;
-  out.test_files  = cli.test_files;
-  out.help        = cli.help;
-  out.version     = cli.version;
+  out.test_files = cli.test_files;
+  out.help = cli.help;
+  out.version = cli.version;
   out.config_path = cli.config_path;
   out.diagnostics = cli.diagnostics;
 
   return out;
 }
 
-// ─── Full pipeline ────────────────────────────────────────────────────────────
+// ─── Full pipeline
+// ────────────────────────────────────────────────────────────
 
 Args load_and_merge(int argc, char *argv[]) {
   // 1. Parse CLI first (we need --config path before loading the file)
@@ -176,7 +202,8 @@ Args load_and_merge(int argc, char *argv[]) {
   std::filesystem::path cfg_path;
   if (!cli.config_path.empty()) {
     cfg_path = expand_tilde(cli.config_path);
-  } else if (const char *env = std::getenv("PICI_CONFIG"); env && env[0]) {
+  } else if (const char *env = std::getenv("PICI_CONFIG");
+             (env != nullptr) && (env[0] != 0)) {
     cfg_path = expand_tilde(env);
   } else {
     cfg_path = default_config_path();
@@ -187,7 +214,8 @@ Args load_and_merge(int argc, char *argv[]) {
   try {
     config = load_config(cfg_path);
   } catch (const std::exception &e) {
-    cli.diagnostics.push_back({false, std::string("config: ") + e.what()});
+    cli.diagnostics.push_back(
+        {.is_error = false, .message = std::string("config: ") + e.what()});
   }
 
   // 4. Merge: CLI wins over config

@@ -1,8 +1,11 @@
 #include "core/models.h"
+#include "core/message_types.h"
 
-#include <algorithm>
 #include <cctype>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace pi::core {
 
@@ -146,7 +149,7 @@ std::vector<const Model *> search_models(std::string_view filter) {
       continue;
     }
     std::string haystack = to_lower(m.id + " " + m.provider + " " + m.name);
-    if (haystack.find(needle) != std::string::npos)
+    if (haystack.contains(needle))
       result.push_back(&m);
   }
   return result;

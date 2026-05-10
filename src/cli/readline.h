@@ -35,7 +35,7 @@ using ControlFn = std::function<void(ControlAction)>;
 // Returns nullopt on EOF (Ctrl+D on empty input) or read error.
 // Ctrl+C exits the process via SIGINT (same as before raw mode).
 std::optional<std::string> readline(std::string_view prompt,
-                                    CompleteFn complete_fn = {},
-                                    ControlFn control_fn = {});
+                                    const CompleteFn &complete_fn = {},
+                                    const ControlFn &control_fn = {});
 
 } // namespace pi::cli

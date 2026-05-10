@@ -1,7 +1,10 @@
 #include "http/http_client.h"
+#include "curl/easy.h"
+#include "curl/system.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <map>
 #include <optional>
@@ -193,17 +196,17 @@ bool HttpClient::post_streaming(
   curl_easy_getinfo(curl.handle, CURLINFO_RESPONSE_CODE, &status);
 
   if (state.callback_error) {
-    state.callback(std::string("{\"error\":{\"message\":\"") +
+    state.callback(std::string(R"({"error":{"message":")") +
                    *state.callback_error + "\"}}");
     return false;
   }
   if (res != CURLE_OK) {
-    state.callback(std::string("{\"error\":{\"message\":\"") +
+    state.callback(std::string(R"({"error":{"message":")") +
                    curl_easy_strerror(res) + "\"}}");
     return false;
   }
   if (status < 200 || status >= 300) {
-    state.callback(std::string("{\"error\":{\"message\":\"HTTP status ") +
+    state.callback(std::string(R"({"error":{"message":"HTTP status )") +
                    std::to_string(status) + "\"}}");
     return false;
   }

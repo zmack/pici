@@ -1,4 +1,5 @@
 #include "core/otel_init.h"
+#include <string_view>
 
 #ifdef PI_CPP_OTEL_SDK_ENABLED
 
@@ -18,7 +19,7 @@ namespace pi::core {
 
 void init_otel(std::string_view endpoint) {
   namespace otlp = opentelemetry::exporter::otlp;
-  namespace sdk  = opentelemetry::sdk::trace;
+  namespace sdk = opentelemetry::sdk::trace;
 
   otlp::OtlpHttpExporterOptions exp_opts;
   exp_opts.url = std::string(endpoint) + "/v1/traces";
@@ -28,8 +29,8 @@ void init_otel(std::string_view endpoint) {
   sdk::BatchSpanProcessorOptions bp_opts;
   bp_opts.schedule_delay_millis = std::chrono::milliseconds(1000);
 
-  auto processor = sdk::BatchSpanProcessorFactory::Create(
-      std::move(exporter), bp_opts);
+  auto processor =
+      sdk::BatchSpanProcessorFactory::Create(std::move(exporter), bp_opts);
   auto provider = sdk::TracerProviderFactory::Create(std::move(processor));
 
   opentelemetry::trace::Provider::SetTracerProvider(std::move(provider));
@@ -37,8 +38,9 @@ void init_otel(std::string_view endpoint) {
 
 void shutdown_otel() {
   auto p = opentelemetry::trace::Provider::GetTracerProvider();
-  if (auto sdk = std::dynamic_pointer_cast<
-          opentelemetry::sdk::trace::TracerProvider>(p)) {
+  if (auto sdk =
+          std::dynamic_pointer_cast<opentelemetry::sdk::trace::TracerProvider>(
+              p)) {
     sdk->ForceFlush(std::chrono::seconds(5));
     sdk->Shutdown();
   }

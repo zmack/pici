@@ -1,17 +1,24 @@
 #include "acp/server.h"
 #include "acp/handlers.h"
+#include "acp/session_store.h"
+#include "acp/types.h"
+#include "nlohmann/json_fwd.hpp"
 
+#include <cstddef>
 #include <httplib.h>
 
 #include <csignal>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace pi::acp {
 
 AgentManifest build_manifest(const ServerConfig &cfg) {
   AgentManifest m;
-  m.name        = cfg.agent_name;
+  m.name = cfg.agent_name;
   m.description = cfg.agent_description;
 
   // Expose tool names in metadata
@@ -19,8 +26,8 @@ AgentManifest build_manifest(const ServerConfig &cfg) {
   for (const auto &t : cfg.tools)
     tool_names.push_back(std::string(t->name()));
   m.metadata = {{"framework", "pi-cpp"},
-                {"version",   PI_CPP_VERSION},
-                {"tools",     std::move(tool_names)}};
+                {"version", PI_CPP_VERSION},
+                {"tools", std::move(tool_names)}};
   return m;
 }
 
@@ -39,7 +46,8 @@ void run_server(int &port, ServerConfig config) {
   if (port == 0) {
     // bind_to_any_port returns the assigned port (0 on failure)
     port = svr.bind_to_any_port(host);
-    if (port == 0) throw std::runtime_error("Failed to bind to any port");
+    if (port == 0)
+      throw std::runtime_error("Failed to bind to any port");
     std::cerr << "[acp] listening on " << host << ":" << port << "\n";
     svr.listen_after_bind();
   } else {

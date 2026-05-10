@@ -1,5 +1,6 @@
 #include "core/markdown.h"
 #include "core/syntax_highlight.h"
+#include <utility>
 
 extern "C" {
 #include <cmark.h>
@@ -14,16 +15,16 @@ extern "C" {
 namespace pi::core {
 namespace {
 
-static constexpr std::string_view kReset = "\033[0m";
-static constexpr std::string_view kBold = "\033[1m";
-static constexpr std::string_view kDim = "\033[2m";
-static constexpr std::string_view kItalic = "\033[3m";
-static constexpr std::string_view kStrike = "\033[9m";
-static constexpr std::string_view kCode = "\033[7m";
-static constexpr std::string_view kH1 = "\033[1;95m";
-static constexpr std::string_view kH2 = "\033[1;94m";
-static constexpr std::string_view kH3 = "\033[1;96m";
-static constexpr std::string_view kLinkDim = "\033[2;4m";
+constexpr std::string_view kReset = "\033[0m";
+constexpr std::string_view kBold = "\033[1m";
+constexpr std::string_view kDim = "\033[2m";
+constexpr std::string_view kItalic = "\033[3m";
+constexpr std::string_view kStrike = "\033[9m";
+constexpr std::string_view kCode = "\033[7m";
+constexpr std::string_view kH1 = "\033[1;95m";
+constexpr std::string_view kH2 = "\033[1;94m";
+constexpr std::string_view kH3 = "\033[1;96m";
+constexpr std::string_view kLinkDim = "\033[2;4m";
 
 struct ListLevel {
   bool ordered;
@@ -58,9 +59,9 @@ struct Renderer {
   }
 };
 
-static const char *nonnull(const char *s) { return s == nullptr ? "" : s; }
+const char *nonnull(const char *s) { return s == nullptr ? "" : s; }
 
-static std::string first_info_word(std::string_view info) {
+std::string first_info_word(std::string_view info) {
   std::string out(info);
   const auto space = out.find_first_of(" \t\r\n");
   if (space != std::string::npos) {
@@ -71,12 +72,12 @@ static std::string first_info_word(std::string_view info) {
 
 static void render_children(Renderer &r, cmark_node *node);
 
-static bool is_inline_node(cmark_node *node) {
+bool is_inline_node(cmark_node *node) {
   const auto type = cmark_node_get_type(node);
   return type >= CMARK_NODE_TEXT && type <= CMARK_NODE_IMAGE;
 }
 
-static void render_text_with_strikethrough(Renderer &r, std::string_view text) {
+void render_text_with_strikethrough(Renderer &r, std::string_view text) {
   std::size_t pos = 0;
   while (pos < text.size()) {
     const auto start = text.find("~~", pos);
@@ -99,7 +100,7 @@ static void render_text_with_strikethrough(Renderer &r, std::string_view text) {
   }
 }
 
-static void render_code_block(Renderer &r, cmark_node *node) {
+void render_code_block(Renderer &r, cmark_node *node) {
   const std::string language =
       first_info_word(nonnull(cmark_node_get_fence_info(node)));
   const std::string_view code = nonnull(cmark_node_get_literal(node));
@@ -123,7 +124,7 @@ static void render_code_block(Renderer &r, cmark_node *node) {
   r.out += '\n';
 }
 
-static void render_block(Renderer &r, cmark_node *node) {
+void render_block(Renderer &r, cmark_node *node) {
   switch (cmark_node_get_type(node)) {
   case CMARK_NODE_DOCUMENT:
     render_children(r, node);
@@ -177,7 +178,7 @@ static void render_block(Renderer &r, cmark_node *node) {
   case CMARK_NODE_LIST: {
     const bool ordered = cmark_node_get_list_type(node) == CMARK_ORDERED_LIST;
     const int start = ordered ? cmark_node_get_list_start(node) : 0;
-    r.list_stack.push_back({ordered, start});
+    r.list_stack.push_back({.ordered = ordered, .counter = start});
     render_children(r, node);
     r.list_stack.pop_back();
     if (r.list_stack.empty()) {
@@ -207,7 +208,7 @@ static void render_block(Renderer &r, cmark_node *node) {
   }
 }
 
-static void render_inline(Renderer &r, cmark_node *node) {
+void render_inline(Renderer &r, cmark_node *node) {
   switch (cmark_node_get_type(node)) {
   case CMARK_NODE_TEXT:
     render_text_with_strikethrough(r, nonnull(cmark_node_get_literal(node)));
@@ -256,7 +257,7 @@ static void render_inline(Renderer &r, cmark_node *node) {
   }
 }
 
-static void render_node(Renderer &r, cmark_node *node) {
+void render_node(Renderer &r, cmark_node *node) {
   if (is_inline_node(node)) {
     render_inline(r, node);
   } else {
@@ -264,20 +265,21 @@ static void render_node(Renderer &r, cmark_node *node) {
   }
 }
 
-static void render_children(Renderer &r, cmark_node *node) {
+void render_children(Renderer &r, cmark_node *node) {
   for (cmark_node *child = cmark_node_first_child(node); child != nullptr;
        child = cmark_node_next(child)) {
     render_node(r, child);
   }
 }
 
-// ── GFM table support ─────────────────────────────────────────────────────────
+// ── GFM table support
+// ─────────────────────────────────────────────────────────
 //
 // cmark 0.31.1 does not parse GFM tables. We pre-process the input, detect
 // table blocks (header + separator + optional body), render them with
 // box-drawing characters, and pass everything else to cmark unchanged.
 
-static std::string_view trim_sv(std::string_view s) {
+std::string_view trim_sv(std::string_view s) {
   while (!s.empty() && (s.front() == ' ' || s.front() == '\t'))
     s.remove_prefix(1);
   while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
@@ -286,30 +288,42 @@ static std::string_view trim_sv(std::string_view s) {
 }
 
 // Split one table row on '|', stripping outer pipes and per-cell whitespace.
-static std::vector<std::string_view> split_row(std::string_view line) {
-  if (!line.empty() && line.front() == '|') line.remove_prefix(1);
-  if (!line.empty() && line.back() == '|') line.remove_suffix(1);
+std::vector<std::string_view> split_row(std::string_view line) {
+  if (!line.empty() && line.front() == '|')
+    line.remove_prefix(1);
+  if (!line.empty() && line.back() == '|')
+    line.remove_suffix(1);
   std::vector<std::string_view> cells;
   std::size_t pos = 0;
   while (true) {
     const auto sep = line.find('|', pos);
-    cells.push_back(
-        trim_sv(line.substr(pos, sep == std::string_view::npos ? sep : sep - pos)));
-    if (sep == std::string_view::npos) break;
+    cells.push_back(trim_sv(
+        line.substr(pos, sep == std::string_view::npos ? sep : sep - pos)));
+    if (sep == std::string_view::npos)
+      break;
     pos = sep + 1;
   }
   return cells;
 }
 
 // GFM separator row: only -, :, |, space/tab — and must contain both - and |.
-static bool is_table_sep(std::string_view line) {
-  bool has_dash = false, has_pipe = false;
+bool is_table_sep(std::string_view line) {
+  bool has_dash = false;
+  bool has_pipe = false;
   for (char c : line) {
     switch (c) {
-    case '-': has_dash = true; break;
-    case '|': has_pipe = true; break;
-    case ':': case ' ': case '\t': break;
-    default: return false;
+    case '-':
+      has_dash = true;
+      break;
+    case '|':
+      has_pipe = true;
+      break;
+    case ':':
+    case ' ':
+    case '\t':
+      break;
+    default:
+      return false;
     }
   }
   return has_dash && has_pipe;
@@ -317,20 +331,23 @@ static bool is_table_sep(std::string_view line) {
 
 enum class Align { left, center, right };
 
-static Align parse_align(std::string_view cell) {
+Align parse_align(std::string_view cell) {
   cell = trim_sv(cell);
   const bool lc = !cell.empty() && cell.front() == ':';
-  const bool rc = !cell.empty() && cell.back()  == ':';
-  if (lc && rc) return Align::center;
-  if (rc)       return Align::right;
+  const bool rc = !cell.empty() && cell.back() == ':';
+  if (lc && rc)
+    return Align::center;
+  if (rc)
+    return Align::right;
   return Align::left;
 }
 
-static std::string render_table(const std::vector<std::string_view> &block) {
-  if (block.size() < 2) return {};
+std::string render_table(const std::vector<std::string_view> &block) {
+  if (block.size() < 2)
+    return {};
 
   auto header = split_row(block[0]);
-  auto sep    = split_row(block[1]);
+  auto sep = split_row(block[1]);
   const std::size_t nc = header.size();
 
   std::vector<Align> aligns(nc, Align::left);
@@ -347,11 +364,12 @@ static std::string render_table(const std::vector<std::string_view> &block) {
   std::vector<std::size_t> widths(nc, 1);
   for (std::size_t c = 0; c < nc; ++c) {
     widths[c] = std::max(widths[c], header[c].size());
-    for (const auto &row : rows) widths[c] = std::max(widths[c], row[c].size());
+    for (const auto &row : rows)
+      widths[c] = std::max(widths[c], row[c].size());
   }
 
-  static constexpr const char *kH  = "\xe2\x94\x80"; // ─
-  static constexpr const char *kV  = "\xe2\x94\x82"; // │
+  static constexpr const char *kH = "\xe2\x94\x80";  // ─
+  static constexpr const char *kV = "\xe2\x94\x82";  // │
   static constexpr const char *kTL = "\xe2\x94\x8c"; // ┌
   static constexpr const char *kTM = "\xe2\x94\xac"; // ┬
   static constexpr const char *kTR = "\xe2\x94\x90"; // ┐
@@ -365,8 +383,10 @@ static std::string render_table(const std::vector<std::string_view> &block) {
   auto hline = [&](const char *l, const char *m, const char *r) {
     std::string s = l;
     for (std::size_t c = 0; c < nc; ++c) {
-      if (c) s += m;
-      for (std::size_t i = 0; i < widths[c] + 2; ++i) s += kH;
+      if (c)
+        s += m;
+      for (std::size_t i = 0; i < widths[c] + 2; ++i)
+        s += kH;
     }
     return s + r + '\n';
   };
@@ -376,12 +396,16 @@ static std::string render_table(const std::vector<std::string_view> &block) {
     const std::size_t pad = w > len ? w - len : 0;
     std::string s;
     if (a == Align::right) {
-      s.append(pad, ' '); s += text;
+      s.append(pad, ' ');
+      s += text;
     } else if (a == Align::center) {
       const std::size_t lp = pad / 2;
-      s.append(lp, ' '); s += text; s.append(pad - lp, ' ');
+      s.append(lp, ' ');
+      s += text;
+      s.append(pad - lp, ' ');
     } else {
-      s += text; s.append(pad, ' ');
+      s += text;
+      s.append(pad, ' ');
     }
     return s;
   };
@@ -390,9 +414,13 @@ static std::string render_table(const std::vector<std::string_view> &block) {
     std::string s = kV;
     for (std::size_t c = 0; c < nc; ++c) {
       s += ' ';
-      if (bold) { s += kBold; }
+      if (bold) {
+        s += kBold;
+      }
       s += padded(cells[c], widths[c], aligns[c]);
-      if (bold) { s += kReset; }
+      if (bold) {
+        s += kReset;
+      }
       s += ' ';
       s += kV;
     }
@@ -403,7 +431,8 @@ static std::string render_table(const std::vector<std::string_view> &block) {
   out += hline(kTL, kTM, kTR);
   out += dline(header, /*bold=*/true);
   out += hline(kML, kMM, kMR);
-  for (const auto &row : rows) out += dline(row, /*bold=*/false);
+  for (const auto &row : rows)
+    out += dline(row, /*bold=*/false);
   out += hline(kBL, kBM, kBR);
   out += '\n';
   return out;
@@ -432,24 +461,27 @@ std::string render_markdown_ansi(std::string_view input) {
   std::string buf;
 
   auto flush = [&]() {
-    if (buf.empty()) return;
+    if (buf.empty())
+      return;
     cmark_node *doc =
         cmark_parse_document(buf.data(), buf.size(), CMARK_OPT_VALIDATE_UTF8);
-    if (doc) { render_node(r, doc); cmark_node_free(doc); }
+    if (doc) {
+      render_node(r, doc);
+      cmark_node_free(doc);
+    }
     buf.clear();
   };
 
   std::size_t i = 0;
   while (i < lines.size()) {
     // Table detection: current line has '|' and next line is a GFM separator.
-    if (i + 1 < lines.size() &&
-        lines[i].find('|') != std::string_view::npos &&
+    if (i + 1 < lines.size() && lines[i].contains('|') &&
         is_table_sep(lines[i + 1])) {
       flush();
       // Collect contiguous non-blank lines as the table block.
       const std::size_t start = i;
-      while (i < lines.size() && !lines[i].empty() &&
-             lines[i].find('|') != std::string_view::npos) ++i;
+      while (i < lines.size() && !lines[i].empty() && lines[i].contains('|'))
+        ++i;
       r.out += render_table({lines.begin() + start, lines.begin() + i});
     } else {
       buf += lines[i];
@@ -460,7 +492,8 @@ std::string render_markdown_ansi(std::string_view input) {
 
   flush();
 
-  while (!r.out.empty() && r.out.back() == '\n') r.out.pop_back();
+  while (!r.out.empty() && r.out.back() == '\n')
+    r.out.pop_back();
   r.out += '\n';
   return r.out;
 }

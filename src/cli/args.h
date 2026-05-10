@@ -25,10 +25,10 @@ struct Args {
   // Tools
   bool no_tools{false};
   bool no_builtin_tools{false};
-  std::vector<std::string> tools;  // allowlist of tool names
-  std::string tools_dir;                  // directory for Lua tools
-  std::vector<std::string> hooks_files;   // Lua hooks files (repeatable)
-  std::string hooks_dir;                  // load all .lua files from dir as add-ons
+  std::vector<std::string> tools;       // allowlist of tool names
+  std::string tools_dir;                // directory for Lua tools
+  std::vector<std::string> hooks_files; // Lua hooks files (repeatable)
+  std::string hooks_dir; // load all .lua files from dir as add-ons
 
   // Output / rendering
   bool print_mode{false}; // -p: run prompt and exit
@@ -41,7 +41,8 @@ struct Args {
   bool list_addons{false};
 
   // Test mode
-  std::vector<std::string> test_files; // --test <file>, run Lua test files and exit
+  std::vector<std::string>
+      test_files; // --test <file>, run Lua test files and exit
 
   // Context files
   bool no_context_files{false}; // disable AGENTS.md / CLAUDE.md discovery

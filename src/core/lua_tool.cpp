@@ -1,4 +1,12 @@
 #include "core/lua_tool.h"
+#include "core/agent_loop.h"
+#include "nlohmann/json_fwd.hpp"
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <type_traits>
+#include <utility>
+#include <variant>
 
 extern "C" {
 #include <lauxlib.h>
@@ -32,7 +40,7 @@ namespace {
 void json_to_lua(lua_State *L, const nlohmann::json &j) {
   if (j.is_object()) {
     lua_newtable(L);
-    for (auto &[key, val] : j.items()) {
+    for (const auto &[key, val] : j.items()) {
       lua_pushstring(L, key.c_str());
       json_to_lua(L, val);
       lua_rawset(L, -3);
@@ -68,7 +76,7 @@ nlohmann::json lua_table_to_json(lua_State *L, int idx) {
   lua_pushnil(L);
   while (lua_next(L, idx) != 0) {
     ++count;
-    if (!lua_isinteger(L, -2)) {
+    if (lua_isinteger(L, -2) == 0) {
       all_int = false;
     }
     lua_pop(L, 1);
@@ -89,7 +97,7 @@ nlohmann::json lua_table_to_json(lua_State *L, int idx) {
     if (lua_type(L, -2) == LUA_TSTRING) {
       key = lua_tostring(L, -2);
     } else if (lua_type(L, -2) == LUA_TNUMBER) {
-      if (lua_isinteger(L, -2)) {
+      if (lua_isinteger(L, -2) != 0) {
         key = std::to_string(lua_tointeger(L, -2));
       } else {
         key = std::to_string(lua_tonumber(L, -2));
@@ -108,7 +116,7 @@ nlohmann::json lua_to_json(lua_State *L, int idx) {
   case LUA_TSTRING:
     return nlohmann::json(std::string(lua_tostring(L, idx)));
   case LUA_TNUMBER:
-    if (lua_isinteger(L, idx)) {
+    if (lua_isinteger(L, idx) != 0) {
       return nlohmann::json(lua_tointeger(L, idx));
     }
     return nlohmann::json(lua_tonumber(L, idx));
@@ -117,7 +125,7 @@ nlohmann::json lua_to_json(lua_State *L, int idx) {
   case LUA_TTABLE:
     return lua_table_to_json(L, idx);
   default:
-    return nlohmann::json(nullptr);
+    return {nullptr};
   }
 }
 
@@ -203,9 +211,9 @@ private:
 
 class LuaTool final : public ToolDefinition {
 public:
-  explicit LuaTool(const std::filesystem::path &path) {
-    L_ = luaL_newstate();
-    if (!L_) {
+  explicit LuaTool(const std::filesystem::path &path) : L_(luaL_newstate()) {
+
+    if (L_ == nullptr) {
       throw std::runtime_error("Failed to create Lua state");
     }
     luaL_openlibs(L_);
@@ -233,7 +241,7 @@ public:
     }
 
     lua_getfield(L_, -1, "name");
-    if (!lua_isstring(L_, -1)) {
+    if (lua_isstring(L_, -1) == 0) {
       lua_close(L_);
       L_ = nullptr;
       throw std::runtime_error("Lua tool missing string 'name': " +
@@ -243,7 +251,7 @@ public:
     lua_pop(L_, 1);
 
     lua_getfield(L_, -1, "description");
-    if (!lua_isstring(L_, -1)) {
+    if (lua_isstring(L_, -1) == 0) {
       lua_close(L_);
       L_ = nullptr;
       throw std::runtime_error("Lua tool missing string 'description': " +
@@ -254,11 +262,10 @@ public:
 
     lua_getfield(L_, -1, "schema");
     std::string schema_str;
-    if (lua_isstring(L_, -1)) {
+    if (lua_isstring(L_, -1) != 0) {
       schema_str = lua_tostring(L_, -1);
     } else {
-      schema_str =
-          R"json({"type":"object","additionalProperties":true})json";
+      schema_str = R"json({"type":"object","additionalProperties":true})json";
     }
     lua_pop(L_, 1);
     schema_ = std::make_unique<LuaToolSchema>(std::move(schema_str));
@@ -277,7 +284,7 @@ public:
   }
 
   ~LuaTool() override {
-    if (L_) {
+    if (L_ != nullptr) {
       luaL_unref(L_, LUA_REGISTRYINDEX, execute_ref_);
       lua_close(L_);
     }
@@ -292,9 +299,10 @@ public:
   ToolSchema &schema() const override { return *schema_; }
 
   std::shared_ptr<ToolResult> execute(std::string_view,
-                                      std::string_view args_json, std::stop_token,
+                                      std::string_view args_json,
+                                      std::stop_token,
                                       ToolUpdateCallback) const override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::scoped_lock lock(mutex_);
 
     lua_rawgeti(L_, LUA_REGISTRYINDEX, execute_ref_);
 
@@ -312,13 +320,13 @@ public:
 
     std::shared_ptr<ToolResult> result;
 
-    if (lua_isstring(L_, -1)) {
-      result =
-          std::make_shared<LuaToolResult>(std::string(lua_tostring(L_, -1)), false);
+    if (lua_isstring(L_, -1) != 0) {
+      result = std::make_shared<LuaToolResult>(
+          std::string(lua_tostring(L_, -1)), false);
     } else if (lua_istable(L_, -1)) {
       lua_getfield(L_, -1, "content");
       std::string content =
-          lua_isstring(L_, -1) ? lua_tostring(L_, -1) : std::string{};
+          (lua_isstring(L_, -1) != 0) ? lua_tostring(L_, -1) : std::string{};
       lua_pop(L_, 1);
 
       lua_getfield(L_, -1, "is_error");
@@ -327,7 +335,7 @@ public:
 
       lua_getfield(L_, -1, "details");
       std::optional<std::string> details;
-      if (lua_isstring(L_, -1)) {
+      if (lua_isstring(L_, -1) != 0) {
         details = lua_tostring(L_, -1);
       }
       lua_pop(L_, 1);
@@ -354,17 +362,17 @@ private:
 
 // ─── Message serialization ───────────────────────────────────────────────────
 
-static std::size_t count_turns(const std::vector<Message> &messages) {
+std::size_t count_turns(const std::vector<Message> &messages) {
   std::size_t n = 0;
   for (const auto &m : messages)
-    if (std::holds_alternative<AssistantMessage>(m)) ++n;
+    if (std::holds_alternative<AssistantMessage>(m))
+      ++n;
   return n;
 }
 
 // Serialize message history to a Lua array.
 // Each element: {index, role, content, [turn], [tool_name], [is_error]}
-static void push_messages_to_lua(lua_State *L,
-                                 const std::vector<Message> &messages) {
+void push_messages_to_lua(lua_State *L, const std::vector<Message> &messages) {
   lua_newtable(L);
   std::size_t turn = 0;
   for (std::size_t i = 0; i < messages.size(); ++i) {
@@ -428,9 +436,8 @@ public:
   InlineLuaTool(std::shared_ptr<LuaHooksImpl> impl, int exec_ref,
                 std::string name, std::string description,
                 std::string schema_str, std::string source)
-      : impl_(std::move(impl)), exec_ref_(exec_ref),
-        name_(std::move(name)), description_(std::move(description)),
-        source_(std::move(source)),
+      : impl_(std::move(impl)), exec_ref_(exec_ref), name_(std::move(name)),
+        description_(std::move(description)), source_(std::move(source)),
         schema_(std::make_unique<LuaToolSchema>(std::move(schema_str))) {}
 
   ~InlineLuaTool() override;
@@ -441,9 +448,9 @@ public:
   ToolSchema &schema() const override { return *schema_; }
 
   std::shared_ptr<ToolResult> execute(std::string_view call_id,
-                                       std::string_view args_json,
-                                       std::stop_token st,
-                                       ToolUpdateCallback cb) const override;
+                                      std::string_view args_json,
+                                      std::stop_token st,
+                                      ToolUpdateCallback cb) const override;
 
 private:
   std::shared_ptr<LuaHooksImpl> impl_;
@@ -456,9 +463,11 @@ private:
 
 class LuaHooksImpl : public std::enable_shared_from_this<LuaHooksImpl> {
 public:
-  explicit LuaHooksImpl(const std::filesystem::path &path) {
-    L_ = luaL_newstate();
-    if (!L_) throw std::runtime_error("Failed to create Lua state for hooks");
+  explicit LuaHooksImpl(const std::filesystem::path &path)
+      : L_(luaL_newstate()) {
+
+    if (L_ == nullptr)
+      throw std::runtime_error("Failed to create Lua state for hooks");
     luaL_openlibs(L_);
     register_json_module(L_);
 
@@ -479,18 +488,21 @@ public:
       std::string err = lua_tostring(L_, -1);
       lua_close(L_);
       L_ = nullptr;
-      throw std::runtime_error("Lua hooks load error in " + path.string() + ": " + err);
+      throw std::runtime_error("Lua hooks load error in " + path.string() +
+                               ": " + err);
     }
     if (lua_pcall(L_, 0, 1, 0) != LUA_OK) {
       std::string err = lua_tostring(L_, -1);
       lua_close(L_);
       L_ = nullptr;
-      throw std::runtime_error("Lua hooks run error in " + path.string() + ": " + err);
+      throw std::runtime_error("Lua hooks run error in " + path.string() +
+                               ": " + err);
     }
     if (!lua_istable(L_, -1)) {
       lua_close(L_);
       L_ = nullptr;
-      throw std::runtime_error("Lua hooks file must return a table: " + path.string());
+      throw std::runtime_error("Lua hooks file must return a table: " +
+                               path.string());
     }
 
     // Extract optional hook refs
@@ -501,12 +513,12 @@ public:
       lua_pop(L_, 1);
       return LUA_NOREF;
     };
-    before_ref_         = extract("before_tool_call");
-    after_ref_          = extract("after_tool_call");
-    stop_after_ref_     = extract("should_stop_after_turn");
-    command_ref_        = extract("on_command");
-    complete_ref_       = extract("complete");
-    prompt_line_ref_    = extract("prompt_line");
+    before_ref_ = extract("before_tool_call");
+    after_ref_ = extract("after_tool_call");
+    stop_after_ref_ = extract("should_stop_after_turn");
+    command_ref_ = extract("on_command");
+    complete_ref_ = extract("complete");
+    prompt_line_ref_ = extract("prompt_line");
 
     // Extract commands array (data, not a function)
     lua_getfield(L_, -1, "commands");
@@ -517,15 +529,19 @@ public:
         if (lua_istable(L_, -1)) {
           LuaHooks::Command cmd;
           lua_getfield(L_, -1, "name");
-          if (lua_isstring(L_, -1)) cmd.name = lua_tostring(L_, -1);
+          if (lua_isstring(L_, -1) != 0)
+            cmd.name = lua_tostring(L_, -1);
           lua_pop(L_, 1);
           lua_getfield(L_, -1, "description");
-          if (lua_isstring(L_, -1)) cmd.description = lua_tostring(L_, -1);
+          if (lua_isstring(L_, -1) != 0)
+            cmd.description = lua_tostring(L_, -1);
           lua_pop(L_, 1);
           lua_getfield(L_, -1, "args_hint");
-          if (lua_isstring(L_, -1)) cmd.args_hint = lua_tostring(L_, -1);
+          if (lua_isstring(L_, -1) != 0)
+            cmd.args_hint = lua_tostring(L_, -1);
           lua_pop(L_, 1);
-          if (!cmd.name.empty()) commands_.push_back(std::move(cmd));
+          if (!cmd.name.empty())
+            commands_.push_back(std::move(cmd));
         }
         lua_pop(L_, 1);
       }
@@ -536,13 +552,19 @@ public:
   }
 
   ~LuaHooksImpl() {
-    if (L_) {
-      if (before_ref_      != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, before_ref_);
-      if (after_ref_       != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, after_ref_);
-      if (stop_after_ref_  != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, stop_after_ref_);
-      if (command_ref_     != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, command_ref_);
-      if (complete_ref_    != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, complete_ref_);
-      if (prompt_line_ref_ != LUA_NOREF) luaL_unref(L_, LUA_REGISTRYINDEX, prompt_line_ref_);
+    if (L_ != nullptr) {
+      if (before_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, before_ref_);
+      if (after_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, after_ref_);
+      if (stop_after_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, stop_after_ref_);
+      if (command_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, command_ref_);
+      if (complete_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, complete_ref_);
+      if (prompt_line_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, prompt_line_ref_);
       lua_close(L_);
     }
   }
@@ -552,17 +574,17 @@ public:
 
   void set_source_path(std::string p) { source_path_ = std::move(p); }
   const std::string &source_path() const { return source_path_; }
-  bool has_before()     const { return before_ref_     != LUA_NOREF; }
-  bool has_after()      const { return after_ref_      != LUA_NOREF; }
+  bool has_before() const { return before_ref_ != LUA_NOREF; }
+  bool has_after() const { return after_ref_ != LUA_NOREF; }
   bool has_stop_after() const { return stop_after_ref_ != LUA_NOREF; }
-  bool has_command()    const { return command_ref_    != LUA_NOREF; }
-  bool has_complete()    const { return complete_ref_    != LUA_NOREF; }
+  bool has_command() const { return command_ref_ != LUA_NOREF; }
+  bool has_complete() const { return complete_ref_ != LUA_NOREF; }
   bool has_prompt_line() const { return prompt_line_ref_ != LUA_NOREF; }
 
   std::optional<std::string> call_prompt_line(std::size_t turn,
-                                               std::string_view model_id,
-                                               std::size_t tools_count) {
-    std::lock_guard<std::mutex> lk(mutex_);
+                                              std::string_view model_id,
+                                              std::size_t tools_count) {
+    std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, prompt_line_ref_);
 
     lua_newtable(L_);
@@ -573,12 +595,16 @@ public:
     lua_pushinteger(L_, static_cast<lua_Integer>(tools_count));
     lua_setfield(L_, -2, "tools");
 
-    if (lua_pcall(L_, 1, 1, 0) != LUA_OK) { lua_pop(L_, 1); return std::nullopt; }
+    if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
+      lua_pop(L_, 1);
+      return std::nullopt;
+    }
 
     std::optional<std::string> result;
-    if (lua_isstring(L_, -1)) {
+    if (lua_isstring(L_, -1) != 0) {
       std::string s = lua_tostring(L_, -1);
-      if (!s.empty()) result = std::move(s);
+      if (!s.empty())
+        result = std::move(s);
     }
     lua_pop(L_, 1);
     return result;
@@ -587,7 +613,7 @@ public:
 
   std::optional<BeforeToolCallResult>
   call_before(const BeforeToolCallContext &ctx) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, before_ref_);
 
     // Build context table
@@ -598,7 +624,8 @@ public:
     lua_setfield(L_, -2, "call_id");
     json_to_lua(L_, ctx.tool_call.arguments);
     lua_setfield(L_, -2, "args");
-    lua_pushinteger(L_, static_cast<lua_Integer>(count_turns(ctx.context.messages)));
+    lua_pushinteger(
+        L_, static_cast<lua_Integer>(count_turns(ctx.context.messages)));
     lua_setfield(L_, -2, "turn");
 
     if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
@@ -613,7 +640,8 @@ public:
       r.block = lua_toboolean(L_, -1) != 0;
       lua_pop(L_, 1);
       lua_getfield(L_, -1, "reason");
-      if (lua_isstring(L_, -1)) r.reason = lua_tostring(L_, -1);
+      if (lua_isstring(L_, -1) != 0)
+        r.reason = lua_tostring(L_, -1);
       lua_pop(L_, 1);
       result = std::move(r);
     }
@@ -623,11 +651,12 @@ public:
 
   std::optional<AfterToolCallResult>
   call_after(const AfterToolCallContext &ctx) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, after_ref_);
 
     // Collect text content from result
-    std::string content_str = ctx.result ? ctx.result->content() : std::string{};
+    std::string content_str =
+        ctx.result ? ctx.result->content() : std::string{};
 
     lua_newtable(L_);
     lua_pushstring(L_, ctx.tool_call.name.c_str());
@@ -640,7 +669,8 @@ public:
     lua_setfield(L_, -2, "content");
     lua_pushboolean(L_, ctx.is_error ? 1 : 0);
     lua_setfield(L_, -2, "is_error");
-    lua_pushinteger(L_, static_cast<lua_Integer>(count_turns(ctx.context.messages)));
+    lua_pushinteger(
+        L_, static_cast<lua_Integer>(count_turns(ctx.context.messages)));
     lua_setfield(L_, -2, "turn");
 
     if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
@@ -652,16 +682,18 @@ public:
     if (lua_istable(L_, -1)) {
       AfterToolCallResult r;
       lua_getfield(L_, -1, "terminate");
-      if (lua_toboolean(L_, -1)) r.terminate = true;
+      if (lua_toboolean(L_, -1) != 0)
+        r.terminate = true;
       lua_pop(L_, 1);
       lua_getfield(L_, -1, "content");
-      if (lua_isstring(L_, -1)) {
+      if (lua_isstring(L_, -1) != 0) {
         r.content = std::vector<ToolResultContentBlock>{
-            TextContent{std::string(lua_tostring(L_, -1))}};
+            TextContent{.text = std::string(lua_tostring(L_, -1))}};
       }
       lua_pop(L_, 1);
       lua_getfield(L_, -1, "is_error");
-      if (!lua_isnil(L_, -1)) r.is_error = lua_toboolean(L_, -1) != 0;
+      if (!lua_isnil(L_, -1))
+        r.is_error = lua_toboolean(L_, -1) != 0;
       lua_pop(L_, 1);
       result = std::move(r);
     }
@@ -672,7 +704,7 @@ public:
   bool call_stop_after(const Message &msg,
                        const std::vector<ToolResultMessage> &tool_results,
                        const AgentContext &) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, stop_after_ref_);
 
     // Extract text from assistant message
@@ -720,15 +752,21 @@ public:
   // ── Storage helpers ──────────────────────────────────────────────────
 
   void load_storage() {
-    if (storage_path_.empty()) return;
+    if (storage_path_.empty())
+      return;
     std::ifstream f(storage_path_);
-    if (!f) { storage_ = nlohmann::json::object(); return; }
+    if (!f) {
+      storage_ = nlohmann::json::object();
+      return;
+    }
     storage_ = nlohmann::json::parse(f, nullptr, false);
-    if (storage_.is_discarded()) storage_ = nlohmann::json::object();
+    if (storage_.is_discarded())
+      storage_ = nlohmann::json::object();
   }
 
   void save_storage() {
-    if (storage_path_.empty()) return;
+    if (storage_path_.empty())
+      return;
     std::ofstream f(storage_path_);
     f << storage_.dump(2);
   }
@@ -742,7 +780,8 @@ public:
   static int lua_pici_log(lua_State *L) {
     int n = lua_gettop(L);
     for (int i = 1; i <= n; ++i) {
-      if (i > 1) std::cerr << '\t';
+      if (i > 1)
+        std::cerr << '\t';
       std::cerr << luaL_tolstring(L, i, nullptr);
       lua_pop(L, 1);
     }
@@ -752,27 +791,34 @@ public:
 
   static int lua_pici_run_agent(lua_State *L) {
     auto *impl = impl_from(L);
-    // run_agent_fn_ set once before calls — no lock (would deadlock from on_command)
+    // run_agent_fn_ set once before calls — no lock (would deadlock from
+    // on_command)
     const LuaHooks::RunAgentFn &fn = impl->run_agent_fn_;
     if (!fn) {
-      lua_pushnil(L); lua_pushstring(L, "pici.run_agent not available"); return 2;
+      lua_pushnil(L);
+      lua_pushstring(L, "pici.run_agent not available");
+      return 2;
     }
     LuaHooks::AgentRunConfig cfg;
     if (lua_istable(L, 1)) {
       auto sfield = [&](const char *k) -> std::string {
         lua_getfield(L, 1, k);
         std::string s = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
-        lua_pop(L, 1); return s;
+        lua_pop(L, 1);
+        return s;
       };
       cfg.prompt = sfield("prompt");
       auto sp = sfield("system_prompt");
-      if (!sp.empty()) cfg.system_prompt = sp;
+      if (!sp.empty())
+        cfg.system_prompt = sp;
       auto mid = sfield("model");
-      if (!mid.empty()) cfg.model_id = mid;
+      if (!mid.empty())
+        cfg.model_id = mid;
       lua_getfield(L, 1, "fork_at");
-      if (lua_isinteger(L, -1)) {
+      if (lua_isinteger(L, -1) != 0) {
         auto n = lua_tointeger(L, -1);
-        if (n > 0) cfg.fork_at = static_cast<std::size_t>(n);
+        if (n > 0)
+          cfg.fork_at = static_cast<std::size_t>(n);
       }
       lua_pop(L, 1);
       lua_getfield(L, 1, "tools");
@@ -780,19 +826,26 @@ public:
         int n = static_cast<int>(lua_rawlen(L, -1));
         for (int i = 1; i <= n; ++i) {
           lua_rawgeti(L, -1, i);
-          if (lua_isstring(L, -1)) cfg.tools.push_back(lua_tostring(L, -1));
+          if (lua_isstring(L, -1) != 0)
+            cfg.tools.emplace_back(lua_tostring(L, -1));
           lua_pop(L, 1);
         }
       }
       lua_pop(L, 1);
     }
     if (cfg.prompt.empty()) {
-      lua_pushnil(L); lua_pushstring(L, "pici.run_agent: prompt is required"); return 2;
+      lua_pushnil(L);
+      lua_pushstring(L, "pici.run_agent: prompt is required");
+      return 2;
     }
     auto result = fn(cfg);
     lua_newtable(L);
-    lua_pushstring(L, result.text.c_str()); lua_setfield(L, -2, "text");
-    if (result.error) lua_pushstring(L, result.error->c_str()); else lua_pushnil(L);
+    lua_pushstring(L, result.text.c_str());
+    lua_setfield(L, -2, "text");
+    if (result.error)
+      lua_pushstring(L, result.error->c_str());
+    else
+      lua_pushnil(L);
     lua_setfield(L, -2, "error");
     return 1;
   }
@@ -802,7 +855,10 @@ public:
   static int lua_storage_get(lua_State *L) {
     auto *impl = impl_from(L);
     const char *key = luaL_checkstring(L, 1);
-    if (!impl->storage_.contains(key)) { lua_pushnil(L); return 1; }
+    if (!impl->storage_.contains(key)) {
+      lua_pushnil(L);
+      return 1;
+    }
     json_to_lua(L, impl->storage_[key]);
     return 1;
   }
@@ -825,7 +881,7 @@ public:
   // ── configure_info ────────────────────────────────────────────────────
 
   void configure_info(const LuaHooks::AgentInfo &info) {
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::scoped_lock lk(mutex_);
     run_agent_fn_ = info.run_agent;
     storage_path_ = info.storage_path;
     load_storage();
@@ -834,9 +890,12 @@ public:
 
     // pici.model → {id, provider, api}
     lua_newtable(L_);
-    lua_pushstring(L_, info.model_id.c_str());       lua_setfield(L_, -2, "id");
-    lua_pushstring(L_, info.model_provider.c_str()); lua_setfield(L_, -2, "provider");
-    lua_pushstring(L_, info.model_api.c_str());      lua_setfield(L_, -2, "api");
+    lua_pushstring(L_, info.model_id.c_str());
+    lua_setfield(L_, -2, "id");
+    lua_pushstring(L_, info.model_provider.c_str());
+    lua_setfield(L_, -2, "provider");
+    lua_pushstring(L_, info.model_api.c_str());
+    lua_setfield(L_, -2, "api");
     lua_setfield(L_, -2, "model");
 
     // pici.tools → array of strings
@@ -866,12 +925,13 @@ public:
     lua_setfield(L_, -2, "path");
     lua_setfield(L_, -2, "storage");
 
-    lua_pop(L_, 1);  // pop pici
+    lua_pop(L_, 1); // pop pici
   }
 
-  std::vector<std::string> call_complete(std::string_view partial,
-                                         const std::vector<Message> &transcript) {
-    std::lock_guard<std::mutex> lk(mutex_);
+  std::vector<std::string>
+  call_complete(std::string_view partial,
+                const std::vector<Message> &transcript) {
+    std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, complete_ref_);
     lua_pushlstring(L_, partial.data(), partial.size());
     push_messages_to_lua(L_, transcript);
@@ -886,8 +946,8 @@ public:
       int n = static_cast<int>(lua_rawlen(L_, -1));
       for (int i = 1; i <= n; ++i) {
         lua_rawgeti(L_, -1, i);
-        if (lua_isstring(L_, -1))
-          result.push_back(lua_tostring(L_, -1));
+        if (lua_isstring(L_, -1) != 0)
+          result.emplace_back(lua_tostring(L_, -1));
         lua_pop(L_, 1);
       }
     }
@@ -898,11 +958,12 @@ public:
   // ── Inline tool support ──────────────────────────────────────────────
 
   std::shared_ptr<ToolResult> execute_inline_tool(int ref,
-                                                   std::string_view args_json) {
-    std::lock_guard<std::mutex> lk(mutex_);
+                                                  std::string_view args_json) {
+    std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
     auto args = nlohmann::json::parse(args_json, nullptr, false);
-    if (args.is_discarded() || !args.is_object()) args = nlohmann::json::object();
+    if (args.is_discarded() || !args.is_object())
+      args = nlohmann::json::object();
     json_to_lua(L_, args);
     if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
       std::string err = lua_tostring(L_, -1);
@@ -910,13 +971,13 @@ public:
       return std::make_shared<LuaToolResult>(std::move(err), true);
     }
     std::shared_ptr<ToolResult> result;
-    if (lua_isstring(L_, -1)) {
+    if (lua_isstring(L_, -1) != 0) {
       result = std::make_shared<LuaToolResult>(
           std::string(lua_tostring(L_, -1)), false);
     } else if (lua_istable(L_, -1)) {
       lua_getfield(L_, -1, "content");
       std::string content =
-          lua_isstring(L_, -1) ? lua_tostring(L_, -1) : std::string{};
+          (lua_isstring(L_, -1) != 0) ? lua_tostring(L_, -1) : std::string{};
       lua_pop(L_, 1);
       lua_getfield(L_, -1, "is_error");
       bool is_err = lua_toboolean(L_, -1) != 0;
@@ -930,13 +991,17 @@ public:
   }
 
   void unref_tool(int ref) {
-    std::lock_guard<std::mutex> lk(mutex_);
-    if (L_) luaL_unref(L_, LUA_REGISTRYINDEX, ref);
+    std::scoped_lock lk(mutex_);
+    if (L_ != nullptr)
+      luaL_unref(L_, LUA_REGISTRYINDEX, ref);
   }
 
   // Phase 1: called from lua_pici_add_tool during construction.
   // Stores specs; InlineLuaTool objects created in finalize_inline_tools().
-  struct PendingTool { int exec_ref; std::string name, description, schema; };
+  struct PendingTool {
+    int exec_ref;
+    std::string name, description, schema;
+  };
 
   void add_pending_tool(PendingTool spec) {
     pending_tools_.push_back(std::move(spec));
@@ -946,15 +1011,15 @@ public:
   void finalize_inline_tools() {
     for (auto &spec : pending_tools_) {
       auto tool = std::make_shared<InlineLuaTool>(
-          shared_from_this(), spec.exec_ref,
-          std::move(spec.name), std::move(spec.description),
-          std::move(spec.schema), source_path_);
+          shared_from_this(), spec.exec_ref, std::move(spec.name),
+          std::move(spec.description), std::move(spec.schema), source_path_);
       inline_tools_.push_back(std::move(tool));
     }
     pending_tools_.clear();
   }
 
-  const std::vector<std::shared_ptr<const ToolDefinition>> &inline_tools() const {
+  const std::vector<std::shared_ptr<const ToolDefinition>> &
+  inline_tools() const {
     return inline_tools_;
   }
 
@@ -971,10 +1036,11 @@ public:
       lua_pop(L, 1);
       return s;
     };
-    std::string name   = sfield("name");
-    std::string desc   = sfield("description");
+    std::string name = sfield("name");
+    std::string desc = sfield("description");
     std::string schema = sfield("schema");
-    if (schema.empty()) schema = R"({"type":"object","additionalProperties":true})";
+    if (schema.empty())
+      schema = R"({"type":"object","additionalProperties":true})";
 
     lua_getfield(L, 1, "execute");
     if (!lua_isfunction(L, -1)) {
@@ -990,15 +1056,18 @@ public:
       lua_pushstring(L, "pici.add_tool: name is required");
       return 2;
     }
-    impl->add_pending_tool({exec_ref, std::move(name), std::move(desc), std::move(schema)});
+    impl->add_pending_tool({.exec_ref = exec_ref,
+                            .name = std::move(name),
+                            .description = std::move(desc),
+                            .schema = std::move(schema)});
     lua_pushboolean(L, 1);
     return 1;
   }
 
-  LuaHooks::CommandResult call_on_command(std::string_view cmd,
-                                          std::string_view args,
-                                          const std::vector<Message> &transcript) {
-    std::lock_guard<std::mutex> lk(mutex_);
+  LuaHooks::CommandResult
+  call_on_command(std::string_view cmd, std::string_view args,
+                  const std::vector<Message> &transcript) {
+    std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, command_ref_);
     lua_pushlstring(L_, cmd.data(), cmd.size());
     lua_pushlstring(L_, args.data(), args.size());
@@ -1016,7 +1085,7 @@ public:
       lua_pop(L_, 1);
 
       lua_getfield(L_, -1, "truncate_to");
-      if (lua_isinteger(L_, -1)) {
+      if (lua_isinteger(L_, -1) != 0) {
         auto n = lua_tointeger(L_, -1);
         if (n > 0)
           result.truncate_to = static_cast<std::size_t>(n);
@@ -1024,7 +1093,7 @@ public:
       lua_pop(L_, 1);
 
       lua_getfield(L_, -1, "prompt");
-      if (lua_isstring(L_, -1))
+      if (lua_isstring(L_, -1) != 0)
         result.prompt = lua_tostring(L_, -1);
       lua_pop(L_, 1);
     }
@@ -1057,9 +1126,10 @@ InlineLuaTool::~InlineLuaTool() {
     impl_->unref_tool(exec_ref_);
 }
 
-std::shared_ptr<ToolResult>
-InlineLuaTool::execute(std::string_view, std::string_view args_json,
-                       std::stop_token, ToolUpdateCallback) const {
+std::shared_ptr<ToolResult> InlineLuaTool::execute(std::string_view,
+                                                   std::string_view args_json,
+                                                   std::stop_token,
+                                                   ToolUpdateCallback) const {
   return impl_->execute_inline_tool(exec_ref_, args_json);
 }
 
@@ -1076,8 +1146,7 @@ std::vector<std::shared_ptr<const ToolDefinition>>
 load_lua_tools(const std::filesystem::path &directory) {
   std::vector<std::shared_ptr<const ToolDefinition>> tools;
   std::error_code ec;
-  for (const auto &entry :
-       std::filesystem::directory_iterator(directory, ec)) {
+  for (const auto &entry : std::filesystem::directory_iterator(directory, ec)) {
     if (!entry.is_regular_file(ec)) {
       continue;
     }
@@ -1093,22 +1162,21 @@ load_lua_tools(const std::filesystem::path &directory) {
   return tools;
 }
 
-std::shared_ptr<LuaHooks>
-load_lua_hooks(const std::filesystem::path &path) {
+std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
   auto impl = std::make_shared<LuaHooksImpl>(path);
   auto hooks = std::make_shared<LuaHooks>();
 
   if (impl->has_before()) {
     hooks->before_tool_call =
         [impl](const BeforeToolCallContext &ctx,
-               std::stop_token) -> std::optional<BeforeToolCallResult> {
+               const std::stop_token &) -> std::optional<BeforeToolCallResult> {
       return impl->call_before(ctx);
     };
   }
   if (impl->has_after()) {
     hooks->after_tool_call =
         [impl](const AfterToolCallContext &ctx,
-               std::stop_token) -> std::optional<AfterToolCallResult> {
+               const std::stop_token &) -> std::optional<AfterToolCallResult> {
       return impl->call_after(ctx);
     };
   }
@@ -1122,8 +1190,9 @@ load_lua_hooks(const std::filesystem::path &path) {
   }
   if (impl->has_command()) {
     hooks->on_command =
-        [impl](std::string_view cmd, std::string_view args,
-               const std::vector<Message> &transcript) -> LuaHooks::CommandResult {
+        [impl](
+            std::string_view cmd, std::string_view args,
+            const std::vector<Message> &transcript) -> LuaHooks::CommandResult {
       return impl->call_on_command(cmd, args, transcript);
     };
   }
@@ -1132,13 +1201,13 @@ load_lua_hooks(const std::filesystem::path &path) {
   };
   impl->set_source_path(path.string());
   impl->finalize_inline_tools(); // needs shared_ptr; safe here post-make_shared
-  hooks->source_path      = impl->source_path();
-  hooks->commands         = impl->commands();
+  hooks->source_path = impl->source_path();
+  hooks->commands = impl->commands();
   hooks->registered_tools = impl->inline_tools();
   if (impl->has_complete()) {
-    hooks->complete =
-        [impl](std::string_view partial,
-               const std::vector<Message> &transcript) -> std::vector<std::string> {
+    hooks->complete = [impl](std::string_view partial,
+                             const std::vector<Message> &transcript)
+        -> std::vector<std::string> {
       return impl->call_complete(partial, transcript);
     };
   }
@@ -1195,7 +1264,8 @@ end
 
 TestResult run_lua_test_file(const std::filesystem::path &path) {
   lua_State *L = luaL_newstate();
-  if (!L) throw std::runtime_error("Failed to create Lua state for test runner");
+  if (L == nullptr)
+    throw std::runtime_error("Failed to create Lua state for test runner");
   luaL_openlibs(L);
   register_json_module(L);
 
@@ -1204,7 +1274,8 @@ TestResult run_lua_test_file(const std::filesystem::path &path) {
   lua_pushcfunction(L, [](lua_State *l) -> int {
     int n = lua_gettop(l);
     for (int i = 1; i <= n; ++i) {
-      if (i > 1) std::cerr << '\t';
+      if (i > 1)
+        std::cerr << '\t';
       std::cerr << luaL_tolstring(l, i, nullptr);
       lua_pop(l, 1);
     }
@@ -1242,7 +1313,7 @@ TestResult run_lua_test_file(const std::filesystem::path &path) {
   if (lua_pcall(L, 0, 3, 0) == LUA_OK) {
     r.passed = static_cast<int>(lua_tointeger(L, -3));
     r.failed = static_cast<int>(lua_tointeger(L, -2));
-    r.total  = static_cast<int>(lua_tointeger(L, -1));
+    r.total = static_cast<int>(lua_tointeger(L, -1));
   }
   lua_close(L);
   return r;
@@ -1258,8 +1329,8 @@ load_lua_hooks_dir(const std::filesystem::path &directory) {
     try {
       list.push_back(load_lua_hooks(entry.path()));
     } catch (const std::exception &e) {
-      std::cerr << "warning: skipping hooks file " << entry.path()
-                << ": " << e.what() << "\n";
+      std::cerr << "warning: skipping hooks file " << entry.path() << ": "
+                << e.what() << "\n";
     }
   }
   return compose_hooks(std::move(list));
@@ -1268,69 +1339,81 @@ load_lua_hooks_dir(const std::filesystem::path &directory) {
 std::shared_ptr<LuaHooks>
 compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   // Drop nulls
-  list.erase(std::remove_if(list.begin(), list.end(),
-                             [](const auto &h) { return !h; }),
+  list.erase(std::ranges::remove_if(list, , [](const auto &h) { return !h; }),
              list.end());
-  if (list.empty())  return nullptr;
-  if (list.size() == 1) return list[0];
+  if (list.empty())
+    return nullptr;
+  if (list.size() == 1)
+    return list[0];
 
   auto out = std::make_shared<LuaHooks>();
 
   // before_tool_call — run all; first block wins
-  if (std::any_of(list.begin(), list.end(),
-                  [](const auto &h) { return !!h->before_tool_call; })) {
+  if (std::ranges::any_of(
+          list, , [](const auto &h) { return !!h->before_tool_call; })) {
     out->before_tool_call =
-        [list](const BeforeToolCallContext &ctx,
-               std::stop_token st) -> std::optional<BeforeToolCallResult> {
+        [list](
+            const BeforeToolCallContext &ctx,
+            const std::stop_token &st) -> std::optional<BeforeToolCallResult> {
       for (const auto &h : list) {
-        if (!h->before_tool_call) continue;
+        if (!h->before_tool_call)
+          continue;
         auto r = h->before_tool_call(ctx, st);
-        if (r && r->block) return r;
+        if (r && r->block)
+          return r;
       }
       return std::nullopt;
     };
   }
 
   // after_tool_call — run all; first non-null wins
-  if (std::any_of(list.begin(), list.end(),
-                  [](const auto &h) { return !!h->after_tool_call; })) {
+  if (std::ranges::any_of(list, ,
+                          [](const auto &h) { return !!h->after_tool_call; })) {
     out->after_tool_call =
-        [list](const AfterToolCallContext &ctx,
-               std::stop_token st) -> std::optional<AfterToolCallResult> {
+        [list](
+            const AfterToolCallContext &ctx,
+            const std::stop_token &st) -> std::optional<AfterToolCallResult> {
       for (const auto &h : list) {
-        if (!h->after_tool_call) continue;
+        if (!h->after_tool_call)
+          continue;
         auto r = h->after_tool_call(ctx, st);
-        if (r) return r;
+        if (r)
+          return r;
       }
       return std::nullopt;
     };
   }
 
   // should_stop_after_turn — OR
-  if (std::any_of(list.begin(), list.end(),
-                  [](const auto &h) { return !!h->should_stop_after_turn; })) {
+  if (std::ranges::any_of(
+          list, , [](const auto &h) { return !!h->should_stop_after_turn; })) {
     out->should_stop_after_turn =
         [list](const Message &msg,
                const std::vector<ToolResultMessage> &results,
                const AgentContext &ctx) -> bool {
       for (const auto &h : list) {
-        if (!h->should_stop_after_turn) continue;
-        if (h->should_stop_after_turn(msg, results, ctx)) return true;
+        if (!h->should_stop_after_turn)
+          continue;
+        if (h->should_stop_after_turn(msg, results, ctx))
+          return true;
       }
       return false;
     };
   }
 
   // on_command — first handled wins
-  if (std::any_of(list.begin(), list.end(),
-                  [](const auto &h) { return !!h->on_command; })) {
+  if (std::ranges::any_of(list, ,
+                          [](const auto &h) { return !!h->on_command; })) {
     out->on_command =
-        [list](std::string_view cmd, std::string_view args,
-               const std::vector<Message> &transcript) -> LuaHooks::CommandResult {
+        [list](
+            std::string_view cmd, std::string_view args,
+            const std::vector<Message> &transcript) -> LuaHooks::CommandResult {
       for (const auto &h : list) {
-        if (!h->on_command) continue;
+        if (!h->on_command)
+          continue;
         auto r = h->on_command(cmd, args, transcript);
-        if (r.handled) return r;
+        if (r.handled)
+          return r;
       }
       return {};
     };
@@ -1338,43 +1421,48 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
 
   // commands + registered_tools — union
   for (const auto &h : list) {
-    out->commands.insert(out->commands.end(), h->commands.begin(), h->commands.end());
+    out->commands.insert(out->commands.end(), h->commands.begin(),
+                         h->commands.end());
     out->registered_tools.insert(out->registered_tools.end(),
-                                  h->registered_tools.begin(),
-                                  h->registered_tools.end());
+                                 h->registered_tools.begin(),
+                                 h->registered_tools.end());
   }
 
   // configure — forward to all
   out->configure = [list](const LuaHooks::AgentInfo &info) {
     for (const auto &h : list)
-      if (h->configure) h->configure(info);
+      if (h->configure)
+        h->configure(info);
   };
 
   // prompt_line — last non-nil wins (override semantics)
-  if (std::any_of(list.begin(), list.end(),
-                  [](const auto &h) { return !!h->prompt_line; })) {
+  if (std::ranges::any_of(list, ,
+                          [](const auto &h) { return !!h->prompt_line; })) {
     out->prompt_line =
         [list](std::size_t turn, std::string_view model_id,
                std::size_t tools_count) -> std::optional<std::string> {
       std::optional<std::string> result;
       for (const auto &h : list) {
-        if (!h->prompt_line) continue;
+        if (!h->prompt_line)
+          continue;
         auto r = h->prompt_line(turn, model_id, tools_count);
-        if (r) result = std::move(r);
+        if (r)
+          result = std::move(r);
       }
       return result;
     };
   }
 
   // complete — union of all results
-  if (std::any_of(list.begin(), list.end(),
-                  [](const auto &h) { return !!h->complete; })) {
-    out->complete =
-        [list](std::string_view partial,
-               const std::vector<Message> &transcript) -> std::vector<std::string> {
+  if (std::ranges::any_of(list, ,
+                          [](const auto &h) { return !!h->complete; })) {
+    out->complete = [list](std::string_view partial,
+                           const std::vector<Message> &transcript)
+        -> std::vector<std::string> {
       std::vector<std::string> result;
       for (const auto &h : list) {
-        if (!h->complete) continue;
+        if (!h->complete)
+          continue;
         auto r = h->complete(partial, transcript);
         result.insert(result.end(), r.begin(), r.end());
       }

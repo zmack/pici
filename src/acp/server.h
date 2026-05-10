@@ -21,7 +21,8 @@ struct ServerConfig {
 };
 
 // Start the ACP HTTP server.  Blocks until the process receives SIGINT/SIGTERM.
-// port = 0 picks a free port and sets it back into the variable (useful in tests).
+// port = 0 picks a free port and sets it back into the variable (useful in
+// tests).
 void run_server(int &port, ServerConfig config);
 
 // Build an AgentManifest from the server config

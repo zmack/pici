@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <map>
 #include <memory>
 #include <optional>
@@ -270,7 +271,7 @@ void process_sse_line(const std::string &line, StreamingState &state) {
       choices_it->empty())
     return;
 
-  const auto &choice = (*choices_it)[0];
+  const auto &choice = *choices_it[0];
 
   if (auto fr_it = choice.find("finish_reason");
       fr_it != choice.end() && !fr_it->is_null()) {

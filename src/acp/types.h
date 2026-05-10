@@ -28,7 +28,8 @@ struct Message {
 void to_json(nlohmann::json &j, const Message &m);
 void from_json(const nlohmann::json &j, Message &m);
 
-// ─── RunCreateRequest ────────────────────────────────────────────────────────��
+// ─── RunCreateRequest
+// ────────────────────────────────────────────────────────��
 
 enum class RunMode { sync, stream };
 
@@ -43,9 +44,16 @@ void from_json(const nlohmann::json &j, RunCreateRequest &r);
 
 // ─── RunStatus ───────────────────────────────────────────────────────────────
 
-enum class RunStatus { created, in_progress, awaiting, completed, failed, cancelled };
+enum class RunStatus {
+  created,
+  in_progress,
+  awaiting,
+  completed,
+  failed,
+  cancelled
+};
 
-std::string run_status_str(RunStatus s);
+std::string_view run_status_str(RunStatus s);
 
 // ─── Run ─────────────────────────────────────────────────────────────────────
 

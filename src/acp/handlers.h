@@ -10,8 +10,7 @@
 namespace pi::acp {
 
 // Register all ACP routes on the server.
-void register_routes(httplib::Server &svr,
-                     const ServerConfig &cfg,
-                     std::shared_ptr<SessionStore> sessions);
+void register_routes(httplib::Server &svr, const ServerConfig &cfg,
+                     const std::shared_ptr<SessionStore> &sessions);
 
 } // namespace pi::acp

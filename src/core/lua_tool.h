@@ -49,12 +49,11 @@ struct LuaHooks {
       const BeforeToolCallContext &, std::stop_token)>
       before_tool_call;
 
-  std::function<std::optional<AfterToolCallResult>(
-      const AfterToolCallContext &, std::stop_token)>
+  std::function<std::optional<AfterToolCallResult>(const AfterToolCallContext &,
+                                                   std::stop_token)>
       after_tool_call;
 
-  std::function<bool(const Message &,
-                     const std::vector<ToolResultMessage> &,
+  std::function<bool(const Message &, const std::vector<ToolResultMessage> &,
                      const AgentContext &)>
       should_stop_after_turn;
 
@@ -71,15 +70,16 @@ struct LuaHooks {
   // ── Sub-agent support ──────────────────────────────────────────────
 
   struct AgentRunConfig {
-    std::string prompt;              // text to send to the sub-agent
-    std::size_t fork_at{0};         // 0 = empty history; N = copy parent's first N messages
+    std::string prompt; // text to send to the sub-agent
+    std::size_t fork_at{
+        0}; // 0 = empty history; N = copy parent's first N messages
     std::optional<std::string> system_prompt; // override system prompt
     std::optional<std::string> model_id;      // override model id only
     std::vector<std::string> tools;           // empty = inherit all from parent
   };
 
   struct AgentRunResult {
-    std::string text;                // concatenated final assistant text
+    std::string text; // concatenated final assistant text
     std::optional<std::string> error;
   };
 
@@ -103,16 +103,16 @@ struct LuaHooks {
   std::function<void(const AgentInfo &)> configure;
 
   // Slash commands declared by this add-on.
-  // Prompt line hook — called before each REPL input to produce the prompt string.
-  // Return a non-empty string to replace the default "> "; return nullopt for default.
-  // compose_hooks: last non-nil result wins (later-loaded add-ons override earlier ones).
+  // Prompt line hook — called before each REPL input to produce the prompt
+  // string. Return a non-empty string to replace the default "> "; return
+  // nullopt for default. compose_hooks: last non-nil result wins (later-loaded
+  // add-ons override earlier ones).
   //
   // Lua signature:
   //   prompt_line(ctx) → string | nil
   //   ctx: {turn, model, tools}
-  std::function<std::optional<std::string>(std::size_t turn,
-                                            std::string_view model_id,
-                                            std::size_t tools_count)>
+  std::function<std::optional<std::string>(
+      std::size_t turn, std::string_view model_id, std::size_t tools_count)>
       prompt_line;
 
   // pici uses these to complete command names automatically when the user
@@ -130,8 +130,8 @@ struct LuaHooks {
   //
   // Lua signature:
   //   complete(partial, transcript) → nil | {string, ...}
-  std::function<std::vector<std::string>(std::string_view partial,
-                                         const std::vector<Message> &transcript)>
+  std::function<std::vector<std::string>(
+      std::string_view partial, const std::vector<Message> &transcript)>
       complete;
 
   // Called when the user types a slash command (/word ...) in the REPL.
@@ -177,12 +177,11 @@ TestResult run_lua_test_file(const std::filesystem::path &path);
 // Load hooks from a Lua file. Only functions present in the returned table are
 // wired up; missing hooks are left as null std::functions.
 // Throws std::runtime_error on load/syntax errors.
-std::shared_ptr<LuaHooks>
-load_lua_hooks(const std::filesystem::path &path);
+std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path);
 
-// Load all .lua files from a directory as independent add-ons, then compose them.
-// Files that fail to load are skipped with a warning to stderr.
-// Returns nullptr if no files loaded successfully.
+// Load all .lua files from a directory as independent add-ons, then compose
+// them. Files that fail to load are skipped with a warning to stderr. Returns
+// nullptr if no files loaded successfully.
 std::shared_ptr<LuaHooks>
 load_lua_hooks_dir(const std::filesystem::path &directory);
 
