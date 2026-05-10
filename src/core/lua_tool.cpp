@@ -1339,8 +1339,8 @@ load_lua_hooks_dir(const std::filesystem::path &directory) {
 std::shared_ptr<LuaHooks>
 compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   // Drop nulls
-  list.erase(std::ranges::remove_if(list, , [](const auto &h) { return !h; }),
-             list.end());
+  auto removed = std::ranges::remove_if(list, [](const auto &h) { return !h; });
+  list.erase(removed.begin(), removed.end());
   if (list.empty())
     return nullptr;
   if (list.size() == 1)
@@ -1350,7 +1350,7 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
 
   // before_tool_call — run all; first block wins
   if (std::ranges::any_of(
-          list, , [](const auto &h) { return !!h->before_tool_call; })) {
+          list, [](const auto &h) { return !!h->before_tool_call; })) {
     out->before_tool_call =
         [list](
             const BeforeToolCallContext &ctx,
@@ -1367,7 +1367,7 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   }
 
   // after_tool_call — run all; first non-null wins
-  if (std::ranges::any_of(list, ,
+  if (std::ranges::any_of(list,
                           [](const auto &h) { return !!h->after_tool_call; })) {
     out->after_tool_call =
         [list](
@@ -1386,7 +1386,7 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
 
   // should_stop_after_turn — OR
   if (std::ranges::any_of(
-          list, , [](const auto &h) { return !!h->should_stop_after_turn; })) {
+          list, [](const auto &h) { return !!h->should_stop_after_turn; })) {
     out->should_stop_after_turn =
         [list](const Message &msg,
                const std::vector<ToolResultMessage> &results,
@@ -1402,7 +1402,7 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   }
 
   // on_command — first handled wins
-  if (std::ranges::any_of(list, ,
+  if (std::ranges::any_of(list,
                           [](const auto &h) { return !!h->on_command; })) {
     out->on_command =
         [list](
@@ -1436,7 +1436,7 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   };
 
   // prompt_line — last non-nil wins (override semantics)
-  if (std::ranges::any_of(list, ,
+  if (std::ranges::any_of(list,
                           [](const auto &h) { return !!h->prompt_line; })) {
     out->prompt_line =
         [list](std::size_t turn, std::string_view model_id,
@@ -1454,8 +1454,7 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   }
 
   // complete — union of all results
-  if (std::ranges::any_of(list, ,
-                          [](const auto &h) { return !!h->complete; })) {
+  if (std::ranges::any_of(list, [](const auto &h) { return !!h->complete; })) {
     out->complete = [list](std::string_view partial,
                            const std::vector<Message> &transcript)
         -> std::vector<std::string> {

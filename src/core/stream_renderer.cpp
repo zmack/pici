@@ -7,12 +7,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
-#include <signal.h>
 #include <sys/ioctl.h>
 #include <type_traits>
 #include <unistd.h>
 
-#include <algorithm>
 #include <limits>
 #include <map>
 #include <memory>
@@ -65,12 +63,6 @@ std::string render_visible_markdown(std::string_view input) {
   rendered.append(static_cast<std::size_t>(count_trailing_newlines(input)),
                   '\n');
   return rendered;
-}
-
-constexpr std::string_view kViewportCursor = "\033[7m \033[0m";
-
-void append_viewport_cursor(std::string &rendered) {
-  rendered.append(kViewportCursor);
 }
 
 class RawStreamRenderer final : public Renderer {
@@ -300,7 +292,8 @@ public:
     scanner_ = {};
     fin_cache_ = {};
     set_scroll_region();
-    write_seq("\033[H\033[J"); // home + erase content region
+    write_seq("\033[?25l"      // hide cursor while the viewport is streaming
+              "\033[H\033[J"); // home + erase content region
     paint_status();
   }
 
@@ -380,12 +373,14 @@ public:
   void on_turn_end() override {
     status_text_ = "tokens: " + std::to_string(total_tokens_) + "  done";
     paint_status();
+    write_seq("\033[?25h");
   }
 
   void on_error(RendererErrorKind, std::string_view msg) override {
     status_text_ = "error: ";
     status_text_.append(msg.substr(0, 60));
     paint_status();
+    write_seq("\033[?25h");
   }
 
 private:
@@ -406,7 +401,6 @@ private:
     sigaction(SIGTERM, &sa, nullptr);
     sigaction(SIGHUP, &sa, nullptr);
     write_seq("\033[?1049h"     // enter alternate screen
-              "\033[?25l"       // hide cursor
               "\033[H\033[2J"); // home + clear
     set_scroll_region();
   }
@@ -510,8 +504,6 @@ private:
                                       content.size() - fin_cache_.raw_end);
       tail_rendered = render_visible_markdown(tail_raw);
     }
-
-    append_viewport_cursor(tail_rendered);
 
     // ── Build viewport from finalized cache + tail
     // ──────────────────────────── Count tail rows without allocating line

@@ -48,13 +48,23 @@ struct RawMode {
   ~RawMode() { leave(); }
 };
 
+constexpr std::string_view kInputCursor = "\033[7m \033[0m\033[D";
+
+void draw_input_cursor() {
+  std::cout << "\033[K" << kInputCursor << std::flush;
+}
+
 // Redraw the whole line in place (handles partial completion rewrites).
 // Leading newlines in prompt are stripped: \r already moves to line start
 // and re-emitting a \n would push the cursor down to a new line.
-void redraw(std::string_view prompt, const std::string &buf) {
+void redraw(std::string_view prompt, const std::string &buf,
+            bool show_cursor = true) {
   while (!prompt.empty() && prompt[0] == '\n')
     prompt.remove_prefix(1);
-  std::cout << '\r' << prompt << buf << "\033[K" << std::flush;
+  std::cout << '\r' << prompt << buf << "\033[K";
+  if (show_cursor)
+    std::cout << kInputCursor;
+  std::cout << std::flush;
 }
 
 // Remove the last UTF-8 character from buf (backs over continuation bytes).
@@ -76,7 +86,7 @@ void apply_completions(std::string_view prompt, std::string &buf,
   }
 
   // Sort for stable display and prefix calculation
-  std::ranges::sort(completions, );
+  std::ranges::sort(completions);
 
   if (completions.size() == 1) {
     buf = completions[0];
@@ -101,7 +111,10 @@ void apply_completions(std::string_view prompt, std::string &buf,
     return;
   }
 
-  // Already at common prefix: print candidates below, then redraw prompt
+  // Already at common prefix: print candidates below, then redraw prompt.
+  // Clear the synthetic input cursor before moving down so it does not remain
+  // painted at the old insertion point.
+  redraw(prompt, buf, false);
   std::cout << '\n';
   for (const auto &c : completions)
     std::cout << "  " << c << '\n';
@@ -184,26 +197,30 @@ std::optional<std::string> readline(std::string_view prompt,
     return line;
   }
 
-  std::cout << prompt << std::flush;
   std::string buf;
+  std::cout << prompt;
+  draw_input_cursor();
 
   while (true) {
     unsigned char c = 0;
     auto n = ::read(STDIN_FILENO, &c, 1);
     if (n <= 0) {
       // EOF or error
+      redraw(prompt, buf, false);
       raw.leave();
       std::cout << '\n' << std::flush;
       return buf.empty() ? std::nullopt : std::optional<std::string>(buf);
     }
 
     if (c == '\r' || c == '\n') {
+      redraw(prompt, buf, false);
       raw.leave();
       std::cout << '\n' << std::flush;
       return buf;
     }
 
     if (c == '\x04') { // Ctrl+D — EOF
+      redraw(prompt, buf, false);
       raw.leave();
       std::cout << '\n' << std::flush;
       return std::nullopt;
@@ -234,7 +251,7 @@ std::optional<std::string> readline(std::string_view prompt,
 
     if (c >= 0x20 || (c & 0x80U) != 0U) { // printable or UTF-8 continuation
       buf += static_cast<char>(c);
-      std::cout << static_cast<char>(c) << std::flush;
+      redraw(prompt, buf);
       continue;
     }
 

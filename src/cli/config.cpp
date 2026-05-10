@@ -8,12 +8,11 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <toml++/impl/parse_error.hpp>
-#include <toml++/impl/parser.hpp>
-#include <toml++/impl/table.hpp>
 #include <vector>
 
+#define TOML_HEADER_ONLY 1
 #define TOML_EXCEPTIONS 1
+#include <toml++/toml.hpp>
 
 namespace pi::cli {
 

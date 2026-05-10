@@ -333,7 +333,7 @@ static std::vector<ContextFile> load_context_files() {
     cur = parent;
   }
   // Outermost first so inner files override/append last
-  std::ranges::reverse(ancestors, );
+  std::ranges::reverse(ancestors);
   result.insert(result.end(), ancestors.begin(), ancestors.end());
   return result;
 }

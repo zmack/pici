@@ -1,6 +1,4 @@
 #include "http/http_client.h"
-#include "curl/easy.h"
-#include "curl/system.h"
 
 #include <cstddef>
 #include <cstdint>

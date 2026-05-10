@@ -20,9 +20,9 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <regex>
+#include <signal.h>
 #include <sstream>
 #include <stdexcept>
-#include <stdlib.h>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -422,13 +422,13 @@ std::string relative_posix(const std::filesystem::path &path,
 
 class ReadTool final : public BuiltinTool {
 public:
-  explicit ReadTool(std::filesystem::path cwd)
+  explicit ReadTool(const std::filesystem::path &cwd)
       : BuiltinTool(
             "read",
             "Read the contents of a text file. Supports path, offset, and "
             "limit. Output is truncated for large files.",
             R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file to read (relative or absolute)"},"offset":{"type":"number","description":"Line number to start reading from (1-indexed)"},"limit":{"type":"number","description":"Maximum number of lines to read"}},"required":["path"],"additionalProperties":false})json",
-            std::move(cwd)) {}
+            cwd) {}
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
                                       std::stop_token,
@@ -487,13 +487,13 @@ public:
 
 class WriteTool final : public BuiltinTool {
 public:
-  explicit WriteTool(std::filesystem::path cwd)
+  explicit WriteTool(const std::filesystem::path &cwd)
       : BuiltinTool(
             "write",
             "Write content to a file. Creates parent directories and "
             "overwrites existing content.",
             R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file to write (relative or absolute)"},"content":{"type":"string","description":"Content to write to the file"}},"required":["path","content"],"additionalProperties":false})json",
-            std::move(cwd)) {}
+            cwd) {}
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
                                       std::stop_token,
@@ -751,7 +751,7 @@ apply_edits(const std::string &lf_content,
   }
 
   // Sort by position and check for overlaps
-  std::ranges::sort(matched, , [](const MatchedEdit &a, const MatchedEdit &b) {
+  std::ranges::sort(matched, [](const MatchedEdit &a, const MatchedEdit &b) {
     return a.match_index < b.match_index;
   });
   for (std::size_t i = 1; i < matched.size(); ++i) {
@@ -778,13 +778,13 @@ apply_edits(const std::string &lf_content,
 
 class EditTool final : public BuiltinTool {
 public:
-  explicit EditTool(std::filesystem::path cwd)
+  explicit EditTool(const std::filesystem::path &cwd)
       : BuiltinTool(
             "edit",
             "Edit a single file using exact text replacement. Each "
             "edits[].oldText must match exactly once.",
             R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text to replace"},"newText":{"type":"string","description":"Replacement text"}},"required":["oldText","newText"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false})json",
-            std::move(cwd)) {}
+            cwd) {}
 
   ToolArguments
   prepare_arguments(const ToolArguments &arguments) const override {
@@ -856,13 +856,13 @@ public:
 
 class LsTool final : public BuiltinTool {
 public:
-  explicit LsTool(std::filesystem::path cwd)
+  explicit LsTool(const std::filesystem::path &cwd)
       : BuiltinTool(
             "ls",
             "List directory contents. Returns entries sorted alphabetically, "
             "with '/' suffix for directories.",
             R"json({"type":"object","properties":{"path":{"type":"string","description":"Directory to list (default: current directory)"},"limit":{"type":"number","description":"Maximum number of entries to return (default: 500)"}},"additionalProperties":false})json",
-            std::move(cwd)) {}
+            cwd) {}
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
                                       std::stop_token,
@@ -915,13 +915,13 @@ public:
 
 class FindTool final : public BuiltinTool {
 public:
-  explicit FindTool(std::filesystem::path cwd)
+  explicit FindTool(const std::filesystem::path &cwd)
       : BuiltinTool(
             "find",
             "Search for files by glob pattern. Returns matching file paths "
             "relative to the search directory.",
             R"json({"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match files, e.g. '*.cpp' or 'src/**/*.h'"},"path":{"type":"string","description":"Directory to search in (default: current directory)"},"limit":{"type":"number","description":"Maximum number of results (default: 1000)"}},"required":["pattern"],"additionalProperties":false})json",
-            std::move(cwd)) {}
+            cwd) {}
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
                                       std::stop_token,
@@ -990,13 +990,13 @@ public:
 
 class GrepTool final : public BuiltinTool {
 public:
-  explicit GrepTool(std::filesystem::path cwd)
+  explicit GrepTool(const std::filesystem::path &cwd)
       : BuiltinTool(
             "grep",
             "Search file contents for a pattern. Returns matching lines with "
             "file paths and line numbers.",
             R"json({"type":"object","properties":{"pattern":{"type":"string","description":"Search pattern (regex or literal string)"},"path":{"type":"string","description":"Directory or file to search (default: current directory)"},"glob":{"type":"string","description":"Filter files by glob pattern, e.g. '*.cpp'"},"ignoreCase":{"type":"boolean","description":"Case-insensitive search (default: false)"},"literal":{"type":"boolean","description":"Treat pattern as literal string instead of regex (default: false)"},"context":{"type":"number","description":"Number of lines to show before and after each match (default: 0)"},"limit":{"type":"number","description":"Maximum number of matches to return (default: 100)"}},"required":["pattern"],"additionalProperties":false})json",
-            std::move(cwd)) {}
+            cwd) {}
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
                                       std::stop_token,
@@ -1102,13 +1102,13 @@ public:
 
 class BashTool final : public BuiltinTool {
 public:
-  explicit BashTool(std::filesystem::path cwd)
+  explicit BashTool(const std::filesystem::path &cwd)
       : BuiltinTool(
             "bash",
             "Execute a bash command in the current working directory. Returns "
             "stdout and stderr. Optionally provide timeout in seconds.",
             R"json({"type":"object","properties":{"command":{"type":"string","description":"Bash command to execute"},"timeout":{"type":"number","description":"Timeout in seconds (optional)"}},"required":["command"],"additionalProperties":false})json",
-            std::move(cwd)) {}
+            cwd) {}
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
                                       std::stop_token stop_tok,

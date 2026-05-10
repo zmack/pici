@@ -271,22 +271,22 @@ void process_sse_line(const std::string &line, StreamingState &state) {
       choices_it->empty())
     return;
 
-  const auto &choice = *choices_it[0];
+  const auto &choice = (*choices_it)[0];
 
   if (auto fr_it = choice.find("finish_reason");
       fr_it != choice.end() && !fr_it->is_null()) {
     result.stop_reason =
-        OpenAICompatibleClient::map_finish_reason(fr_it->get<std::string>());
+        OpenAICompatibleClient::map_finish_reason(fr_it.value().get<std::string>());
   }
 
   auto delta_it = choice.find("delta");
   if (delta_it == choice.end())
     return;
-  const auto &delta = *delta_it;
+  const auto &delta = delta_it.value();
 
   auto content_it = delta.find("content");
   if (content_it != delta.end() && !content_it->is_null()) {
-    auto text = content_it->get<std::string>();
+    auto text = content_it.value().get<std::string>();
     if (!text.empty()) {
       if (state.current_block != BlockType::text) {
         finish_current_block(state);
@@ -314,7 +314,7 @@ void process_sse_line(const std::string &line, StreamingState &state) {
   if (reasoning_it == delta.end())
     reasoning_it = delta.find("reasoning");
   if (reasoning_it != delta.end() && !reasoning_it->is_null()) {
-    auto text = reasoning_it->get<std::string>();
+    auto text = reasoning_it.value().get<std::string>();
     if (!text.empty()) {
       if (state.current_block != BlockType::thinking) {
         finish_current_block(state);
@@ -348,7 +348,7 @@ void process_sse_line(const std::string &line, StreamingState &state) {
       if (auto id_it = tc_delta.find("id");
           id_it != tc_delta.end() && id_it->is_string()) {
         if (ptc.id.empty()) {
-          ptc.id = id_it->get<std::string>();
+          ptc.id = id_it.value().get<std::string>();
         }
       }
 
@@ -356,12 +356,12 @@ void process_sse_line(const std::string &line, StreamingState &state) {
         if (auto name_it = fn_it->find("name");
             name_it != fn_it->end() && name_it->is_string()) {
           if (ptc.name.empty()) {
-            ptc.name = name_it->get<std::string>();
+            ptc.name = name_it.value().get<std::string>();
           }
         }
         if (auto args_it = fn_it->find("arguments");
             args_it != fn_it->end() && args_it->is_string()) {
-          std::string delta_str = args_it->get<std::string>();
+          std::string delta_str = args_it.value().get<std::string>();
           if (!delta_str.empty()) {
             bool is_new = ptc.partial_args.empty() &&
                           state.current_block != BlockType::tool_call;

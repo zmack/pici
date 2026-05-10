@@ -1,6 +1,7 @@
 #include "acp/types.h"
 #include "nlohmann/json_fwd.hpp"
 
+#include <string_view>
 #include <vector>
 
 namespace pi::acp {

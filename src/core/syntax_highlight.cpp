@@ -355,13 +355,12 @@ void add_identifier_highlights(LanguageId id, TSNode node,
 
 std::string render_highlighted(std::string_view code,
                                std::vector<HighlightSpan> spans) {
-  std::ranges::sort(spans, ,
-                    [](const HighlightSpan &a, const HighlightSpan &b) {
-                      if (a.start != b.start) {
-                        return a.start < b.start;
-                      }
-                      return a.end > b.end;
-                    });
+  std::ranges::sort(spans, [](const HighlightSpan &a, const HighlightSpan &b) {
+    if (a.start != b.start) {
+      return a.start < b.start;
+    }
+    return a.end > b.end;
+  });
 
   std::vector<HighlightSpan> filtered;
   filtered.reserve(spans.size());
