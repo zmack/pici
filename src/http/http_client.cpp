@@ -66,11 +66,18 @@ HttpClient::post(const std::string &url, const std::string &body,
   headers.append("Accept: application/json");
 
   if (api_key) {
-    headers.append("Authorization: Bearer " + *api_key);
+    std::string auth = "Authorization: Bearer ";
+    auth += *api_key;
+    headers.append(auth);
   }
 
   for (const auto &[key, value] : extra_headers) {
-    headers.append(key + ": " + value);
+    std::string header;
+    header.reserve(key.size() + value.size() + 2);
+    header += key;
+    header += ": ";
+    header += value;
+    headers.append(header);
   }
 
   curl_easy_setopt(curl.handle, CURLOPT_URL, url.c_str());
@@ -153,11 +160,18 @@ bool HttpClient::post_streaming(
   headers.append("Accept: text/event-stream");
 
   if (api_key) {
-    headers.append("Authorization: Bearer " + *api_key);
+    std::string auth = "Authorization: Bearer ";
+    auth += *api_key;
+    headers.append(auth);
   }
 
   for (const auto &[key, value] : extra_headers) {
-    headers.append(key + ": " + value);
+    std::string header;
+    header.reserve(key.size() + value.size() + 2);
+    header += key;
+    header += ": ";
+    header += value;
+    headers.append(header);
   }
 
   curl_easy_setopt(curl.handle, CURLOPT_URL, url.c_str());

@@ -37,6 +37,7 @@ public:
   EventStream &operator=(const EventStream &) = default;
   EventStream(EventStream &&) noexcept = default;
   EventStream &operator=(EventStream &&) noexcept = default;
+  ~EventStream() = default;
 
   // ── Push events ────────────────────────────────────────────────────
 

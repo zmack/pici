@@ -702,7 +702,9 @@ static ToolCallResult execute_tool_calls_parallel(
   std::vector<FinalizedToolCall> finalized_calls;
   finalized_calls.reserve(n);
   for (auto &slot : slots) {
-    finalized_calls.push_back(std::move(*slot));
+    if (slot.has_value()) {
+      finalized_calls.push_back(std::move(slot.value()));
+    }
   }
 
   for (const auto &finalized : finalized_calls) {

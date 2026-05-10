@@ -273,6 +273,10 @@ public:
 class ViewportRenderer final : public Renderer {
 public:
   explicit ViewportRenderer(int fd) : fd_(fd) { enter(); }
+  ViewportRenderer(const ViewportRenderer &) = delete;
+  ViewportRenderer &operator=(const ViewportRenderer &) = delete;
+  ViewportRenderer(ViewportRenderer &&) = delete;
+  ViewportRenderer &operator=(ViewportRenderer &&) = delete;
 
   ~ViewportRenderer() override {
     leave();

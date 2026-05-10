@@ -22,6 +22,13 @@ struct RawMode {
   struct termios saved{};
   bool active{false};
 
+  RawMode() = default;
+  RawMode(const RawMode &) = delete;
+  RawMode &operator=(const RawMode &) = delete;
+  RawMode(RawMode &&) = delete;
+  RawMode &operator=(RawMode &&) = delete;
+  ~RawMode() { leave(); }
+
   bool enter(int fdesc) {
     if (isatty(fdesc) == 0)
       return false;
@@ -45,7 +52,6 @@ struct RawMode {
     }
   }
 
-  ~RawMode() { leave(); }
 };
 
 constexpr std::string_view kInputCursor = "\033[7m \033[0m\033[D";
