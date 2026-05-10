@@ -23,15 +23,15 @@
 #include "core/llm_client.h"
 #include "core/message_types.h"
 #include "core/stream.h"
-#include "opentelemetry/nostd/shared_ptr.h"
-#include "opentelemetry/nostd/string_view.h"
-#include "opentelemetry/trace/span.h"
-#include "opentelemetry/trace/span_metadata.h"
 
 #ifdef PI_CPP_OTEL_ENABLED
 #include <opentelemetry/context/context.h>
 #include <opentelemetry/context/runtime_context.h>
+#include <opentelemetry/nostd/shared_ptr.h>
+#include <opentelemetry/nostd/string_view.h>
 #include <opentelemetry/trace/context.h>
+#include <opentelemetry/trace/span.h>
+#include <opentelemetry/trace/span_metadata.h>
 #include <opentelemetry/trace/scope.h>
 #include <opentelemetry/trace/span_startoptions.h>
 #include <opentelemetry/trace/tracer.h>

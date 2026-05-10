@@ -7,8 +7,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PI_CPP_BUILD_TESTS "Build tests" ON)
-option(PI_CPP_OTEL_API   "Compile OpenTelemetry API instrumentation (noop when SDK absent)" ON)
+option(PI_CPP_OTEL_API   "Compile OpenTelemetry API instrumentation" OFF)
 option(PI_CPP_OTEL_SDK   "Link OpenTelemetry SDK + OTLP/HTTP exporter for real trace export" OFF)
+option(PI_CPP_USE_CCACHE "Use ccache when it is available" ON)
+
+if(PI_CPP_USE_CCACHE)
+    find_program(CCACHE_PROGRAM ccache)
+    if(CCACHE_PROGRAM)
+        set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+        message(STATUS "ccache: ${CCACHE_PROGRAM}")
+    endif()
+endif()
 
 # ─── FetchContent dependencies ───
 include(FetchContent)
@@ -39,8 +49,24 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/commonmark/cmark.git
     GIT_TAG        0.31.1
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
 )
+get_property(_PI_CPP_CMAKE_WARN_DEPRECATED_WAS_SET CACHE CMAKE_WARN_DEPRECATED
+    PROPERTY VALUE SET)
+if(_PI_CPP_CMAKE_WARN_DEPRECATED_WAS_SET)
+    get_property(_PI_CPP_CMAKE_WARN_DEPRECATED CACHE CMAKE_WARN_DEPRECATED
+        PROPERTY VALUE)
+endif()
+set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(cmark_src)
+if(_PI_CPP_CMAKE_WARN_DEPRECATED_WAS_SET)
+    set(CMAKE_WARN_DEPRECATED ${_PI_CPP_CMAKE_WARN_DEPRECATED}
+        CACHE BOOL "" FORCE)
+else()
+    unset(CMAKE_WARN_DEPRECATED CACHE)
+endif()
+unset(_PI_CPP_CMAKE_WARN_DEPRECATED_WAS_SET)
+unset(_PI_CPP_CMAKE_WARN_DEPRECATED)
 message(STATUS "cmark: 0.31.1")
 
 # ─── Tree-sitter (syntax highlighting) ───────────────────────────────────────
@@ -49,69 +75,95 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter.git
     GIT_TAG        v0.25.10
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 
 FetchContent_Declare(
     tree_sitter_c_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-c.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_cpp_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-cpp.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_python_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-python.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_bash_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-bash.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_json_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-json.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_typescript_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-typescript.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_rust_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-rust.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_go_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-go.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_markdown_src
     GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-markdown.git
     GIT_TAG        main
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_ruby_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-ruby.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_lua_src
     GIT_REPOSITORY https://github.com/tree-sitter-grammars/tree-sitter-lua.git
     GIT_TAG        main
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tree_sitter_javascript_src
     GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-javascript.git
     GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL
+    SOURCE_SUBDIR  cmake-do-not-add
 )
 FetchContent_Declare(
     tomlplusplus
@@ -155,62 +207,26 @@ if(PI_CPP_OTEL_API)
         GIT_REPOSITORY https://github.com/open-telemetry/opentelemetry-cpp
         GIT_TAG        v1.17.0
         GIT_SHALLOW    TRUE
+        EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(opentelemetry-cpp)
 endif()
 
-FetchContent_GetProperties(tree_sitter_runtime_src)
-if(NOT tree_sitter_runtime_src_POPULATED)
-    FetchContent_Populate(tree_sitter_runtime_src)
-endif()
-FetchContent_GetProperties(tree_sitter_c_src)
-if(NOT tree_sitter_c_src_POPULATED)
-    FetchContent_Populate(tree_sitter_c_src)
-endif()
-FetchContent_GetProperties(tree_sitter_cpp_src)
-if(NOT tree_sitter_cpp_src_POPULATED)
-    FetchContent_Populate(tree_sitter_cpp_src)
-endif()
-FetchContent_GetProperties(tree_sitter_python_src)
-if(NOT tree_sitter_python_src_POPULATED)
-    FetchContent_Populate(tree_sitter_python_src)
-endif()
-FetchContent_GetProperties(tree_sitter_bash_src)
-if(NOT tree_sitter_bash_src_POPULATED)
-    FetchContent_Populate(tree_sitter_bash_src)
-endif()
-FetchContent_GetProperties(tree_sitter_json_src)
-if(NOT tree_sitter_json_src_POPULATED)
-    FetchContent_Populate(tree_sitter_json_src)
-endif()
-FetchContent_GetProperties(tree_sitter_typescript_src)
-if(NOT tree_sitter_typescript_src_POPULATED)
-    FetchContent_Populate(tree_sitter_typescript_src)
-endif()
-FetchContent_GetProperties(tree_sitter_rust_src)
-if(NOT tree_sitter_rust_src_POPULATED)
-    FetchContent_Populate(tree_sitter_rust_src)
-endif()
-FetchContent_GetProperties(tree_sitter_go_src)
-if(NOT tree_sitter_go_src_POPULATED)
-    FetchContent_Populate(tree_sitter_go_src)
-endif()
-FetchContent_GetProperties(tree_sitter_markdown_src)
-if(NOT tree_sitter_markdown_src_POPULATED)
-    FetchContent_Populate(tree_sitter_markdown_src)
-endif()
-FetchContent_GetProperties(tree_sitter_ruby_src)
-if(NOT tree_sitter_ruby_src_POPULATED)
-    FetchContent_Populate(tree_sitter_ruby_src)
-endif()
-FetchContent_GetProperties(tree_sitter_lua_src)
-if(NOT tree_sitter_lua_src_POPULATED)
-    FetchContent_Populate(tree_sitter_lua_src)
-endif()
-FetchContent_GetProperties(tree_sitter_javascript_src)
-if(NOT tree_sitter_javascript_src_POPULATED)
-    FetchContent_Populate(tree_sitter_javascript_src)
-endif()
+FetchContent_MakeAvailable(
+    tree_sitter_runtime_src
+    tree_sitter_c_src
+    tree_sitter_cpp_src
+    tree_sitter_python_src
+    tree_sitter_bash_src
+    tree_sitter_json_src
+    tree_sitter_typescript_src
+    tree_sitter_rust_src
+    tree_sitter_go_src
+    tree_sitter_markdown_src
+    tree_sitter_ruby_src
+    tree_sitter_lua_src
+    tree_sitter_javascript_src
+)
 
 add_library(tree_sitter_pi STATIC
     ${tree_sitter_runtime_src_SOURCE_DIR}/lib/src/lib.c
@@ -412,6 +428,7 @@ if(NOT CURL_FOUND)
         curl
         GIT_REPOSITORY https://github.com/curl/curl.git
         GIT_TAG        curl-8_7_1
+        EXCLUDE_FROM_ALL
     )
     FetchContent_MakeAvailable(curl)
 endif()

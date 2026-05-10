@@ -143,7 +143,26 @@ for (const auto &ev : agent.prompt(text))
 |------|---------|-----------|
 | `"auto"` | `make_auto_renderer(fd)` | Markdown on TTY, raw on pipes |
 | `"markdown"` | `make_diff_renderer(fd)` | In-place markdown with scrollback-safe committed regions |
+| `"viewport"` | `make_viewport_renderer(fd)` | Alternate-screen viewport with status bar, readline row, and scroll controls |
 | `"raw"` | `make_raw_renderer(fd)` | Plain text append, no escape codes |
+
+### Viewport renderer notes
+
+The viewport renderer is a full-screen compositor.  It owns the assistant output
+area and status row, but the final row is reserved for readline input.  That
+separation matters:
+
+- Assistant output does **not** draw a fake cursor.  The output area can repaint
+  frequently while a response streams.
+- Readline draws the visible user insertion cursor on the prompt row, so the
+  cursor marks where typed text will appear even if viewport repainting moves the
+  terminal's hardware cursor.
+- `Renderer::on_scroll(RendererScrollCommand)` is a no-op by default.  The CLI
+  maps `PageUp`/`PageDown`, `Up`/`Down`, and `Home`/`End` to that hook; only the
+  viewport renderer currently consumes it.
+- Scroll state is tracked in wrapped terminal rows, not raw markdown bytes.  The
+  row accounting shares the same ANSI/UTF-8 width helpers used by markdown
+  rendering.
 
 ### Custom renderers
 
@@ -173,12 +192,26 @@ enum class RendererErrorKind { llm, transport, tool, abort, unknown };
 
 ## Building
 
+The root `Makefile` wraps the common CMake flows:
+
+```bash
+make dev          # Debug pi-cli in build/
+make release      # Release pi-cli in build-release/
+make lint         # clang-tidy target
+make format       # clang-format target
+make test         # build + ctest
+```
+
 ```bash
 # Configure
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 
 # Build
-cmake --build build
+cmake --build build --parallel
+
+# Optional static analysis target.  This target currently prints advisory
+# clang-tidy warnings but exits successfully unless clang-tidy itself fails.
+cmake --build build --target tidy
 
 # Run demo
 ./build/pi-cli demo
@@ -191,6 +224,37 @@ cmake --build build
 ./build/test-agent-loop
 ./build/test-agent
 ./build/test-stream
+```
+
+For a faster edit-compile loop, build the target you are working on instead of
+the whole default target graph:
+
+```bash
+cmake --build build --target pi-cli --parallel
+cmake --build build --target test-markdown --parallel
+```
+
+The default configuration keeps tests enabled, but OpenTelemetry API
+instrumentation is off by default because it pulls in a large vendored target
+graph.  Enable it explicitly when working on tracing:
+
+```bash
+cmake -B build-otel -DPI_CPP_OTEL_API=ON
+```
+
+For a lean local build directory that skips test targets:
+
+```bash
+cmake -B build-dev -DPI_CPP_BUILD_TESTS=OFF -DPI_CPP_OTEL_API=OFF
+cmake --build build-dev --target pi-cli --parallel
+```
+
+CMake will use `ccache` automatically when it is installed.  Ninja also tends to
+give better incremental scheduling than Make:
+
+```bash
+cmake -S . -B build-ninja -G Ninja -DPI_CPP_OTEL_API=OFF
+cmake --build build-ninja --parallel
 ```
 
 ## Local OpenAI-Compatible API
@@ -275,12 +339,37 @@ int main() {
 ## Key Design Decisions
 
 1. **nlohmann/json** — all JSON parsing/serialization via nlohmann/json; JSON Schema validation via pboettch/json-schema-validator
-2. **No exceptions** — error propagation via `std::optional` and return values
+2. **Explicit error surfaces** — expected runtime errors generally flow through `std::optional`, result objects, or renderer error callbacks; boundary code still catches and translates exceptions where third-party libraries throw
 3. **Thread safety** — `AgentState` uses `std::mutex` for all shared state
 4. **Async streaming** — `EventStream` supports blocking iterator, `for_each`, and `wait()`
 5. **Provider abstraction** — `LLMClient` interface allows swapping providers without touching the loop
 6. **C++23 features** — `std::stop_token`/`std::stop_source` for cancellation, concepts, `if constexpr`, `std::scoped_lock`, structured bindings
 7. **Self-contained tests** — custom test harness, no Catch2 or other test frameworks
+
+## Implementation Lessons
+
+- Prefer public umbrella headers for vendored C libraries.  For libcurl, include
+  `<curl/curl.h>` rather than internal headers such as `curl/easy.h`; the latter
+  assumes setup macros from the public header.
+- When using toml++, define configuration macros before including toml++ headers.
+  This project uses header-only toml++ in `src/cli/config.cpp`.
+- C++23 ranges calls do not take placeholder commas.  Use
+  `std::ranges::sort(items, pred)`, `std::ranges::reverse(items)`, and remember
+  `std::ranges::remove_if` returns a subrange, so erase with
+  `removed.begin(), removed.end()`.
+- For JSON iterators from nlohmann/json, use `it.value()` or `(*it)` explicitly.
+  `*it[0]` parses as `*(it[0])`, not as `(*it)[0]`.
+- RAII types that own terminal or renderer state should explicitly delete copy
+  and move operations when duplicating the handle would be invalid.
+- The tidy target is useful as a regression net, but many current warnings are
+  policy/advisory findings in established code paths.  Fix targeted warnings
+  near edited code instead of churning the whole tree opportunistically.
+- Keep optional instrumentation truly optional.  OpenTelemetry includes and
+  link dependencies should stay behind `PI_CPP_OTEL_ENABLED`; otherwise a fast
+  local build still needs the vendored telemetry headers.
+- Avoid letting vendored helper tools leak into the default `all` target.  Use
+  `EXCLUDE_FROM_ALL` for dependency FetchContent declarations when the project
+  only needs their libraries.
 
 ## File Index
 
