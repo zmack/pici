@@ -5,6 +5,10 @@
 
 namespace pi::core {
 
+int term_width(int fd);
+int term_height(int fd);
+
+
 // Skip one ANSI/VT escape sequence starting at s[i].
 //
 // Handles:

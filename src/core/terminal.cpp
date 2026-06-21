@@ -3,8 +3,25 @@
 #include <algorithm>
 #include <cstddef>
 #include <string_view>
+#include <asm-generic/ioctls.h>
+#include <sys/ioctl.h>
 
 namespace pi::core {
+
+int term_width(int fd) {
+  struct winsize ws{};
+  if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+    return static_cast<int>(ws.ws_col);
+  return 80;
+}
+
+int term_height(int fd) {
+  struct winsize ws{};
+  if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
+    return static_cast<int>(ws.ws_row);
+  return 24;
+}
+
 namespace {
 
 // ── UTF-8 decode ─────────────────────────────────────────────────────────────

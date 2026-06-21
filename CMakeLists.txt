@@ -456,6 +456,7 @@ add_library(pi-core
     src/core/otel_init.cpp
     src/core/session/session_id.cpp
     src/core/session/session_store.cpp
+    src/core/session/session_tree.cpp
 )
 
 target_include_directories(pi-core PUBLIC
@@ -508,6 +509,7 @@ add_executable(pi-cli
     src/cli/args.cpp
     src/cli/config.cpp
     src/cli/readline.cpp
+    src/cli/tree_selector.cpp
 )
 
 target_link_libraries(pi-cli PRIVATE pi-core pi-http tomlplusplus::tomlplusplus)

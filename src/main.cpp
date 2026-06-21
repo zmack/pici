@@ -35,9 +35,11 @@
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/providers/openai_completions.h"
+#include "cli/tree_selector.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
+#include "core/session/session_tree.h"
 #include "core/stream_renderer.h"
 
 namespace pi {
@@ -636,7 +638,7 @@ static int cmd_run(const cli::Args &args) {
            {std::string_view("/exit"), std::string_view("/quit"),
             std::string_view("/tools"), std::string_view("/addons"),
             std::string_view("/usage"), std::string_view("/name"),
-            std::string_view("/fork")}) {
+            std::string_view("/fork"), std::string_view("/tree")}) {
         if (b.starts_with(partial))
           result.emplace_back(b);
       }
@@ -747,6 +749,40 @@ static int cmd_run(const cli::Args &args) {
         store->set_name(current_session_id, name);
         std::cerr << "[session name: " << name << "]\n";
       }
+      continue;
+    }
+    if (line == "/tree") {
+      auto tree_opt = core::build_session_tree(*store, current_session_id);
+      if (!tree_opt) {
+        std::cerr << "no session tree available\n";
+        continue;
+      }
+      auto tree_lines = core::format_session_tree(*tree_opt, current_session_id);
+
+      std::size_t cursor = 0;
+      for (std::size_t i = 0; i < tree_lines.size(); ++i) {
+        if (tree_lines[i].session_id == current_session_id) {
+          cursor = i;
+          break;
+        }
+      }
+
+      auto result = cli::run_tree_selector(tree_lines, current_session_id, cursor);
+      if (result.cancelled || result.selected_session_id == current_session_id)
+        continue;
+
+      auto loaded = store->load(result.selected_session_id);
+      if (!loaded) {
+        std::cerr << "error: session not found\n";
+        continue;
+      }
+      current_session_id = result.selected_session_id;
+      agent.state().set_messages(loaded->messages);
+      agent.state().set_session_id(current_session_id);
+      std::cerr << "[session: " << current_session_id;
+      if (loaded->header.name)
+        std::cerr << "  " << *loaded->header.name;
+      std::cerr << "]\n";
       continue;
     }
     if (line == "/fork") {

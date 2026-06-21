@@ -28,20 +28,6 @@
 namespace pi::core {
 namespace {
 
-int term_width(int fd) {
-  struct winsize ws{};
-  if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
-    return static_cast<int>(ws.ws_col);
-  return 80;
-}
-
-int term_height(int fd) {
-  struct winsize ws{};
-  if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
-    return static_cast<int>(ws.ws_row);
-  return 24;
-}
-
 // Split on '\n', discarding the trailing empty element from a final newline.
 std::string strip_final_newline(std::string s) {
   if (!s.empty() && s.back() == '\n') {
