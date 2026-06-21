@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <format>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -105,6 +106,19 @@ print_addons(const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
       }
     }
   }
+}
+
+// Returns "$0.0023" for 0.002341928, "$1.23" for 1.234, "$12.34" for 12.345
+static std::string format_cost(double usd) {
+  std::ostringstream ss;
+  ss << '$';
+  if (usd < 0.01)
+    ss << std::format("{:.4g}", usd);
+  else if (usd < 1.00)
+    ss << std::fixed << std::setprecision(4) << usd;
+  else
+    ss << std::fixed << std::setprecision(2) << usd;
+  return ss.str();
 }
 
 static std::string format_tokens(std::uint64_t n) {
@@ -299,8 +313,15 @@ public:
 
   void on_message_end(const core::TokenUsage &u) override {
     base_.on_message_end(u);
-    if (verbose_)
-      std::cerr << "[usage: in=" << u.input << " out=" << u.output << "]\n";
+    if (verbose_) {
+      bool has_pricing = u.cost.total != 0 || u.cost.input != 0;
+      std::cerr << "[usage: in=" << format_tokens(u.input)
+                << " out=" << format_tokens(u.output)
+                << " cache_r=" << format_tokens(u.cache_read);
+      if (has_pricing)
+        std::cerr << " " << format_cost(u.cost.total);
+      std::cerr << "]\n";
+    }
     last_usage_ = u;
   }
 
@@ -330,18 +351,47 @@ static core::TokenUsage run_turn(core::Agent &agent, const std::string &input,
   return vr.last_usage();
 }
 
-static void print_usage(const core::TokenUsage &last,
-                        const core::TokenUsage &session, std::size_t turns) {
-  auto row = [](std::string_view label, std::uint64_t in, std::uint64_t out,
-                std::uint64_t total) {
-    std::cout << std::left << std::setw(10) << label << "  in=" << std::setw(8)
-              << in << "  out=" << std::setw(8) << out << "  total=" << total
-              << "\n";
+struct CostAccumulator {
+  std::uint64_t input_tokens{0};
+  std::uint64_t output_tokens{0};
+  std::uint64_t cache_read_tokens{0};
+  std::uint64_t cache_write_tokens{0};
+  std::uint64_t total_tokens{0};
+  double total_cost{0.0};
+  std::size_t turns{0};
+
+  void add(const core::TokenUsage &u) {
+    input_tokens += u.input;
+    output_tokens += u.output;
+    cache_read_tokens += u.cache_read;
+    cache_write_tokens += u.cache_write;
+    total_tokens += u.total_tokens;
+    total_cost += u.cost.total;
+    ++turns;
+  }
+};
+
+static void print_usage(const CostAccumulator &last,
+                        const CostAccumulator &session, bool has_pricing) {
+  auto row = [&](std::string_view label, const CostAccumulator &acc) {
+    std::cout << std::left << std::setw(10) << label
+              << "  in=" << std::setw(8) << format_tokens(acc.input_tokens)
+              << "  out=" << std::setw(8) << format_tokens(acc.output_tokens)
+              << "  cache_r=" << std::setw(8)
+              << format_tokens(acc.cache_read_tokens)
+              << "  cache_w=" << std::setw(8)
+              << format_tokens(acc.cache_write_tokens);
+    if (has_pricing)
+      std::cout << "  " << format_cost(acc.total_cost);
+    std::cout << "\n";
   };
   std::cout << "\n";
-  row("last turn:", last.input, last.output, last.total_tokens);
-  row("session:", session.input, session.output, session.total_tokens);
-  std::cout << "  turns: " << turns << "\n";
+  row("last turn:", last);
+  row("session:", session);
+  std::cout << "  turns: " << session.turns;
+  if (!has_pricing)
+    std::cout << "  (cost unknown)";
+  std::cout << "\n";
 }
 
 struct ContextFile {
@@ -715,18 +765,15 @@ static int cmd_run(const cli::Args &args) {
   };
 
   // Interactive REPL — track usage across turns
-  core::TokenUsage last_usage;
-  core::TokenUsage session_usage;
-  std::size_t session_turns = 0;
+  CostAccumulator last_turn;
+  CostAccumulator session;
+  bool has_pricing =
+      model.cost.input_per_mtok != 0 || model.cost.output_per_mtok != 0;
 
   auto accumulate = [&](const core::TokenUsage &u) {
-    last_usage = u;
-    session_usage.input += u.input;
-    session_usage.output += u.output;
-    session_usage.cache_read += u.cache_read;
-    session_usage.cache_write += u.cache_write;
-    session_usage.total_tokens += u.total_tokens;
-    ++session_turns;
+    last_turn = CostAccumulator{};
+    last_turn.add(u);
+    session.add(u);
   };
 
   // Run a turn and persist all new messages to the session file.
@@ -786,7 +833,7 @@ static int cmd_run(const cli::Args &args) {
       continue;
     }
     if (line == "/usage") {
-      print_usage(last_usage, session_usage, session_turns);
+      print_usage(last_turn, session, has_pricing);
       continue;
     }
     if (line.starts_with("/name ") || line == "/name") {

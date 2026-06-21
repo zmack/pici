@@ -148,10 +148,10 @@ struct Model {
   bool reasoning{false};
   std::vector<std::string> input_capabilities; // "text", "image"
   struct Cost {
-    double input{0};
-    double output{0};
-    double cache_read{0};
-    double cache_write{0};
+    double input_per_mtok{0};
+    double output_per_mtok{0};
+    double cache_read_per_mtok{0};
+    double cache_write_per_mtok{0};
   } cost{};
   std::uint64_t context_window{0};
   std::uint64_t max_tokens{0};
@@ -161,6 +161,8 @@ struct Model {
 
   bool operator==(const Model &) const = delete;
 };
+
+void compute_cost(TokenUsage &usage, const Model::Cost &price);
 
 class ToolSchema {
 public:

@@ -476,8 +476,7 @@ OpenAICompatibleClient::detect_compat(const Model &model) {
   compat.supports_reasoning_effort = !is_grok && !is_zai && !is_moonshot &&
                                      !is_cloudflare_gateway && !is_llamacpp &&
                                      !is_local;
-  compat.supports_usage_in_streaming =
-      !is_llamacpp && !is_local && !is_fireworks;
+  compat.supports_usage_in_streaming = !is_llamacpp && !is_local;
   compat.max_tokens_field =
       use_max_tokens ? "max_tokens" : "max_completion_tokens";
   compat.requires_tool_result_name = false;

@@ -402,4 +402,17 @@ std::optional<Message> from_json(std::string_view s) {
 
 } // namespace json
 
+void compute_cost(TokenUsage &usage, const Model::Cost &price) {
+  usage.cost.input =
+      static_cast<double>(usage.input) * price.input_per_mtok / 1'000'000.0;
+  usage.cost.output =
+      static_cast<double>(usage.output) * price.output_per_mtok / 1'000'000.0;
+  usage.cost.cache_read = static_cast<double>(usage.cache_read) *
+                          price.cache_read_per_mtok / 1'000'000.0;
+  usage.cost.cache_write = static_cast<double>(usage.cache_write) *
+                           price.cache_write_per_mtok / 1'000'000.0;
+  usage.cost.total = usage.cost.input + usage.cost.output +
+                     usage.cost.cache_read + usage.cost.cache_write;
+}
+
 } // namespace pi::core

@@ -216,7 +216,7 @@ int main() {
         CHECK_EQ(json["stream"].get<bool>(), true);
         CHECK(json.contains("max_tokens"));
         CHECK(!json.contains("max_completion_tokens"));
-        CHECK(!json.contains("stream_options"));
+        CHECK(json.contains("stream_options"));
     });
 
     tests::register_test("map_finish_reason: stop", []() {

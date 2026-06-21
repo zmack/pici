@@ -11,9 +11,12 @@
 #include <type_traits>
 #include <unistd.h>
 
+#include <format>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -49,6 +52,32 @@ std::string render_visible_markdown(std::string_view input) {
   rendered.append(static_cast<std::size_t>(count_trailing_newlines(input)),
                   '\n');
   return rendered;
+}
+
+std::string format_tokens(std::uint64_t n) {
+  std::ostringstream ss;
+  if (n >= 1'000'000) {
+    ss << std::fixed << std::setprecision(1)
+       << static_cast<double>(n) / 1'000'000.0 << 'M';
+  } else if (n >= 1'000) {
+    ss << std::fixed << std::setprecision(1)
+       << static_cast<double>(n) / 1'000.0 << 'K';
+  } else {
+    ss << n;
+  }
+  return ss.str();
+}
+
+std::string format_cost(double usd) {
+  std::ostringstream ss;
+  ss << '$';
+  if (usd < 0.01)
+    ss << std::format("{:.4g}", usd);
+  else if (usd < 1.00)
+    ss << std::fixed << std::setprecision(4) << usd;
+  else
+    ss << std::fixed << std::setprecision(2) << usd;
+  return ss.str();
 }
 
 class RawStreamRenderer final : public Renderer {
@@ -275,6 +304,7 @@ public:
     thinking_buffer_.clear();
     in_thinking_ = false;
     total_tokens_ = 0;
+    last_usage_ = TokenUsage{};
     status_text_.clear();
     active_tools_.clear();
     scroll_offset_rows_ = 0;
@@ -357,6 +387,7 @@ public:
 
   void on_message_end(const TokenUsage &u) override {
     total_tokens_ += u.output;
+    last_usage_ = u;
     paint_status();
   }
 
@@ -578,6 +609,22 @@ private:
     if (std::cmp_greater(text.size(), w))
       text.resize(static_cast<std::size_t>(w));
 
+    std::string usage_text;
+    if (last_usage_.input != 0 || last_usage_.output != 0) {
+      usage_text = "in:" + format_tokens(last_usage_.input) +
+                   " out:" + format_tokens(last_usage_.output);
+      bool has_pricing =
+          last_usage_.cost.total != 0 || last_usage_.cost.input != 0;
+      if (has_pricing) {
+        usage_text += ' ';
+        usage_text += format_cost(last_usage_.cost.total);
+      }
+    }
+    int gap = w - static_cast<int>(text.size()) -
+              static_cast<int>(usage_text.size());
+    if (usage_text.empty() || gap < 1)
+      usage_text.clear();
+
     // CUP addresses any row regardless of DECSTBM, so row h-1 is reachable
     // even though it's outside the scroll region.
     std::string bar;
@@ -585,6 +632,10 @@ private:
     bar += std::to_string(h - 1);
     bar += ";1H\033[2K\033[2m";
     bar += text;
+    if (!usage_text.empty()) {
+      bar.append(static_cast<std::size_t>(gap), ' ');
+      bar += usage_text;
+    }
     bar += "\033[0m";
     ::write(fd_, bar.data(), bar.size());
   }
@@ -675,6 +726,7 @@ private:
   std::map<std::string, std::string> active_tools_;
   std::string status_text_;
   std::uint64_t total_tokens_{0};
+  TokenUsage last_usage_;
   int scroll_offset_rows_{0};
   int max_scroll_rows_{0};
   BlockBoundaryScanner scanner_;

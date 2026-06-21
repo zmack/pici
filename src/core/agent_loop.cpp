@@ -475,6 +475,7 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
 
   auto final_msg =
       client->stream(config.model, llm_context, opts, on_event, stop_tok);
+  compute_cost(final_msg->usage, config.model.cost);
 
   if (added_partial) {
     context.messages.back() = *final_msg;
