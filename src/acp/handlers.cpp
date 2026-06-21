@@ -113,7 +113,6 @@ private:
   bool in_message_{false};
 };
 
-
 std::atomic<std::uint64_t> gRunCounter{0};
 
 std::string make_run_id() {
@@ -122,7 +121,6 @@ std::string make_run_id() {
                 .count();
   return "run-" + std::to_string(ts) + "-" + std::to_string(++gRunCounter);
 }
-
 
 // Extract plain text from a pici AssistantMessage's content blocks.
 std::string assistant_text(const core::AssistantMessage &am) {
@@ -163,7 +161,6 @@ messages_from_run(const std::string &agent_name,
   }
   return out;
 }
-
 
 class SyncRenderer final : public core::Renderer {
 public:

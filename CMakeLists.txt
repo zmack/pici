@@ -454,6 +454,8 @@ add_library(pi-core
     src/core/providers/faux.cpp
     src/core/providers/transform_messages.cpp
     src/core/otel_init.cpp
+    src/core/session/session_id.cpp
+    src/core/session/session_store.cpp
 )
 
 target_include_directories(pi-core PUBLIC

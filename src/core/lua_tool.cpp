@@ -35,7 +35,6 @@ extern "C" {
 namespace pi::core {
 namespace {
 
-
 void json_to_lua(lua_State *L, const nlohmann::json &j) {
   if (j.is_object()) {
     lua_newtable(L);
@@ -128,7 +127,6 @@ nlohmann::json lua_to_json(lua_State *L, int idx) {
   }
 }
 
-
 int lua_json_decode(lua_State *L) {
   const char *str = luaL_checkstring(L, 1);
   auto parsed = nlohmann::json::parse(str, nullptr, false);
@@ -157,7 +155,6 @@ void register_json_module(lua_State *L) {
   lua_setglobal(L, "json");
 }
 
-
 class LuaToolResult : public ToolResult {
 public:
   LuaToolResult(std::string content, bool is_error,
@@ -174,7 +171,6 @@ private:
   std::optional<std::string> details_;
   bool is_error_;
 };
-
 
 class LuaToolSchema : public JsonSchemaToolSchema {
 public:
@@ -202,7 +198,6 @@ public:
 private:
   std::string schema_;
 };
-
 
 class LuaTool final : public ToolDefinition {
 public:
@@ -355,7 +350,6 @@ private:
   mutable std::mutex mutex_;
 };
 
-
 std::size_t count_turns(const std::vector<Message> &messages) {
   std::size_t n = 0;
   for (const auto &m : messages)
@@ -451,7 +445,6 @@ private:
   std::string name_, description_, source_;
   std::unique_ptr<LuaToolSchema> schema_;
 };
-
 
 class LuaHooksImpl : public std::enable_shared_from_this<LuaHooksImpl> {
 public:
@@ -1111,7 +1104,6 @@ private:
   mutable std::mutex mutex_;
 };
 
-
 InlineLuaTool::~InlineLuaTool() {
   if (impl_ && exec_ref_ != LUA_NOREF)
     impl_->unref_tool(exec_ref_);
@@ -1125,7 +1117,6 @@ std::shared_ptr<ToolResult> InlineLuaTool::execute(std::string_view,
 }
 
 } // namespace
-
 
 std::shared_ptr<const ToolDefinition>
 load_lua_tool(const std::filesystem::path &path) {
@@ -1210,7 +1201,6 @@ std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
   }
   return hooks;
 }
-
 
 static const char kPiciTestLua[] = R"lua(
 do

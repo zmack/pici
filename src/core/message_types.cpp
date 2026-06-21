@@ -15,7 +15,6 @@
 
 namespace pi::core {
 
-
 std::string_view stop_reason_to_string(StopReason reason) {
   switch (reason) {
   case StopReason::stop:
@@ -45,7 +44,6 @@ StopReason stop_reason_from_string(std::string_view s) {
     return StopReason::aborted;
   return StopReason::error;
 }
-
 
 std::string_view thinking_level_to_string(ThinkingLevel level) {
   switch (level) {
@@ -81,7 +79,6 @@ ThinkingLevel thinking_level_from_string(std::string_view s) {
   return ThinkingLevel::off;
 }
 
-
 std::ostream &operator<<(std::ostream &os, StopReason reason) {
   os << stop_reason_to_string(reason);
   return os;
@@ -104,14 +101,12 @@ std::ostream &operator<<(std::ostream &os, ToolExecutionMode mode) {
   return os;
 }
 
-
 std::optional<std::string>
 JsonSchemaToolSchema::validate_arguments(ToolArguments &arguments) const {
   // validate() mutates arguments in-place for coercion; const_cast is safe
   // here because JsonSchemaToolSchema is specifically designed for coercion.
   return ToolValidator::validate("(schema)", serialize(), arguments);
 }
-
 
 namespace json {
 
@@ -292,6 +287,10 @@ std::string to_json(const TokenUsage &usage) {
 
 std::string to_json(const Message &msg) {
   return message_to_json_obj(msg).dump(2);
+}
+
+std::string to_jsonl_line(const Message &msg) {
+  return message_to_json_obj(msg).dump();
 }
 
 std::string to_json(const Model &model) {

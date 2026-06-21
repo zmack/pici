@@ -125,6 +125,17 @@ Args parse_args(int argc, char *argv[]) {
       auto v = need("--test");
       if (!v.empty())
         result.test_files.emplace_back(v);
+    } else if (arg == "--continue" || arg == "-c") {
+      result.session_continue = true;
+    } else if (arg == "--resume" || arg == "-r") {
+      result.session_resume = std::string(need("--resume"));
+      if (result.session_resume.empty()) {
+        result.diagnostics.push_back(
+            {.is_error = true,
+             .message = "--resume requires a non-empty prefix"});
+      }
+    } else if (arg == "--session-dir") {
+      result.session_dir = std::string(need("--session-dir"));
     } else if (arg == "--no-context-files" || arg == "-nc") {
       result.no_context_files = true;
     } else if (arg == "--config") {
@@ -183,6 +194,10 @@ void print_help(const char *prog) {
          "  --print, -p                 Non-interactive: run prompt and exit\n"
          "  --test <file>               Run Lua test file and exit "
          "(repeatable)\n"
+         "  --continue, -c              Resume the most recent session\n"
+         "  --resume, -r <prefix>       Resume session matching partial ID\n"
+         "  --session-dir <path>        Override default session storage "
+         "directory\n"
          "  --no-context-files, -nc     Disable AGENTS.md / CLAUDE.md "
          "discovery\n"
          "  --config <file>             Config file (default: "

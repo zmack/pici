@@ -35,7 +35,6 @@ std::string_view event_type_to_string(EventType type) {
   return "unknown";
 }
 
-
 static std::string_view msg_type(const Message &msg) {
   if (std::holds_alternative<UserMessage>(msg))
     return "user";

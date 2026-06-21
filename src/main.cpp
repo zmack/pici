@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -34,6 +35,9 @@
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/providers/openai_completions.h"
+#include "core/session/session_id.h"
+#include "core/session/session_record.h"
+#include "core/session/session_store.h"
 #include "core/stream_renderer.h"
 
 namespace pi {
@@ -346,6 +350,36 @@ static int cmd_run(const cli::Args &args) {
   }
   core::Model model = *model_opt;
 
+  auto store = std::make_unique<core::SessionStore>(
+      args.session_dir.empty() ? core::SessionStore::default_sessions_dir()
+                               : std::filesystem::path(args.session_dir));
+
+  std::optional<core::SessionRecord> loaded_session;
+
+  if (args.session_continue) {
+    auto id = store->latest_session_id();
+    if (!id) {
+      std::cerr << "error: no previous session found\n";
+      return 1;
+    }
+    loaded_session = store->load(*id);
+  } else if (!args.session_resume.empty()) {
+    auto matches = store->find_by_prefix(args.session_resume);
+    if (matches.empty()) {
+      std::cerr << "error: no session matching \"" << args.session_resume
+                << "\"\n";
+      return 1;
+    }
+    if (matches.size() > 1) {
+      std::cerr << "error: ambiguous prefix \"" << args.session_resume
+                << "\" matches " << matches.size() << " sessions:\n";
+      for (const auto &h : matches)
+        std::cerr << "  " << h.id << (h.name ? ("  " + *h.name) : "") << "\n";
+      return 1;
+    }
+    loaded_session = store->load(matches[0].id);
+  }
+
   // Build system prompt
   std::string system = args.system_prompt;
   for (const auto &extra : args.append_system_prompts) {
@@ -543,6 +577,26 @@ static int cmd_run(const cli::Args &args) {
     hooks->configure(info);
   }
 
+  std::string current_session_id;
+  if (loaded_session) {
+    current_session_id = loaded_session->header.id;
+    agent.state().set_messages(loaded_session->messages);
+    agent.state().set_session_id(current_session_id);
+    std::cerr << "[session: " << current_session_id;
+    if (loaded_session->header.name)
+      std::cerr << "  " << *loaded_session->header.name;
+    std::cerr << "]\n";
+  } else {
+    core::SessionHeader hdr;
+    hdr.id = core::generate_session_id();
+    hdr.created =
+        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    hdr.model = model.id;
+    hdr.provider = model.provider;
+    current_session_id = store->create(hdr);
+    agent.state().set_session_id(current_session_id);
+  }
+
   auto renderer = make_renderer(args);
 
   if (args.verbose) {
@@ -581,7 +635,8 @@ static int cmd_run(const cli::Args &args) {
       for (std::string_view b :
            {std::string_view("/exit"), std::string_view("/quit"),
             std::string_view("/tools"), std::string_view("/addons"),
-            std::string_view("/usage")}) {
+            std::string_view("/usage"), std::string_view("/name"),
+            std::string_view("/fork")}) {
         if (b.starts_with(partial))
           result.emplace_back(b);
       }
@@ -639,6 +694,16 @@ static int cmd_run(const cli::Args &args) {
     ++session_turns;
   };
 
+  // Run a turn and persist all new messages to the session file.
+  auto run_and_persist = [&](const std::string &input) {
+    auto prev_count = agent.state().messages().size();
+    auto usage = run_turn(agent, input, *renderer, args.verbose);
+    auto msgs = agent.state().messages();
+    for (std::size_t i = prev_count; i < msgs.size(); ++i)
+      store->append_message(current_session_id, msgs[i]);
+    return usage;
+  };
+
   while (true) {
     // Build the prompt — let add-ons customise it
     std::string prompt = "\n> ";
@@ -673,6 +738,31 @@ static int cmd_run(const cli::Args &args) {
       print_usage(last_usage, session_usage, session_turns);
       continue;
     }
+    if (line.starts_with("/name ") || line == "/name") {
+      std::string name = line.size() > 5 ? line.substr(5) : "";
+      name.erase(0, name.find_first_not_of(" \t"));
+      if (name.empty()) {
+        std::cerr << "usage: /name <session name>\n";
+      } else {
+        store->set_name(current_session_id, name);
+        std::cerr << "[session name: " << name << "]\n";
+      }
+      continue;
+    }
+    if (line == "/fork") {
+      core::SessionHeader child_hdr;
+      child_hdr.id = core::generate_session_id();
+      child_hdr.created = std::chrono::system_clock::to_time_t(
+          std::chrono::system_clock::now());
+      child_hdr.model = model.id;
+      child_hdr.provider = model.provider;
+      child_hdr.parent_id = current_session_id;
+      child_hdr.parent_offset = agent.state().messages().size();
+      current_session_id = store->create(child_hdr);
+      agent.state().set_session_id(current_session_id);
+      std::cerr << "[fork: " << current_session_id << "]\n";
+      continue;
+    }
 
     // Slash command dispatch
     if (line[0] == '/' && hooks && hooks->on_command) {
@@ -690,12 +780,12 @@ static int cmd_run(const cli::Args &args) {
           agent.state().set_messages(std::move(msgs));
         }
         if (result.prompt)
-          accumulate(run_turn(agent, *result.prompt, *renderer, args.verbose));
+          accumulate(run_and_persist(*result.prompt));
         continue;
       }
     }
 
-    accumulate(run_turn(agent, line, *renderer, args.verbose));
+    accumulate(run_and_persist(line));
   }
   return 0;
 }

@@ -238,7 +238,6 @@ private:
   std::shared_ptr<State> state_;
 };
 
-
 class AsyncEventStream {
 public:
   using Event = AgentEvent;

@@ -35,7 +35,6 @@ namespace pi::core {
 // Forward declaration
 class LLMClient;
 
-
 // Called for each streaming event from the LLM.
 // Returns true to continue, false to abort.
 using StreamCallback = std::function<void(const AgentEvent &)>;
@@ -67,7 +66,6 @@ struct AfterToolCallResult {
   std::optional<bool> is_error;
   std::optional<bool> terminate;
 };
-
 
 struct AgentLoopConfig {
   Model model;
@@ -133,7 +131,6 @@ struct AgentLoopConfig {
 #endif
 };
 
-
 // Start a new agent loop with prompts
 EventStream<AgentEvent, std::vector<Message>>
 run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
@@ -146,7 +143,6 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
                         StreamCallback emit,
                         const std::stop_token &stop_tok = std::stop_token{});
 
-
 // Stream an assistant response from the LLM.
 // This is called by the loop on each turn.
 std::shared_ptr<AssistantMessage>
@@ -154,7 +150,6 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
                           StreamCallback emit,
                           const std::stop_token &stop_tok = std::stop_token{},
                           const OtelCtx &otel_ctx = {});
-
 
 // Execute all tool calls from an assistant message
 struct ToolCallResult {

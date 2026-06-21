@@ -13,7 +13,6 @@
 
 namespace pi::core {
 
-
 class AgentState {
 public:
   AgentState() = default;
@@ -150,6 +149,28 @@ public:
   std::stop_token stop_token() const { return stop_tok_; }
   std::stop_source &stop_source() { return stop_src_; }
 
+  // ── Session identity ───────────────────────────────────────────────
+
+  std::optional<std::string> session_id() const {
+    std::scoped_lock lock(mutex_);
+    return session_id_;
+  }
+
+  void set_session_id(std::string id) {
+    std::scoped_lock lock(mutex_);
+    session_id_ = std::move(id);
+  }
+
+  std::optional<std::string> session_name() const {
+    std::scoped_lock lock(mutex_);
+    return session_name_;
+  }
+
+  void set_session_name(std::string name) {
+    std::scoped_lock lock(mutex_);
+    session_name_ = std::move(name);
+  }
+
   // ── Reset ──────────────────────────────────────────────────────────
 
   void reset() {
@@ -178,10 +199,12 @@ private:
   std::set<std::string> pending_tool_calls_;
   std::optional<std::string> error_message_;
 
+  std::optional<std::string> session_id_;
+  std::optional<std::string> session_name_;
+
   std::stop_source stop_src_;
   std::stop_token stop_tok_{stop_src_.get_token()};
 };
-
 
 struct AgentContext {
   std::string system_prompt;

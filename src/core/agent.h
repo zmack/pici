@@ -20,7 +20,6 @@
 
 namespace pi::core {
 
-
 class Agent {
 public:
   struct Options {

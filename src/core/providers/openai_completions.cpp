@@ -275,8 +275,8 @@ void process_sse_line(const std::string &line, StreamingState &state) {
 
   if (auto fr_it = choice.find("finish_reason");
       fr_it != choice.end() && !fr_it->is_null()) {
-    result.stop_reason =
-        OpenAICompatibleClient::map_finish_reason(fr_it.value().get<std::string>());
+    result.stop_reason = OpenAICompatibleClient::map_finish_reason(
+        fr_it.value().get<std::string>());
   }
 
   auto delta_it = choice.find("delta");

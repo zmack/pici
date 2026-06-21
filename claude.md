@@ -19,6 +19,10 @@ successfully; treat new warnings in touched code as actionable.  Use
 `cmake --build build --target tidy-fix` only when you have reviewed the intended
 scope, because it can make broad mechanical edits.
 
+## Code Style
+
+- Do not use decorative section divider comments (`// ─── Foo ────`). They are literal dogshit. They add no information and create noise. Use a blank line to separate sections.
+
 ## Notes Learned From Recent Work
 
 - The viewport renderer owns assistant output and status painting.  Readline owns

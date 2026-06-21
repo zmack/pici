@@ -118,6 +118,10 @@ Args load_config(const std::filesystem::path &path) {
   // [context]
   cfg.no_context_files = boolean("context", "disabled");
 
+  // [session]
+  if (auto d = str("session", "dir"); !d.empty())
+    cfg.session_dir = expand_tilde(d);
+
   return cfg;
 }
 
@@ -170,6 +174,12 @@ Args merge_args(const Args &config, const Args &cli) {
   out.render = merge_str(config.render, cli.render);
   out.verbose = config.verbose || cli.verbose;
   out.no_context_files = config.no_context_files || cli.no_context_files;
+
+  // Session: CLI --session-dir wins over config
+  out.session_dir = merge_str(config.session_dir, cli.session_dir);
+  // session_continue and session_resume are CLI-only
+  out.session_continue = cli.session_continue;
+  out.session_resume = cli.session_resume;
 
   // Pass-through CLI-only fields
   out.messages = cli.messages;

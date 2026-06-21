@@ -45,7 +45,6 @@ struct StreamOptions {
       on_response;
 };
 
-
 // Each provider (OpenAI, Anthropic, etc.) implements this interface.
 // The actual implementation is in src/http/http_client.h for HTTP providers.
 
@@ -69,7 +68,6 @@ public:
   // Check if this client can handle the given model
   static std::shared_ptr<LLMClient> create(const Model &model);
 };
-
 
 class LLMClientRegistry {
 public:

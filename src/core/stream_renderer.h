@@ -12,7 +12,6 @@
 
 namespace pi::core {
 
-
 enum class RendererErrorKind {
   llm,       // LLM returned an error response
   transport, // network / HTTP error
@@ -88,7 +87,6 @@ public:
 //
 void dispatch_event(const AgentEvent &ev, Renderer &renderer);
 
-
 // Writes raw text deltas as they arrive (suitable for non-TTY / pipes).
 std::unique_ptr<Renderer> make_raw_renderer(int fd = 1);
 
@@ -105,7 +103,6 @@ std::unique_ptr<Renderer> make_auto_renderer(int fd = 1);
 
 // Legacy alias — kept for code that still refers to StreamRenderer.
 using StreamRenderer = Renderer;
-
 
 class StreamRendererRegistry {
 public:

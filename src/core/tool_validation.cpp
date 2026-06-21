@@ -25,7 +25,6 @@ using njson = nlohmann::json;
 using nlohmann::json_schema::error_handler;
 using nlohmann::json_schema::json_validator;
 
-
 static njson coerce_with_schema(const njson &value, const njson &schema);
 
 njson coerce_primitive_by_type(const njson &value, const std::string &type) {
@@ -268,7 +267,6 @@ njson coerce_with_schema(const njson &value, const njson &schema) {
   return next;
 }
 
-
 std::mutex g_cache_mutex;
 std::unordered_map<std::string, json_validator> g_validator_cache;
 
@@ -284,7 +282,6 @@ json_validator &get_or_create_validator(const std::string &schema_str,
   v.set_root_schema(schema_json);
   return v;
 }
-
 
 struct ValidationError {
   std::string path;
@@ -315,7 +312,6 @@ public:
 };
 
 } // anonymous namespace
-
 
 std::optional<std::string>
 ToolValidator::validate(std::string_view tool_name,
@@ -361,7 +357,6 @@ ToolValidator::validate(std::string_view tool_name,
 
   return oss.str();
 }
-
 
 std::optional<std::string>
 validate_tool_arguments(const ToolDefinition &tool,

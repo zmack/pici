@@ -51,7 +51,6 @@ struct RawMode {
       active = false;
     }
   }
-
 };
 
 constexpr std::string_view kInputCursor = "\033[7m \033[0m\033[D";

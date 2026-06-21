@@ -14,7 +14,6 @@
 #include <variant>
 #include <vector>
 
-
 namespace pi::core {
 
 struct TokenUsage {
@@ -35,7 +34,6 @@ struct TokenUsage {
 
 // Must hold a JSON object (not array/scalar) for tool calls.
 using ToolArguments = nlohmann::json;
-
 
 struct TextContent {
   static constexpr std::string_view type = "text";
@@ -69,7 +67,6 @@ using ContentBlock =
     std::variant<TextContent, ThinkingContent, ImageContent, ToolCall>;
 using ToolResultContentBlock = std::variant<TextContent, ImageContent>;
 
-
 enum class StopReason {
   stop,
   length,
@@ -86,13 +83,11 @@ struct UserMessage;
 struct AssistantMessage;
 struct ToolResultMessage;
 
-
 struct UserMessage {
   static constexpr std::string_view role = "user";
   std::vector<ContentBlock> content;
   std::int64_t timestamp{0};
 };
-
 
 struct AssistantMessage {
   static constexpr std::string_view role = "assistant";
@@ -108,7 +103,6 @@ struct AssistantMessage {
   std::int64_t timestamp{0};
 };
 
-
 struct ToolResultMessage {
   static constexpr std::string_view role = "toolResult";
   std::string tool_call_id;
@@ -119,9 +113,7 @@ struct ToolResultMessage {
   std::int64_t timestamp{0};
 };
 
-
 using Message = std::variant<UserMessage, AssistantMessage, ToolResultMessage>;
-
 
 enum class ThinkingLevel {
   off,
@@ -169,7 +161,6 @@ struct Model {
 
   bool operator==(const Model &) const = delete;
 };
-
 
 class ToolSchema {
 public:
@@ -237,12 +228,14 @@ public:
   validate_arguments(ToolArguments &arguments) const override;
 };
 
-
 namespace json {
 
 std::string to_json(const TokenUsage &usage);
 std::string to_json(const Message &msg);
 std::string to_json(const Model &model);
+
+// Compact (no indentation) JSON string for JSONL session files
+std::string to_jsonl_line(const Message &msg);
 
 // Parse a Message from JSON
 std::optional<Message> from_json(const std::string &s);

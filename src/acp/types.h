@@ -7,7 +7,6 @@
 
 namespace pi::acp {
 
-
 struct MessagePart {
   std::string content_type{"text/plain"};
   std::string content;
@@ -16,7 +15,6 @@ struct MessagePart {
 
 void to_json(nlohmann::json &j, const MessagePart &p);
 void from_json(const nlohmann::json &j, MessagePart &p);
-
 
 struct Message {
   std::string role; // "user" | "agent"
@@ -39,7 +37,6 @@ struct RunCreateRequest {
 
 void from_json(const nlohmann::json &j, RunCreateRequest &r);
 
-
 enum class RunStatus {
   created,
   in_progress,
@@ -51,7 +48,6 @@ enum class RunStatus {
 
 std::string_view run_status_str(RunStatus s);
 
-
 struct Run {
   std::string run_id;
   std::string agent_name;
@@ -62,7 +58,6 @@ struct Run {
 };
 
 void to_json(nlohmann::json &j, const Run &r);
-
 
 struct AgentManifest {
   std::string name;

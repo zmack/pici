@@ -510,7 +510,6 @@ public:
   }
 };
 
-
 std::string normalize_to_lf(const std::string &s) {
   std::string out;
   out.reserve(s.size());
@@ -770,7 +769,6 @@ apply_edits(const std::string &lf_content,
   }
   return result;
 }
-
 
 class EditTool final : public BuiltinTool {
 public:

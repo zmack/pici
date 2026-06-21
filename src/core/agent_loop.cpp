@@ -30,9 +30,9 @@
 #include <opentelemetry/nostd/shared_ptr.h>
 #include <opentelemetry/nostd/string_view.h>
 #include <opentelemetry/trace/context.h>
+#include <opentelemetry/trace/scope.h>
 #include <opentelemetry/trace/span.h>
 #include <opentelemetry/trace/span_metadata.h>
-#include <opentelemetry/trace/scope.h>
 #include <opentelemetry/trace/span_startoptions.h>
 #include <opentelemetry/trace/tracer.h>
 #endif
@@ -344,7 +344,6 @@ bool otel_has_thinking(const std::vector<ContentBlock> &content) {
 
 } // namespace
 
-
 std::shared_ptr<AssistantMessage>
 stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
                           StreamCallback emit, const std::stop_token &stop_tok,
@@ -510,7 +509,6 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
 
   return final_msg;
 }
-
 
 static ToolCallResult execute_tool_calls_sequential(
     AgentContext &context, const AssistantMessage &assistant_message,
@@ -715,7 +713,6 @@ static ToolCallResult execute_tool_calls_parallel(
   return result;
 }
 
-
 ToolCallResult execute_tool_calls(AgentContext &context,
                                   const AssistantMessage &assistant_message,
                                   const AgentLoopConfig &config,
@@ -741,7 +738,6 @@ ToolCallResult execute_tool_calls(AgentContext &context,
   return execute_tool_calls_parallel(context, assistant_message, tool_calls,
                                      config, emit, stop_tok, otel_ctx);
 }
-
 
 EventStream<AgentEvent, std::vector<Message>>
 run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
@@ -945,7 +941,6 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
 
   return stream;
 }
-
 
 EventStream<AgentEvent, std::vector<Message>>
 run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,

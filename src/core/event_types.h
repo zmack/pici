@@ -16,7 +16,6 @@ namespace pi::core {
 
 // Forward declaration — defined in stream.h
 
-
 struct AssistantMessageStartEvent {
   AssistantMessage partial;
 };
@@ -79,7 +78,6 @@ using AssistantMessageEvent = std::variant<
     AssistantMessageToolCallDeltaEvent, AssistantMessageToolCallEndEvent,
     AssistantMessageDoneEvent, AssistantMessageErrorEvent>;
 
-
 enum class EventType {
   agent_start,
   agent_end,
@@ -94,7 +92,6 @@ enum class EventType {
 };
 
 std::string_view event_type_to_string(EventType type);
-
 
 // Base event — all events carry a timestamp and source location for debugging
 struct EventBase {
@@ -217,13 +214,11 @@ struct ToolExecutionEndEvent : EventBase {
         result(std::move(res)), is_error(err) {}
 };
 
-
 using AgentEvent =
     std::variant<AgentStartEvent, AgentEndEvent, TurnStartEvent, TurnEndEvent,
                  MessageStartEvent, MessageUpdateEvent, MessageEndEvent,
                  ToolExecutionStartEvent, ToolExecutionUpdateEvent,
                  ToolExecutionEndEvent>;
-
 
 template <typename F>
   requires(std::is_invocable_v<F, AgentStartEvent> &&
@@ -255,7 +250,6 @@ auto map_event(const AgentEvent &ev, F &&visitor)
     -> decltype(visitor(AgentStartEvent{})) {
   return std::visit(std::forward<F>(visitor), ev);
 }
-
 
 std::ostream &operator<<(std::ostream &os, const AgentEvent &event);
 
