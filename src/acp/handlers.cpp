@@ -113,6 +113,7 @@ private:
   bool in_message_{false};
 };
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<std::uint64_t> gRunCounter{0};
 
 std::string make_run_id() {

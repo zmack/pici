@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <unistd.h>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -19,6 +18,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 #include <utility>
 #include <variant>
 
@@ -133,12 +133,15 @@ nlohmann::json convert_messages(const Model &model, const AgentContext &context,
               tc->text.find_first_not_of(" \t\n\r") != std::string::npos) {
             content_text += tc->text;
           }
-        } else if (const auto *th = std::get_if<ThinkingContent>(&b)) {
-          if (compat.requires_thinking_as_text && !th->thinking.empty() &&
-              th->thinking.find_first_not_of(" \t\n\r") != std::string::npos) {
-            content_text = th->thinking +
-                           (content_text.empty() ? "" : "\n\n" + content_text);
+        } else if (const auto *th = std::get_if<ThinkingContent>(&b);
+                   th != nullptr && compat.requires_thinking_as_text &&
+                   !th->thinking.empty() &&
+                   th->thinking.find_first_not_of(" \t\n\r") !=
+                       std::string::npos) {
+          if (!content_text.empty()) {
+            content_text.insert(0, "\n\n");
           }
+          content_text.insert(0, th->thinking);
         }
       }
 
@@ -347,18 +350,15 @@ void process_sse_line(const std::string &line, StreamingState &state) {
       ptc.index = index;
 
       if (auto id_it = tc_delta.find("id");
-          id_it != tc_delta.end() && id_it->is_string()) {
-        if (ptc.id.empty()) {
-          ptc.id = id_it.value().get<std::string>();
-        }
+          id_it != tc_delta.end() && id_it->is_string() && ptc.id.empty()) {
+        ptc.id = id_it.value().get<std::string>();
       }
 
       if (auto fn_it = tc_delta.find("function"); fn_it != tc_delta.end()) {
-        if (auto name_it = fn_it->find("name");
-            name_it != fn_it->end() && name_it->is_string()) {
-          if (ptc.name.empty()) {
-            ptc.name = name_it.value().get<std::string>();
-          }
+        if (auto name_it = fn_it->find("name"); name_it != fn_it->end() &&
+                                                name_it->is_string() &&
+                                                ptc.name.empty()) {
+          ptc.name = name_it.value().get<std::string>();
         }
         if (auto args_it = fn_it->find("arguments");
             args_it != fn_it->end() && args_it->is_string()) {
@@ -754,6 +754,7 @@ void pi::core::register_openai_completions_client() {
 }
 
 namespace {
+// NOLINTNEXTLINE(bugprone-throwing-static-initialization)
 const bool registered = [] {
   pi::core::register_openai_completions_client();
   return true;

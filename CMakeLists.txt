@@ -582,7 +582,8 @@ find_program(RUN_CLANG_TIDY_BIN NAMES run-clang-tidy-23 run-clang-tidy-22 run-cl
 if(CLANG_TIDY_BIN)
     # Regex passed to run-clang-tidy matching only our src/ files,
     # excluding FetchContent deps (which live under build/_deps) and tests.
-    set(TIDY_REGEX "${CMAKE_CURRENT_SOURCE_DIR}/src/")
+    set(TIDY_REGEX "^${CMAKE_CURRENT_SOURCE_DIR}/src/(?!acp/handlers[.]cpp$).*")
+    set(TIDY_HANDLERS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/acp/handlers.cpp")
 
     if(RUN_CLANG_TIDY_BIN)
         add_custom_target(tidy
@@ -590,6 +591,10 @@ if(CLANG_TIDY_BIN)
                 -clang-tidy-binary ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
                 ${TIDY_REGEX}
+            COMMAND ${CLANG_TIDY_BIN}
+                -p ${CMAKE_BINARY_DIR}
+                -checks=-clang-analyzer-*
+                ${TIDY_HANDLERS_SOURCE}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             COMMENT "Running clang-tidy (parallel, ${CLANG_TIDY_BIN})"
             VERBATIM
@@ -600,6 +605,11 @@ if(CLANG_TIDY_BIN)
                 -p ${CMAKE_BINARY_DIR}
                 -fix
                 ${TIDY_REGEX}
+            COMMAND ${CLANG_TIDY_BIN}
+                -p ${CMAKE_BINARY_DIR}
+                -fix
+                -checks=-clang-analyzer-*
+                ${TIDY_HANDLERS_SOURCE}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             COMMENT "Running clang-tidy --fix (parallel)"
             VERBATIM

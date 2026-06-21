@@ -125,8 +125,9 @@ struct AgentStartEvent : EventBase {
 struct AgentEndEvent : EventBase {
   static constexpr EventType type = EventType::agent_end;
   std::vector<Message> messages;
-  AgentEndEvent(std::vector<Message> msgs,
-                std::source_location loc = std::source_location::current())
+  explicit AgentEndEvent(
+      std::vector<Message> msgs,
+      std::source_location loc = std::source_location::current())
       : EventBase(EventType::agent_end, loc), messages(std::move(msgs)) {}
 };
 
@@ -150,8 +151,8 @@ struct TurnEndEvent : EventBase {
 struct MessageStartEvent : EventBase {
   static constexpr EventType type = EventType::message_start;
   Message message;
-  MessageStartEvent(Message msg,
-                    std::source_location loc = std::source_location::current())
+  explicit MessageStartEvent(
+      Message msg, std::source_location loc = std::source_location::current())
       : EventBase(EventType::message_start, loc), message(std::move(msg)) {}
 };
 
@@ -168,8 +169,8 @@ struct MessageUpdateEvent : EventBase {
 struct MessageEndEvent : EventBase {
   static constexpr EventType type = EventType::message_end;
   Message message;
-  MessageEndEvent(Message msg,
-                  std::source_location loc = std::source_location::current())
+  explicit MessageEndEvent(
+      Message msg, std::source_location loc = std::source_location::current())
       : EventBase(EventType::message_end, loc), message(std::move(msg)) {}
 };
 
