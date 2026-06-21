@@ -3,8 +3,10 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
+#include <ios>
 #include <random>
 #include <sstream>
+#include <string>
 
 namespace pi::core {
 

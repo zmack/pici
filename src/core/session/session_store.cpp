@@ -1,21 +1,35 @@
 #include "core/session/session_store.h"
 #include "core/session/session_id.h"
+#include "core/message_types.h"
+#include "core/session/session_record.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ios>
+#include <iterator>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 namespace pi::core {
 
-static SessionHeader parse_header_line(const nlohmann::json &j,
-                                       const std::string &fallback_id) {
+namespace {
+
+SessionHeader parse_header_line(const nlohmann::json &j, // NOLINT(misc-include-cleaner)
+                                const std::string &fallback_id) {
   SessionHeader hdr;
   hdr.id = j.value("id", fallback_id);
   hdr.created = j.value("created", std::int64_t{0});
@@ -30,9 +44,10 @@ static SessionHeader parse_header_line(const nlohmann::json &j,
   return hdr;
 }
 
-static SessionRecord load_recursive(const std::filesystem::path &base_dir,
-                                    const std::string &session_id,
-                                    std::set<std::string> &visited) {
+// NOLINTNEXTLINE(misc-no-recursion)
+SessionRecord load_recursive(const std::filesystem::path &base_dir,
+                             const std::string &session_id,
+                             std::set<std::string> &visited) {
   if (!visited.insert(session_id).second)
     throw std::runtime_error("session cycle detected at: " + session_id);
 
@@ -67,12 +82,11 @@ static SessionRecord load_recursive(const std::filesystem::path &base_dir,
     }
 
     if (j.contains("role")) {
-      auto msg = json::from_json(line);
-      if (msg)
+      if (auto msg = json::from_json(line))
         messages.push_back(std::move(*msg));
-    } else if (j.value("type", std::string{}) == "meta") {
-      if (j.contains("name") && j["name"].is_string())
-        header.name = j["name"].get<std::string>();
+    } else if (j.value("type", std::string{}) == "meta" &&
+               j.contains("name") && j["name"].is_string()) {
+      header.name = j["name"].get<std::string>();
     }
   }
 
@@ -91,7 +105,8 @@ static SessionRecord load_recursive(const std::filesystem::path &base_dir,
     std::vector<Message> full;
     full.reserve(offset + messages.size());
     full.insert(full.end(), parent.messages.begin(),
-                parent.messages.begin() + static_cast<std::ptrdiff_t>(offset));
+                std::next(parent.messages.begin(),
+                          static_cast<std::ptrdiff_t>(offset)));
     full.insert(full.end(), messages.begin(), messages.end());
     messages = std::move(full);
   }
@@ -100,13 +115,15 @@ static SessionRecord load_recursive(const std::filesystem::path &base_dir,
                        .messages = std::move(messages)};
 }
 
+} // namespace
+
 std::filesystem::path SessionStore::default_sessions_dir() {
   std::filesystem::path base;
   if (const char *xdg = std::getenv("XDG_DATA_HOME");
-      xdg != nullptr && xdg[0] != '\0') {
+      xdg != nullptr && *xdg != '\0') {
     base = xdg;
   } else if (const char *home = std::getenv("HOME");
-             home != nullptr && home[0] != '\0') {
+             home != nullptr && *home != '\0') {
     base = std::filesystem::path(home) / ".local" / "share";
   } else {
     base = ".";
@@ -252,8 +269,9 @@ std::vector<SessionHeader> SessionStore::list() const {
     }
   }
 
-  std::sort(entries.begin(), entries.end(),
-            [](const Entry &a, const Entry &b) { return a.first > b.first; });
+  std::ranges::sort(entries, [](const Entry &a, const Entry &b) {
+    return a.first > b.first;
+  });
 
   std::vector<SessionHeader> result;
   result.reserve(entries.size());

@@ -19,6 +19,7 @@ class SessionStore {
 public:
   explicit SessionStore(std::filesystem::path base_dir = {});
 
+  ~SessionStore() = default;
   SessionStore(const SessionStore &) = delete;
   SessionStore &operator=(const SessionStore &) = delete;
   SessionStore(SessionStore &&) = delete;
