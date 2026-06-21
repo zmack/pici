@@ -203,6 +203,22 @@ int main() {
         CHECK_EQ(json["chat_template_kwargs"]["enable_thinking"].get<bool>(), false);
     });
 
+    tests::register_test("build_request_json: fireworks compatibility streams", []() {
+        OpenAICompatibleClient client;
+        auto model = make_model("accounts/fireworks/models/glm-5p2", "fireworks");
+        model.base_url = "https://api.fireworks.ai/inference/v1";
+        auto ctx = make_context();
+        StreamOptions opts;
+        opts.max_tokens = 256;
+
+        auto json = client.build_request_json(model, ctx, opts);
+
+        CHECK_EQ(json["stream"].get<bool>(), true);
+        CHECK(json.contains("max_tokens"));
+        CHECK(!json.contains("max_completion_tokens"));
+        CHECK(!json.contains("stream_options"));
+    });
+
     tests::register_test("map_finish_reason: stop", []() {
         CHECK_EQ(OpenAICompatibleClient::map_finish_reason("stop"), StopReason::stop);
         CHECK_EQ(OpenAICompatibleClient::map_finish_reason("end"), StopReason::stop);

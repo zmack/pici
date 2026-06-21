@@ -490,7 +490,6 @@ OpenAICompatibleClient::detect_compat(const Model &model) {
       !is_moonshot && !is_cloudflare_gateway && !is_llamacpp && !is_local;
   compat.cache_control_format = std::move(cache_control_format);
   compat.disables_thinking_by_default = is_llamacpp || is_local;
-  compat.uses_non_streaming = is_fireworks;
   return compat;
 }
 
