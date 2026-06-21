@@ -612,8 +612,6 @@ static ToolCallResult execute_tool_calls_parallel(
 
   for (std::size_t i = 0; i < n; ++i) {
     const auto &tc = tool_calls[i];
-    emit(ToolExecutionStartEvent(tc.id, tc.name, tool_call_args_json(tc),
-                                 std::source_location::current()));
 
 #ifdef PI_CPP_OTEL_ENABLED
     // Create the tool.call span on the worker thread; it will be ended on the
@@ -642,9 +640,9 @@ static ToolCallResult execute_tool_calls_parallel(
         tool_span->SetStatus(opentelemetry::trace::StatusCode::kError, "");
       tool_span->End();
 #endif
-      emit(ToolExecutionEndEvent(
-          immediate->tool_call.id, immediate->tool_call.name, immediate->result,
-          immediate->is_error, std::source_location::current()));
+      // ToolExecutionEndEvent is emitted after all futures complete,
+      // in source order, to keep event ordering consistent with the
+      // sequential path and the renderer's expectations.
       slots[i] = std::move(*immediate);
       continue;
     }
@@ -690,9 +688,11 @@ static ToolCallResult execute_tool_calls_parallel(
             tool_span->SetStatus(opentelemetry::trace::StatusCode::kError, "");
           tool_span->End();
 #endif
-          emit(ToolExecutionEndEvent(call.tool_call.id, call.tool_call.name,
-                                     finalized.result, finalized.is_error,
-                                     std::source_location::current()));
+          // ToolExecutionEndEvent is NOT emitted here — it is emitted
+          // after all futures complete, in source order, so that the
+          // renderer sees a consistent event sequence matching the
+          // sequential path:
+          //   ToolExecutionStart → MessageStart → MessageEnd → ToolExecutionEnd
           return std::make_pair(idx, std::move(finalized));
         }));
   }
@@ -710,10 +710,21 @@ static ToolCallResult execute_tool_calls_parallel(
     }
   }
 
+  // Emit tool result events in source order, matching the sequential
+  // path's grouping: ToolExecutionStart → MessageStart → MessageEnd → ToolExecutionEnd.
+  // Start is emitted here (not before async launch) so each tool's start
+  // and result appear as a unit in the renderer.
   for (const auto &finalized : finalized_calls) {
+    emit(ToolExecutionStartEvent(finalized.tool_call.id,
+                                 finalized.tool_call.name,
+                                 tool_call_args_json(finalized.tool_call),
+                                 std::source_location::current()));
     auto msg = make_tool_result_message(finalized.tool_call, finalized.result);
     emit(MessageStartEvent(msg, std::source_location::current()));
     emit(MessageEndEvent(msg, std::source_location::current()));
+    emit(ToolExecutionEndEvent(finalized.tool_call.id, finalized.tool_call.name,
+                               finalized.result, finalized.is_error,
+                               std::source_location::current()));
     result.messages.push_back(std::move(msg));
   }
 

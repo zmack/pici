@@ -291,7 +291,8 @@ public:
   void on_tool_end(std::string_view call_id, std::string_view name,
                    const core::ToolResult &result, bool is_error) override {
     base_.on_tool_end(call_id, name, result, is_error);
-    std::cout << "\033[38;5;245m" << format_tool_result(result.content())
+    std::cout << "\033[38;5;245m" << "  [" << name << "] "
+              << format_tool_result(result.content())
               << "\033[0m\n"
               << std::flush;
   }

@@ -1064,7 +1064,7 @@ private:
 };
 
 void test_parallel_completion_vs_source_order() {
-    tests::register_test("Parallel: completion order for end events, source order for results", []() {
+    tests::register_test("Parallel: all events in source order (end events no longer completion-ordered)", []() {
         Model model;
         model.id = "test-model";
         model.api = "test";
@@ -1147,10 +1147,14 @@ void test_parallel_completion_vs_source_order() {
             (void)ev;
         }
 
-        // B ends before A (completion order)
+        // Both end events and MessageStart events appear in source order
+        // (A then B), NOT completion order.  The parallel path emits
+        // ToolExecutionEndEvent after all futures complete, grouped with
+        // MessageStart/MessageEnd, to keep the renderer's event stream
+        // consistent with the sequential path.
         CHECK_EQ(end_event_order.size(), std::size_t(2));
-        CHECK_EQ(end_event_order[0], std::string("tool_b"));
-        CHECK_EQ(end_event_order[1], std::string("tool_a"));
+        CHECK_EQ(end_event_order[0], std::string("tool_a"));
+        CHECK_EQ(end_event_order[1], std::string("tool_b"));
 
         // MessageStart events appear in source order A then B
         CHECK_EQ(message_start_order.size(), std::size_t(2));
