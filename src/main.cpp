@@ -224,6 +224,48 @@ static std::unique_ptr<core::Renderer> make_renderer(const cli::Args &args) {
   return core::make_auto_renderer(STDOUT_FILENO);
 }
 
+static std::string format_tool_result(std::string_view content) {
+  while (!content.empty() && (content.back() == '\n' || content.back() == '\r'))
+    content.remove_suffix(1);
+
+  std::vector<std::string_view> lines;
+  std::size_t pos = 0;
+  while (pos <= content.size()) {
+    const std::size_t next = content.find('\n', pos);
+    if (next == std::string_view::npos) {
+      lines.push_back(content.substr(pos));
+      break;
+    }
+    lines.push_back(content.substr(pos, next - pos));
+    pos = next + 1;
+  }
+  if (lines.empty())
+    lines.push_back({});
+
+  std::vector<std::string_view> visible;
+  std::string omitted;
+  if (lines.size() > 5) {
+    visible.push_back(lines[0]);
+    visible.push_back(lines[1]);
+    omitted =
+        "… +" + std::to_string(lines.size() - 4) + " lines omitted";
+    visible.push_back(omitted);
+    visible.push_back(lines[lines.size() - 2]);
+    visible.push_back(lines[lines.size() - 1]);
+  } else {
+    visible = std::move(lines);
+  }
+
+  std::string out;
+  for (std::size_t i = 0; i < visible.size(); ++i) {
+    out += (i == 0) ? " -> " : "    ";
+    out += visible[i];
+    if (i + 1 < visible.size())
+      out += '\n';
+  }
+  return out;
+}
+
 // A renderer adapter that adds verbose tool/usage output on top of any base
 // renderer.
 class VerboseRenderer final : public core::Renderer {
@@ -239,14 +281,19 @@ public:
   }
   void on_thinking_end() override { base_.on_thinking_end(); }
 
-  void on_tool_start(std::string_view, std::string_view name,
-                     std::string_view) override {
-    std::cout << "\n[tool: " << name << "]\n" << std::flush;
+  void on_tool_start(std::string_view call_id, std::string_view name,
+                     std::string_view args_json) override {
+    base_.on_tool_start(call_id, name, args_json);
+    std::cout << "\n[tool: " << name << "("
+              << "\033[38;5;214m" << args_json << "\033[0m" << ")]\n"
+              << std::flush;
   }
-  void on_tool_end(std::string_view, std::string_view,
-                   const core::ToolResult &result, bool) override {
-    if (verbose_)
-      std::cout << result.content() << "\n" << std::flush;
+  void on_tool_end(std::string_view call_id, std::string_view name,
+                   const core::ToolResult &result, bool is_error) override {
+    base_.on_tool_end(call_id, name, result, is_error);
+    std::cout << "\033[38;5;245m" << format_tool_result(result.content())
+              << "\033[0m\n"
+              << std::flush;
   }
 
   void on_message_end(const core::TokenUsage &u) override {

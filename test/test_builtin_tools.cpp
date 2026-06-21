@@ -329,6 +329,9 @@ void test_discovery_tools() {
     auto find_result = find->execute("2", R"({"pattern":"**/*.cpp"})");
     CHECK(find_result->content().find("src/main.cpp") != std::string::npos);
 
+    auto readme_result = find->execute("3", R"({"pattern":"**/README*"})");
+    CHECK(readme_result->content().find("README.md") != std::string::npos);
+
     auto grep_result = grep->execute("3", R"({"pattern":"needle"})");
     CHECK(grep_result->content().find("README.md:1: needle") !=
           std::string::npos);

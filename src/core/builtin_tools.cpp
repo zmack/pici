@@ -261,8 +261,13 @@ std::string glob_to_regex(std::string_view glob) {
     const char ch = glob[i];
     if (ch == '*') {
       if (i + 1 < glob.size() && glob[i + 1] == '*') {
-        out += ".*";
-        ++i;
+        if (i + 2 < glob.size() && glob[i + 2] == '/') {
+          out += "(?:.*/)?";
+          i += 2;
+        } else {
+          out += ".*";
+          ++i;
+        }
       } else {
         out += "[^/]*";
       }
