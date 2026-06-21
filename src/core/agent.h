@@ -4,12 +4,14 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <optional>
 #include <set>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "core/agent_loop.h"
@@ -77,6 +79,12 @@ public:
 
   Agent();
   explicit Agent(const Options &options);
+  ~Agent();
+
+  Agent(const Agent &) = delete;
+  Agent &operator=(const Agent &) = delete;
+  Agent(Agent &&) = delete;
+  Agent &operator=(Agent &&) = delete;
 
   // ── State access ───────────────────────────────────────────────────
 
@@ -133,7 +141,11 @@ private:
   std::mutex followup_mutex_;
   std::vector<Message> followup_queue_;
 
+  std::mutex worker_mutex_;
+  std::vector<std::jthread> workers_;
+
   // Internal helpers
+  void join_workers();
   void run_with_lifecycle(const std::function<void(std::stop_token)> &executor);
   AgentContext create_context_snapshot();
   AgentLoopConfig create_loop_config();

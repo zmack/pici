@@ -153,8 +153,10 @@ public:
       return *this;
     }
 
-    bool operator==(const iterator &) const { return !has_value; }
-    bool operator!=(const iterator &) const { return has_value; }
+    bool operator==(const iterator &other) const {
+      return has_value == other.has_value;
+    }
+    bool operator!=(const iterator &other) const { return !(*this == other); }
 
   private:
     Event current_;

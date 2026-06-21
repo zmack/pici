@@ -64,6 +64,11 @@ Agent::Agent(const Options &options)
     : state_(options.system_prompt, options.model, options.thinking_level),
       options_(options) {}
 
+Agent::~Agent() {
+  abort();
+  join_workers();
+}
+
 void Agent::add_tool(std::shared_ptr<const ToolDefinition> tool) {
   state_.add_tool(std::move(tool));
 }
@@ -101,11 +106,15 @@ Agent::prompt(std::vector<Message> messages) {
         return {};
       });
 
+  join_workers();
+
   // Run asynchronously
   auto ctx = create_context_snapshot();
   auto config = create_loop_config();
 
-  std::thread([this, messages, ctx, config, stream]() mutable {
+  {
+    std::scoped_lock lock(worker_mutex_);
+    workers_.emplace_back([this, messages, ctx, config, stream]() mutable {
     run_with_lifecycle([this, messages = std::move(messages),
                         ctx = std::move(ctx), config = std::move(config),
                         stream](const std::stop_token &stop_tok) mutable {
@@ -124,7 +133,8 @@ Agent::prompt(std::vector<Message> messages) {
 
       stream.wait();
     });
-  }).detach();
+    });
+  }
 
   return stream;
 }
@@ -177,11 +187,15 @@ EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
         return {};
       });
 
+  join_workers();
+
   auto context = create_context_snapshot();
   auto config = create_loop_config();
 
-  std::thread([this, context = std::move(context), config = std::move(config),
-               stream]() mutable {
+  {
+    std::scoped_lock lock(worker_mutex_);
+    workers_.emplace_back([this, context = std::move(context),
+                           config = std::move(config), stream]() mutable {
     run_with_lifecycle([this, context = std::move(context),
                         config = std::move(config),
                         stream](const std::stop_token &stop_tok) mutable {
@@ -195,7 +209,8 @@ EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
 
       stream.wait();
     });
-  }).detach();
+    });
+  }
 
   return stream;
 }
@@ -247,6 +262,14 @@ void Agent::wait_for_idle() {
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────
+
+void Agent::join_workers() {
+  std::vector<std::jthread> workers;
+  {
+    std::scoped_lock lock(worker_mutex_);
+    workers.swap(workers_);
+  }
+}
 
 void Agent::run_with_lifecycle(
     const std::function<void(std::stop_token)> &executor) {

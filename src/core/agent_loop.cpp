@@ -131,6 +131,12 @@ struct PreparedToolCall {
   std::string args_json;
 };
 
+struct ExecutedToolCall {
+  PreparedToolCall call;
+  std::shared_ptr<ToolResult> result;
+  bool is_error{false};
+};
+
 // Helper: emit a tool result message pair (start + end)
 void emit_tool_result(const ToolCall &tc, std::shared_ptr<ToolResult> result,
                       bool is_err, const StreamCallback &emit) {
@@ -370,7 +376,8 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
   }
 
   auto llm_messages = config.convert_to_llm(messages);
-  (void)llm_messages;
+  AgentContext llm_context = context;
+  llm_context.messages = std::move(llm_messages);
 
   auto client = config.llm_client;
   if (!client) {
@@ -467,7 +474,7 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
   };
 
   auto final_msg =
-      client->stream(config.model, context, opts, on_event, stop_tok);
+      client->stream(config.model, llm_context, opts, on_event, stop_tok);
 
   if (added_partial) {
     context.messages.back() = *final_msg;
@@ -601,7 +608,7 @@ static ToolCallResult execute_tool_calls_parallel(
   ToolCallResult result;
   const std::size_t n = tool_calls.size();
   std::vector<std::optional<FinalizedToolCall>> slots(n);
-  std::vector<std::future<std::pair<std::size_t, FinalizedToolCall>>> pending;
+  std::vector<std::future<std::pair<std::size_t, ExecutedToolCall>>> pending;
 
   for (std::size_t i = 0; i < n; ++i) {
     const auto &tc = tool_calls[i];
@@ -644,7 +651,7 @@ static ToolCallResult execute_tool_calls_parallel(
 
     auto call = std::get<PreparedToolCall>(std::move(prepared));
     pending.push_back(std::async(
-        std::launch::async, [&context, &assistant_message, &config, emit,
+        std::launch::async, [&config, emit,
                              stop_tok, call = std::move(call), idx = i
 #ifdef PI_CPP_OTEL_ENABLED
                              ,
