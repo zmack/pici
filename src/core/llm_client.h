@@ -45,7 +45,6 @@ struct StreamOptions {
       on_response;
 };
 
-// ─── LLMClient: Abstraction over LLM API calls ─────────────────────────────
 
 // Each provider (OpenAI, Anthropic, etc.) implements this interface.
 // The actual implementation is in src/http/http_client.h for HTTP providers.
@@ -71,7 +70,6 @@ public:
   static std::shared_ptr<LLMClient> create(const Model &model);
 };
 
-// ─── LLMClient registry ────────────────────────────────────────────────────
 
 class LLMClientRegistry {
 public:

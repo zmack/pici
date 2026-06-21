@@ -15,7 +15,6 @@
 
 namespace pi::core {
 
-// ─── StopReason ───────────────────────────────────────────────────────────
 
 std::string_view stop_reason_to_string(StopReason reason) {
   switch (reason) {
@@ -47,7 +46,6 @@ StopReason stop_reason_from_string(std::string_view s) {
   return StopReason::error;
 }
 
-// ─── ThinkingLevel ─────────────────────────────────────────────────────────
 
 std::string_view thinking_level_to_string(ThinkingLevel level) {
   switch (level) {
@@ -83,7 +81,6 @@ ThinkingLevel thinking_level_from_string(std::string_view s) {
   return ThinkingLevel::off;
 }
 
-// ─── Stream operators ──────────────────────────────────────────────────────
 
 std::ostream &operator<<(std::ostream &os, StopReason reason) {
   os << stop_reason_to_string(reason);
@@ -107,7 +104,6 @@ std::ostream &operator<<(std::ostream &os, ToolExecutionMode mode) {
   return os;
 }
 
-// ─── JsonSchemaToolSchema ──────────────────────────────────────────────────
 
 std::optional<std::string>
 JsonSchemaToolSchema::validate_arguments(ToolArguments &arguments) const {
@@ -116,7 +112,6 @@ JsonSchemaToolSchema::validate_arguments(ToolArguments &arguments) const {
   return ToolValidator::validate("(schema)", serialize(), arguments);
 }
 
-// ─── JSON serialization helpers ────────────────────────────────────────────
 
 namespace json {
 

@@ -14,7 +14,6 @@
 #include <variant>
 #include <vector>
 
-// ─── Token usage and cost ───────────────────────────────────────────────────
 
 namespace pi::core {
 
@@ -34,11 +33,9 @@ struct TokenUsage {
   } cost{};
 };
 
-// ─── Tool arguments ─────────────────────────────────────────────────────────
 // Must hold a JSON object (not array/scalar) for tool calls.
 using ToolArguments = nlohmann::json;
 
-// ─── Content blocks ─────────────────────────────────────────────────────────
 
 struct TextContent {
   static constexpr std::string_view type = "text";
@@ -72,7 +69,6 @@ using ContentBlock =
     std::variant<TextContent, ThinkingContent, ImageContent, ToolCall>;
 using ToolResultContentBlock = std::variant<TextContent, ImageContent>;
 
-// ─── Message types ──────────────────────────────────────────────────────────
 
 enum class StopReason {
   stop,
@@ -90,7 +86,6 @@ struct UserMessage;
 struct AssistantMessage;
 struct ToolResultMessage;
 
-// ─── UserMessage ────────────────────────────────────────────────────────────
 
 struct UserMessage {
   static constexpr std::string_view role = "user";
@@ -98,7 +93,6 @@ struct UserMessage {
   std::int64_t timestamp{0};
 };
 
-// ─── AssistantMessage ───────────────────────────────────────────────────────
 
 struct AssistantMessage {
   static constexpr std::string_view role = "assistant";
@@ -114,7 +108,6 @@ struct AssistantMessage {
   std::int64_t timestamp{0};
 };
 
-// ─── ToolResultMessage ──────────────────────────────────────────────────────
 
 struct ToolResultMessage {
   static constexpr std::string_view role = "toolResult";
@@ -126,11 +119,9 @@ struct ToolResultMessage {
   std::int64_t timestamp{0};
 };
 
-// ─── Message (discriminated union) ─────────────────────────────────────────
 
 using Message = std::variant<UserMessage, AssistantMessage, ToolResultMessage>;
 
-// ─── Model ──────────────────────────────────────────────────────────────────
 
 enum class ThinkingLevel {
   off,
@@ -179,7 +170,6 @@ struct Model {
   bool operator==(const Model &) const = delete;
 };
 
-// ─── Tool ───────────────────────────────────────────────────────────────────
 
 class ToolSchema {
 public:
@@ -237,7 +227,6 @@ public:
   }
 };
 
-// ─── JsonSchemaToolSchema ───────────────────────────────────────────────────
 // Base class for tools that validate via ToolValidator (json-schema-validator).
 // Subclasses only need to implement serialize() and to_definition().
 // validate_arguments applies TypeBox-style coercion before structural
@@ -248,7 +237,6 @@ public:
   validate_arguments(ToolArguments &arguments) const override;
 };
 
-// ─── JSON helpers ───────────────────────────────────────────────────────────
 
 namespace json {
 

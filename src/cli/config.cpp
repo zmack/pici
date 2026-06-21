@@ -16,7 +16,6 @@
 
 namespace pi::cli {
 
-// ─── Path helpers
 // ─────────────────────────────────────────────────────────────
 
 static std::string expand_tilde(std::string path) {
@@ -40,7 +39,6 @@ std::filesystem::path default_config_path() {
   return base / "pici" / "config.toml";
 }
 
-// ─── TOML loading
 // ─────────────────────────────────────────────────────────────
 
 Args load_config(const std::filesystem::path &path) {
@@ -123,7 +121,6 @@ Args load_config(const std::filesystem::path &path) {
   return cfg;
 }
 
-// ─── Merge
 // ────────────────────────────────────────────────────────────────────
 
 Args merge_args(const Args &config, const Args &cli) {
@@ -190,7 +187,6 @@ Args merge_args(const Args &config, const Args &cli) {
   return out;
 }
 
-// ─── Full pipeline
 // ────────────────────────────────────────────────────────────
 
 Args load_and_merge(int argc, char *argv[]) {

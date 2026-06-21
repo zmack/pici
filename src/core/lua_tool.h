@@ -22,7 +22,6 @@ load_lua_tool(const std::filesystem::path &path);
 std::vector<std::shared_ptr<const ToolDefinition>>
 load_lua_tools(const std::filesystem::path &directory);
 
-// ─── Lua hooks ───────────────────────────────────────────────────────────────
 //
 // A hooks file is a .lua script that returns a table with any of the following
 // optional functions:
@@ -146,7 +145,6 @@ struct LuaHooks {
       on_command;
 };
 
-// ─── Test runner ─────────────────────────────────────────────────────────────
 //
 // A test file calls pici.test.run(name, fn) to register tests. Inside fn:
 //   pici.test.eq(a, b [,msg])  — assert equality

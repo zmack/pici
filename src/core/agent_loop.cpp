@@ -344,7 +344,6 @@ bool otel_has_thinking(const std::vector<ContentBlock> &content) {
 
 } // namespace
 
-// ─── stream_assistant_response ─────────────────────────────────────────────
 
 std::shared_ptr<AssistantMessage>
 stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
@@ -512,7 +511,6 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
   return final_msg;
 }
 
-// ─── execute_tool_calls (sequential) ───────────────────────────────────────
 
 static ToolCallResult execute_tool_calls_sequential(
     AgentContext &context, const AssistantMessage &assistant_message,
@@ -593,7 +591,6 @@ static ToolCallResult execute_tool_calls_sequential(
   return result;
 }
 
-// ─── execute_tool_calls (parallel) ─────────────────────────────────────────
 // Note: In a full implementation, tools would execute concurrently.
 // For now, we execute them sequentially (simpler, no async complexity).
 
@@ -718,7 +715,6 @@ static ToolCallResult execute_tool_calls_parallel(
   return result;
 }
 
-// ─── execute_tool_calls (public entry) ─────────────────────────────────────
 
 ToolCallResult execute_tool_calls(AgentContext &context,
                                   const AssistantMessage &assistant_message,
@@ -746,7 +742,6 @@ ToolCallResult execute_tool_calls(AgentContext &context,
                                      config, emit, stop_tok, otel_ctx);
 }
 
-// ─── run_agent_loop (main loop) ────────────────────────────────────────────
 
 EventStream<AgentEvent, std::vector<Message>>
 run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
@@ -951,7 +946,6 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
   return stream;
 }
 
-// ─── run_agent_loop_continue ───────────────────────────────────────────────
 
 EventStream<AgentEvent, std::vector<Message>>
 run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,

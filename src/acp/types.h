@@ -7,7 +7,6 @@
 
 namespace pi::acp {
 
-// ─── MessagePart ─────────────────────────────────────────────────────────────
 
 struct MessagePart {
   std::string content_type{"text/plain"};
@@ -18,7 +17,6 @@ struct MessagePart {
 void to_json(nlohmann::json &j, const MessagePart &p);
 void from_json(const nlohmann::json &j, MessagePart &p);
 
-// ─── Message ─────────────────────────────────────────────────────────────────
 
 struct Message {
   std::string role; // "user" | "agent"
@@ -28,7 +26,6 @@ struct Message {
 void to_json(nlohmann::json &j, const Message &m);
 void from_json(const nlohmann::json &j, Message &m);
 
-// ─── RunCreateRequest
 // ────────────────────────────────────────────────────────��
 
 enum class RunMode { sync, stream };
@@ -42,7 +39,6 @@ struct RunCreateRequest {
 
 void from_json(const nlohmann::json &j, RunCreateRequest &r);
 
-// ─── RunStatus ───────────────────────────────────────────────────────────────
 
 enum class RunStatus {
   created,
@@ -55,7 +51,6 @@ enum class RunStatus {
 
 std::string_view run_status_str(RunStatus s);
 
-// ─── Run ─────────────────────────────────────────────────────────────────────
 
 struct Run {
   std::string run_id;
@@ -68,7 +63,6 @@ struct Run {
 
 void to_json(nlohmann::json &j, const Run &r);
 
-// ─── AgentManifest ───────────────────────────────────────────────────────────
 
 struct AgentManifest {
   std::string name;

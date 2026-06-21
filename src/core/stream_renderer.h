@@ -12,7 +12,6 @@
 
 namespace pi::core {
 
-// ─── Error kind ──────────────────────────────────────────────────────────────
 
 enum class RendererErrorKind {
   llm,       // LLM returned an error response
@@ -31,7 +30,6 @@ enum class RendererScrollCommand {
   bottom,
 };
 
-// ─── Renderer ────────────────────────────────────────────────────────────────
 //
 // Receives presentation-level events derived from the agent's AgentEvent
 // stream.  All methods except on_text_delta have default no-op
@@ -80,7 +78,6 @@ public:
   virtual void on_scroll(RendererScrollCommand command) {}
 };
 
-// ─── dispatch_event ──────────────────────────────────────────────────────────
 //
 // Translates one AgentEvent into the appropriate Renderer call(s).
 // Call this inside any EventStream iteration loop to wire a renderer without
@@ -91,7 +88,6 @@ public:
 //
 void dispatch_event(const AgentEvent &ev, Renderer &renderer);
 
-// ─── Built-in renderer factories ─────────────────────────────────────────────
 
 // Writes raw text deltas as they arrive (suitable for non-TTY / pipes).
 std::unique_ptr<Renderer> make_raw_renderer(int fd = 1);
@@ -110,7 +106,6 @@ std::unique_ptr<Renderer> make_auto_renderer(int fd = 1);
 // Legacy alias — kept for code that still refers to StreamRenderer.
 using StreamRenderer = Renderer;
 
-// ─── Registry ────────────────────────────────────────────────────────────────
 
 class StreamRendererRegistry {
 public:

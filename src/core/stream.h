@@ -238,7 +238,6 @@ private:
   std::shared_ptr<State> state_;
 };
 
-// ─── AsyncEventStream: Non-blocking stream with callbacks ───────────────────
 
 class AsyncEventStream {
 public:

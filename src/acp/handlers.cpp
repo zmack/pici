@@ -25,7 +25,6 @@ namespace pi::acp {
 
 namespace {
 
-// ─── AcpSseRenderer ──────────────────────────────────────────────────────────
 // Translates Renderer callbacks into ACP SSE events.
 
 class AcpSseRenderer final : public core::Renderer {
@@ -114,7 +113,6 @@ private:
   bool in_message_{false};
 };
 
-// ─── ID generation ───────────────────────────────────────────────────────────
 
 std::atomic<std::uint64_t> gRunCounter{0};
 
@@ -125,7 +123,6 @@ std::string make_run_id() {
   return "run-" + std::to_string(ts) + "-" + std::to_string(++gRunCounter);
 }
 
-// ─── pici Message → ACP Message ──────────────────────────────────────────────
 
 // Extract plain text from a pici AssistantMessage's content blocks.
 std::string assistant_text(const core::AssistantMessage &am) {
@@ -167,7 +164,6 @@ messages_from_run(const std::string &agent_name,
   return out;
 }
 
-// ─── SyncRenderer: collects output without emitting SSE ──────────────────────
 
 class SyncRenderer final : public core::Renderer {
 public:
@@ -185,7 +181,6 @@ private:
   RunStatus status_{RunStatus::completed};
 };
 
-// ─── HTTP helpers
 // ─────────────────────────────────────────────────────────────
 
 void json_response(httplib::Response &res, int status,
@@ -203,7 +198,6 @@ nlohmann::json parse_body(const httplib::Request &req) {
 
 } // namespace
 
-// ─── Route registration
 // ───────────────────────────────────────────────────────
 
 void register_routes(httplib::Server &svr, const ServerConfig &cfg,

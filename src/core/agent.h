@@ -20,7 +20,6 @@
 
 namespace pi::core {
 
-// ─── Agent: High-level stateful agent wrapper ──────────────────────────────
 
 class Agent {
 public:

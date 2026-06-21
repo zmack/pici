@@ -25,7 +25,6 @@ using njson = nlohmann::json;
 using nlohmann::json_schema::error_handler;
 using nlohmann::json_schema::json_validator;
 
-// ─── Coercion (mirrors validation.ts::coerceWithJsonSchema) ───────────────
 
 static njson coerce_with_schema(const njson &value, const njson &schema);
 
@@ -269,7 +268,6 @@ njson coerce_with_schema(const njson &value, const njson &schema) {
   return next;
 }
 
-// ─── Validator cache ───────────────────────────────────────────────────────
 
 std::mutex g_cache_mutex;
 std::unordered_map<std::string, json_validator> g_validator_cache;
@@ -287,7 +285,6 @@ json_validator &get_or_create_validator(const std::string &schema_str,
   return v;
 }
 
-// ─── Error collector ───────────────────────────────────────────────────────
 
 struct ValidationError {
   std::string path;
@@ -319,7 +316,6 @@ public:
 
 } // anonymous namespace
 
-// ─── ToolValidator::validate ───────────────────────────────────────────────
 
 std::optional<std::string>
 ToolValidator::validate(std::string_view tool_name,
@@ -366,7 +362,6 @@ ToolValidator::validate(std::string_view tool_name,
   return oss.str();
 }
 
-// ─── validate_tool_arguments ───────────────────────────────────────────────
 
 std::optional<std::string>
 validate_tool_arguments(const ToolDefinition &tool,

@@ -11,7 +11,6 @@ namespace pi::core {
 
 // clang-format off
 static const std::vector<Model> kModels = {
-  // ─── OpenAI ────────────────────────────────────────────────────────────────
   { .id="gpt-4o",       .name="GPT-4o",          .api="openai-completions", .provider="openai",
     .base_url="https://api.openai.com/v1", .reasoning=false, .context_window=128000, .max_tokens=16384 },
   { .id="gpt-4o-mini",  .name="GPT-4o Mini",     .api="openai-completions", .provider="openai",
@@ -33,13 +32,11 @@ static const std::vector<Model> kModels = {
   { .id="o4-mini",      .name="o4 Mini",          .api="openai-completions", .provider="openai",
     .base_url="https://api.openai.com/v1", .reasoning=true,  .context_window=200000,  .max_tokens=100000 },
 
-  // ─── DeepSeek ──────────────────────────────────────────────────────────────
   { .id="deepseek-chat",     .name="DeepSeek V3",     .api="openai-completions", .provider="deepseek",
     .base_url="https://api.deepseek.com/v1", .reasoning=false, .context_window=64000,  .max_tokens=8192 },
   { .id="deepseek-reasoner", .name="DeepSeek R1",     .api="openai-completions", .provider="deepseek",
     .base_url="https://api.deepseek.com/v1", .reasoning=true,  .context_window=64000,  .max_tokens=8192 },
 
-  // ─── Groq ──────────────────────────────────────────────────────────────────
   { .id="llama-3.3-70b-versatile",  .name="Llama 3.3 70B",  .api="openai-completions", .provider="groq",
     .base_url="https://api.groq.com/openai/v1", .reasoning=false, .context_window=128000, .max_tokens=32768 },
   { .id="llama-3.1-8b-instant",     .name="Llama 3.1 8B",   .api="openai-completions", .provider="groq",
@@ -51,7 +48,6 @@ static const std::vector<Model> kModels = {
   { .id="qwen-qwq-32b",             .name="QwQ 32B",        .api="openai-completions", .provider="groq",
     .base_url="https://api.groq.com/openai/v1", .reasoning=true,  .context_window=128000, .max_tokens=16000 },
 
-  // ─── xAI ───────────────────────────────────────────────────────────────────
   { .id="grok-3",      .name="Grok 3",       .api="openai-completions", .provider="xai",
     .base_url="https://api.x.ai/v1", .reasoning=false, .context_window=131072, .max_tokens=16384 },
   { .id="grok-3-mini", .name="Grok 3 Mini",  .api="openai-completions", .provider="xai",
@@ -59,7 +55,6 @@ static const std::vector<Model> kModels = {
   { .id="grok-2-1212", .name="Grok 2",       .api="openai-completions", .provider="xai",
     .base_url="https://api.x.ai/v1", .reasoning=false, .context_window=131072, .max_tokens=8192 },
 
-  // ─── Cerebras ──────────────────────────────────────────────────────────────
   { .id="llama3.1-8b",    .name="Llama 3.1 8B",    .api="openai-completions", .provider="cerebras",
     .base_url="https://api.cerebras.ai/v1", .reasoning=false, .context_window=32000,  .max_tokens=8000 },
   { .id="llama-3.3-70b",  .name="Llama 3.3 70B",   .api="openai-completions", .provider="cerebras",
@@ -67,7 +62,6 @@ static const std::vector<Model> kModels = {
   { .id="qwen-3-235b-a22b-instruct-2507", .name="Qwen 3 235B", .api="openai-completions", .provider="cerebras",
     .base_url="https://api.cerebras.ai/v1", .reasoning=false, .context_window=131000, .max_tokens=32000 },
 
-  // ─── OpenRouter ────────────────────────────────────────────────────────────
   { .id="anthropic/claude-sonnet-4-5",  .name="Claude Sonnet 4.5 (OR)",  .api="openai-completions", .provider="openrouter",
     .base_url="https://openrouter.ai/api/v1", .reasoning=false, .context_window=200000, .max_tokens=64000 },
   { .id="anthropic/claude-opus-4",      .name="Claude Opus 4 (OR)",      .api="openai-completions", .provider="openrouter",
@@ -81,7 +75,9 @@ static const std::vector<Model> kModels = {
   { .id="qwen/qwen3-235b-a22b",         .name="Qwen 3 235B (OR)",        .api="openai-completions", .provider="openrouter",
     .base_url="https://openrouter.ai/api/v1", .reasoning=true,  .context_window=40960,  .max_tokens=16000 },
 
-  // ─── Google (Gemini via OpenAI-compat) ─────────────────────────────────────
+  { .id="accounts/fireworks/models/glm-5p2", .name="GLM 5.2", .api="openai-completions", .provider="fireworks",
+    .base_url="https://api.fireworks.ai/inference/v1", .reasoning=false, .context_window=128000, .max_tokens=4096 },
+
   { .id="gemini-2.5-pro",         .name="Gemini 2.5 Pro",     .api="openai-completions", .provider="google",
     .base_url="https://generativelanguage.googleapis.com/v1beta/openai", .reasoning=true,  .context_window=1048576, .max_tokens=65536 },
   { .id="gemini-2.5-flash",       .name="Gemini 2.5 Flash",   .api="openai-completions", .provider="google",

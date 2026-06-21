@@ -13,7 +13,6 @@
 
 namespace pi::core {
 
-// ─── AgentState: Thread-safe mutable agent state ───────────────────────────
 
 class AgentState {
 public:
@@ -183,7 +182,6 @@ private:
   std::stop_token stop_tok_{stop_src_.get_token()};
 };
 
-// ─── AgentContext: Snapshot passed to the loop ─────────────────────────────
 
 struct AgentContext {
   std::string system_prompt;

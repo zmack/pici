@@ -285,7 +285,6 @@ bool should_skip_dir(const std::filesystem::path &path) {
          name == "build-asan";
 }
 
-// ─── GitIgnore
 // ────────────────────────────────────────────────────────────────
 
 class GitIgnore {
@@ -355,7 +354,6 @@ private:
   std::vector<Pattern> patterns_;
 };
 
-// ─── Image helpers
 // ────────────────────────────────────────────────────────────
 
 std::string image_mime_type(const std::filesystem::path &path) {
@@ -512,7 +510,6 @@ public:
   }
 };
 
-// ─── Edit helpers ────────────────────────────────────────────────────────────
 
 std::string normalize_to_lf(const std::string &s) {
   std::string out;
@@ -774,7 +771,6 @@ apply_edits(const std::string &lf_content,
   return result;
 }
 
-// ─── EditTool ────────────────────────────────────────────────────────────────
 
 class EditTool final : public BuiltinTool {
 public:

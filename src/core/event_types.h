@@ -16,7 +16,6 @@ namespace pi::core {
 
 // Forward declaration — defined in stream.h
 
-// ─── AssistantMessageEvent structs and variant ────────────────────────────
 
 struct AssistantMessageStartEvent {
   AssistantMessage partial;
@@ -80,7 +79,6 @@ using AssistantMessageEvent = std::variant<
     AssistantMessageToolCallDeltaEvent, AssistantMessageToolCallEndEvent,
     AssistantMessageDoneEvent, AssistantMessageErrorEvent>;
 
-// ─── Event type enumeration ────────────────────────────────────────────────
 
 enum class EventType {
   agent_start,
@@ -97,7 +95,6 @@ enum class EventType {
 
 std::string_view event_type_to_string(EventType type);
 
-// ─── Event variant ─────────────────────────────────────────────────────────
 
 // Base event — all events carry a timestamp and source location for debugging
 struct EventBase {
@@ -220,7 +217,6 @@ struct ToolExecutionEndEvent : EventBase {
         result(std::move(res)), is_error(err) {}
 };
 
-// ─── Event type alias (the top-level variant) ─────────────────────────────
 
 using AgentEvent =
     std::variant<AgentStartEvent, AgentEndEvent, TurnStartEvent, TurnEndEvent,
@@ -228,7 +224,6 @@ using AgentEvent =
                  ToolExecutionStartEvent, ToolExecutionUpdateEvent,
                  ToolExecutionEndEvent>;
 
-// ─── Visitor helpers ───────────────────────────────────────────────────────
 
 template <typename F>
   requires(std::is_invocable_v<F, AgentStartEvent> &&
@@ -261,7 +256,6 @@ auto map_event(const AgentEvent &ev, F &&visitor)
   return std::visit(std::forward<F>(visitor), ev);
 }
 
-// ─── Debug output ──────────────────────────────────────────────────────────
 
 std::ostream &operator<<(std::ostream &os, const AgentEvent &event);
 

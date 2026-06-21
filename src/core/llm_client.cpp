@@ -12,7 +12,6 @@
 
 namespace pi::core {
 
-// ─── Stub LLM Client (no-op fallback) ─────────────────────────────────────
 
 class StubLLMClient : public LLMClient {
 public:
@@ -45,7 +44,6 @@ public:
   std::string_view api_id() const override { return "none"; }
 };
 
-// ─── LLMClientRegistry ────────────────────────────────────────────────────
 
 void LLMClientRegistry::register_client(std::string api_id, Factory factory) {
   std::scoped_lock lock(mutex_);
@@ -67,7 +65,6 @@ LLMClientRegistry &LLMClientRegistry::instance() {
   return reg;
 }
 
-// ─── LLMClient::create ────────────────────────────────────────────────────
 
 std::shared_ptr<LLMClient> LLMClient::create(const Model &model) {
   return LLMClientRegistry::instance().get_client(model);

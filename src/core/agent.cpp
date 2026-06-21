@@ -58,7 +58,6 @@ Message make_user_message(std::string text, std::vector<ImageContent> images) {
 
 } // namespace
 
-// ─── Agent ─────────────────────────────────────────────────────────────────
 
 Agent::Agent() : Agent(Options{}) {}
 
