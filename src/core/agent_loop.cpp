@@ -608,7 +608,7 @@ static ToolCallResult execute_tool_calls_parallel(
   ToolCallResult result;
   const std::size_t n = tool_calls.size();
   std::vector<std::optional<FinalizedToolCall>> slots(n);
-  std::vector<std::future<std::pair<std::size_t, ExecutedToolCall>>> pending;
+  std::vector<std::future<std::pair<std::size_t, FinalizedToolCall>>> pending;
 
   for (std::size_t i = 0; i < n; ++i) {
     const auto &tc = tool_calls[i];
@@ -651,7 +651,7 @@ static ToolCallResult execute_tool_calls_parallel(
 
     auto call = std::get<PreparedToolCall>(std::move(prepared));
     pending.push_back(std::async(
-        std::launch::async, [&config, emit,
+        std::launch::async, [&context, &assistant_message, &config, emit,
                              stop_tok, call = std::move(call), idx = i
 #ifdef PI_CPP_OTEL_ENABLED
                              ,

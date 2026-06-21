@@ -201,6 +201,7 @@ struct PartialToolCall {
   std::string name;
   std::string partial_args;
   int index{0};
+  std::optional<std::size_t> content_index;
 };
 
 struct StreamingState {
@@ -233,12 +234,6 @@ void finish_current_block(StreamingState &state) {
           AssistantMessageThinkingEndEvent{.content_index = idx,
                                            .content = std::move(content),
                                            .partial = result});
-    }
-  } else if (state.current_block == BlockType::tool_call) {
-    const auto *tc = std::get_if<ToolCall>(&result.content[idx]);
-    if ((tc != nullptr) && state.on_event) {
-      state.on_event(AssistantMessageToolCallEndEvent{
-          .content_index = idx, .tool_call = *tc, .partial = result});
     }
   }
 
@@ -360,47 +355,50 @@ void process_sse_line(const std::string &line, StreamingState &state) {
                                                 ptc.name.empty()) {
           ptc.name = name_it.value().get<std::string>();
         }
+      }
+
+      if (!ptc.content_index.has_value()) {
+        // Each tool call gets its own content block, independent of any
+        // other tool call's deltas, so interleaved/parallel tool calls
+        // don't clobber each other's arguments.
+        if (state.current_block == BlockType::text ||
+            state.current_block == BlockType::thinking) {
+          finish_current_block(state);
+        }
+        ptc.content_index = result.content.size();
+        ToolCall new_tc;
+        new_tc.id = ptc.id;
+        new_tc.name = ptc.name;
+        result.content.emplace_back(std::move(new_tc));
+        state.current_block = BlockType::tool_call;
+        if (state.on_event) {
+          state.on_event(AssistantMessageToolCallStartEvent{
+              .content_index = *ptc.content_index, .partial = result});
+        }
+      } else {
+        // Name/id may arrive after the block was created from an
+        // arguments-only delta.
+        auto &existing_tc =
+            std::get<ToolCall>(result.content[*ptc.content_index]);
+        if (existing_tc.id.empty() && !ptc.id.empty())
+          existing_tc.id = ptc.id;
+        if (existing_tc.name.empty() && !ptc.name.empty())
+          existing_tc.name = ptc.name;
+      }
+
+      if (auto fn_it = tc_delta.find("function"); fn_it != tc_delta.end()) {
         if (auto args_it = fn_it->find("arguments");
             args_it != fn_it->end() && args_it->is_string()) {
           std::string delta_str = args_it.value().get<std::string>();
           if (!delta_str.empty()) {
-            bool is_new = ptc.partial_args.empty() &&
-                          state.current_block != BlockType::tool_call;
-
-            if (is_new || (state.current_block == BlockType::tool_call &&
-                           state.partial_tool_calls.size() > 1)) {
-              if (state.current_block == BlockType::tool_call) {
-                auto &existing_tc = std::get<ToolCall>(
-                    result.content[state.current_content_index]);
-                auto parsed = nlohmann::json::parse(existing_tc.partial_json,
-                                                    nullptr, false);
-                existing_tc.arguments =
-                    parsed.is_discarded() ? nlohmann::json::object() : parsed;
-                finish_current_block(state);
-              }
-
-              finish_current_block(state);
-              state.current_content_index = result.content.size();
-              ToolCall new_tc;
-              new_tc.id = ptc.id;
-              new_tc.name = ptc.name;
-              result.content.emplace_back(std::move(new_tc));
-              state.current_block = BlockType::tool_call;
-              if (state.on_event) {
-                state.on_event(AssistantMessageToolCallStartEvent{
-                    .content_index = state.current_content_index,
-                    .partial = result});
-              }
-            }
-
             ptc.partial_args += delta_str;
             auto &cur_tc =
-                std::get<ToolCall>(result.content[state.current_content_index]);
+                std::get<ToolCall>(result.content[*ptc.content_index]);
             cur_tc.partial_json = ptc.partial_args;
 
             if (state.on_event) {
               state.on_event(AssistantMessageToolCallDeltaEvent{
-                  .content_index = state.current_content_index,
+                  .content_index = *ptc.content_index,
                   .delta = delta_str,
                   .partial = result});
             }
@@ -713,12 +711,17 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
   }
 
   for (auto &[idx, ptc] : state.partial_tool_calls) {
-    if (state.current_block == BlockType::tool_call) {
-      auto &tc =
-          std::get<ToolCall>(result->content[state.current_content_index]);
-      auto parsed = nlohmann::json::parse(ptc.partial_args, nullptr, false);
-      tc.arguments = parsed.is_discarded() ? nlohmann::json::object() : parsed;
-      tc.partial_json.clear();
+    if (!ptc.content_index.has_value())
+      continue;
+    auto &tc = std::get<ToolCall>(result->content[*ptc.content_index]);
+    auto parsed = nlohmann::json::parse(ptc.partial_args, nullptr, false);
+    tc.arguments = parsed.is_discarded() ? nlohmann::json::object() : parsed;
+    tc.partial_json.clear();
+    if (state.on_event) {
+      state.on_event(AssistantMessageToolCallEndEvent{
+          .content_index = *ptc.content_index,
+          .tool_call = tc,
+          .partial = *result});
     }
   }
 
