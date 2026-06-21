@@ -41,6 +41,7 @@ public:
     nlohmann::json metadata;
     decltype(StreamOptions::on_payload) on_payload;
     decltype(StreamOptions::on_response) on_response;
+    bool verbose{false};
 
     // LLM
     std::function<std::optional<std::string>(std::string_view provider)>

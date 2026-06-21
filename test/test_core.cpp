@@ -17,6 +17,7 @@
 #include "core/agent_state.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/models.h"
 #include "core/stream.h"
 
 using namespace pi::core;
@@ -454,6 +455,36 @@ void test_agent_state_thread_safety() {
     });
 }
 
+void test_find_model() {
+    tests::register_test("find_model: slash-heavy ID matches before splitting", []() {
+        // Regression: "accounts/fireworks/models/glm-5p2" was being split on the
+        // first slash, yielding provider="accounts", id="fireworks/models/glm-5p2",
+        // which never matched the registry and produced an empty base_url.
+        auto m = find_model("accounts/fireworks/models/glm-5p2", "fireworks");
+        CHECK(m.has_value());
+        CHECK_STR(m->provider, "fireworks");
+        CHECK(!m->base_url.empty());
+    });
+
+    tests::register_test("find_model: simple ID with provider hint", []() {
+        auto m = find_model("gpt-4o", "openai");
+        CHECK(m.has_value());
+        CHECK_STR(m->provider, "openai");
+    });
+
+    tests::register_test("find_model: provider/id shorthand", []() {
+        auto m = find_model("openai/gpt-4o", "");
+        CHECK(m.has_value());
+        CHECK_STR(m->provider, "openai");
+    });
+
+    tests::register_test("find_model: unknown ID produces generic with empty base_url", []() {
+        auto m = find_model("no-such-model", "");
+        CHECK(m.has_value());
+        CHECK(m->base_url.empty());
+    });
+}
+
 void test_model_json() {
     tests::register_test("Model: JSON serialization", []() {
         Model model;
@@ -487,6 +518,7 @@ int main() {
     test_assistant_message_json();
     test_tool_result_message_json();
     test_token_usage_json();
+    test_find_model();
     test_model_json();
 
     // Stream tests

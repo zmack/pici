@@ -84,6 +84,7 @@ struct AgentLoopConfig {
   nlohmann::json metadata;
   decltype(StreamOptions::on_payload) on_payload;
   decltype(StreamOptions::on_response) on_response;
+  bool verbose{false};
 
   // Converts AgentMessage[] to LLM-compatible messages
   std::function<std::vector<Message>(const std::vector<Message> &)>

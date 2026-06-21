@@ -62,8 +62,6 @@ HttpClient::post(const std::string &url, const std::string &body,
   Response result;
 
   CurlHeaders headers;
-  headers.append("Content-Type: application/json");
-  headers.append("Accept: application/json");
 
   if (api_key) {
     std::string auth = "Authorization: Bearer ";
@@ -79,6 +77,12 @@ HttpClient::post(const std::string &url, const std::string &body,
     header += value;
     headers.append(header);
   }
+
+  // Defaults for any headers the caller didn't set.
+  if (!extra_headers.contains("Content-Type"))
+    headers.append("Content-Type: application/json");
+  if (!extra_headers.contains("Accept"))
+    headers.append("Accept: application/json");
 
   curl_easy_setopt(curl.handle, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl.handle, CURLOPT_POST, 1L);
@@ -156,8 +160,6 @@ bool HttpClient::post_streaming(
     return false;
 
   CurlHeaders headers;
-  headers.append("Content-Type: application/json");
-  headers.append("Accept: text/event-stream");
 
   if (api_key) {
     std::string auth = "Authorization: Bearer ";
@@ -173,6 +175,12 @@ bool HttpClient::post_streaming(
     header += value;
     headers.append(header);
   }
+
+  // Defaults for any headers the caller didn't set.
+  if (!extra_headers.contains("Content-Type"))
+    headers.append("Content-Type: application/json");
+  if (!extra_headers.contains("Accept"))
+    headers.append("Accept: text/event-stream");
 
   curl_easy_setopt(curl.handle, CURLOPT_URL, url.c_str());
   curl_easy_setopt(curl.handle, CURLOPT_POST, 1L);
@@ -218,8 +226,10 @@ bool HttpClient::post_streaming(
     return false;
   }
   if (status < 200 || status >= 300) {
-    state.callback(std::string(R"({"error":{"message":"HTTP status )") +
-                   std::to_string(status) + "\"}}");
+    std::string msg = "HTTP status " + std::to_string(status);
+    if (!state.buffer.empty())
+      msg += ": " + state.buffer;
+    state.callback(std::string(R"({"error":{"message":")") + msg + "\"}}");
     return false;
   }
 

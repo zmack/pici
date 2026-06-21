@@ -37,6 +37,8 @@ std::optional<std::string> get_env_api_key(std::string_view provider) {
     return try_vars({"MISTRAL_API_KEY"});
   if (provider == "cerebras")
     return try_vars({"CEREBRAS_API_KEY"});
+  if (provider == "fireworks")
+    return try_vars({"FIREWORKS_API_KEY"});
   if (provider == "github-copilot")
     return try_vars({"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"});
 

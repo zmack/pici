@@ -400,6 +400,7 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
   opts.metadata = config.metadata;
   opts.on_payload = config.on_payload;
   opts.on_response = config.on_response;
+  opts.verbose = config.verbose;
   opts.api_key = config.get_api_key ? config.get_api_key(config.model.provider)
                                     : std::nullopt;
 

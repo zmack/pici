@@ -413,6 +413,7 @@ static int cmd_run(const cli::Args &args) {
       return args.api_key;
     return core::get_env_api_key(p.empty() ? model.provider : p);
   };
+  opts.verbose = args.verbose;
   opts.should_stop_after_turn = nullptr;
 
   // Load and compose Lua hooks
@@ -606,22 +607,6 @@ static int cmd_run(const cli::Args &args) {
     std::cerr << "[tools: " << agent.state().tools().size() << "]\n";
   }
 
-  // Print mode: run the provided messages and exit
-  if (args.print_mode || !args.messages.empty()) {
-    std::string prompt;
-    for (const auto &msg : args.messages) {
-      if (!prompt.empty())
-        prompt += '\n';
-      prompt += msg;
-    }
-    if (!prompt.empty()) {
-      run_turn(agent, prompt, *renderer, args.verbose);
-      std::cout << "\n";
-    }
-    if (args.print_mode)
-      return 0;
-  }
-
   // Build completion function.
   // Command-name completion (/... with no space) is handled here from the
   // declared commands list — no Lua needed.  Argument completion (/cmd ...
@@ -705,6 +690,22 @@ static int cmd_run(const cli::Args &args) {
       store->append_message(current_session_id, msgs[i]);
     return usage;
   };
+
+  // Print mode / initial message
+  if (args.print_mode || !args.messages.empty()) {
+    std::string prompt;
+    for (const auto &msg : args.messages) {
+      if (!prompt.empty())
+        prompt += '\n';
+      prompt += msg;
+    }
+    if (!prompt.empty()) {
+      accumulate(run_and_persist(prompt));
+      std::cout << "\n";
+    }
+    if (args.print_mode)
+      return 0;
+  }
 
   while (true) {
     // Build the prompt — let add-ons customise it

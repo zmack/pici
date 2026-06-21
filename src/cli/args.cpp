@@ -136,6 +136,10 @@ Args parse_args(int argc, char *argv[]) {
       }
     } else if (arg == "--session-dir") {
       result.session_dir = std::string(need("--session-dir"));
+    } else if (arg == "--message" || arg == "-M") {
+      auto v = need("--message");
+      if (!v.empty())
+        result.messages.emplace_back(v);
     } else if (arg == "--no-context-files" || arg == "-nc") {
       result.no_context_files = true;
     } else if (arg == "--config") {
@@ -191,6 +195,7 @@ void print_help(const char *prog) {
          "add-ons\n"
          "  --render <mode>             Rendering: auto (default), markdown, "
          "raw, viewport\n"
+         "  --message, -M <text>        Send an initial message then enter REPL\n"
          "  --print, -p                 Non-interactive: run prompt and exit\n"
          "  --test <file>               Run Lua test file and exit "
          "(repeatable)\n"

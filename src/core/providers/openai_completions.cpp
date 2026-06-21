@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <unistd.h>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -433,16 +434,21 @@ OpenAICompatibleClient::detect_compat(const Model &model) {
                      str_contains(base_url, "llamacpp");
   bool is_local = provider == "local" || is_local_endpoint(base_url);
 
+  bool is_fireworks =
+      provider == "fireworks" || str_contains(base_url, "fireworks.ai");
+
   bool is_non_standard =
       provider == "cerebras" || str_contains(base_url, "cerebras.ai") ||
       provider == "xai" || str_contains(base_url, "api.x.ai") ||
       str_contains(base_url, "chutes.ai") ||
       str_contains(base_url, "deepseek.com") || is_zai || is_moonshot ||
       provider == "opencode" || str_contains(base_url, "opencode.ai") ||
-      is_cloudflare_workers || is_cloudflare_gateway || is_llamacpp || is_local;
+      is_cloudflare_workers || is_cloudflare_gateway || is_llamacpp ||
+      is_local || is_fireworks;
 
   bool use_max_tokens = str_contains(base_url, "chutes.ai") || is_moonshot ||
-                        is_cloudflare_gateway || is_llamacpp || is_local;
+                        is_cloudflare_gateway || is_llamacpp || is_local ||
+                        is_fireworks;
 
   bool is_grok = provider == "xai" || str_contains(base_url, "api.x.ai");
   bool is_deepseek =
@@ -472,7 +478,8 @@ OpenAICompatibleClient::detect_compat(const Model &model) {
   compat.supports_reasoning_effort = !is_grok && !is_zai && !is_moonshot &&
                                      !is_cloudflare_gateway && !is_llamacpp &&
                                      !is_local;
-  compat.supports_usage_in_streaming = !is_llamacpp && !is_local;
+  compat.supports_usage_in_streaming =
+      !is_llamacpp && !is_local && !is_fireworks;
   compat.max_tokens_field =
       use_max_tokens ? "max_tokens" : "max_completion_tokens";
   compat.requires_tool_result_name = false;
@@ -483,7 +490,7 @@ OpenAICompatibleClient::detect_compat(const Model &model) {
       !is_moonshot && !is_cloudflare_gateway && !is_llamacpp && !is_local;
   compat.cache_control_format = std::move(cache_control_format);
   compat.disables_thinking_by_default = is_llamacpp || is_local;
-  compat.uses_non_streaming = false;
+  compat.uses_non_streaming = is_fireworks;
   return compat;
 }
 
@@ -571,7 +578,18 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
 
   auto compat = detect_compat(model);
   auto request_json = build_request_json(model, context, options);
-  auto request_body = request_json.dump();
+  auto request_body = request_json.dump(2);
+
+  if (options.verbose) {
+    std::string dbg = "[request] POST ";
+    dbg += base_url_.empty() ? model.base_url : base_url_;
+    dbg += "/chat/completions\n";
+    dbg += request_json.dump(2);
+    dbg += '\n';
+    ::write(STDERR_FILENO, dbg.data(), dbg.size());
+  }
+
+  request_body = request_json.dump();
 
   std::map<std::string, std::string> headers = options.headers;
   headers["Content-Type"] = "application/json";
@@ -606,6 +624,8 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
           } else if (error.is_string()) {
             result->error_message = error.get<std::string>();
           }
+        } else if (!response->body.empty()) {
+          result->error_message = response->body;
         }
       }
       if (on_event)

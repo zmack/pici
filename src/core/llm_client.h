@@ -43,6 +43,7 @@ struct StreamOptions {
   std::function<void(int status, const std::map<std::string, std::string> &,
                      const Model &)>
       on_response;
+  bool verbose{false};
 };
 
 // Each provider (OpenAI, Anthropic, etc.) implements this interface.

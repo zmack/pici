@@ -95,7 +95,15 @@ const std::vector<Model> &all_models() { return kModels; }
 
 std::optional<Model> find_model(std::string_view spec,
                                 std::string_view provider_hint) {
-  // Check for "provider/id" format
+  // Full-ID match first (handles slash-heavy IDs like accounts/foo/models/bar)
+  for (const auto &m : kModels) {
+    bool id_match = m.id == spec;
+    bool prov_match = provider_hint.empty() || m.provider == provider_hint;
+    if (id_match && prov_match)
+      return m;
+  }
+
+  // Try "provider/id" split
   std::string provider;
   std::string model_id;
   auto slash = spec.find('/');
