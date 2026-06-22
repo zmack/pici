@@ -9,6 +9,7 @@
 #include "core/otel_init.h"
 #include "core/providers/openai_completions.h"
 
+#include <atomic>
 #include <csignal>
 #include <cstdlib>
 #include <exception>
@@ -28,8 +29,10 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
-  std::signal(SIGINT, [](int) { std::exit(0); });
-  std::signal(SIGTERM, [](int) { std::exit(0); });
+  // Installed once, before any worker threads exist, so there is no
+  // concurrent std::signal() call to race with.
+  std::signal(SIGINT, [](int) { std::exit(0); });   // NOLINT(concurrency-mt-unsafe)
+  std::signal(SIGTERM, [](int) { std::exit(0); });  // NOLINT(concurrency-mt-unsafe)
 
   pi::core::register_openai_completions_client();
 
@@ -59,7 +62,7 @@ int main(int argc, char *argv[]) {
   }
 
   // --port (not in shared Args, parse manually)
-  int port = 8080;
+  std::atomic<int> port{8080};
   int acp_threads = 4;
   for (int i = 1; i < argc; ++i) {
     std::string_view a = argv[i];

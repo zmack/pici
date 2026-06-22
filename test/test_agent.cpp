@@ -214,6 +214,10 @@ void test_agent_prompt_stream() {
             }
         }
 
+        // AgentEndEvent is published before the worker thread flips
+        // is_streaming() back to false, so wait for that explicitly instead
+        // of racing it.
+        agent.wait_for_idle();
         CHECK(!agent.state().is_streaming());
     });
 }

@@ -5,6 +5,7 @@
 #include "core/agent.h"
 #include "core/builtin_tools.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -22,8 +23,9 @@ struct ServerConfig {
 
 // Start the ACP HTTP server.  Blocks until the process receives SIGINT/SIGTERM.
 // port = 0 picks a free port and sets it back into the variable (useful in
-// tests).
-void run_server(int &port, ServerConfig config);
+// tests). `port` is atomic because callers that run this on a background
+// thread (e.g. tests) read it from a different thread while it's listening.
+void run_server(std::atomic<int> &port, ServerConfig config);
 
 // Build an AgentManifest from the server config
 AgentManifest build_manifest(const ServerConfig &cfg);

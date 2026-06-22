@@ -40,7 +40,7 @@ bool check(bool cond, std::string_view expr,
 // ─── Server fixture ──────────────────────────────────────────────────────────
 
 struct AcpFixture {
-  int port{0};
+  std::atomic<int> port{0};
   std::thread server_thread;
 
   explicit AcpFixture() {

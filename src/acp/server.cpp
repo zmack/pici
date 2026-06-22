@@ -31,7 +31,7 @@ AgentManifest build_manifest(const ServerConfig &cfg) {
   return m;
 }
 
-void run_server(int &port, ServerConfig config) {
+void run_server(std::atomic<int> &port, ServerConfig config) {
   auto sessions = std::make_shared<SessionStore>();
 
   httplib::Server svr;
