@@ -58,7 +58,27 @@ if(_PI_CPP_CMAKE_WARN_DEPRECATED_WAS_SET)
         PROPERTY VALUE)
 endif()
 set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "" FORCE)
+# cmark's own CMakeLists registers its CommonMark spec-conformance test suite
+# (api_test, spectest_executable, etc.) whenever BUILD_TESTING is set — which
+# it is here, as a side effect of another dependency's CMakeLists turning it
+# on globally via the CTest module. We vendor cmark as EXCLUDE_FROM_ALL (it's
+# only used as a library), so those test binaries never get built by default
+# and the registered tests fail with "no such file" instead of actually
+# validating anything of ours. Force it off for this one dependency.
+set(_PI_CPP_BUILD_TESTING_WAS_SET FALSE)
+get_property(_PI_CPP_BUILD_TESTING_WAS_SET CACHE BUILD_TESTING PROPERTY VALUE SET)
+if(_PI_CPP_BUILD_TESTING_WAS_SET)
+    get_property(_PI_CPP_BUILD_TESTING CACHE BUILD_TESTING PROPERTY VALUE)
+endif()
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(cmark_src)
+if(_PI_CPP_BUILD_TESTING_WAS_SET)
+    set(BUILD_TESTING ${_PI_CPP_BUILD_TESTING} CACHE BOOL "" FORCE)
+else()
+    unset(BUILD_TESTING CACHE)
+endif()
+unset(_PI_CPP_BUILD_TESTING_WAS_SET)
+unset(_PI_CPP_BUILD_TESTING)
 if(_PI_CPP_CMAKE_WARN_DEPRECATED_WAS_SET)
     set(CMAKE_WARN_DEPRECATED ${_PI_CPP_CMAKE_WARN_DEPRECATED}
         CACHE BOOL "" FORCE)
