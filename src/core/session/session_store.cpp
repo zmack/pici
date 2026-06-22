@@ -117,12 +117,14 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
 
 } // namespace
 
+// Called once during CLI startup / SessionStore construction, before any
+// worker threads exist, so these std::getenv() calls never race.
 std::filesystem::path SessionStore::default_sessions_dir() {
   std::filesystem::path base;
-  if (const char *xdg = std::getenv("XDG_DATA_HOME");
+  if (const char *xdg = std::getenv("XDG_DATA_HOME"); // NOLINT(concurrency-mt-unsafe)
       xdg != nullptr && *xdg != '\0') {
     base = xdg;
-  } else if (const char *home = std::getenv("HOME");
+  } else if (const char *home = std::getenv("HOME"); // NOLINT(concurrency-mt-unsafe)
              home != nullptr && *home != '\0') {
     base = std::filesystem::path(home) / ".local" / "share";
   } else {

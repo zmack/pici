@@ -18,22 +18,25 @@ namespace pi::cli {
 
 // ─────────────────────────────────────────────────────────────
 
+// expand_tilde() and default_config_path() are only ever called during CLI
+// startup (arg/config parsing), before any worker threads exist, so the
+// std::getenv() calls below never race with a concurrent setenv/putenv.
 static std::string expand_tilde(std::string path) {
   if (path.empty() || path[0] != '~')
     return path;
-  const char *home = std::getenv("HOME");
+  const char *home = std::getenv("HOME"); // NOLINT(concurrency-mt-unsafe)
   if (home == nullptr)
     return path;
   return std::string(home) + path.substr(1);
 }
 
 std::filesystem::path default_config_path() {
-  const char *xdg = std::getenv("XDG_CONFIG_HOME");
+  const char *xdg = std::getenv("XDG_CONFIG_HOME"); // NOLINT(concurrency-mt-unsafe)
   std::filesystem::path base;
   if ((xdg != nullptr) && xdg[0] != '\0') {
     base = xdg;
   } else {
-    const char *home = std::getenv("HOME");
+    const char *home = std::getenv("HOME"); // NOLINT(concurrency-mt-unsafe)
     base = (home != nullptr) ? std::filesystem::path(home) / ".config" : ".";
   }
   return base / "pici" / "config.toml";
@@ -207,7 +210,7 @@ Args load_and_merge(int argc, char *argv[]) {
   std::filesystem::path cfg_path;
   if (!cli.config_path.empty()) {
     cfg_path = expand_tilde(cli.config_path);
-  } else if (const char *env = std::getenv("PICI_CONFIG");
+  } else if (const char *env = std::getenv("PICI_CONFIG"); // NOLINT(concurrency-mt-unsafe) — called once at CLI startup, before any worker threads
              (env != nullptr) && (env[0] != 0)) {
     cfg_path = expand_tilde(env);
   } else {

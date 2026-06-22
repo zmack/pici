@@ -925,8 +925,10 @@ static int cmd_run(const cli::Args &args) {
 } // namespace pi
 
 int main(int argc, char *argv[]) {
-  std::signal(SIGINT, [](int) { std::exit(0); });
-  std::signal(SIGTERM, [](int) { std::exit(0); });
+  // Installed once, before any worker threads exist, so there is no
+  // concurrent std::signal() call to race with.
+  std::signal(SIGINT, [](int) { std::exit(0); });   // NOLINT(concurrency-mt-unsafe)
+  std::signal(SIGTERM, [](int) { std::exit(0); });  // NOLINT(concurrency-mt-unsafe)
 
   pi::core::register_openai_completions_client();
 
