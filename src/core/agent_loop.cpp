@@ -183,7 +183,7 @@ std::shared_ptr<const ToolDefinition> find_tool(const AgentContext &context,
 }
 
 std::variant<PreparedToolCall, FinalizedToolCall>
-prepare_tool_call(AgentContext &context,
+prepare_tool_call(const AgentContext &context,
                   const AssistantMessage &assistant_message, const ToolCall &tc,
                   const AgentLoopConfig &config, std::stop_token stop_tok) {
   auto tool = find_tool(context, tc);
@@ -243,7 +243,7 @@ prepare_tool_call(AgentContext &context,
 }
 
 FinalizedToolCall
-finalize_tool_call(AgentContext &context,
+finalize_tool_call(const AgentContext &context,
                    const AssistantMessage &assistant_message,
                    const ToolCall &tc, std::shared_ptr<ToolResult> tool_result,
                    bool is_error, const AgentLoopConfig &config,
@@ -759,6 +759,198 @@ ToolCallResult execute_tool_calls(AgentContext &context,
                                      config, emit, stop_tok, otel_ctx);
 }
 
+namespace {
+
+// Shared worker body for run_agent_loop and run_agent_loop_continue.
+// `prompts` is empty for the continue path, in which case the
+// emit-and-seed-new_messages step below is simply a no-op.
+void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
+                           AgentLoopConfig config, StreamCallback emit,
+                           EventStream<AgentEvent, std::vector<Message>> stream,
+                           std::stop_token stop_tok) {
+  auto publish = [&](AgentEvent event) {
+    emit(event);
+    stream.push(std::move(event));
+  };
+
+#ifdef PI_CPP_OTEL_ENABLED
+  auto session_span = otel_child_span(
+      config.tracer, otel::context::RuntimeContext::GetCurrent(),
+      "agent.session");
+  session_span->SetAttribute("agent.model", config.model.id);
+  session_span->SetAttribute("agent.provider", config.model.provider);
+  if (config.session_id)
+    session_span->SetAttribute("session.id", *config.session_id);
+  // Attach session context for this thread's lifetime.
+  otel::trace::Scope session_scope(session_span);
+
+  OtelSpan turn_span;
+  otel::context::Context turn_ctx;
+
+  auto begin_turn = [&] {
+    turn_span = otel_child_span(config.tracer,
+                                otel::context::RuntimeContext::GetCurrent(),
+                                "agent.turn");
+    turn_ctx =
+        otel_ctx_with(otel::context::RuntimeContext::GetCurrent(), turn_span);
+  };
+
+  auto end_turn = [&](const AssistantMessage &msg, std::size_t tool_count) {
+    if (!turn_span)
+      return;
+    turn_span->SetAttribute("agent.tool_calls_count",
+                            static_cast<int64_t>(tool_count));
+    if (stop_tok.stop_requested()) {
+      turn_span->AddEvent("cancelled");
+      turn_span->SetStatus(otel::trace::StatusCode::kError, "cancelled");
+    } else if (msg.stop_reason == StopReason::error) {
+      turn_span->SetStatus(otel::trace::StatusCode::kError,
+                           msg.error_message.value_or(""));
+    }
+    turn_span->End();
+    turn_span = {};
+  };
+#endif
+
+  publish(AgentStartEvent());
+  publish(TurnStartEvent());
+#ifdef PI_CPP_OTEL_ENABLED
+  begin_turn();
+#endif
+
+  // Emit prompt messages (no-op when continuing from existing context)
+  for (const auto &prompt : prompts) {
+    publish(MessageStartEvent(prompt));
+    publish(MessageEndEvent(prompt));
+    context.messages.push_back(prompt);
+  }
+
+  auto new_messages = std::move(prompts);
+  auto pending_messages = config.get_steering_messages
+                              ? config.get_steering_messages()
+                              : std::vector<Message>{};
+  bool first_turn = true;
+
+  // Outer loop: continues when follow-up messages arrive
+  while (!stop_tok.stop_requested()) {
+    bool has_more_tool_calls = true;
+
+    // Inner loop: process tool calls and steering messages
+    while (has_more_tool_calls || !pending_messages.empty()) {
+      if (first_turn) {
+        first_turn = false;
+      } else {
+        publish(TurnStartEvent());
+#ifdef PI_CPP_OTEL_ENABLED
+        begin_turn();
+#endif
+      }
+      has_more_tool_calls = false;
+
+      if (!pending_messages.empty()) {
+        for (const auto &msg : pending_messages) {
+          publish(MessageStartEvent(msg));
+          publish(MessageEndEvent(msg));
+          context.messages.push_back(msg);
+          new_messages.push_back(msg);
+        }
+        pending_messages.clear();
+      }
+
+      // Stream assistant response
+      auto assistant_msg =
+          stream_assistant_response(context, config, publish, stop_tok
+#ifdef PI_CPP_OTEL_ENABLED
+                                    ,
+                                    turn_ctx
+#endif
+          );
+      if (!assistant_msg) {
+        assistant_msg = std::make_shared<AssistantMessage>();
+        assistant_msg->api = "none";
+        assistant_msg->provider = "none";
+        assistant_msg->model = config.model.id;
+        assistant_msg->stop_reason = StopReason::error;
+        assistant_msg->error_message = "LLM client returned no message";
+      }
+      new_messages.emplace_back(*assistant_msg);
+
+      // Check for error/abort
+      if (assistant_msg->stop_reason == StopReason::error ||
+          assistant_msg->stop_reason == StopReason::aborted) {
+#ifdef PI_CPP_OTEL_ENABLED
+        end_turn(*assistant_msg, 0);
+#endif
+        publish(TurnEndEvent(*assistant_msg, {}));
+        publish(AgentEndEvent(new_messages));
+        stream.finish(new_messages);
+        return;
+      }
+
+      // Check for tool calls
+      auto tool_calls = extract_tool_calls(assistant_msg->content);
+
+      std::vector<ToolResultMessage> tool_results;
+      if (!tool_calls.empty()) {
+        auto batch_result = execute_tool_calls(context, *assistant_msg,
+                                               config, publish, stop_tok
+#ifdef PI_CPP_OTEL_ENABLED
+                                               ,
+                                               turn_ctx
+#endif
+        );
+        tool_results = std::move(batch_result.messages);
+        has_more_tool_calls = !batch_result.terminate;
+
+        for (const auto &tr : tool_results) {
+          context.messages.emplace_back(tr);
+          new_messages.emplace_back(tr);
+        }
+      }
+
+#ifdef PI_CPP_OTEL_ENABLED
+      end_turn(*assistant_msg, tool_calls.size());
+#endif
+      publish(TurnEndEvent(*assistant_msg, tool_results));
+
+      // Should we stop after this turn?
+      if (config.should_stop_after_turn) {
+        bool stop = config.should_stop_after_turn(*assistant_msg,
+                                                  tool_results, context);
+        if (stop) {
+          publish(AgentEndEvent(new_messages));
+          stream.finish(new_messages);
+          return;
+        }
+      }
+
+      pending_messages = config.get_steering_messages
+                             ? config.get_steering_messages()
+                             : std::vector<Message>{};
+    }
+
+    // Check for follow-up messages
+    auto follow_ups = config.get_follow_up_messages
+                          ? config.get_follow_up_messages()
+                          : std::vector<Message>{};
+    if (!follow_ups.empty()) {
+      pending_messages = std::move(follow_ups);
+      continue;
+    }
+
+    // No more messages, exit
+    break;
+  }
+
+  publish(AgentEndEvent(new_messages));
+  stream.finish(new_messages);
+#ifdef PI_CPP_OTEL_ENABLED
+  session_span->End();
+#endif
+}
+
+} // namespace
+
 EventStream<AgentEvent, std::vector<Message>>
 run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
                const AgentLoopConfig &config, StreamCallback emit,
@@ -776,188 +968,9 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
         return {};
       });
 
-  std::thread([prompts, context = std::move(context), config,
-               emit = std::move(emit), stream, stop_tok]() mutable {
-    auto publish = [&](AgentEvent event) {
-      emit(event);
-      stream.push(std::move(event));
-    };
-
-#ifdef PI_CPP_OTEL_ENABLED
-    auto session_span = otel_child_span(
-        config.tracer, otel::context::RuntimeContext::GetCurrent(),
-        "agent.session");
-    session_span->SetAttribute("agent.model", config.model.id);
-    session_span->SetAttribute("agent.provider", config.model.provider);
-    if (config.session_id)
-      session_span->SetAttribute("session.id", *config.session_id);
-    // Attach session context for this thread's lifetime.
-    otel::trace::Scope session_scope(session_span);
-
-    OtelSpan turn_span;
-    otel::context::Context turn_ctx;
-
-    auto begin_turn = [&] {
-      turn_span = otel_child_span(config.tracer,
-                                  otel::context::RuntimeContext::GetCurrent(),
-                                  "agent.turn");
-      turn_ctx =
-          otel_ctx_with(otel::context::RuntimeContext::GetCurrent(), turn_span);
-    };
-
-    auto end_turn = [&](const AssistantMessage &msg, std::size_t tool_count) {
-      if (!turn_span)
-        return;
-      turn_span->SetAttribute("agent.tool_calls_count",
-                              static_cast<int64_t>(tool_count));
-      if (stop_tok.stop_requested()) {
-        turn_span->AddEvent("cancelled");
-        turn_span->SetStatus(otel::trace::StatusCode::kError, "cancelled");
-      } else if (msg.stop_reason == StopReason::error) {
-        turn_span->SetStatus(otel::trace::StatusCode::kError,
-                             msg.error_message.value_or(""));
-      }
-      turn_span->End();
-      turn_span = {};
-    };
-#endif
-
-    publish(AgentStartEvent());
-    publish(TurnStartEvent());
-#ifdef PI_CPP_OTEL_ENABLED
-    begin_turn();
-#endif
-
-    // Emit prompt messages
-    for (const auto &prompt : prompts) {
-      publish(MessageStartEvent(prompt));
-      publish(MessageEndEvent(prompt));
-      context.messages.push_back(prompt);
-    }
-
-    auto new_messages = prompts;
-    auto pending_messages = config.get_steering_messages
-                                ? config.get_steering_messages()
-                                : std::vector<Message>{};
-    bool first_turn = true;
-
-    // Outer loop: continues when follow-up messages arrive
-    while (!stop_tok.stop_requested()) {
-      bool has_more_tool_calls = true;
-
-      // Inner loop: process tool calls and steering messages
-      while (has_more_tool_calls || !pending_messages.empty()) {
-        if (first_turn) {
-          first_turn = false;
-        } else {
-          publish(TurnStartEvent());
-#ifdef PI_CPP_OTEL_ENABLED
-          begin_turn();
-#endif
-        }
-        has_more_tool_calls = false;
-
-        if (!pending_messages.empty()) {
-          for (const auto &msg : pending_messages) {
-            publish(MessageStartEvent(msg));
-            publish(MessageEndEvent(msg));
-            context.messages.push_back(msg);
-            new_messages.push_back(msg);
-          }
-          pending_messages.clear();
-        }
-
-        // Stream assistant response
-        auto assistant_msg =
-            stream_assistant_response(context, config, publish, stop_tok
-#ifdef PI_CPP_OTEL_ENABLED
-                                      ,
-                                      turn_ctx
-#endif
-            );
-        if (!assistant_msg) {
-          assistant_msg = std::make_shared<AssistantMessage>();
-          assistant_msg->api = "none";
-          assistant_msg->provider = "none";
-          assistant_msg->model = config.model.id;
-          assistant_msg->stop_reason = StopReason::error;
-          assistant_msg->error_message = "LLM client returned no message";
-        }
-        new_messages.emplace_back(*assistant_msg);
-
-        // Check for error/abort
-        if (assistant_msg->stop_reason == StopReason::error ||
-            assistant_msg->stop_reason == StopReason::aborted) {
-#ifdef PI_CPP_OTEL_ENABLED
-          end_turn(*assistant_msg, 0);
-#endif
-          publish(TurnEndEvent(*assistant_msg, {}));
-          publish(AgentEndEvent(new_messages));
-          stream.finish(new_messages);
-          return;
-        }
-
-        // Check for tool calls
-        auto tool_calls = extract_tool_calls(assistant_msg->content);
-
-        std::vector<ToolResultMessage> tool_results;
-        if (!tool_calls.empty()) {
-          auto batch_result = execute_tool_calls(context, *assistant_msg,
-                                                 config, publish, stop_tok
-#ifdef PI_CPP_OTEL_ENABLED
-                                                 ,
-                                                 turn_ctx
-#endif
-          );
-          tool_results = std::move(batch_result.messages);
-          has_more_tool_calls = !batch_result.terminate;
-
-          for (const auto &tr : tool_results) {
-            context.messages.emplace_back(tr);
-            new_messages.emplace_back(tr);
-          }
-        }
-
-#ifdef PI_CPP_OTEL_ENABLED
-        end_turn(*assistant_msg, tool_calls.size());
-#endif
-        publish(TurnEndEvent(*assistant_msg, tool_results));
-
-        // Should we stop after this turn?
-        if (config.should_stop_after_turn) {
-          bool stop = config.should_stop_after_turn(*assistant_msg,
-                                                    tool_results, context);
-          if (stop) {
-            publish(AgentEndEvent(new_messages));
-            stream.finish(new_messages);
-            return;
-          }
-        }
-
-        pending_messages = config.get_steering_messages
-                               ? config.get_steering_messages()
-                               : std::vector<Message>{};
-      }
-
-      // Check for follow-up messages
-      auto follow_ups = config.get_follow_up_messages
-                            ? config.get_follow_up_messages()
-                            : std::vector<Message>{};
-      if (!follow_ups.empty()) {
-        pending_messages = std::move(follow_ups);
-        continue;
-      }
-
-      // No more messages, exit
-      break;
-    }
-
-    publish(AgentEndEvent(new_messages));
-    stream.finish(new_messages);
-#ifdef PI_CPP_OTEL_ENABLED
-    session_span->End();
-#endif
-  }).detach();
+  std::thread(run_agent_loop_worker, prompts, std::move(context), config,
+             std::move(emit), stream, stop_tok)
+      .detach();
 
   return stream;
 }
@@ -985,175 +998,11 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
         return {};
       });
 
-  auto context_snapshot = context;
-  std::thread([context = std::move(context_snapshot), config,
-               emit = std::move(emit), stream, stop_tok]() mutable {
-    auto publish = [&](AgentEvent event) {
-      emit(event);
-      stream.push(std::move(event));
-    };
-
-#ifdef PI_CPP_OTEL_ENABLED
-    auto session_span = otel_child_span(
-        config.tracer, otel::context::RuntimeContext::GetCurrent(),
-        "agent.session");
-    session_span->SetAttribute("agent.model", config.model.id);
-    session_span->SetAttribute("agent.provider", config.model.provider);
-    if (config.session_id)
-      session_span->SetAttribute("session.id", *config.session_id);
-    otel::trace::Scope session_scope(session_span);
-
-    OtelSpan turn_span;
-    otel::context::Context turn_ctx;
-
-    auto begin_turn = [&] {
-      turn_span = otel_child_span(config.tracer,
-                                  otel::context::RuntimeContext::GetCurrent(),
-                                  "agent.turn");
-      turn_ctx =
-          otel_ctx_with(otel::context::RuntimeContext::GetCurrent(), turn_span);
-    };
-
-    auto end_turn = [&](const AssistantMessage &msg, std::size_t tool_count) {
-      if (!turn_span)
-        return;
-      turn_span->SetAttribute("agent.tool_calls_count",
-                              static_cast<int64_t>(tool_count));
-      if (stop_tok.stop_requested()) {
-        turn_span->AddEvent("cancelled");
-        turn_span->SetStatus(otel::trace::StatusCode::kError, "cancelled");
-      } else if (msg.stop_reason == StopReason::error) {
-        turn_span->SetStatus(otel::trace::StatusCode::kError,
-                             msg.error_message.value_or(""));
-      }
-      turn_span->End();
-      turn_span = {};
-    };
-#endif
-
-    publish(AgentStartEvent());
-    publish(TurnStartEvent());
-#ifdef PI_CPP_OTEL_ENABLED
-    begin_turn();
-#endif
-
-    auto new_messages = std::vector<Message>{};
-    auto pending_messages = config.get_steering_messages
-                                ? config.get_steering_messages()
-                                : std::vector<Message>{};
-    bool first_turn = true;
-
-    while (!stop_tok.stop_requested()) {
-      bool has_more_tool_calls = true;
-
-      while (has_more_tool_calls || !pending_messages.empty()) {
-        if (first_turn) {
-          first_turn = false;
-        } else {
-          publish(TurnStartEvent());
-#ifdef PI_CPP_OTEL_ENABLED
-          begin_turn();
-#endif
-        }
-
-        if (!pending_messages.empty()) {
-          for (const auto &msg : pending_messages) {
-            publish(MessageStartEvent(msg));
-            publish(MessageEndEvent(msg));
-            context.messages.push_back(msg);
-            new_messages.push_back(msg);
-          }
-          pending_messages.clear();
-        }
-
-        // Stream assistant response
-        auto assistant_msg =
-            stream_assistant_response(context, config, publish, stop_tok
-#ifdef PI_CPP_OTEL_ENABLED
-                                      ,
-                                      turn_ctx
-#endif
-            );
-        if (!assistant_msg) {
-          assistant_msg = std::make_shared<AssistantMessage>();
-          assistant_msg->api = "none";
-          assistant_msg->provider = "none";
-          assistant_msg->model = config.model.id;
-          assistant_msg->stop_reason = StopReason::error;
-          assistant_msg->error_message = "LLM client returned no message";
-        }
-        new_messages.emplace_back(*assistant_msg);
-
-        if (assistant_msg->stop_reason == StopReason::error ||
-            assistant_msg->stop_reason == StopReason::aborted) {
-#ifdef PI_CPP_OTEL_ENABLED
-          end_turn(*assistant_msg, 0);
-#endif
-          publish(TurnEndEvent(*assistant_msg, {}));
-          publish(AgentEndEvent(new_messages));
-          stream.finish(new_messages);
-          return;
-        }
-
-        // Check for tool calls
-        auto tool_calls = extract_tool_calls(assistant_msg->content);
-
-        std::vector<ToolResultMessage> tool_results;
-        has_more_tool_calls = false;
-
-        if (!tool_calls.empty()) {
-          auto batch_result = execute_tool_calls(context, *assistant_msg,
-                                                 config, publish, stop_tok
-#ifdef PI_CPP_OTEL_ENABLED
-                                                 ,
-                                                 turn_ctx
-#endif
-          );
-          tool_results = std::move(batch_result.messages);
-          has_more_tool_calls = !batch_result.terminate;
-
-          for (const auto &tr : tool_results) {
-            context.messages.emplace_back(tr);
-            new_messages.emplace_back(tr);
-          }
-        }
-
-#ifdef PI_CPP_OTEL_ENABLED
-        end_turn(*assistant_msg, tool_calls.size());
-#endif
-        publish(TurnEndEvent(*assistant_msg, tool_results));
-
-        if (config.should_stop_after_turn) {
-          bool stop = config.should_stop_after_turn(*assistant_msg,
-                                                    tool_results, context);
-          if (stop) {
-            publish(AgentEndEvent(new_messages));
-            stream.finish(new_messages);
-            return;
-          }
-        }
-
-        pending_messages = config.get_steering_messages
-                               ? config.get_steering_messages()
-                               : std::vector<Message>{};
-      }
-
-      auto follow_ups = config.get_follow_up_messages
-                            ? config.get_follow_up_messages()
-                            : std::vector<Message>{};
-      if (!follow_ups.empty()) {
-        pending_messages = std::move(follow_ups);
-        continue;
-      }
-      break;
-    }
-
-    publish(AgentEndEvent(new_messages));
-    stream.finish(new_messages);
-#ifdef PI_CPP_OTEL_ENABLED
-    session_span->End();
-#endif
-  }).detach();
+  // std::thread copies its arguments, so passing `context` by value here
+  // snapshots it for the worker thread without aliasing the caller's object.
+  std::thread(run_agent_loop_worker, std::vector<Message>{}, context, config,
+             std::move(emit), stream, stop_tok)
+      .detach();
 
   return stream;
 }

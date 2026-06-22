@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -112,13 +113,22 @@ public:
   }
 
   void set_streaming(bool streaming) {
-    std::scoped_lock lock(mutex_);
-    is_streaming_ = streaming;
+    {
+      std::scoped_lock lock(mutex_);
+      is_streaming_ = streaming;
+    }
+    streaming_cv_.notify_all();
   }
 
   void set_complete(bool complete) {
     std::scoped_lock lock(mutex_);
     is_complete_ = complete;
+  }
+
+  // Blocks until is_streaming() becomes false.
+  void wait_until_idle() const {
+    std::unique_lock lock(mutex_);
+    streaming_cv_.wait(lock, [this] { return !is_streaming_; });
   }
 
   std::set<std::string> pending_tool_calls() const {
@@ -188,6 +198,7 @@ public:
 
 private:
   mutable std::mutex mutex_;
+  mutable std::condition_variable streaming_cv_;
   std::string system_prompt_;
   Model model_;
   ThinkingLevel thinking_level_{ThinkingLevel::off};

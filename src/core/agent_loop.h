@@ -43,7 +43,7 @@ struct BeforeToolCallContext {
   const Message &assistant_message;
   const ToolCall &tool_call;
   std::string args_json;
-  AgentContext &context;
+  const AgentContext &context;
 };
 
 struct BeforeToolCallResult {
@@ -57,7 +57,7 @@ struct AfterToolCallContext {
   std::string args_json;
   std::shared_ptr<ToolResult> result;
   bool is_error{false};
-  AgentContext &context;
+  const AgentContext &context;
 };
 
 struct AfterToolCallResult {

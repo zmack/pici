@@ -254,12 +254,7 @@ void Agent::reset() {
   clear_follow_up_queue();
 }
 
-void Agent::wait_for_idle() {
-  // Simple spin-wait (in a real impl, use a condition variable)
-  while (state_.is_streaming()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-}
+void Agent::wait_for_idle() { state_.wait_until_idle(); }
 
 // ── Internal helpers ──────────────────────────────────────────────────────
 
