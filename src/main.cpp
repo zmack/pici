@@ -42,6 +42,7 @@
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
 #include "core/session/session_tree.h"
+#include "core/stream_diagnostics.h"
 #include "core/stream_renderer.h"
 
 namespace pi {
@@ -285,19 +286,40 @@ static std::string format_tool_result(std::string_view content) {
 // renderer.
 class VerboseRenderer final : public core::Renderer {
 public:
-  VerboseRenderer(core::Renderer &base, bool verbose)
-      : base_(base), verbose_(verbose) {}
+  VerboseRenderer(core::Renderer &base, bool verbose,
+                  std::shared_ptr<core::StreamDiagnostics> diagnostics)
+      : base_(base), verbose_(verbose), diagnostics_(std::move(diagnostics)) {}
 
-  void on_turn_start() override { base_.on_turn_start(); }
-  void on_text_delta(std::string_view d) override { base_.on_text_delta(d); }
-  void on_thinking_start() override { base_.on_thinking_start(); }
+  void on_turn_start() override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("turn_start");
+    base_.on_turn_start();
+  }
+  void on_text_delta(std::string_view d) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("text_delta", d.size());
+    base_.on_text_delta(d);
+  }
+  void on_thinking_start() override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("thinking_start");
+    base_.on_thinking_start();
+  }
   void on_thinking_delta(std::string_view d) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("thinking_delta", d.size());
     base_.on_thinking_delta(d);
   }
-  void on_thinking_end() override { base_.on_thinking_end(); }
+  void on_thinking_end() override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("thinking_end");
+    base_.on_thinking_end();
+  }
 
   void on_tool_start(std::string_view call_id, std::string_view name,
                      std::string_view args_json) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("tool_start", args_json.size());
     base_.on_tool_start(call_id, name, args_json);
     std::cout << "\n[tool: " << name << "("
               << "\033[38;5;214m" << args_json << "\033[0m" << ")]\n"
@@ -305,6 +327,8 @@ public:
   }
   void on_tool_end(std::string_view call_id, std::string_view name,
                    const core::ToolResult &result, bool is_error) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("tool_end", result.content().size());
     base_.on_tool_end(call_id, name, result, is_error);
     std::cout << "\033[38;5;245m" << "  [" << name << "] "
               << format_tool_result(result.content())
@@ -313,6 +337,8 @@ public:
   }
 
   void on_message_end(const core::TokenUsage &u) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("message_end");
     base_.on_message_end(u);
     if (verbose_) {
       bool has_pricing = u.cost.total != 0 || u.cost.input != 0;
@@ -326,9 +352,15 @@ public:
     last_usage_ = u;
   }
 
-  void on_turn_end() override { base_.on_turn_end(); }
+  void on_turn_end() override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("turn_end");
+    base_.on_turn_end();
+  }
 
   void on_error(core::RendererErrorKind, std::string_view msg) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("error", msg.size());
     std::cerr << "\nerror: " << msg << "\n";
   }
 
@@ -341,12 +373,15 @@ public:
 private:
   core::Renderer &base_;
   bool verbose_;
+  std::shared_ptr<core::StreamDiagnostics> diagnostics_;
   core::TokenUsage last_usage_;
 };
 
 static core::TokenUsage run_turn(core::Agent &agent, const std::string &input,
-                                 core::Renderer &renderer, bool verbose) {
-  VerboseRenderer vr(renderer, verbose);
+                                 core::Renderer &renderer, bool verbose,
+                                 std::shared_ptr<core::StreamDiagnostics>
+                                     diagnostics) {
+  VerboseRenderer vr(renderer, verbose, std::move(diagnostics));
   for (const auto &ev : agent.prompt(input))
     core::dispatch_event(ev, vr);
   return vr.last_usage();
@@ -506,6 +541,17 @@ static int cmd_run(const cli::Args &args) {
   opts.model = model;
   opts.system_prompt = system;
   opts.thinking_level = to_core_thinking(args.thinking);
+  std::shared_ptr<core::StreamDiagnostics> stream_diagnostics;
+  if (!args.stream_trace.empty()) {
+    try {
+      stream_diagnostics =
+          std::make_shared<core::StreamDiagnostics>(args.stream_trace);
+    } catch (const std::exception &e) {
+      std::cerr << "error: " << e.what() << "\n";
+      return 1;
+    }
+  }
+  opts.diagnostics = stream_diagnostics;
   opts.get_api_key =
       [&args, &model](std::string_view p) -> std::optional<std::string> {
     if (!args.api_key.empty())
@@ -780,7 +826,8 @@ static int cmd_run(const cli::Args &args) {
   // Run a turn and persist all new messages to the session file.
   auto run_and_persist = [&](const std::string &input) {
     auto prev_count = agent.state().messages().size();
-    auto usage = run_turn(agent, input, *renderer, args.verbose);
+    auto usage =
+        run_turn(agent, input, *renderer, args.verbose, stream_diagnostics);
     auto msgs = agent.state().messages();
     for (std::size_t i = prev_count; i < msgs.size(); ++i)
       store->append_message(current_session_id, msgs[i]);

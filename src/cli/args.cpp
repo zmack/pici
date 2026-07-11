@@ -150,6 +150,8 @@ Args parse_args(int argc, char *argv[]) {
       result.list_addons = true;
     } else if (arg == "--otel-endpoint") {
       result.otel_endpoint = std::string(need("--otel-endpoint"));
+    } else if (arg == "--stream-trace") {
+      result.stream_trace = std::string(need("--stream-trace"));
     } else if (arg == "--list-models") {
       result.list_models = true;
       // optional next arg that isn't a flag
@@ -213,6 +215,7 @@ void print_help(const char *prog) {
          "filter)\n"
          "  --otel-endpoint <url>       Export OpenTelemetry traces (e.g. "
          "http://localhost:4318)\n"
+         "  --stream-trace <path>      Write privacy-safe streaming timing JSONL\n"
          "  --verbose                   Verbose output\n"
          "  --version, -v               Show version\n"
          "  --help, -h                  Show this help\n\n"

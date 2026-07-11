@@ -1,6 +1,8 @@
 #include "core/providers/muse_messages.h"
 
 #include <functional>
+#include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -100,6 +102,31 @@ private:
 };
 
 int main() {
+  tests::run("stream diagnostics: privacy-safe JSONL", [] {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "pici-stream-diagnostics-test.jsonl";
+    std::filesystem::remove(path);
+    {
+      StreamDiagnostics diagnostics(path.string());
+      diagnostics.record_transport_chunk(42);
+      diagnostics.record_transport_line("event: content_block_delta\r");
+      diagnostics.record_transport_line(
+          R"(data: {"type":"content_block_delta","delta":{"text":"secret"}})");
+      diagnostics.record_parser_event("text_delta", 6);
+      diagnostics.record_renderer_event("text_delta", 6);
+    }
+
+    std::ifstream input(path);
+    std::string trace((std::istreambuf_iterator<char>(input)),
+                      std::istreambuf_iterator<char>());
+    CHECK(!trace.empty());
+    CHECK(trace.find("secret") == std::string::npos);
+    CHECK(trace.find("transport") != std::string::npos);
+    CHECK(trace.find("parser") != std::string::npos);
+    CHECK(trace.find("renderer") != std::string::npos);
+    std::filesystem::remove(path);
+  });
+
   tests::run("build_request_json: required shape", [] {
     auto model = make_model();
     AgentContext context;

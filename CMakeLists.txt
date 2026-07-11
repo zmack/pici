@@ -466,6 +466,7 @@ add_library(pi-core
     src/core/syntax_highlight.cpp
     src/core/terminal.cpp
     src/core/stream_renderer.cpp
+    src/core/stream_diagnostics.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
     src/core/env_api_keys.cpp

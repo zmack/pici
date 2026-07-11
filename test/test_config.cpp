@@ -97,6 +97,14 @@ disabled = true
     CHECK_EQ(out.provider, std::string("openai"));       // config wins (CLI empty)
   }
 
+  // stream trace is a CLI-only diagnostic path
+  {
+    Args cli;
+    cli.stream_trace = "/tmp/pici-stream.jsonl";
+    auto out = merge_args({}, cli);
+    CHECK_EQ(out.stream_trace, std::string("/tmp/pici-stream.jsonl"));
+  }
+
   // merge: booleans are OR'd
   {
     Args conf; conf.no_tools = true;  conf.verbose = false;

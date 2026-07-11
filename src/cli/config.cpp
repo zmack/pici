@@ -195,6 +195,7 @@ Args merge_args(const Args &config, const Args &cli) {
   out.help = cli.help;
   out.version = cli.version;
   out.config_path = cli.config_path;
+  out.stream_trace = cli.stream_trace;
   out.diagnostics = cli.diagnostics;
 
   return out;

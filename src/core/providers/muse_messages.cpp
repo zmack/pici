@@ -240,8 +240,10 @@ std::string data_value(std::string_view line) {
 } // namespace
 
 MuseMessagesSseParser::MuseMessagesSseParser(
-    std::shared_ptr<AssistantMessage> result, AssistantEventCallback on_event)
-    : result_(std::move(result)), on_event_(std::move(on_event)) {
+    std::shared_ptr<AssistantMessage> result, AssistantEventCallback on_event,
+    std::shared_ptr<StreamDiagnostics> diagnostics)
+    : result_(std::move(result)), on_event_(std::move(on_event)),
+      diagnostics_(std::move(diagnostics)) {
   if (!result_)
     throw std::invalid_argument("Muse SSE parser requires a result");
 }
@@ -279,6 +281,8 @@ void MuseMessagesSseParser::process_data(std::string_view data) {
       type_it != event.end() && type_it->is_string()) {
     type = type_it->get<std::string>();
   }
+  if (diagnostics_)
+    diagnostics_->record_parser_event(type, data.size());
 
   if (type == "ping")
     return;
@@ -728,7 +732,7 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
   if (on_event)
     on_event(AssistantMessageStartEvent{*result});
 
-  MuseMessagesSseParser parser(result, on_event);
+  MuseMessagesSseParser parser(result, on_event, options.diagnostics);
   std::optional<std::string> callback_error;
   bool ok = HttpClient::post_streaming(
       url, request.dump(),
@@ -739,7 +743,8 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
           callback_error = e.what();
         }
       },
-      headers, options.api_key, options.timeout_ms, stop_tok);
+      headers, options.api_key, options.timeout_ms, stop_tok,
+      options.diagnostics);
   parser.finish();
 
   if (stop_tok.stop_requested() || !ok || parser.error() || callback_error) {

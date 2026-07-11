@@ -307,6 +307,7 @@ AgentLoopConfig Agent::create_loop_config() {
   config.metadata = options_.metadata;
   config.on_payload = options_.on_payload;
   config.on_response = options_.on_response;
+  config.diagnostics = options_.diagnostics;
   config.verbose = options_.verbose;
   config.tool_execution = options_.tool_execution;
   config.convert_to_llm = options_.convert_to_llm ? options_.convert_to_llm

@@ -20,7 +20,8 @@ namespace pi::core {
 class MuseMessagesSseParser {
 public:
   MuseMessagesSseParser(std::shared_ptr<AssistantMessage> result,
-                        AssistantEventCallback on_event = {});
+                        AssistantEventCallback on_event = {},
+                        std::shared_ptr<StreamDiagnostics> diagnostics = {});
 
   void feed_line(std::string_view line);
   void finish();
@@ -45,6 +46,7 @@ private:
 
   std::shared_ptr<AssistantMessage> result_;
   AssistantEventCallback on_event_;
+  std::shared_ptr<StreamDiagnostics> diagnostics_;
   std::map<std::size_t, BlockState> blocks_;
   std::optional<std::size_t> active_block_index_;
   std::string event_name_;

@@ -234,6 +234,22 @@ cmake --build build --target pi-cli --parallel
 cmake --build build --target test-markdown --parallel
 ```
 
+### Streaming diagnostics
+
+When a provider appears to return a complete response instead of streaming,
+enable the privacy-safe JSONL trace. It records elapsed times, transport SSE
+events, parser events, renderer events, and byte counts; it does not record
+prompts, response text, tool arguments, or API keys.
+
+```bash
+./build/pi-cli --stream-trace /tmp/pici-stream.jsonl -p "say hello"
+cat /tmp/pici-stream.jsonl
+```
+
+Compare `transport`, `parser`, and `renderer` timestamps. If transport events
+arrive together, the provider or an intermediary batched the response. If
+parser events advance but renderer events do not, the client path is at fault.
+
 The default configuration keeps tests enabled, but OpenTelemetry API
 instrumentation is off by default because it pulls in a large vendored target
 graph.  Enable it explicitly when working on tracing:

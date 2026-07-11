@@ -207,6 +207,7 @@ struct PartialToolCall {
 struct StreamingState {
   std::shared_ptr<AssistantMessage> result;
   AssistantEventCallback on_event;
+  std::shared_ptr<StreamDiagnostics> diagnostics;
   BlockType current_block{BlockType::none};
   std::size_t current_content_index{0};
   std::map<int, PartialToolCall> partial_tool_calls;
@@ -250,6 +251,8 @@ void process_sse_line(const std::string &line, StreamingState &state) {
   auto chunk = nlohmann::json::parse(json_str, nullptr, false);
   if (chunk.is_discarded())
     return;
+  if (state.diagnostics)
+    state.diagnostics->record_parser_event("openai_chunk", json_str.size());
 
   auto &result = *state.result;
 
@@ -679,7 +682,9 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
     return result;
   }
 
-  StreamingState state{.result = result, .on_event = on_event};
+  StreamingState state{.result = result,
+                       .on_event = on_event,
+                       .diagnostics = options.diagnostics};
   std::optional<std::string> response_error;
 
   bool ok = HttpClient::post_streaming(
@@ -704,7 +709,8 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
           response_error = e.what();
         }
       },
-      headers, options.api_key, options.timeout_ms, stop_tok);
+      headers, options.api_key, options.timeout_ms, stop_tok,
+      options.diagnostics);
   if (response_error) {
     ok = false;
   }

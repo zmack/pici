@@ -16,6 +16,7 @@
 #include "core/agent_state.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/stream_diagnostics.h"
 
 namespace pi::core {
 
@@ -43,6 +44,7 @@ struct StreamOptions {
   std::function<void(int status, const std::map<std::string, std::string> &,
                      const Model &)>
       on_response;
+  std::shared_ptr<StreamDiagnostics> diagnostics;
   bool verbose{false};
 };
 

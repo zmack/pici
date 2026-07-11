@@ -43,6 +43,7 @@ public:
     nlohmann::json metadata;
     decltype(StreamOptions::on_payload) on_payload;
     decltype(StreamOptions::on_response) on_response;
+    std::shared_ptr<StreamDiagnostics> diagnostics;
     bool verbose{false};
 
     // LLM
