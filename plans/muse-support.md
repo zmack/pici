@@ -54,7 +54,7 @@ format:
 4. **`build_request_json(...)`** — assembles `model`, `messages`, `system`,
    required `max_tokens` (fall back to `model.max_tokens` if
    `options.max_tokens` is unset — Muse 400s without it), `stream`,
-   temperature passthrough, `thinking: {"type":"adaptive"}` + optional
+   temperature passthrough, optional adaptive thinking configuration plus
    `output_config.effort`, `tools`, and validated string-valued `metadata`.
    `top_p` is intentionally not supported in this phase because pici has no
    corresponding option; adding it requires plumbing through `Agent::Options`,
@@ -164,7 +164,12 @@ live HTTP server or on anonymous-namespace functions.
 ## `ThinkingLevel` → `output_config.effort` policy
 
 Muse always reasons (`thinking: {type:"disabled"}` → 400) and has no
-`"minimal"`/`"none"` effort value. Express the policy entirely via
+`"minimal"`/`"none"` effort value. The Messages API's default request shape
+also streams visible text incrementally, while explicitly sending adaptive
+thinking batches the visible answer into a single delta in live testing. Keep
+the default `ThinkingLevel::off` request free of a `thinking` field; this does
+not disable Muse reasoning, it selects the API default. Express explicit
+effort control entirely via
 `Model.thinking_level_map` (first real consumer of that field) rather than
 hardcoding it in the client:
 
@@ -179,9 +184,9 @@ hardcoding it in the client:
 }
 ```
 
-`thinking: {"type":"adaptive"}` is always present in the request regardless
-of level, since Muse can't disable reasoning; `output_config.effort` is set
-only when the map yields a value.
+For any non-off level, send `thinking: {"type":"adaptive"}` and set
+`output_config.effort` when the map yields a value. For `off`, omit both
+fields; Muse still reasons using its default behavior.
 
 ## Interface boundaries and unknowns
 
@@ -251,8 +256,8 @@ hand-rolled `main()`-harness pattern (no gtest), wired into `CMakeLists.txt`
 the same way (`add_executable(test-muse_messages ...)`, `add_test(...)`, add
 `muse_messages.cpp` to the `pi-http` target's sources). Cover:
 - `build_request_json`: basic shape, `system` field placement, `max_tokens`
-  fallback, `thinking.type=="adaptive"` always present, `output_config.effort`
-  present/absent per `ThinkingLevel` (explicitly checking `off`→omitted and
+  fallback, default `thinking` omission for `off`, explicit adaptive thinking,
+  and `output_config.effort` present/absent per `ThinkingLevel` (explicitly checking `off`→omitted and
   `minimal`→`"low"`), validated metadata, and that `top_p`,
   `tool_choice`, `stop_sequences`/`top_k`/`container`/`inference_geo` are
   absent.
@@ -277,7 +282,7 @@ codebase.
 
 1. **Skeleton + text output, no thinking/tool events yet.**
    `muse_messages.{h,cpp}` builds requests from text-only history and sends
-   `thinking:{type:"adaptive"}` with no effort. Its parser must nevertheless
+   the API-default thinking behavior with no effort field. Its parser must nevertheless
    track every block boundary/index and safely skip unsupported reasoning/tool
    blocks while emitting text events. Add usage parsing, the
    `models.cpp`/`env_api_keys.cpp` entries and registration wiring, plus

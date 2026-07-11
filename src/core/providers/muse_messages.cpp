@@ -652,9 +652,9 @@ nlohmann::json MuseMessagesClient::build_request_json(
       {"messages", convert_messages(model, context)},
       {"max_tokens", max_tokens},
       {"stream", true},
-      {"thinking", {{"type", "adaptive"}}},
   };
   if (options.reasoning != ThinkingLevel::off) {
+    request["thinking"] = {{"type", "adaptive"}};
     const auto level = std::string(thinking_level_to_string(options.reasoning));
     if (const auto it = model.thinking_level_map.find(level);
         it != model.thinking_level_map.end() && it->second) {

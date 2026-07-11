@@ -146,7 +146,7 @@ int main() {
     CHECK_EQ(request["system"].get<std::string>(), "Be concise");
     CHECK_EQ(request["max_tokens"].get<std::uint32_t>(), 4096U);
     CHECK(request["stream"].get<bool>());
-    CHECK_EQ(request["thinking"]["type"].get<std::string>(), "adaptive");
+    CHECK(!request.contains("thinking"));
     CHECK(!request.contains("tool_choice"));
     CHECK(!request.contains("top_p"));
     CHECK(!request.contains("stop_sequences"));
@@ -178,6 +178,8 @@ int main() {
     minimal.reasoning = ThinkingLevel::minimal;
     auto minimal_request =
         MuseMessagesClient::build_request_json(model, context, minimal);
+    CHECK_EQ(minimal_request["thinking"]["type"].get<std::string>(),
+             "adaptive");
     CHECK_EQ(minimal_request["output_config"]["effort"].get<std::string>(),
              "low");
 
@@ -185,6 +187,7 @@ int main() {
     high.reasoning = ThinkingLevel::high;
     auto high_request =
         MuseMessagesClient::build_request_json(model, context, high);
+    CHECK_EQ(high_request["thinking"]["type"].get<std::string>(), "adaptive");
     CHECK_EQ(high_request["output_config"]["effort"].get<std::string>(),
              "high");
 
