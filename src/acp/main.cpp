@@ -8,6 +8,7 @@
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/providers/openai_completions.h"
+#include "core/providers/muse_messages.h"
 
 #include <atomic>
 #include <csignal>
@@ -35,6 +36,7 @@ int main(int argc, char *argv[]) {
   std::signal(SIGTERM, [](int) { std::exit(0); });  // NOLINT(concurrency-mt-unsafe)
 
   pi::core::register_openai_completions_client();
+  pi::core::register_muse_messages_client();
 
   // Parse shared CLI flags
   auto args = pi::cli::load_and_merge(argc, argv);

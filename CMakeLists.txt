@@ -572,6 +572,10 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-openai_completions PRIVATE pi-http)
     add_test(NAME test-openai_completions COMMAND test-openai_completions)
 
+    add_executable(test-muse_messages test/test_muse_messages.cpp)
+    target_link_libraries(test-muse_messages PRIVATE pi-http)
+    add_test(NAME test-muse_messages COMMAND test-muse_messages)
+
     add_executable(test-config test/test_config.cpp src/cli/config.cpp src/cli/args.cpp)
     target_include_directories(test-config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus)
@@ -589,6 +593,7 @@ endif()
 add_library(pi-http
     src/http/http_client.cpp
     src/core/providers/openai_completions.cpp
+    src/core/providers/muse_messages.cpp
 )
 target_include_directories(pi-http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl)

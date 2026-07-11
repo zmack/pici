@@ -36,6 +36,7 @@
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/providers/openai_completions.h"
+#include "core/providers/muse_messages.h"
 #include "cli/tree_selector.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
@@ -931,6 +932,7 @@ int main(int argc, char *argv[]) {
   std::signal(SIGTERM, [](int) { std::exit(0); });  // NOLINT(concurrency-mt-unsafe)
 
   pi::core::register_openai_completions_client();
+  pi::core::register_muse_messages_client();
 
   auto args = pi::cli::load_and_merge(argc, argv);
 

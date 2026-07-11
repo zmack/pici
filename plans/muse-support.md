@@ -5,9 +5,10 @@
 Meta's Muse Spark (`muse-spark-1.1`) is a reasoning model reachable through
 three wire-compatible surfaces documented in `docs/muse/`: Chat Completions,
 Responses, and Messages (Anthropic `/v1/messages`-shaped). We're integrating
-via the **Messages API** specifically because it's the only stateless surface
-that lets an external caller replay real chain-of-thought (`thinking` /
-`redacted_thinking` content blocks) across turns — Chat Completions redacts
+via the **Messages API** specifically because it may provide a stateless
+encrypted-reasoning replay path through `redacted_thinking` content blocks —
+not because it exposes raw chain-of-thought. Muse keeps raw reasoning private;
+readable `thinking` content is a summary. Chat Completions redacts
 `reasoning_content` to empty for external callers, and the Responses API's
 richer reasoning-replay story is a much bigger, separately-scoped lift (new
 wire format entirely, no existing client shape in pici to build from).
@@ -53,12 +54,18 @@ format:
 4. **`build_request_json(...)`** — assembles `model`, `messages`, `system`,
    required `max_tokens` (fall back to `model.max_tokens` if
    `options.max_tokens` is unset — Muse 400s without it), `stream`,
-   `temperature`/`top_p` passthrough, `thinking: {"type":"adaptive"}` +
-   optional `output_config.effort`, `tools`, `metadata`. Never emit
+   temperature passthrough, `thinking: {"type":"adaptive"}` + optional
+   `output_config.effort`, `tools`, and validated string-valued `metadata`.
+   `top_p` is intentionally not supported in this phase because pici has no
+   corresponding option; adding it requires plumbing through `Agent::Options`,
+   `AgentLoopConfig`, and `StreamOptions`. Never emit
    `stop_sequences`, `top_k`, `container`, `inference_geo` (all 400 on Muse).
    **Omit `tool_choice` entirely** — pici's `AgentContext`/`StreamOptions`
-   has no field this would come from today, and `"auto"` is Muse's only
-   supported value anyway, which is the default when omitted.
+   has no field this would come from today, and omission selects Muse's
+   default `"auto"`. Muse also supports `any`, `none`, and
+   `disable_parallel_tool_use`; named tool choices are unsupported. Adding
+   configurable choices is a separate interface change, not part of this
+   plan.
 5. **SSE parser** — translates Anthropic-shaped `message_start` /
    `content_block_start` / `content_block_delta` / `content_block_stop` /
    `message_delta` / `message_stop` events into pici's existing
@@ -66,6 +73,10 @@ format:
    per block type: text/thinking/tool_call), the same way
    `process_sse_line()` does for OpenAI's shape. Needs to track the most
    recent `event:` line to interpret the following `data:` line correctly.
+   The state machine must track content-block indices and safely recognize,
+   skip, or finalize every declared block type even when a phase does not yet
+   expose that block as a pici event. This prevents ignored reasoning/tool
+   blocks from corrupting later text indices.
    Within `content_block_delta`, handle all three delta shapes explicitly by
    name: `text_delta` (visible text), `input_json_delta` (tool-call argument
    accumulation), and `signature_delta` (thinking-block signature, when
@@ -76,16 +87,22 @@ format:
 6. **`map_stop_reason`**: `end_turn`→`stop`, `tool_use`→`tool_use`,
    `max_tokens`→`length`, `refusal`→`error` (with an error message noting the
    refusal, since `StopReason` has no dedicated refusal state).
-7. **Error handling** — three shapes must all funnel into `result->error_message`:
+7. **Usage and error handling** — parse usage from `message_start` and
+   `message_delta` into `TokenUsage` (`input_tokens`, `output_tokens`,
+   `cache_read_input_tokens`, reasoning-token details, total tokens), then
+   call `compute_cost`. Three error shapes must all funnel into
+   `result->error_message`:
    a non-2xx response body carrying Muse's Anthropic-style envelope
    (`{"type":"error","error":{"type","message"}}`), a mid-stream `event: error`
    frame, and `HttpClient::post_streaming`'s own synthetic error line
    (`http_client.cpp:228-233` emits an *OpenAI-shaped*
    `{"error":{"message":"HTTP status N..."}}` after a transport failure, not
-   the Anthropic envelope) — the parser needs to accept both `error.message`
-   (Anthropic shape) and a bare `error.message` one level up (the transport's
-   synthetic shape) rather than assuming only one envelope format ever
-   appears.
+   the Anthropic envelope) — both shapes expose `error.message`; the Muse
+   envelope additionally has a top-level `type` and inner `error.type`. The
+   current transport may consume newline-terminated non-2xx bodies before it
+   synthesizes its fallback line, so tests must cover complete and truncated
+   transport errors. Do not promise HTTP status/header preservation without
+   expanding `HttpClient`.
 8. **`stream()`** — POST to `{model.base_url}/v1/messages` via
    `HttpClient::post_streaming` (always streaming; no non-streaming fallback
    path needed, unlike OpenAI's local-server compat case).
@@ -127,7 +144,9 @@ format:
   writing the round-trip test, not just against the docs' prose.
 - `ToolResultMessage` → a `tool_result` content block nested inside a
   `user`-role message (`{"role":"user","content":[{"type":"tool_result",
-  "tool_use_id",...,"is_error"}]}`). **Important:** consecutive
+  "tool_use_id","content":...,"is_error"}]}`). Map all supported tool
+  result text/image blocks, preserve `is_error`, and define the behavior for
+  empty content. **Important:** consecutive
   `ToolResultMessage`s (parallel tool calls) must be **coalesced into one
   `user` message** with multiple `tool_result` blocks — Anthropic's Messages
   convention requires this, unlike OpenAI's separate `tool`-role messages.
@@ -140,6 +159,11 @@ format:
 - `tool_use` → `ToolCall{.id, .name, .arguments=block.input}`.
 - `server_tool_use` (built-in `web_search`/`tool_search`) — out of scope for
   now; no built-in tools are being wired up in this pass.
+
+The parser test seam is part of the implementation: keep the SSE state
+machine in a small internal parser class or separate compilation unit with a
+testable `feed_line()`/`finish()` surface. Do not make the test depend on a
+live HTTP server or on anonymous-namespace functions.
 
 ## `ThinkingLevel` → `output_config.effort` policy
 
@@ -163,19 +187,35 @@ hardcoding it in the client:
 of level, since Muse can't disable reasoning; `output_config.effort` is set
 only when the map yields a value.
 
+## Interface boundaries and unknowns
+
+- `StreamOptions::metadata` is arbitrary JSON, while Muse requires metadata
+  values to be strings. The client will accept only a JSON object whose values
+  are strings and omit or report invalid metadata deterministically; it will
+  not silently stringify nested values.
+- `top_p` and configurable `tool_choice` are intentionally deferred. Neither
+  exists in the current Agent/AgentLoop/StreamOptions chain, and adding either
+  is a separate cross-cutting API change.
+- Muse's docs do not publish a context-window or pricing value for this model.
+  The current `Model` type has no unknown representation. A temporary model
+  entry may use zero as an explicit unknown sentinel for development only; it
+  must not be presented as a real context limit or free pricing in a release.
+  Resolve this before calling the integration production-ready.
+
 ## `src/core/models.cpp`
 
 New comment-headed group in the existing style:
 
 ```cpp
 // Meta Muse — docs/muse/messages_api.md (Messages API, Anthropic-compatible)
-// TODO: real pricing/context-window once published; placeholders below.
+// TODO: verify pricing/context-window before presenting this as a product-ready
+// registry entry. Model currently has no explicit unknown representation.
 { .id="muse-spark-1.1", .name="Muse Spark 1.1", .api="muse-messages", .provider="meta",
   .base_url="https://api.meta.ai", .reasoning=true,
   .input_capabilities={"text", "image"},
   .cost={.input_per_mtok=0.0 /*TODO*/, .output_per_mtok=0.0 /*TODO*/,
          .cache_read_per_mtok=0.0 /*TODO*/, .cache_write_per_mtok=0},
-  .context_window=0 /*TODO*/, .max_tokens=8192 /*TODO*/,
+  .context_window=0 /*unknown; do not treat as a real limit*/, .max_tokens=8192 /*TODO*/,
   .thinking_level_map={
     {"off", std::nullopt}, {"minimal", "low"}, {"low", "low"},
     {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"},
@@ -217,32 +257,37 @@ the same way (`add_executable(test-muse_messages ...)`, `add_test(...)`, add
 - `build_request_json`: basic shape, `system` field placement, `max_tokens`
   fallback, `thinking.type=="adaptive"` always present, `output_config.effort`
   present/absent per `ThinkingLevel` (explicitly checking `off`→omitted and
-  `minimal`→`"low"`), and that `stop_sequences`/`top_k`/`container`/
-  `inference_geo` are never emitted.
+  `minimal`→`"low"`), validated metadata, and that `top_p`,
+  `tool_choice`, `stop_sequences`/`top_k`/`container`/`inference_geo` are
+  absent.
 - Content-block conversion: a `redacted_thinking` block in prior history
-  round-trips correctly when `same_model` holds, and is dropped/downgraded
-  when it doesn't — this is the highest-value test in the whole change.
+  round-trips correctly when `same_model` holds and is dropped (not
+  downgraded) when it does not. Add a separate test showing that readable,
+  non-redacted thinking can downgrade to text across models.
 - Parallel `ToolResultMessage` coalescing into one `user` message with
   multiple `tool_result` blocks.
-- SSE parsing: canned `event:`/`data:` sequences (message_start →
-  content_block_start(text) → delta → stop → message_delta → message_stop)
-  assert on resulting `AssistantMessage` content and emitted event sequence.
-  This is new coverage beyond what `openai_completions` currently has, and
-  worth it given the thinking/redacted_thinking streaming path is novel.
-- `map_stop_reason`: all four known values plus an unknown fallback.
+- SSE parsing: canned `event:`/`data:` sequences through the parser seam,
+  including text, `input_json_delta`, `signature_delta`, redacted blocks,
+  `ping`, block-index transitions, malformed/unknown events, CRLF input,
+  both error envelopes, and message usage. Assert on the resulting
+  `AssistantMessage` content and emitted event sequence.
+- `map_stop_reason`: all four known values plus an unknown fallback, including
+  refusal error text and error-event behavior.
 
 No live-API integration test, consistent with every other provider in the
 codebase.
 
 ## Phasing (land each phase with `make test` / `ctest --test-dir build --output-on-failure` green)
 
-1. **Skeleton + text-only, no thinking, no tools.** `muse_messages.{h,cpp}`
-   with a minimal `stream()`: build request from text-only history,
-   `thinking:{type:"adaptive"}` with no effort, parse only `text` blocks from
-   the SSE stream. Add the `models.cpp`/`env_api_keys.cpp` entries and
-   registration wiring. Add `test_muse_messages.cpp` with the structural
-   `build_request_json` tests. This is the point where a real API key can be
-   used for a manual smoke test.
+1. **Skeleton + text output, no thinking/tool events yet.**
+   `muse_messages.{h,cpp}` builds requests from text-only history and sends
+   `thinking:{type:"adaptive"}` with no effort. Its parser must nevertheless
+   track every block boundary/index and safely skip unsupported reasoning/tool
+   blocks while emitting text events. Add usage parsing, the
+   `models.cpp`/`env_api_keys.cpp` entries and registration wiring, plus
+   `test_muse_messages.cpp` structural/request/parser-seam tests. This is the
+   point where a real API key can be used for a text-stream smoke test; it is
+   not yet the reasoning-continuity milestone.
 2. **Thinking/reasoning blocks**: the effort-mapping policy, and the
    `thinking`/`redacted_thinking` round-trip (request-side replay,
    response-side parsing). Before writing the round-trip test, confirm
@@ -251,17 +296,31 @@ codebase.
    (see the open question in the content-block translation section) — the
    test should assert the actual observed shape, not an assumed one. Land
    this phase in its own commit, isolated from tool calling.
-3. **Tool calling**: `tools`/`tool_choice` in the request, `tool_use` block
-   parsing, `ToolResultMessage` → coalesced `tool_result` block conversion.
-   Add corresponding tests.
-4. **Streaming polish + error handling**: full incremental
-   `content_block_delta` handling for every block type if phases 1-3 took a
-   simpler "accumulate then emit once" shortcut, plus the error-envelope and
-   mid-stream-error-event handling. Lower risk, can land anytime after phase 1.
+3. **Tool calling**: `tools`, `tool_use` block parsing, partial JSON
+   accumulation, and `ToolResultMessage` → coalesced `tool_result` block
+   conversion. `tool_choice` remains omitted because pici has no setting for
+   it. Add the complete streaming lifecycle and tests in this phase.
+4. **Transport/error hardening**: malformed/unknown SSE handling, both error
+   envelopes, CRLF behavior, and any `HttpClient` changes needed to preserve
+   response status/body metadata. This is not presentation polish; phases
+   that introduce a block type must already provide its complete streaming
+   lifecycle.
 
 Use `cmake --build build --target test-muse_messages --parallel &&
 ./build/test-muse_messages` as the narrow dev loop within a phase, per
-CLAUDE.md.
+`AGENTS.md`.
+
+## Current implementation status
+
+Phase 1 is implemented: request construction for text/images, required
+`max_tokens`, adaptive thinking configuration, validated metadata, usage
+accounting, safe text-only SSE emission, transport/refusal errors, model/key
+registration, and focused offline tests are complete. Thinking summaries,
+encrypted reasoning replay, tool calls, and configurable sampling/tool choice
+remain intentionally deferred to phases 2 and 3. Phase 2 cannot claim
+reasoning continuity until a live Messages response confirms how Muse returns
+the encrypted replay blob and which `display`/include-style request setting
+produces it.
 
 ## Verification
 

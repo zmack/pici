@@ -166,6 +166,17 @@ static const std::vector<Model> kModels = {
     .base_url="https://generativelanguage.googleapis.com/v1beta/openai", .reasoning=false,
     .cost={.input_per_mtok=0.075, .output_per_mtok=0.30, .cache_read_per_mtok=0.01875, .cache_write_per_mtok=0},
     .context_window=1048576, .max_tokens=8192  },
+
+  // Meta Muse — docs/muse/messages_api.md (Messages API, Anthropic-compatible)
+  // Context window and pricing are not published in the local API docs.
+  { .id="muse-spark-1.1", .name="Muse Spark 1.1", .api="muse-messages", .provider="meta",
+    .base_url="https://api.meta.ai", .reasoning=true,
+    .input_capabilities={"text", "image"},
+    .context_window=0, .max_tokens=8192,
+    .thinking_level_map={
+      {"off", std::nullopt}, {"minimal", "low"}, {"low", "low"},
+      {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"},
+    } },
 };
 // clang-format on
 
