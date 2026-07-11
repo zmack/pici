@@ -44,12 +44,14 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
   // Determine listen address
   const char *host = "0.0.0.0";
   if (port == 0) {
-    // bind_to_any_port returns the assigned port (0 on failure)
-    port = svr.bind_to_any_port(host);
-    if (port == 0)
+    // bind_to_any_port returns the assigned port (negative on failure).
+    const int bound_port = svr.bind_to_any_port(host);
+    if (bound_port <= 0)
       throw std::runtime_error("Failed to bind to any port");
+    port = bound_port;
     std::cerr << "[acp] listening on " << host << ":" << port << "\n";
-    svr.listen_after_bind();
+    if (!svr.listen_after_bind())
+      throw std::runtime_error("Failed to listen after binding");
   } else {
     std::cerr << "[acp] listening on " << host << ":" << port << "\n";
     if (!svr.listen(host, port)) {

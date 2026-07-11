@@ -1,13 +1,11 @@
 #include "core/stream_renderer.h"
 
 #include <algorithm>
-#include <asm-generic/ioctls.h>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
-#include <sys/ioctl.h>
 #include <type_traits>
 #include <unistd.h>
 

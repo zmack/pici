@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <string_view>
-#include <asm-generic/ioctls.h>
 #include <sys/ioctl.h>
 
 namespace pi::core {

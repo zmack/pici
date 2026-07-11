@@ -422,10 +422,9 @@ target_include_directories(ts-lang-javascript PUBLIC
 )
 
 # ─── Lua 5.4 ─────────────────────────────────────────────────────────────────
-pkg_check_modules(LUA REQUIRED lua5.4)
+pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua5.4)
 add_library(lua_pi INTERFACE)
-target_include_directories(lua_pi INTERFACE ${LUA_INCLUDE_DIRS})
-target_link_libraries(lua_pi INTERFACE ${LUA_LIBRARIES})
+target_link_libraries(lua_pi INTERFACE PkgConfig::LUA)
 message(STATUS "Lua: ${LUA_VERSION} (${LUA_INCLUDE_DIRS})")
 
 find_package(CURL QUIET)
