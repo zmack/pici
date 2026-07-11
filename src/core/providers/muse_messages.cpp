@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -53,12 +54,65 @@ Json image_block(const ImageContent &image) {
                        {"data", image.data}}}};
 }
 
+Json tool_result_block(const ToolResultMessage &tool_result) {
+  Json content = Json::array();
+  for (const auto &block : tool_result.content) {
+    if (const auto *text = std::get_if<TextContent>(&block)) {
+      content.push_back({{"type", "text"}, {"text", text->text}});
+    } else if (const auto *image = std::get_if<ImageContent>(&block)) {
+      content.push_back(image_block(*image));
+    }
+  }
+
+  Json serialized_content = content;
+  if (content.empty()) {
+    serialized_content = "";
+  } else if (content.size() == 1 && content[0]["type"] == "text") {
+    serialized_content = content[0]["text"];
+  }
+
+  return {{"type", "tool_result"},
+          {"tool_use_id", tool_result.tool_call_id},
+          {"content", std::move(serialized_content)},
+          {"is_error", tool_result.is_error}};
+}
+
+Json convert_tools(const AgentContext &context) {
+  Json tools = Json::array();
+  for (const auto &tool : context.tools) {
+    Json schema = Json::parse(tool->schema().serialize(), nullptr, false);
+    if (schema.is_discarded() || !schema.is_object())
+      schema = Json::object();
+    tools.push_back({{"type", "custom"},
+                     {"name", std::string(tool->name())},
+                     {"description", std::string(tool->description())},
+                     {"input_schema", std::move(schema)},
+                     {"strict", false}});
+  }
+  return tools;
+}
+
 Json convert_messages(const Model &model, const AgentContext &context) {
   auto transformed =
       transform_messages(context.messages, model, normalize_tool_call_id);
   Json messages = Json::array();
+  std::vector<Json> pending_tool_results;
+
+  auto flush_tool_results = [&] {
+    if (pending_tool_results.empty())
+      return;
+    messages.push_back({{"role", "user"},
+                        {"content", std::move(pending_tool_results)}});
+    pending_tool_results.clear();
+  };
 
   for (const auto &message : transformed) {
+    if (const auto *tool_result = std::get_if<ToolResultMessage>(&message)) {
+      pending_tool_results.push_back(tool_result_block(*tool_result));
+      continue;
+    }
+    flush_tool_results();
+
     if (const auto *user = std::get_if<UserMessage>(&message)) {
       Json content = Json::array();
       for (const auto &block : user->content) {
@@ -100,6 +154,14 @@ Json convert_messages(const Model &model, const AgentContext &context) {
               thinking_block["signature"] = *thinking->thinking_signature;
             content.push_back(std::move(thinking_block));
           }
+        } else if (const auto *tool_call = std::get_if<ToolCall>(&block)) {
+          Json input = tool_call->arguments.is_object()
+                           ? tool_call->arguments
+                           : Json::object();
+          content.push_back({{"type", "tool_use"},
+                             {"id", tool_call->id},
+                             {"name", tool_call->name},
+                             {"input", std::move(input)}});
         }
       }
       if (content.empty())
@@ -113,9 +175,11 @@ Json convert_messages(const Model &model, const AgentContext &context) {
       continue;
     }
 
-    // Tool history and tool calls are introduced in phase 3. Do not emit a
-    // partial Anthropic conversation that would fail validation in phase 1.
+    // Unsupported history blocks are omitted rather than serialized into an
+    // invalid partial Messages conversation.
   }
+
+  flush_tool_results();
 
   return messages;
 }
@@ -348,6 +412,28 @@ void MuseMessagesSseParser::start_block(const nlohmann::json &event) {
     if (data_it != block_it->end() && data_it->is_string())
       thinking.thinking_signature = data_it->get<std::string>();
     result_->content.emplace_back(std::move(thinking));
+  } else if (block_type == "tool_use") {
+    state.kind = BlockKind::tool_call;
+    state.content_index = result_->content.size();
+    ToolCall tool_call;
+    if (block_it != event.end() && block_it->is_object()) {
+      const auto id_it = block_it->find("id");
+      if (id_it != block_it->end() && id_it->is_string())
+        tool_call.id = id_it->get<std::string>();
+      const auto name_it = block_it->find("name");
+      if (name_it != block_it->end() && name_it->is_string())
+        tool_call.name = name_it->get<std::string>();
+      const auto input_it = block_it->find("input");
+      if (input_it != block_it->end() && input_it->is_object())
+        tool_call.arguments = *input_it;
+    }
+    result_->content.emplace_back(std::move(tool_call));
+    active_block_index_ = index;
+    if (on_event_) {
+      on_event_(AssistantMessageToolCallStartEvent{.content_index =
+                                                       *state.content_index,
+                                                   .partial = *result_});
+    }
   }
   blocks_[index] = state;
 }
@@ -416,6 +502,23 @@ void MuseMessagesSseParser::process_delta(const nlohmann::json &event) {
     if (!signature)
       signature = std::string{};
     *signature += data_it->get<std::string>();
+  } else if (block_it->second.kind == BlockKind::tool_call &&
+             delta_type == "input_json_delta") {
+    const auto partial_json_it = delta_it->find("partial_json");
+    if (partial_json_it == delta_it->end() || !partial_json_it->is_string())
+      return;
+    const auto delta = partial_json_it->get<std::string>();
+    auto &block = block_it->second;
+    block.partial_json += delta;
+    auto &tool_call =
+        std::get<ToolCall>(result_->content[content_index]);
+    tool_call.partial_json = block.partial_json;
+    if (on_event_) {
+      on_event_(AssistantMessageToolCallDeltaEvent{.content_index =
+                                                        content_index,
+                                                    .delta = delta,
+                                                    .partial = *result_});
+    }
   }
 }
 
@@ -437,6 +540,8 @@ void MuseMessagesSseParser::finish_block(std::size_t protocol_index) {
     finish_text_block(protocol_index);
   else if (block_it->second.kind == BlockKind::thinking)
     finish_thinking_block(protocol_index);
+  else if (block_it->second.kind == BlockKind::tool_call)
+    finish_tool_call_block(protocol_index);
   else if (active_block_index_ && *active_block_index_ == protocol_index)
     active_block_index_.reset();
 }
@@ -471,6 +576,31 @@ void MuseMessagesSseParser::finish_thinking_block(
   if (on_event_) {
     on_event_(AssistantMessageThinkingEndEvent{.content_index = content_index,
                                                .content = thinking,
+                                               .partial = *result_});
+  }
+  if (active_block_index_ && *active_block_index_ == protocol_index)
+    active_block_index_.reset();
+}
+
+void MuseMessagesSseParser::finish_tool_call_block(
+    std::size_t protocol_index) {
+  auto block_it = blocks_.find(protocol_index);
+  if (block_it == blocks_.end() || block_it->second.kind != BlockKind::tool_call ||
+      !block_it->second.content_index)
+    return;
+
+  const auto content_index = *block_it->second.content_index;
+  auto &tool_call = std::get<ToolCall>(result_->content[content_index]);
+  if (!block_it->second.partial_json.empty()) {
+    auto parsed = Json::parse(block_it->second.partial_json, nullptr, false);
+    tool_call.arguments = parsed.is_discarded() || !parsed.is_object()
+                              ? Json::object()
+                              : std::move(parsed);
+  }
+  tool_call.partial_json.clear();
+  if (on_event_) {
+    on_event_(AssistantMessageToolCallEndEvent{.content_index = content_index,
+                                               .tool_call = tool_call,
                                                .partial = *result_});
   }
   if (active_block_index_ && *active_block_index_ == protocol_index)
@@ -523,6 +653,8 @@ nlohmann::json MuseMessagesClient::build_request_json(
     request["system"] = context.system_prompt;
   if (options.temperature)
     request["temperature"] = *options.temperature;
+  if (!context.tools.empty())
+    request["tools"] = convert_tools(context);
   add_validated_metadata(options.metadata, request);
 
   if (options.on_payload) {

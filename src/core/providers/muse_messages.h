@@ -28,11 +28,18 @@ public:
   const std::optional<std::string> &error() const { return error_; }
 
 private:
-  enum class BlockKind { ignored, text, thinking, redacted_thinking };
+  enum class BlockKind {
+    ignored,
+    text,
+    thinking,
+    redacted_thinking,
+    tool_call
+  };
 
   struct BlockState {
     BlockKind kind{BlockKind::ignored};
     std::optional<std::size_t> content_index;
+    std::string partial_json;
   };
 
   std::shared_ptr<AssistantMessage> result_;
@@ -50,6 +57,7 @@ private:
   void finish_block(std::size_t protocol_index);
   void finish_text_block(std::size_t protocol_index);
   void finish_thinking_block(std::size_t protocol_index);
+  void finish_tool_call_block(std::size_t protocol_index);
   void emit_done();
 };
 

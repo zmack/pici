@@ -2,9 +2,11 @@
 
 #include <functional>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <source_location>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -67,6 +69,35 @@ static Model make_model() {
       {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"}};
   return model;
 }
+
+class TestSchema final : public ToolSchema {
+public:
+  std::string serialize() const override {
+    return R"({"type":"object","properties":{"city":{"type":"string"}}})";
+  }
+
+  std::map<std::string, std::string> to_definition() const override {
+    return {{"type", "object"}};
+  }
+};
+
+class TestTool final : public ToolDefinition {
+public:
+  std::string_view name() const override { return "lookup_city"; }
+  std::string_view description() const override {
+    return "Look up a city's information";
+  }
+  ToolSchema &schema() const override { return schema_; }
+  std::shared_ptr<ToolResult>
+  execute(std::string_view, std::string_view,
+          std::stop_token = std::stop_token{},
+          ToolUpdateCallback = {}) const override {
+    return nullptr;
+  }
+
+private:
+  mutable TestSchema schema_;
+};
 
 int main() {
   tests::run("build_request_json: required shape", [] {
@@ -213,6 +244,61 @@ int main() {
     CHECK_EQ(downgraded_content[1]["text"].get<std::string>(), "answer");
   });
 
+  tests::run("build_request_json: tools and coalesced tool results", [] {
+    auto model = make_model();
+    AgentContext context;
+    context.tools.push_back(std::make_shared<TestTool>());
+
+    AssistantMessage assistant;
+    assistant.api = model.api;
+    assistant.provider = model.provider;
+    assistant.model = model.id;
+    assistant.content.emplace_back(ToolCall{
+        .id = "call-1",
+        .name = "lookup_city",
+        .arguments = nlohmann::json{{"city", "Paris"}}});
+    context.messages.emplace_back(std::move(assistant));
+
+    ToolResultMessage first;
+    first.tool_call_id = "call-1";
+    first.tool_name = "lookup_city";
+    first.content.emplace_back(TextContent{.text = "sunny"});
+    context.messages.emplace_back(std::move(first));
+
+    ToolResultMessage second;
+    second.tool_call_id = "call-2";
+    second.tool_name = "lookup_city";
+    second.is_error = true;
+    second.content.emplace_back(
+        ImageContent{.data = "aGVsbG8=", .mime_type = "image/png"});
+    context.messages.emplace_back(std::move(second));
+
+    auto request = MuseMessagesClient::build_request_json(model, context, {});
+    CHECK(request["tools"].is_array());
+    CHECK_EQ(request["tools"].size(), 1U);
+    CHECK_EQ(request["tools"][0]["type"].get<std::string>(), "custom");
+    CHECK_EQ(request["tools"][0]["name"].get<std::string>(), "lookup_city");
+    CHECK_EQ(request["tools"][0]["input_schema"]["type"].get<std::string>(),
+             "object");
+    CHECK(!request["tools"][0]["strict"].get<bool>());
+
+    CHECK_EQ(request["messages"].size(), 2U);
+    const auto &assistant_content = request["messages"][0]["content"];
+    CHECK_EQ(assistant_content[0]["type"].get<std::string>(), "tool_use");
+    CHECK_EQ(assistant_content[0]["id"].get<std::string>(), "call-1");
+    CHECK_EQ(assistant_content[0]["input"]["city"].get<std::string>(),
+             "Paris");
+
+    const auto &tool_results = request["messages"][1]["content"];
+    CHECK_EQ(tool_results.size(), 2U);
+    CHECK_EQ(tool_results[0]["type"].get<std::string>(), "tool_result");
+    CHECK_EQ(tool_results[0]["content"].get<std::string>(), "sunny");
+    CHECK_EQ(tool_results[1]["tool_use_id"].get<std::string>(), "call-2");
+    CHECK(tool_results[1]["is_error"].get<bool>());
+    CHECK_EQ(tool_results[1]["content"][0]["type"].get<std::string>(),
+             "image");
+  });
+
   tests::run("SSE parser: thinking, text, usage, and block indices", [] {
     auto result = std::make_shared<AssistantMessage>();
     std::vector<AssistantMessageEvent> events;
@@ -280,6 +366,40 @@ int main() {
     CHECK(thinking.redacted);
     CHECK_EQ(thinking.thinking, "");
     CHECK_EQ(thinking.thinking_signature.value_or(""), "encrypted-tail");
+  });
+
+  tests::run("SSE parser: tool use and partial JSON", [] {
+    auto result = std::make_shared<AssistantMessage>();
+    std::vector<AssistantMessageEvent> events;
+    MuseMessagesSseParser parser(result, [&](const AssistantMessageEvent &event) {
+      events.push_back(event);
+    });
+    parser.feed_line(
+        "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-2\",\"name\":\"lookup_city\",\"input\":{}}}");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Par\"}}");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"is\\\"}\"}}");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_stop\",\"index\":2}");
+    parser.feed_line(
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}");
+    parser.feed_line("data: {\"type\":\"message_stop\"}");
+    parser.finish();
+
+    CHECK(!parser.error());
+    CHECK_EQ(result->content.size(), 1U);
+    const auto &tool_call = std::get<ToolCall>(result->content[0]);
+    CHECK_EQ(tool_call.id, "call-2");
+    CHECK_EQ(tool_call.name, "lookup_city");
+    CHECK_EQ(tool_call.arguments["city"].get<std::string>(), "Paris");
+    CHECK(tool_call.partial_json.empty());
+    CHECK_EQ(result->stop_reason, StopReason::tool_use);
+    CHECK(std::holds_alternative<AssistantMessageToolCallStartEvent>(events[0]));
+    CHECK(std::holds_alternative<AssistantMessageToolCallDeltaEvent>(events[1]));
+    CHECK(std::holds_alternative<AssistantMessageToolCallDeltaEvent>(events[2]));
+    CHECK(std::holds_alternative<AssistantMessageToolCallEndEvent>(events[3]));
+    CHECK(std::holds_alternative<AssistantMessageDoneEvent>(events.back()));
   });
 
   tests::run("SSE parser: transport error envelope", [] {
