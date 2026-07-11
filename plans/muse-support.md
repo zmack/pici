@@ -306,17 +306,17 @@ Use `cmake --build build --target test-muse_messages --parallel &&
 
 ## Current implementation status
 
-Phases 1–3 are implemented: request construction for text/images, thinking
+Phases 1–4 are implemented: request construction for text/images, thinking
 replay, and tools; required `max_tokens`; adaptive thinking configuration with
 effort mapping; validated metadata; usage accounting; text/thinking/redacted
-thinking/tool-use SSE parsing; transport/refusal errors; model/key
-registration; and focused offline tests are complete. Live smoke tests have
-confirmed two-turn encrypted reasoning replay and a client-executed `bash`
-tool loop. Configurable sampling/tool choice remain intentionally outside the
-current interface, and built-in server tools remain out of scope. The
-Messages contract used here is the observed default response shape:
-`redacted_thinking.data`; the unsupported top-level `display` field is not
-sent.
+thinking/tool-use SSE parsing; transport/refusal errors; malformed/duplicate
+frame handling; model/key registration; and focused offline tests are
+complete. Live smoke tests have confirmed two-turn encrypted reasoning replay
+and a client-executed `bash` tool loop. Configurable sampling/tool choice
+remain intentionally outside the current interface, and built-in server tools
+remain out of scope. The Messages contract used here is the observed default
+response shape: `redacted_thinking.data`; the unsupported top-level `display`
+field is not sent.
 
 ## Verification
 

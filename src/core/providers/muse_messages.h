@@ -40,6 +40,7 @@ private:
     BlockKind kind{BlockKind::ignored};
     std::optional<std::size_t> content_index;
     std::string partial_json;
+    bool finished{false};
   };
 
   std::shared_ptr<AssistantMessage> result_;

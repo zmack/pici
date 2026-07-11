@@ -8,6 +8,8 @@
 #include <optional>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include <curl/curl.h>
 #include <utility>
 
@@ -44,6 +46,13 @@ struct CurlHeaders {
 int stop_token_progress(void *p, curl_off_t, curl_off_t, curl_off_t,
                         curl_off_t) {
   return static_cast<const std::stop_token *>(p)->stop_requested() ? 1 : 0;
+}
+
+std::string error_line(std::string message) {
+  return nlohmann::json{
+      {"error", {{"message", std::move(message)}}},
+  }
+      .dump();
 }
 
 } // namespace
@@ -216,20 +225,18 @@ bool HttpClient::post_streaming(
   curl_easy_getinfo(curl.handle, CURLINFO_RESPONSE_CODE, &status);
 
   if (state.callback_error) {
-    state.callback(std::string(R"({"error":{"message":")") +
-                   *state.callback_error + "\"}}");
+    state.callback(error_line(*state.callback_error));
     return false;
   }
   if (res != CURLE_OK) {
-    state.callback(std::string(R"({"error":{"message":")") +
-                   curl_easy_strerror(res) + "\"}}");
+    state.callback(error_line(curl_easy_strerror(res)));
     return false;
   }
   if (status < 200 || status >= 300) {
     std::string msg = "HTTP status " + std::to_string(status);
     if (!state.buffer.empty())
       msg += ": " + state.buffer;
-    state.callback(std::string(R"({"error":{"message":")") + msg + "\"}}");
+    state.callback(error_line(std::move(msg)));
     return false;
   }
 

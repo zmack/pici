@@ -284,16 +284,18 @@ void MuseMessagesSseParser::process_data(std::string_view data) {
     return;
 
   if (type == "error" || event.contains("error")) {
-    const auto &error = event["error"];
-    if (error.is_object()) {
-      error_ = error.value("message", std::string("Muse request failed"));
-    } else if (error.is_string()) {
-      error_ = error.get<std::string>();
-    } else {
-      error_ = "Muse request failed";
+    if (!error_) {
+      const auto &error = event["error"];
+      if (error.is_object()) {
+        error_ = error.value("message", std::string("Muse request failed"));
+      } else if (error.is_string()) {
+        error_ = error.get<std::string>();
+      } else {
+        error_ = "Muse request failed";
+      }
+      result_->stop_reason = StopReason::error;
+      result_->error_message = *error_;
     }
-    result_->stop_reason = StopReason::error;
-    result_->error_message = *error_;
     return;
   }
 
@@ -336,7 +338,7 @@ void MuseMessagesSseParser::process_data(std::string_view data) {
           reason_it != delta_it->end() && reason_it->is_string()) {
         const auto reason = reason_it->get<std::string>();
         result_->stop_reason = MuseMessagesClient::map_stop_reason(reason);
-        if (reason == "refusal") {
+        if (reason == "refusal" && !error_) {
           error_ = "Muse refused the request";
           result_->error_message = *error_;
         }
@@ -536,6 +538,12 @@ void MuseMessagesSseParser::finish_block(std::size_t protocol_index) {
   auto block_it = blocks_.find(protocol_index);
   if (block_it == blocks_.end())
     return;
+  if (block_it->second.finished) {
+    if (active_block_index_ && *active_block_index_ == protocol_index)
+      active_block_index_.reset();
+    return;
+  }
+  block_it->second.finished = true;
   if (block_it->second.kind == BlockKind::text)
     finish_text_block(protocol_index);
   else if (block_it->second.kind == BlockKind::thinking)

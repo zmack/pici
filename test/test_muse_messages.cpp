@@ -410,6 +410,54 @@ int main() {
     parser.finish();
     CHECK(parser.error().has_value());
     CHECK_EQ(*parser.error(), "HTTP status 503: overloaded");
+    CHECK_EQ(result->error_message.value_or(""),
+             "HTTP status 503: overloaded");
+  });
+
+  tests::run("SSE parser: Muse error and fallback preservation", [] {
+    auto result = std::make_shared<AssistantMessage>();
+    MuseMessagesSseParser parser(result);
+    parser.feed_line("event: error\r");
+    parser.feed_line(
+        R"(data: {"type":"error","error":{"type":"invalid_request_error","message":"bad input"}})");
+    parser.feed_line(
+        R"({"error":{"message":"HTTP status 400: fallback"}})");
+    parser.finish();
+    CHECK(parser.error().has_value());
+    CHECK_EQ(*parser.error(), "bad input");
+    CHECK_EQ(result->error_message.value_or(""), "bad input");
+  });
+
+  tests::run("SSE parser: malformed and duplicate frames", [] {
+    auto result = std::make_shared<AssistantMessage>();
+    std::vector<AssistantMessageEvent> events;
+    MuseMessagesSseParser parser(result, [&](const AssistantMessageEvent &event) {
+      events.push_back(event);
+    });
+    parser.feed_line("event: unknown_event");
+    parser.feed_line("data: {not valid json}");
+    parser.feed_line("event: ping");
+    parser.feed_line("data: {}");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\"}}");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"unknown_delta\",\"value\":\"ignored\"}}");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}");
+    parser.feed_line("data: {\"type\":\"content_block_stop\",\"index\":3}");
+    parser.feed_line("data: {\"type\":\"content_block_stop\",\"index\":3}");
+    parser.feed_line("data: {\"type\":\"message_stop\"}");
+    parser.finish();
+
+    CHECK(!parser.error());
+    CHECK_EQ(std::get<TextContent>(result->content[0]).text, "ok");
+    int text_end_events = 0;
+    for (const auto &event : events) {
+      if (std::holds_alternative<AssistantMessageTextEndEvent>(event))
+        ++text_end_events;
+    }
+    CHECK_EQ(text_end_events, 1);
+    CHECK(std::holds_alternative<AssistantMessageDoneEvent>(events.back()));
   });
 
   tests::run("SSE parser: refusal is an error", [] {
