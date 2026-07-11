@@ -112,6 +112,29 @@ int main() {
     CHECK_EQ(request["metadata"]["request_id"].get<std::string>(), "test-1");
   });
 
+  tests::run("build_request_json: thinking effort mapping", [] {
+    auto model = make_model();
+    AgentContext context;
+
+    StreamOptions minimal;
+    minimal.reasoning = ThinkingLevel::minimal;
+    auto minimal_request =
+        MuseMessagesClient::build_request_json(model, context, minimal);
+    CHECK_EQ(minimal_request["output_config"]["effort"].get<std::string>(),
+             "low");
+
+    StreamOptions high;
+    high.reasoning = ThinkingLevel::high;
+    auto high_request =
+        MuseMessagesClient::build_request_json(model, context, high);
+    CHECK_EQ(high_request["output_config"]["effort"].get<std::string>(),
+             "high");
+
+    auto off_request =
+        MuseMessagesClient::build_request_json(model, context, {});
+    CHECK(!off_request.contains("output_config"));
+  });
+
   tests::run("build_request_json: invalid metadata and missing max_tokens", [] {
     auto model = make_model();
     AgentContext context;
@@ -153,7 +176,44 @@ int main() {
     CHECK_EQ(content[1]["source"]["data"].get<std::string>(), "aGVsbG8=");
   });
 
-  tests::run("SSE parser: text, usage, and ignored block indices", [] {
+  tests::run("build_request_json: thinking replay", [] {
+    auto model = make_model();
+    AgentContext context;
+    AssistantMessage assistant;
+    assistant.api = model.api;
+    assistant.provider = model.provider;
+    assistant.model = model.id;
+    ThinkingContent visible{.thinking = "summary",
+                            .thinking_signature = "visible-signature"};
+    ThinkingContent redacted;
+    redacted.redacted = true;
+    redacted.thinking_signature = "encrypted-payload";
+    assistant.content = {visible, redacted, TextContent{.text = "answer"}};
+    context.messages.emplace_back(std::move(assistant));
+
+    auto request = MuseMessagesClient::build_request_json(model, context, {});
+    const auto &content = request["messages"][0]["content"];
+    CHECK(content.is_array());
+    CHECK_EQ(content.size(), 3U);
+    CHECK_EQ(content[0]["type"].get<std::string>(), "thinking");
+    CHECK_EQ(content[0]["thinking"].get<std::string>(), "summary");
+    CHECK_EQ(content[0]["signature"].get<std::string>(),
+             "visible-signature");
+    CHECK_EQ(content[1]["type"].get<std::string>(), "redacted_thinking");
+    CHECK_EQ(content[1]["data"].get<std::string>(), "encrypted-payload");
+    CHECK_EQ(content[2]["type"].get<std::string>(), "text");
+
+    auto other_model = model;
+    other_model.id = "other-model";
+    auto downgraded =
+        MuseMessagesClient::build_request_json(other_model, context, {});
+    const auto &downgraded_content = downgraded["messages"][0]["content"];
+    CHECK(downgraded_content.is_array());
+    CHECK_EQ(downgraded_content[0]["text"].get<std::string>(), "summary");
+    CHECK_EQ(downgraded_content[1]["text"].get<std::string>(), "answer");
+  });
+
+  tests::run("SSE parser: thinking, text, usage, and block indices", [] {
     auto result = std::make_shared<AssistantMessage>();
     std::vector<AssistantMessageEvent> events;
     MuseMessagesSseParser parser(result, [&](const AssistantMessageEvent &event) {
@@ -168,6 +228,8 @@ int main() {
         "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}");
     parser.feed_line(
         "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hidden\"}}");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}");
     parser.feed_line(
         "data: {\"type\":\"content_block_stop\",\"index\":0}");
     parser.feed_line(
@@ -185,14 +247,39 @@ int main() {
 
     CHECK(!parser.error());
     CHECK_EQ(result->response_id.value_or(""), "msg_1");
-    CHECK_EQ(result->content.size(), 1U);
-    CHECK_EQ(std::get<TextContent>(result->content[0]).text, "Hello world");
+    CHECK_EQ(result->content.size(), 2U);
+    CHECK_EQ(std::get<ThinkingContent>(result->content[0]).thinking, "hidden");
+    CHECK_EQ(std::get<ThinkingContent>(result->content[0])
+                 .thinking_signature.value_or(""),
+             "sig");
+    CHECK_EQ(std::get<TextContent>(result->content[1]).text, "Hello world");
     CHECK_EQ(result->usage.input, 12U);
     CHECK_EQ(result->usage.output, 3U);
     CHECK_EQ(result->usage.total_tokens, 15U);
     CHECK_EQ(result->stop_reason, StopReason::stop);
     CHECK(!events.empty());
     CHECK(std::holds_alternative<AssistantMessageDoneEvent>(events.back()));
+  });
+
+  tests::run("SSE parser: redacted thinking", [] {
+    auto result = std::make_shared<AssistantMessage>();
+    MuseMessagesSseParser parser(result);
+    parser.feed_line("event: content_block_start\r\n");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"encrypted\"}}\r\n");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"redacted_thinking_delta\",\"data\":\"-tail\"}}\r\n");
+    parser.feed_line(
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\r\n");
+    parser.feed_line("data: {\"type\":\"message_stop\"}\r\n");
+    parser.finish();
+
+    CHECK(!parser.error());
+    CHECK_EQ(result->content.size(), 1U);
+    const auto &thinking = std::get<ThinkingContent>(result->content[0]);
+    CHECK(thinking.redacted);
+    CHECK_EQ(thinking.thinking, "");
+    CHECK_EQ(thinking.thinking_signature.value_or(""), "encrypted-tail");
   });
 
   tests::run("SSE parser: transport error envelope", [] {

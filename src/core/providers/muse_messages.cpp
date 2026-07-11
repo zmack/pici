@@ -84,11 +84,27 @@ Json convert_messages(const Model &model, const AgentContext &context) {
       for (const auto &block : assistant->content) {
         if (const auto *text = std::get_if<TextContent>(&block)) {
           content.push_back({{"type", "text"}, {"text", text->text}});
+        } else if (const auto *thinking =
+                       std::get_if<ThinkingContent>(&block)) {
+          if (thinking->redacted) {
+            if (thinking->thinking_signature &&
+                !thinking->thinking_signature->empty()) {
+              content.push_back(
+                  {{"type", "redacted_thinking"},
+                   {"data", *thinking->thinking_signature}});
+            }
+          } else if (!thinking->thinking.empty()) {
+            Json thinking_block = {{"type", "thinking"},
+                                   {"thinking", thinking->thinking}};
+            if (thinking->thinking_signature)
+              thinking_block["signature"] = *thinking->thinking_signature;
+            content.push_back(std::move(thinking_block));
+          }
         }
       }
       if (content.empty())
         continue;
-      if (content.size() == 1) {
+      if (content.size() == 1 && content[0]["type"] == "text") {
         messages.push_back({{"role", "assistant"},
                             {"content", content[0]["text"]}});
       } else {
@@ -213,6 +229,7 @@ void MuseMessagesSseParser::process_data(std::string_view data) {
       error_ = "Muse request failed";
     }
     result_->stop_reason = StopReason::error;
+    result_->error_message = *error_;
     return;
   }
 
@@ -276,8 +293,8 @@ void MuseMessagesSseParser::start_block(const nlohmann::json &event) {
     return;
   const auto index = index_it->get<std::size_t>();
 
-  if (active_text_index_)
-    finish_text_block(*active_text_index_);
+  if (active_block_index_)
+    finish_block(*active_block_index_);
 
   BlockState state;
   const auto block_it = event.find("content_block");
@@ -290,13 +307,47 @@ void MuseMessagesSseParser::start_block(const nlohmann::json &event) {
   if (block_type == "text") {
     state.kind = BlockKind::text;
     state.content_index = result_->content.size();
-    result_->content.emplace_back(TextContent{.text = ""});
-    active_text_index_ = index;
+    TextContent text;
+    if (block_it != event.end() && block_it->is_object()) {
+      const auto text_it = block_it->find("text");
+      if (text_it != block_it->end() && text_it->is_string())
+        text.text = text_it->get<std::string>();
+    }
+    result_->content.emplace_back(std::move(text));
+    active_block_index_ = index;
     if (on_event_) {
       on_event_(AssistantMessageTextStartEvent{.content_index =
                                                     *state.content_index,
                                                 .partial = *result_});
     }
+  } else if (block_type == "thinking") {
+    state.kind = BlockKind::thinking;
+    state.content_index = result_->content.size();
+    ThinkingContent thinking;
+    if (block_it != event.end() && block_it->is_object()) {
+      const auto thinking_it = block_it->find("thinking");
+      if (thinking_it != block_it->end() && thinking_it->is_string())
+        thinking.thinking = thinking_it->get<std::string>();
+      const auto signature_it = block_it->find("signature");
+      if (signature_it != block_it->end() && signature_it->is_string())
+        thinking.thinking_signature = signature_it->get<std::string>();
+    }
+    result_->content.emplace_back(std::move(thinking));
+    active_block_index_ = index;
+    if (on_event_) {
+      on_event_(AssistantMessageThinkingStartEvent{.content_index =
+                                                       *state.content_index,
+                                                   .partial = *result_});
+    }
+  } else if (block_type == "redacted_thinking") {
+    state.kind = BlockKind::redacted_thinking;
+    state.content_index = result_->content.size();
+    ThinkingContent thinking;
+    thinking.redacted = true;
+    const auto data_it = block_it->find("data");
+    if (data_it != block_it->end() && data_it->is_string())
+      thinking.thinking_signature = data_it->get<std::string>();
+    result_->content.emplace_back(std::move(thinking));
   }
   blocks_[index] = state;
 }
@@ -309,26 +360,62 @@ void MuseMessagesSseParser::process_delta(const nlohmann::json &event) {
     return;
 
   const auto block_it = blocks_.find(index_it->get<std::size_t>());
-  if (block_it == blocks_.end() || block_it->second.kind != BlockKind::text ||
-      !block_it->second.content_index)
+  if (block_it == blocks_.end() || !block_it->second.content_index)
     return;
 
-  const auto type_it = delta_it->find("type");
-  if (type_it == delta_it->end() || !type_it->is_string() ||
-      type_it->get<std::string>() != "text_delta")
+  const auto delta_type_it = delta_it->find("type");
+  if (delta_type_it == delta_it->end() || !delta_type_it->is_string())
     return;
-  const auto text_it = delta_it->find("text");
-  if (text_it == delta_it->end() || !text_it->is_string())
-    return;
-
+  const auto delta_type = delta_type_it->get<std::string>();
   const auto content_index = *block_it->second.content_index;
-  auto &text = std::get<TextContent>(result_->content[content_index]).text;
-  const auto delta = text_it->get<std::string>();
-  text += delta;
-  if (on_event_) {
-    on_event_(AssistantMessageTextDeltaEvent{.content_index = content_index,
-                                             .delta = delta,
-                                             .partial = *result_});
+  if (block_it->second.kind == BlockKind::text &&
+      delta_type == "text_delta") {
+    const auto text_it = delta_it->find("text");
+    if (text_it == delta_it->end() || !text_it->is_string())
+      return;
+    auto &text = std::get<TextContent>(result_->content[content_index]).text;
+    const auto delta = text_it->get<std::string>();
+    text += delta;
+    if (on_event_) {
+      on_event_(AssistantMessageTextDeltaEvent{.content_index = content_index,
+                                               .delta = delta,
+                                               .partial = *result_});
+    }
+  } else if (block_it->second.kind == BlockKind::thinking &&
+             delta_type == "thinking_delta") {
+    const auto thinking_it = delta_it->find("thinking");
+    if (thinking_it == delta_it->end() || !thinking_it->is_string())
+      return;
+    auto &thinking =
+        std::get<ThinkingContent>(result_->content[content_index]).thinking;
+    const auto delta = thinking_it->get<std::string>();
+    thinking += delta;
+    if (on_event_) {
+      on_event_(AssistantMessageThinkingDeltaEvent{
+          .content_index = content_index, .delta = delta, .partial = *result_});
+    }
+  } else if (block_it->second.kind == BlockKind::thinking &&
+             delta_type == "signature_delta") {
+    const auto signature_it = delta_it->find("signature");
+    if (signature_it == delta_it->end() || !signature_it->is_string())
+      return;
+    auto &signature = std::get<ThinkingContent>(
+                          result_->content[content_index])
+                          .thinking_signature;
+    if (!signature)
+      signature = std::string{};
+    *signature += signature_it->get<std::string>();
+  } else if (block_it->second.kind == BlockKind::redacted_thinking &&
+             delta_type == "redacted_thinking_delta") {
+    const auto data_it = delta_it->find("data");
+    if (data_it == delta_it->end() || !data_it->is_string())
+      return;
+    auto &signature = std::get<ThinkingContent>(
+                          result_->content[content_index])
+                          .thinking_signature;
+    if (!signature)
+      signature = std::string{};
+    *signature += data_it->get<std::string>();
   }
 }
 
@@ -338,8 +425,20 @@ void MuseMessagesSseParser::stop_block(const nlohmann::json &event) {
     return;
   const auto index = index_it->get<std::size_t>();
   auto block_it = blocks_.find(index);
-  if (block_it != blocks_.end() && block_it->second.kind == BlockKind::text)
-    finish_text_block(index);
+  if (block_it != blocks_.end())
+    finish_block(index);
+}
+
+void MuseMessagesSseParser::finish_block(std::size_t protocol_index) {
+  auto block_it = blocks_.find(protocol_index);
+  if (block_it == blocks_.end())
+    return;
+  if (block_it->second.kind == BlockKind::text)
+    finish_text_block(protocol_index);
+  else if (block_it->second.kind == BlockKind::thinking)
+    finish_thinking_block(protocol_index);
+  else if (active_block_index_ && *active_block_index_ == protocol_index)
+    active_block_index_.reset();
 }
 
 void MuseMessagesSseParser::finish_text_block(std::size_t protocol_index) {
@@ -355,8 +454,27 @@ void MuseMessagesSseParser::finish_text_block(std::size_t protocol_index) {
                                            .content = text,
                                            .partial = *result_});
   }
-  if (active_text_index_ && *active_text_index_ == protocol_index)
-    active_text_index_.reset();
+  if (active_block_index_ && *active_block_index_ == protocol_index)
+    active_block_index_.reset();
+}
+
+void MuseMessagesSseParser::finish_thinking_block(
+    std::size_t protocol_index) {
+  auto block_it = blocks_.find(protocol_index);
+  if (block_it == blocks_.end() || block_it->second.kind != BlockKind::thinking ||
+      !block_it->second.content_index)
+    return;
+
+  const auto content_index = *block_it->second.content_index;
+  const auto &thinking =
+      std::get<ThinkingContent>(result_->content[content_index]).thinking;
+  if (on_event_) {
+    on_event_(AssistantMessageThinkingEndEvent{.content_index = content_index,
+                                               .content = thinking,
+                                               .partial = *result_});
+  }
+  if (active_block_index_ && *active_block_index_ == protocol_index)
+    active_block_index_.reset();
 }
 
 void MuseMessagesSseParser::emit_done() {
@@ -370,8 +488,8 @@ void MuseMessagesSseParser::emit_done() {
 }
 
 void MuseMessagesSseParser::finish() {
-  if (active_text_index_)
-    finish_text_block(*active_text_index_);
+  if (active_block_index_)
+    finish_block(*active_block_index_);
   emit_done();
 }
 
@@ -394,6 +512,13 @@ nlohmann::json MuseMessagesClient::build_request_json(
       {"stream", true},
       {"thinking", {{"type", "adaptive"}}},
   };
+  if (options.reasoning != ThinkingLevel::off) {
+    const auto level = std::string(thinking_level_to_string(options.reasoning));
+    if (const auto it = model.thinking_level_map.find(level);
+        it != model.thinking_level_map.end() && it->second) {
+      request["output_config"]["effort"] = *it->second;
+    }
+  }
   if (!context.system_prompt.empty())
     request["system"] = context.system_prompt;
   if (options.temperature)

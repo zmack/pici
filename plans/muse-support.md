@@ -133,15 +133,11 @@ format:
   `ThinkingContent::thinking_signature` (leave `.thinking` empty) so the
   existing `redacted` bool + `thinking_signature` optional pair maps directly
   with no new field needed.
-  **Open question to resolve in phase 2, not assumed:** the Messages docs
-  don't state that `redacted_thinking` (i.e. `encrypted_content`) is included
-  by default — the Responses API equivalent requires an explicit
-  `include: ["reasoning.encrypted_content"]`. The phase-2 smoke test must
-  confirm whether Muse's Messages adapter includes `redacted_thinking` under
-  the default `display: "summarized"`, or whether `display: "omitted"` (or
-  some other field) is required to get it. This is the entire premise of
-  choosing this API surface, so confirm it against a live response before
-  writing the round-trip test, not just against the docs' prose.
+  **Observed phase-2 behavior:** a live Messages request rejected a top-level
+  `display` field as unknown, but the default response included a
+  `redacted_thinking` block with the encrypted replay payload in `data`.
+  Treat this observed Messages behavior as the contract for this integration;
+  do not copy the Responses API's `include` parameter into Messages requests.
 - `ToolResultMessage` → a `tool_result` content block nested inside a
   `user`-role message (`{"role":"user","content":[{"type":"tool_result",
   "tool_use_id","content":...,"is_error"}]}`). Map all supported tool
@@ -288,14 +284,12 @@ codebase.
    `test_muse_messages.cpp` structural/request/parser-seam tests. This is the
    point where a real API key can be used for a text-stream smoke test; it is
    not yet the reasoning-continuity milestone.
-2. **Thinking/reasoning blocks**: the effort-mapping policy, and the
-   `thinking`/`redacted_thinking` round-trip (request-side replay,
-   response-side parsing). Before writing the round-trip test, confirm
-   against a real response whether `redacted_thinking`/`encrypted_content` is
-   present by default or requires a specific `display`/`include`-style field
-   (see the open question in the content-block translation section) — the
-   test should assert the actual observed shape, not an assumed one. Land
-   this phase in its own commit, isolated from tool calling.
+2. **Thinking/reasoning blocks**: implement the effort-mapping policy and the
+   `thinking`/`redacted_thinking` round-trip using the observed default
+   Messages response shape. Add request-side replay, response-side parsing,
+   and a live smoke test that verifies a subsequent turn accepts the retained
+   encrypted block. Land this phase in its own commit, isolated from tool
+   calling.
 3. **Tool calling**: `tools`, `tool_use` block parsing, partial JSON
    accumulation, and `ToolResultMessage` → coalesced `tool_result` block
    conversion. `tool_choice` remains omitted because pici has no setting for
@@ -312,15 +306,17 @@ Use `cmake --build build --target test-muse_messages --parallel &&
 
 ## Current implementation status
 
-Phase 1 is implemented: request construction for text/images, required
-`max_tokens`, adaptive thinking configuration, validated metadata, usage
-accounting, safe text-only SSE emission, transport/refusal errors, model/key
-registration, and focused offline tests are complete. Thinking summaries,
-encrypted reasoning replay, tool calls, and configurable sampling/tool choice
-remain intentionally deferred to phases 2 and 3. Phase 2 cannot claim
-reasoning continuity until a live Messages response confirms how Muse returns
-the encrypted replay blob and which `display`/include-style request setting
-produces it.
+Phases 1 and 2 are implemented: request construction for text/images and
+thinking replay, required `max_tokens`, adaptive thinking configuration with
+effort mapping, validated metadata, usage accounting, text/thinking/redacted
+thinking SSE parsing, transport/refusal errors, model/key registration, and
+focused offline tests are complete. A live two-turn smoke test returned the
+expected exact text on both turns after resuming an isolated session, so Muse
+accepted the retained encrypted reasoning block. Tool calls remain deferred
+to phase 3; configurable sampling/tool choice remain intentionally outside
+the current interface. The Messages contract used here is the observed
+default response shape: `redacted_thinking.data`; the unsupported top-level
+`display` field is not sent.
 
 ## Verification
 

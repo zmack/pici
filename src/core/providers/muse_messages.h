@@ -15,8 +15,8 @@
 namespace pi::core {
 
 // Small, directly testable parser for the Anthropic-style Messages SSE
-// protocol. Phase 1 emits visible text and safely skips block types that are
-// implemented in later phases.
+// protocol. The parser preserves encrypted reasoning blocks without exposing
+// their payload as visible text.
 class MuseMessagesSseParser {
 public:
   MuseMessagesSseParser(std::shared_ptr<AssistantMessage> result,
@@ -28,7 +28,7 @@ public:
   const std::optional<std::string> &error() const { return error_; }
 
 private:
-  enum class BlockKind { ignored, text };
+  enum class BlockKind { ignored, text, thinking, redacted_thinking };
 
   struct BlockState {
     BlockKind kind{BlockKind::ignored};
@@ -38,7 +38,7 @@ private:
   std::shared_ptr<AssistantMessage> result_;
   AssistantEventCallback on_event_;
   std::map<std::size_t, BlockState> blocks_;
-  std::optional<std::size_t> active_text_index_;
+  std::optional<std::size_t> active_block_index_;
   std::string event_name_;
   std::optional<std::string> error_;
   bool done_emitted_{false};
@@ -47,7 +47,9 @@ private:
   void start_block(const nlohmann::json &event);
   void process_delta(const nlohmann::json &event);
   void stop_block(const nlohmann::json &event);
+  void finish_block(std::size_t protocol_index);
   void finish_text_block(std::size_t protocol_index);
+  void finish_thinking_block(std::size_t protocol_index);
   void emit_done();
 };
 
