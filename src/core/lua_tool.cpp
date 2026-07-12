@@ -50,9 +50,12 @@ void json_to_lua(lua_State *L, const nlohmann::json &j) {
       lua_rawseti(L, -2, static_cast<lua_Integer>(i) + 1);
     }
   } else if (j.is_string()) {
-    lua_pushstring(L, j.get<std::string>().c_str());
+    const auto value = j.get_ref<const std::string &>();
+    lua_pushlstring(L, value.data(), value.size());
   } else if (j.is_number_integer()) {
     lua_pushinteger(L, static_cast<lua_Integer>(j.get<std::int64_t>()));
+  } else if (j.is_number_unsigned()) {
+    lua_pushinteger(L, static_cast<lua_Integer>(j.get<std::uint64_t>()));
   } else if (j.is_number()) {
     lua_pushnumber(L, j.get<double>());
   } else if (j.is_boolean()) {
@@ -415,6 +418,110 @@ void push_messages_to_lua(lua_State *L, const std::vector<Message> &messages) {
   }
 }
 
+// Serialize the complete internal message representation. The canonical JSON
+// serializer is shared with session persistence so this view does not acquire
+// a second, lossy message format.
+void push_complete_messages_to_lua(lua_State *L,
+                                   const std::vector<Message> &messages) {
+  lua_newtable(L);
+  std::size_t turn = 0;
+  for (std::size_t i = 0; i < messages.size(); ++i) {
+    auto value = nlohmann::json::parse(json::to_json(messages[i]), nullptr,
+                                       false);
+    if (!value.is_object()) {
+      value = nlohmann::json{{"role", "unknown"},
+                             {"content", nlohmann::json::array()}};
+    }
+    value["index"] = i + 1;
+    if (std::holds_alternative<AssistantMessage>(messages[i]))
+      value["turn"] = ++turn;
+
+    json_to_lua(L, value);
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i) + 1);
+  }
+}
+
+void push_model_to_lua(lua_State *L, const Model &model) {
+  auto value = nlohmann::json::parse(json::to_json(model), nullptr, false);
+  if (!value.is_object())
+    value = nlohmann::json::object();
+
+  value["cost"] = {
+      {"inputPerMtok", model.cost.input_per_mtok},
+      {"outputPerMtok", model.cost.output_per_mtok},
+      {"cacheReadPerMtok", model.cost.cache_read_per_mtok},
+      {"cacheWritePerMtok", model.cost.cache_write_per_mtok},
+  };
+  json_to_lua(L, value);
+}
+
+void push_tools_to_lua(
+    lua_State *L,
+    const std::vector<std::shared_ptr<const ToolDefinition>> &tools) {
+  lua_newtable(L);
+  for (std::size_t i = 0; i < tools.size(); ++i) {
+    const auto &tool = tools[i];
+    lua_newtable(L);
+    lua_pushlstring(L, tool->name().data(), tool->name().size());
+    lua_setfield(L, -2, "name");
+    lua_pushlstring(L, tool->description().data(), tool->description().size());
+    lua_setfield(L, -2, "description");
+    const auto source = tool->source_path();
+    lua_pushlstring(L, source.data(), source.size());
+    lua_setfield(L, -2, "source_path");
+
+    auto schema = nlohmann::json::parse(tool->schema().serialize(), nullptr,
+                                        false);
+    const bool valid_schema = schema.is_object();
+    if (!valid_schema)
+      schema = nlohmann::json::object();
+    json_to_lua(L, schema);
+    lua_setfield(L, -2, "input_schema");
+    lua_pushboolean(L, valid_schema ? 1 : 0);
+    lua_setfield(L, -2, "schema_valid");
+
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i) + 1);
+  }
+}
+
+void push_agent_context_to_lua(lua_State *L, const AgentContext &context) {
+  lua_newtable(L);
+  lua_pushlstring(L, context.system_prompt.data(),
+                  context.system_prompt.size());
+  lua_setfield(L, -2, "system_prompt");
+  push_complete_messages_to_lua(L, context.messages);
+  lua_setfield(L, -2, "messages");
+  push_model_to_lua(L, context.model);
+  lua_setfield(L, -2, "model");
+  push_tools_to_lua(L, context.tools);
+  lua_setfield(L, -2, "tools");
+}
+
+void push_context_snapshot_to_lua(lua_State *L,
+                                  const LuaContextSnapshot &snapshot) {
+  lua_newtable(L);
+  const int context_index = lua_gettop(L);
+  push_agent_context_to_lua(L, snapshot.raw);
+  lua_setfield(L, -2, "raw");
+
+  if (!snapshot.effective) {
+    lua_newtable(L);
+    lua_pushboolean(L, 0);
+    lua_setfield(L, -2, "available");
+  } else {
+    push_agent_context_to_lua(L, *snapshot.effective);
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "available");
+    lua_pushlstring(L, snapshot.effective->model.provider.data(),
+                    snapshot.effective->model.provider.size());
+    lua_setfield(L, -2, "provider");
+    lua_pushlstring(L, snapshot.effective->model.api.data(),
+                    snapshot.effective->model.api.size());
+    lua_setfield(L, -2, "api");
+  }
+  lua_setfield(L, context_index, "effective");
+}
+
 // Forward-declared; defined after LuaHooksImpl.
 class LuaHooksImpl;
 
@@ -566,9 +673,37 @@ public:
   bool has_complete() const { return complete_ref_ != LUA_NOREF; }
   bool has_prompt_line() const { return prompt_line_ref_ != LUA_NOREF; }
 
+  void push_usage(lua_State *Ls, const TokenUsage &u) {
+    lua_newtable(Ls);
+    lua_pushinteger(Ls, static_cast<lua_Integer>(u.input));
+    lua_setfield(Ls, -2, "input");
+    lua_pushinteger(Ls, static_cast<lua_Integer>(u.output));
+    lua_setfield(Ls, -2, "output");
+    lua_pushinteger(Ls, static_cast<lua_Integer>(u.cache_read));
+    lua_setfield(Ls, -2, "cache_read");
+    lua_pushinteger(Ls, static_cast<lua_Integer>(u.cache_write));
+    lua_setfield(Ls, -2, "cache_write");
+    lua_pushinteger(Ls, static_cast<lua_Integer>(u.total_tokens));
+    lua_setfield(Ls, -2, "total_tokens");
+    lua_newtable(Ls);
+    lua_pushnumber(Ls, u.cost.input);
+    lua_setfield(Ls, -2, "input");
+    lua_pushnumber(Ls, u.cost.output);
+    lua_setfield(Ls, -2, "output");
+    lua_pushnumber(Ls, u.cost.cache_read);
+    lua_setfield(Ls, -2, "cache_read");
+    lua_pushnumber(Ls, u.cost.cache_write);
+    lua_setfield(Ls, -2, "cache_write");
+    lua_pushnumber(Ls, u.cost.total);
+    lua_setfield(Ls, -2, "total");
+    lua_setfield(Ls, -2, "cost");
+  }
+
   std::optional<std::string> call_prompt_line(std::size_t turn,
                                               std::string_view model_id,
-                                              std::size_t tools_count) {
+                                              std::size_t tools_count,
+                                              const TokenUsage &last,
+                                              const TokenUsage &session) {
     std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, prompt_line_ref_);
 
@@ -579,6 +714,10 @@ public:
     lua_setfield(L_, -2, "model");
     lua_pushinteger(L_, static_cast<lua_Integer>(tools_count));
     lua_setfield(L_, -2, "tools");
+    push_usage(L_, last);
+    lua_setfield(L_, -2, "last");
+    push_usage(L_, session);
+    lua_setfield(L_, -2, "session");
 
     if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
       lua_pop(L_, 1);
@@ -1051,14 +1190,16 @@ public:
 
   LuaHooks::CommandResult
   call_on_command(std::string_view cmd, std::string_view args,
-                  const std::vector<Message> &transcript) {
+                  const std::vector<Message> &transcript,
+                  const LuaContextSnapshot &context) {
     std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, command_ref_);
     lua_pushlstring(L_, cmd.data(), cmd.size());
     lua_pushlstring(L_, args.data(), args.size());
     push_messages_to_lua(L_, transcript);
+    push_context_snapshot_to_lua(L_, context);
 
-    if (lua_pcall(L_, 3, 1, 0) != LUA_OK) {
+    if (lua_pcall(L_, 4, 1, 0) != LUA_OK) {
       lua_pop(L_, 1);
       return {};
     }
@@ -1080,6 +1221,11 @@ public:
       lua_getfield(L_, -1, "prompt");
       if (lua_isstring(L_, -1) != 0)
         result.prompt = lua_tostring(L_, -1);
+      lua_pop(L_, 1);
+
+      lua_getfield(L_, -1, "output");
+      if (lua_isstring(L_, -1) != 0)
+        result.output = lua_tostring(L_, -1);
       lua_pop(L_, 1);
     }
     lua_pop(L_, 1);
@@ -1173,8 +1319,9 @@ std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
     hooks->on_command =
         [impl](
             std::string_view cmd, std::string_view args,
-            const std::vector<Message> &transcript) -> LuaHooks::CommandResult {
-      return impl->call_on_command(cmd, args, transcript);
+            const std::vector<Message> &transcript,
+            const LuaContextSnapshot &context) -> LuaHooks::CommandResult {
+      return impl->call_on_command(cmd, args, transcript, context);
     };
   }
   hooks->configure = [impl](const LuaHooks::AgentInfo &info) {
@@ -1195,8 +1342,10 @@ std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
   if (impl->has_prompt_line()) {
     hooks->prompt_line =
         [impl](std::size_t turn, std::string_view model_id,
-               std::size_t tools_count) -> std::optional<std::string> {
-      return impl->call_prompt_line(turn, model_id, tools_count);
+               std::size_t tools_count, const TokenUsage &last,
+               const TokenUsage &session) -> std::optional<std::string> {
+      return impl->call_prompt_line(turn, model_id, tools_count, last,
+                                     session);
     };
   }
   return hooks;
@@ -1386,11 +1535,12 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
     out->on_command =
         [list](
             std::string_view cmd, std::string_view args,
-            const std::vector<Message> &transcript) -> LuaHooks::CommandResult {
+            const std::vector<Message> &transcript,
+            const LuaContextSnapshot &context) -> LuaHooks::CommandResult {
       for (const auto &h : list) {
         if (!h->on_command)
           continue;
-        auto r = h->on_command(cmd, args, transcript);
+        auto r = h->on_command(cmd, args, transcript, context);
         if (r.handled)
           return r;
       }
@@ -1417,14 +1567,15 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   // prompt_line — last non-nil wins (override semantics)
   if (std::ranges::any_of(list,
                           [](const auto &h) { return !!h->prompt_line; })) {
-    out->prompt_line =
-        [list](std::size_t turn, std::string_view model_id,
-               std::size_t tools_count) -> std::optional<std::string> {
+    out->prompt_line = [list](
+        std::size_t turn, std::string_view model_id,
+        std::size_t tools_count, const TokenUsage &last,
+        const TokenUsage &session) -> std::optional<std::string> {
       std::optional<std::string> result;
       for (const auto &h : list) {
         if (!h->prompt_line)
           continue;
-        auto r = h->prompt_line(turn, model_id, tools_count);
+        auto r = h->prompt_line(turn, model_id, tools_count, last, session);
         if (r)
           result = std::move(r);
       }

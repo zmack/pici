@@ -12,6 +12,14 @@
 
 namespace pi::core {
 
+// Immutable context views passed to Lua command hooks. `raw` is captured when
+// the command is dispatched. `effective` is the most recent request-ready
+// context, if a model request has been prepared for this session.
+struct LuaContextSnapshot {
+  AgentContext raw;
+  std::optional<AgentContext> effective;
+};
+
 // Load a single Lua tool from a .lua file.
 // Throws std::runtime_error if the file cannot be loaded or is invalid.
 std::shared_ptr<const ToolDefinition>
@@ -64,6 +72,9 @@ struct LuaHooks {
     std::optional<std::size_t> truncate_to;
     // If set: send this as the next prompt after applying truncate_to.
     std::optional<std::string> prompt;
+    // If set: display this directly through the active renderer without
+    // sending it to the model.
+    std::optional<std::string> output;
   };
 
   // ── Sub-agent support ──────────────────────────────────────────────
@@ -109,9 +120,12 @@ struct LuaHooks {
   //
   // Lua signature:
   //   prompt_line(ctx) → string | nil
-  //   ctx: {turn, model, tools}
+  //   ctx: {turn, model, tools, last={input,output,cache_read,cache_write,
+  //     total_tokens,cost={input,output,cache_read,cache_write,total}},
+  //     session={...}}
   std::function<std::optional<std::string>(
-      std::size_t turn, std::string_view model_id, std::size_t tools_count)>
+      std::size_t turn, std::string_view model_id, std::size_t tools_count,
+      const TokenUsage &last_usage, const TokenUsage &session_usage)>
       prompt_line;
 
   // pici uses these to complete command names automatically when the user
@@ -134,14 +148,30 @@ struct LuaHooks {
       complete;
 
   // Called when the user types a slash command (/word ...) in the REPL.
-  // transcript is the full message history as a Lua array (role, content,
-  // index, turn fields).  Return nil/{handled=false} to fall through to the
-  // agent; return {handled=true, ...} to consume the command.
+  // transcript is the legacy flattened message history. `context` is the
+  // complete raw/effective context view described below. Return
+  // nil/{handled=false} to fall through to the agent; return
+  // {handled=true, ...} to consume the command.
   //
   // Lua signature:
-  //   on_command(cmd, args, transcript) → nil | {handled, truncate_to, prompt}
+  //   on_command(cmd, args, transcript, context)
+  //     → nil | {handled, truncate_to, prompt, output}
+  //   context = {
+  //     raw = {system_prompt, messages, model, tools},
+  //     effective = {available=false} or
+  //       {available=true, system_prompt, messages, model, tools,
+  //        provider, api},
+  //   }
+  //
+  // Raw messages use the canonical message JSON shape, including every
+  // content block and message metadata. Tool schemas are structured JSON
+  // values under input_schema. These views may contain sensitive prompts,
+  // reasoning data, and large base64 image payloads. They are snapshots and
+  // cannot mutate agent state. `effective` is the last prepared context, not
+  // the exact provider wire payload.
   std::function<CommandResult(std::string_view cmd, std::string_view args,
-                              const std::vector<Message> &transcript)>
+                              const std::vector<Message> &transcript,
+                              const LuaContextSnapshot &context)>
       on_command;
 };
 

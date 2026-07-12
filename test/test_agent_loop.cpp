@@ -326,6 +326,82 @@ void test_agent_loop_single_turn() {
     });
 }
 
+void test_effective_context_callback() {
+    tests::register_test("Agent loop: publishes effective context before request", []() {
+        Model model;
+        model.id = "request-model";
+        model.api = "request-api";
+        model.provider = "request-provider";
+
+        std::optional<AgentContext> observed;
+        AgentContext sent_to_client;
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [&sent_to_client](const AgentContext& context,
+                              const StreamOptions&,
+                              AssistantEventCallback,
+                              std::stop_token) {
+                sent_to_client = context;
+                auto message = std::make_shared<AssistantMessage>();
+                message->api = "request-api";
+                message->provider = "request-provider";
+                message->model = "request-model";
+                message->stop_reason = StopReason::stop;
+                message->content.emplace_back(TextContent{.text = "done"});
+                return message;
+            });
+
+        AgentContext context;
+        context.system_prompt = "raw system";
+        context.model.id = "raw-model";
+        context.tools.emplace_back(std::make_shared<CounterTool>());
+        UserMessage user;
+        user.content.emplace_back(TextContent{.text = "original"});
+        context.messages.emplace_back(std::move(user));
+
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.transform_context = [](const std::vector<Message>& messages,
+                                      std::stop_token) {
+            auto result = messages;
+            UserMessage transformed;
+            transformed.content.emplace_back(TextContent{.text = "transformed"});
+            result.emplace_back(std::move(transformed));
+            return result;
+        };
+        config.convert_to_llm = [](const std::vector<Message>& messages) {
+            auto result = messages;
+            UserMessage converted;
+            converted.content.emplace_back(TextContent{.text = "converted"});
+            result.emplace_back(std::move(converted));
+            return result;
+        };
+        config.on_effective_context =
+            [&observed](const AgentContext& snapshot) { observed = snapshot; };
+        config.should_stop_after_turn = [](const Message&,
+                                           const std::vector<ToolResultMessage>&,
+                                           AgentContext&) { return true; };
+        config.get_steering_messages = [] { return std::vector<Message>{}; };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+
+        auto stream = run_agent_loop({}, context, config, [](const AgentEvent&) {});
+        for (auto& event : stream)
+            (void)event;
+
+        CHECK(observed.has_value());
+        CHECK_EQ(observed->system_prompt, std::string("raw system"));
+        CHECK_EQ(observed->model.id, std::string("request-model"));
+        CHECK_EQ(observed->model.provider, std::string("request-provider"));
+        CHECK_EQ(observed->messages.size(), std::size_t(3));
+        CHECK_EQ(sent_to_client.messages.size(), std::size_t(3));
+        CHECK_EQ(observed->tools.size(), std::size_t(1));
+        CHECK_EQ(std::get<TextContent>(
+                      std::get<UserMessage>(observed->messages[2]).content[0])
+                      .text,
+                  std::string("converted"));
+    });
+}
+
 // ─── Test agent loop: with tool calls ─────────────────────────────────────
 
 void test_agent_loop_with_tools() {
@@ -1927,6 +2003,7 @@ int main() {
     std::cout << "=== pi-cpp agent loop tests ===\n\n";
 
     test_agent_loop_single_turn();
+    test_effective_context_callback();
     test_agent_loop_with_tools();
     test_agent_loop_stop_after_turn();
     test_agent_loop_sequential_tools();

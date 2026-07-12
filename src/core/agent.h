@@ -59,6 +59,10 @@ public:
     std::function<std::vector<Message>(const std::vector<Message> &)>
         convert_to_llm;
 
+    // Called with an immutable copy of the request-ready context immediately
+    // before the LLM client is invoked.
+    std::function<void(const AgentContext &)> on_effective_context;
+
     // Tool callbacks
     std::function<std::optional<BeforeToolCallResult>(
         const BeforeToolCallContext &, std::stop_token)>
@@ -91,6 +95,9 @@ public:
 
   AgentState &state() { return state_; }
   const AgentState &state() const { return state_; }
+
+  // Return an immutable snapshot of the current raw agent context.
+  AgentContext context_snapshot() const;
 
   // ── Tools ──────────────────────────────────────────────────────────
 

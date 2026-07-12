@@ -69,6 +69,10 @@ public:
   // The entire agent turn is complete (all messages + tool results).
   virtual void on_turn_end() {}
 
+  // User-facing output produced by a command or add-on. This is separate
+  // from model text so it does not become part of the assistant response.
+  virtual void on_command_output(std::string_view text) {}
+
   // An error occurred.  kind distinguishes LLM / transport / abort errors.
   virtual void on_error(RendererErrorKind kind, std::string_view message) {}
 

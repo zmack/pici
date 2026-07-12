@@ -258,6 +258,35 @@ graph.  Enable it explicitly when working on tracing:
 cmake -B build-otel -DPI_CPP_OTEL_API=ON
 ```
 
+### Lua context access
+
+Lua `on_command` hooks receive a fourth argument in addition to the legacy
+`cmd`, `args`, and flattened `transcript` values:
+
+```lua
+on_command = function(cmd, args, transcript, context)
+  local view = args == "effective" and context.effective or context.raw
+  if args == "effective" and not view.available then
+    return {handled = true, output = "effective context is not available yet"}
+  end
+  return {handled = true, output = json.encode(view)}
+end
+```
+
+`context.raw` contains the configured system prompt, complete message content
+and metadata, model metadata, and full structured tool definitions.
+`context.effective` is unavailable until a request is prepared; afterward it
+contains the most recent post-transform/post-conversion context, plus the
+provider and API identifiers. It is provider-neutral context, not the exact
+wire JSON sent to a model. Lua receives immutable copies, and existing
+three-argument hooks remain compatible.
+
+Messages preserve all content blocks, including thinking/signatures, images,
+tool calls/results, usage, timestamps, and response metadata. Context dumps may
+contain sensitive prompt content, reasoning data, and large base64 image
+payloads. See [`addons/context.lua`](addons/context.lua) for a working
+`/context` diagnostic command.
+
 For a lean local build directory that skips test targets:
 
 ```bash

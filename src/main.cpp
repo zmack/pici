@@ -9,6 +9,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -358,6 +359,10 @@ public:
     base_.on_turn_end();
   }
 
+  void on_command_output(std::string_view text) override {
+    base_.on_command_output(text);
+  }
+
   void on_error(core::RendererErrorKind, std::string_view msg) override {
     if (diagnostics_)
       diagnostics_->record_renderer_event("error", msg.size());
@@ -541,6 +546,13 @@ static int cmd_run(const cli::Args &args) {
   opts.model = model;
   opts.system_prompt = system;
   opts.thinking_level = to_core_thinking(args.thinking);
+  std::mutex effective_context_mutex;
+  std::optional<core::AgentContext> effective_context;
+  opts.on_effective_context =
+      [&](const core::AgentContext &context) {
+        std::scoped_lock lock(effective_context_mutex);
+        effective_context = context;
+      };
   std::shared_ptr<core::StreamDiagnostics> stream_diagnostics;
   if (!args.stream_trace.empty()) {
     try {
@@ -667,6 +679,7 @@ static int cmd_run(const cli::Args &args) {
       sub_opts.before_tool_call = nullptr;
       sub_opts.after_tool_call = nullptr;
       sub_opts.should_stop_after_turn = nullptr;
+      sub_opts.on_effective_context = nullptr;
       if (cfg.system_prompt)
         sub_opts.system_prompt = *cfg.system_prompt;
       if (cfg.model_id)
@@ -814,6 +827,19 @@ static int cmd_run(const cli::Args &args) {
   // Interactive REPL — track usage across turns
   CostAccumulator last_turn;
   CostAccumulator session;
+  // Last single-turn TokenUsage for Lua prompt_line hook.
+  core::TokenUsage last_usage_for_prompt{};
+  core::TokenUsage session_usage_for_prompt{};
+  auto build_session_usage = [&]() -> core::TokenUsage {
+    core::TokenUsage u;
+    u.input = session.input_tokens;
+    u.output = session.output_tokens;
+    u.cache_read = session.cache_read_tokens;
+    u.cache_write = session.cache_write_tokens;
+    u.total_tokens = session.total_tokens;
+    u.cost.total = session.total_cost;
+    return u;
+  };
   bool has_pricing =
       model.cost.input_per_mtok != 0 || model.cost.output_per_mtok != 0;
 
@@ -821,6 +847,8 @@ static int cmd_run(const cli::Args &args) {
     last_turn = CostAccumulator{};
     last_turn.add(u);
     session.add(u);
+    last_usage_for_prompt = u;
+    session_usage_for_prompt = build_session_usage();
   };
 
   // Run a turn and persist all new messages to the session file.
@@ -859,8 +887,10 @@ static int cmd_run(const cli::Args &args) {
       for (const auto &m : msgs)
         if (std::holds_alternative<core::AssistantMessage>(m))
           ++turns;
-      auto custom =
-          hooks->prompt_line(turns, model.id, agent.state().tools().size());
+      auto custom = hooks->prompt_line(turns, model.id,
+                                        agent.state().tools().size(),
+                                        last_usage_for_prompt,
+                                        session_usage_for_prompt);
       if (custom)
         prompt = "\n" + *custom;
     }
@@ -923,6 +953,10 @@ static int cmd_run(const cli::Args &args) {
       current_session_id = result.selected_session_id;
       agent.state().set_messages(loaded->messages);
       agent.state().set_session_id(current_session_id);
+      {
+        std::scoped_lock lock(effective_context_mutex);
+        effective_context.reset();
+      }
       std::cerr << "[session: " << current_session_id;
       if (loaded->header.name)
         std::cerr << "  " << *loaded->header.name;
@@ -940,6 +974,10 @@ static int cmd_run(const cli::Args &args) {
       child_hdr.parent_offset = agent.state().messages().size();
       current_session_id = store->create(child_hdr);
       agent.state().set_session_id(current_session_id);
+      {
+        std::scoped_lock lock(effective_context_mutex);
+        effective_context.reset();
+      }
       std::cerr << "[fork: " << current_session_id << "]\n";
       continue;
     }
@@ -952,13 +990,24 @@ static int cmd_run(const cli::Args &args) {
       std::string rest =
           space == std::string::npos ? "" : line.substr(space + 1);
 
-      auto result = hooks->on_command(cmd, rest, agent.state().messages());
+      core::LuaContextSnapshot context_snapshot;
+      context_snapshot.raw = agent.context_snapshot();
+      {
+        std::scoped_lock lock(effective_context_mutex);
+        context_snapshot.effective = effective_context;
+      }
+      auto result = hooks->on_command(cmd, rest, context_snapshot.raw.messages,
+                                      context_snapshot);
       if (result.handled) {
         if (result.truncate_to) {
           auto msgs = agent.state().messages();
           msgs.resize(std::min(*result.truncate_to, msgs.size()));
           agent.state().set_messages(std::move(msgs));
+          std::scoped_lock lock(effective_context_mutex);
+          effective_context.reset();
         }
+        if (result.output)
+          renderer->on_command_output(*result.output);
         if (result.prompt)
           accumulate(run_and_persist(*result.prompt));
         continue;

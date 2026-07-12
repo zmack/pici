@@ -284,9 +284,14 @@ void Agent::run_with_lifecycle(
 }
 
 AgentContext Agent::create_context_snapshot() {
+  return context_snapshot();
+}
+
+AgentContext Agent::context_snapshot() const {
   AgentContext ctx;
   ctx.system_prompt = state_.system_prompt();
   ctx.messages = state_.messages();
+  ctx.model = state_.model();
   ctx.tools = state_.tools();
   return ctx;
 }
@@ -312,6 +317,7 @@ AgentLoopConfig Agent::create_loop_config() {
   config.tool_execution = options_.tool_execution;
   config.convert_to_llm = options_.convert_to_llm ? options_.convert_to_llm
                                                   : default_convert_to_llm;
+  config.on_effective_context = options_.on_effective_context;
   config.transform_context = options_.transform_context;
   config.get_api_key = options_.get_api_key;
   config.should_stop_after_turn = options_.should_stop_after_turn;

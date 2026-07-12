@@ -91,6 +91,9 @@ struct AgentLoopConfig {
   std::function<std::vector<Message>(const std::vector<Message> &)>
       convert_to_llm;
 
+  // Called after context transformation/conversion and before stream().
+  std::function<void(const AgentContext &)> on_effective_context;
+
   // Optional context transform (e.g., pruning)
   std::function<std::vector<Message>(const std::vector<Message> &,
                                      std::stop_token)>

@@ -195,8 +195,8 @@ void update_usage(const Json &usage_json, TokenUsage &usage) {
     usage.cache_read = usage_json.value("cache_read_input_tokens",
                                          usage.cache_read);
   }
-  if (usage_json.contains("cache_write_input_tokens")) {
-    usage.cache_write = usage_json.value("cache_write_input_tokens",
+  if (usage_json.contains("cache_creation_input_tokens")) {
+    usage.cache_write = usage_json.value("cache_creation_input_tokens",
                                           usage.cache_write);
   }
   if (usage_json.contains("input_tokens")) {
@@ -653,6 +653,13 @@ nlohmann::json MuseMessagesClient::build_request_json(
       {"max_tokens", max_tokens},
       {"stream", true},
   };
+  // NOTE: Messages API Request fields list disallows unknown top-level
+  // fields (400). prompt_caching.md says prompt_cache_key belongs to
+  // Chat Completions / Responses only — do NOT send it here. Automatic
+  // prefix caching works without any key because we resend full history
+  // verbatim (system_prompt first, then messages[0..N-1]).
+  // See docs/muse/messages_api.md#request-fields.
+
   if (options.reasoning != ThinkingLevel::off) {
     request["thinking"] = {{"type", "adaptive"}};
     const auto level = std::string(thinking_level_to_string(options.reasoning));

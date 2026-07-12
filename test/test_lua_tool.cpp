@@ -67,6 +67,35 @@ static std::filesystem::path write_lua(const std::filesystem::path &dir,
   return path;
 }
 
+static LuaContextSnapshot empty_context() { return {}; }
+
+class ContextTool final : public ToolDefinition {
+public:
+  explicit ContextTool(std::string schema) : schema_(std::move(schema)) {}
+
+  std::string_view name() const override { return "context_tool"; }
+  std::string_view description() const override { return "context test tool"; }
+  ToolSchema &schema() const override { return schema_; }
+  std::shared_ptr<ToolResult>
+  execute(std::string_view, std::string_view, std::stop_token,
+          ToolUpdateCallback) const override {
+    return nullptr;
+  }
+
+private:
+  class Schema final : public ToolSchema {
+  public:
+    explicit Schema(std::string value) : value_(std::move(value)) {}
+    std::string serialize() const override { return value_; }
+    std::map<std::string, std::string> to_definition() const override {
+      return {};
+    }
+
+  private:
+    std::string value_;
+  } mutable schema_;
+};
+
 void test_load_and_metadata() {
   tests::register_test("LuaTool: load and metadata", []() {
     const auto dir =
@@ -391,7 +420,7 @@ return {
     transcript.push_back(a2);
 
     // /rewind 1 — keep through first assistant turn (index 2)
-    auto r = hooks->on_command("rewind", "1", transcript);
+    auto r = hooks->on_command("rewind", "1", transcript, empty_context());
     CHECK(r.handled);
     CHECK(r.truncate_to.has_value());
     CHECK(*r.truncate_to == std::size_t(2));
@@ -409,8 +438,122 @@ return {
 }
 )lua");
     auto hooks = load_lua_hooks(p);
-    auto r = hooks->on_command("help", "", {});
+    auto r = hooks->on_command("help", "", {}, empty_context());
     CHECK(!r.handled);
+  });
+
+  tests::register_test("LuaHooks: on_command exposes complete context views", [&]() {
+    auto p = write_hooks("context.lua", R"lua(
+return {
+  on_command = function(cmd, args, transcript, context)
+    if cmd ~= "inspect" then return {handled=false} end
+    local raw = context.raw
+    local user = raw.messages[1]
+    local assistant = raw.messages[2]
+    local tool_result = raw.messages[3]
+    local call = assistant.content[3]
+    local valid_tool = raw.tools[1]
+    local invalid_tool = raw.tools[2]
+
+    -- Lua receives copies, so these assignments must not mutate native state.
+    raw.system_prompt = "mutated"
+    user.content[1].text = "mutated"
+
+    local fields = {
+      raw.system_prompt,
+      user.role,
+      user.content[1].text,
+      user.content[2].mimeType,
+      assistant.turn,
+      assistant.content[1].thinkingSignature,
+      tostring(assistant.content[1].redacted),
+      assistant.content[2].textSignature,
+      call.type .. ":" .. call.id .. ":" .. call.name,
+      call.arguments.query,
+      assistant.responseId,
+      assistant.stopReason,
+      tostring(assistant.usage.input),
+      tool_result.toolCallId .. ":" .. tool_result.toolName,
+      tool_result.details,
+      tostring(tool_result.isError),
+      valid_tool.input_schema.properties.query.type,
+      tostring(valid_tool.source_path ~= ""),
+      tostring(invalid_tool.schema_valid),
+      raw.model.id .. ":" .. raw.model.provider .. ":" .. raw.model.baseUrl,
+      tostring(raw.model.cost.inputPerMtok),
+      tostring(context.effective.available),
+      context.effective.provider or "-",
+      context.effective.api or "-",
+      context.effective.system_prompt or "-",
+    }
+    return {handled=true, output=table.concat(fields, "|")}
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+
+    LuaContextSnapshot context;
+    context.raw.system_prompt = "system prompt";
+    context.raw.model.id = "model-1";
+    context.raw.model.provider = "provider-1";
+    context.raw.model.api = "api-1";
+    context.raw.model.base_url = "https://example.test";
+    context.raw.model.cost.input_per_mtok = 1.25;
+
+    UserMessage user;
+    user.content.emplace_back(TextContent{.text = "hello"});
+    user.content.emplace_back(
+        ImageContent{.data = "aGVsbG8=", .mime_type = "image/png"});
+    context.raw.messages.emplace_back(user);
+
+    AssistantMessage assistant;
+    assistant.api = "api-1";
+    assistant.provider = "provider-1";
+    assistant.model = "model-1";
+    assistant.response_id = "response-1";
+    assistant.stop_reason = StopReason::tool_use;
+    assistant.usage.input = 42;
+    assistant.content.emplace_back(ThinkingContent{
+        .thinking = "hidden", .thinking_signature = "think-sig", .redacted = true});
+    assistant.content.emplace_back(
+        TextContent{.text = "answer", .text_signature = "text-sig"});
+    ToolCall call;
+    call.id = "call-1";
+    call.name = "search";
+    call.arguments = {{"query", "pici"}};
+    assistant.content.emplace_back(std::move(call));
+    context.raw.messages.emplace_back(std::move(assistant));
+
+    ToolResultMessage result;
+    result.tool_call_id = "call-1";
+    result.tool_name = "search";
+    result.details = "details";
+    result.is_error = true;
+    result.content.emplace_back(TextContent{.text = "no result"});
+    context.raw.messages.emplace_back(std::move(result));
+
+    context.raw.tools.emplace_back(std::make_shared<ContextTool>(R"json(
+{"type":"object","properties":{"query":{"type":"string"}}}
+)json"));
+    context.raw.tools.emplace_back(std::make_shared<ContextTool>("not json"));
+
+    auto unavailable = hooks->on_command("inspect", "", context.raw.messages,
+                                         context);
+    CHECK(unavailable.handled);
+    CHECK(unavailable.output.has_value());
+    CHECK(*unavailable.output ==
+          "mutated|user|mutated|image/png|1|think-sig|true|text-sig|toolCall:call-1:search|pici|response-1|toolUse|42|call-1:search|details|true|string|true|false|model-1:provider-1:https://example.test|1.25|false|-|-|-");
+    CHECK(context.raw.system_prompt == "system prompt");
+    CHECK(std::get<UserMessage>(context.raw.messages[0]).content.size() ==
+          std::size_t(2));
+
+    context.effective = context.raw;
+    context.effective->system_prompt = "effective system";
+    auto available = hooks->on_command("inspect", "", context.raw.messages,
+                                        context);
+    CHECK(available.handled);
+    CHECK(available.output.has_value());
+    CHECK(available.output->ends_with("|true|provider-1|api-1|effective system"));
   });
 
   tests::register_test("LuaHooks: ctx.turn in before_tool_call", [&]() {
@@ -475,26 +618,32 @@ return { before_tool_call = function(ctx) return {block=true, reason="wrong"} en
 
   tests::register_test("compose_hooks: on_command first-handled wins", [&]() {
     auto p1 = write_hooks("cmd_a.lua", R"lua(
-return { on_command = function(cmd, args, t)
-  if cmd == "foo" then return {handled=true, prompt="foo handled"} end
+return { on_command = function(cmd, args, t, context)
+  if cmd == "foo" and context.raw.system_prompt == "shared" then
+    return {handled=true, prompt="foo handled"}
+  end
 end }
 )lua");
     auto p2 = write_hooks("cmd_b.lua", R"lua(
-return { on_command = function(cmd, args, t)
-  if cmd == "bar" then return {handled=true, prompt="bar handled"} end
+return { on_command = function(cmd, args, t, context)
+  if cmd == "bar" and context.raw.system_prompt == "shared" then
+    return {handled=true, prompt="bar handled"}
+  end
 end }
 )lua");
 
     auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
-    auto r1 = composed->on_command("foo", "", {});
+    LuaContextSnapshot shared;
+    shared.raw.system_prompt = "shared";
+    auto r1 = composed->on_command("foo", "", {}, shared);
     CHECK(r1.handled);
     CHECK(r1.prompt == "foo handled");
 
-    auto r2 = composed->on_command("bar", "", {});
+    auto r2 = composed->on_command("bar", "", {}, shared);
     CHECK(r2.handled);
     CHECK(r2.prompt == "bar handled");
 
-    auto r3 = composed->on_command("unknown", "", {});
+    auto r3 = composed->on_command("unknown", "", {}, shared);
     CHECK(!r3.handled);
   });
 
@@ -540,11 +689,11 @@ end }
     };
     composed->configure(info);
 
-    auto r1 = composed->on_command("sub1", "", {});
+    auto r1 = composed->on_command("sub1", "", {}, empty_context());
     CHECK(r1.handled);
     CHECK(r1.prompt == "ok:sub1");
 
-    auto r2 = composed->on_command("sub2", "", {});
+    auto r2 = composed->on_command("sub2", "", {}, empty_context());
     CHECK(r2.handled);
     CHECK(r2.prompt == "ok:sub2");
   });
@@ -606,7 +755,8 @@ return {
 )lua");
     auto hooks = load_lua_hooks(p);
     CHECK(hooks->prompt_line != nullptr);
-    auto r = hooks->prompt_line(3, "gpt-4o", 7);
+    TokenUsage empty{};
+    auto r = hooks->prompt_line(3, "gpt-4o", 7, empty, empty);
     CHECK(r.has_value());
     CHECK(*r == "[turn 3/gpt-4o] > ");
   });
@@ -616,7 +766,8 @@ return {
 return { prompt_line = function(ctx) return nil end }
 )lua");
     auto hooks = load_lua_hooks(p);
-    auto r = hooks->prompt_line(0, "model", 0);
+    TokenUsage empty{};
+    auto r = hooks->prompt_line(0, "model", 0, empty, empty);
     CHECK(!r.has_value());
   });
 
@@ -629,9 +780,29 @@ return { prompt_line = function(ctx) return "second> " end }
 )lua");
     auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
     CHECK(composed->prompt_line != nullptr);
-    auto r = composed->prompt_line(0, "m", 0);
+    TokenUsage empty{};
+    auto r = composed->prompt_line(0, "m", 0, empty, empty);
     CHECK(r.has_value());
     CHECK(*r == "second> ");
+  });
+
+  tests::register_test("LuaHooks: prompt_line exposes last cost", [&]() {
+    auto p = write_hooks("prompt_cost.lua", R"lua(
+return {
+  prompt_line = function(ctx)
+    return string.format("cost=%.4f in=%d", ctx.last.cost.total, ctx.last.input)
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    CHECK(hooks->prompt_line != nullptr);
+    TokenUsage u;
+    u.input = 123;
+    u.cost.total = 0.0042;
+    TokenUsage sess{};
+    auto r = hooks->prompt_line(1, "gpt-4o", 7, u, sess);
+    CHECK(r.has_value());
+    CHECK(*r == "cost=0.0042 in=123");
   });
 
   tests::register_test("LuaHooks: pici.run_agent calls C++ factory", [&]() {
@@ -674,7 +845,7 @@ return {
     AssistantMessage a; a.content.push_back(TextContent{"hello"});
     transcript.push_back(a);
 
-    auto r = hooks->on_command("sub", "", transcript);
+    auto r = hooks->on_command("sub", "", transcript, empty_context());
     CHECK(r.handled);
     CHECK(factory_called);
     CHECK(captured_prompt == "hello from sub");
@@ -705,7 +876,7 @@ return {
     info.cwd            = "/tmp/test";
     hooks->configure(info);
 
-    auto r = hooks->on_command("info", "", {});
+    auto r = hooks->on_command("info", "", {}, empty_context());
     CHECK(r.handled);
     CHECK(r.prompt.has_value());
     CHECK(*r.prompt == "gpt-4o|openai|3|/tmp/test");
@@ -733,8 +904,8 @@ return {
     info.storage_path = storage_file;
     hooks->configure(info);
 
-    hooks->on_command("store", "hello", {});
-    auto r = hooks->on_command("load", "", {});
+    hooks->on_command("store", "hello", {}, empty_context());
+    auto r = hooks->on_command("load", "", {}, empty_context());
     CHECK(r.handled);
     CHECK(r.prompt == "hello");
 

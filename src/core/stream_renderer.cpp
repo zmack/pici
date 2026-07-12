@@ -91,6 +91,12 @@ public:
     ::write(fd_, &nl, 1);
   }
 
+  void on_command_output(std::string_view text) override {
+    ::write(fd_, text.data(), text.size());
+    if (text.empty() || text.back() != '\n')
+      ::write(fd_, "\n", 1);
+  }
+
 private:
   int fd_;
 };
@@ -225,6 +231,12 @@ public:
     const char nl = '\n';
     ::write(fd_, &nl, 1);
     clear_state();
+  }
+
+  void on_command_output(std::string_view text) override {
+    ::write(fd_, text.data(), text.size());
+    if (text.empty() || text.back() != '\n')
+      ::write(fd_, "\n", 1);
   }
 
   void on_turn_start() override { clear_state(); }
@@ -393,6 +405,18 @@ public:
     status_text_ = "tokens: " + std::to_string(total_tokens_) + "  done";
     paint_status();
     write_seq("\033[?25h");
+  }
+
+  void on_command_output(std::string_view text) override {
+    if (!raw_buffer_.empty() && raw_buffer_.back() != '\n')
+      raw_buffer_ += '\n';
+    raw_buffer_ += '\n';
+    raw_buffer_.append(text.data(), text.size());
+    scanner_ = {};
+    fin_cache_ = {};
+    scroll_offset_rows_ = 0;
+    max_scroll_rows_ = 0;
+    repaint();
   }
 
   void on_error(RendererErrorKind, std::string_view msg) override {

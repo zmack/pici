@@ -45,6 +45,7 @@ env_api_key_cache() {
             {"cerebras", try_vars({"CEREBRAS_API_KEY"})},
             {"fireworks", try_vars({"FIREWORKS_API_KEY"})},
             {"meta", try_vars({"MODEL_API_KEY", "META_API_KEY"})},
+            {"meta-chat", try_vars({"MODEL_API_KEY", "META_API_KEY"})},
             {"github-copilot",
              try_vars({"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"})},
         };

@@ -219,6 +219,30 @@ int main() {
         CHECK(json.contains("stream_options"));
     });
 
+    tests::register_test("build_request_json: prompt_cache_key set for meta base_url", []() {
+        OpenAICompatibleClient client;
+        auto model = make_model("muse-spark-1.1", "meta-chat");
+        model.base_url = "https://api.meta.ai/v1";
+        auto ctx = make_context();
+        StreamOptions opts;
+
+        auto json = client.build_request_json(model, ctx, opts);
+
+        CHECK(json.contains("prompt_cache_key"));
+        CHECK_EQ(json["prompt_cache_key"].get<std::string>(), std::string("pici"));
+    });
+
+    tests::register_test("build_request_json: prompt_cache_key absent for other providers", []() {
+        OpenAICompatibleClient client;
+        auto model = make_model("gpt-4o", "openai");
+        auto ctx = make_context();
+        StreamOptions opts;
+
+        auto json = client.build_request_json(model, ctx, opts);
+
+        CHECK(!json.contains("prompt_cache_key"));
+    });
+
     tests::register_test("map_finish_reason: stop", []() {
         CHECK_EQ(OpenAICompatibleClient::map_finish_reason("stop"), StopReason::stop);
         CHECK_EQ(OpenAICompatibleClient::map_finish_reason("end"), StopReason::stop);

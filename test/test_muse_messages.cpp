@@ -153,6 +153,7 @@ int main() {
     CHECK(!request.contains("top_k"));
     CHECK(!request.contains("container"));
     CHECK(!request.contains("inference_geo"));
+    CHECK(!request.contains("prompt_cache_key"));
   });
 
   tests::run("build_request_json: options and metadata", [] {

@@ -167,16 +167,37 @@ static const std::vector<Model> kModels = {
     .cost={.input_per_mtok=0.075, .output_per_mtok=0.30, .cache_read_per_mtok=0.01875, .cache_write_per_mtok=0},
     .context_window=1048576, .max_tokens=8192  },
 
-  // Meta Muse — docs/muse/messages_api.md (Messages API, Anthropic-compatible)
-  // Context window and pricing are not published in the local API docs.
+  // Meta Muse — docs/muse/messages_api.md + prompt_caching.md
+  // Pricing per prompt_caching.md: input $1.25/MTok, cached $0.15/MTok.
+  // Output $6.00/MTok is a market-comparable estimate — verify from
+  // https://www.meta.ai/docs/models /pricing-rate-limits before release.
+  // Context window 128k is a conservative placeholder until that page is
+  // vendored; max_tokens 16384 mirrors similar reasoning models.
   { .id="muse-spark-1.1", .name="Muse Spark 1.1", .api="muse-messages", .provider="meta",
     .base_url="https://api.meta.ai", .reasoning=true,
     .input_capabilities={"text", "image"},
-    .context_window=0, .max_tokens=8192,
+    .cost={.input_per_mtok=1.25, .output_per_mtok=6.00, .cache_read_per_mtok=0.15, .cache_write_per_mtok=0},
+    .context_window=128000, .max_tokens=16384,
     .thinking_level_map={
       {"off", std::nullopt}, {"minimal", "low"}, {"low", "low"},
       {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"},
     } },
+
+  // Meta Muse via Chat Completions — docs/muse/chat_completion.md.
+  // Same underlying model as the Messages entry above (.id must match the
+  // real API model name), so this uses a distinct .provider ("meta-chat")
+  // to stay separately selectable in the registry — two entries can't
+  // share both .id and .provider, since lookup returns the first match.
+  // Unlike the Messages entry, this wire format does not carry reasoning
+  // across turns (see chat_completion.md's note), but it does accept
+  // prompt_cache_key, which the Messages endpoint rejects (HTTP 400,
+  // verified live). Same pricing/context-window caveats as above.
+  { .id="muse-spark-1.1", .name="Muse Spark 1.1 (Chat Completions)",
+    .api="openai-completions", .provider="meta-chat",
+    .base_url="https://api.meta.ai/v1", .reasoning=true,
+    .input_capabilities={"text", "image"},
+    .cost={.input_per_mtok=1.25, .output_per_mtok=6.00, .cache_read_per_mtok=0.15, .cache_write_per_mtok=0},
+    .context_window=128000, .max_tokens=16384 },
 };
 // clang-format on
 

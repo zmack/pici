@@ -378,6 +378,12 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
   auto llm_messages = config.convert_to_llm(messages);
   AgentContext llm_context = context;
   llm_context.messages = std::move(llm_messages);
+  llm_context.model = config.model;
+
+  // Keep this callback before client->stream(). The callback receives a copy
+  // so observers cannot mutate the context used by the request.
+  if (config.on_effective_context)
+    config.on_effective_context(llm_context);
 
   auto client = config.llm_client;
   if (!client) {

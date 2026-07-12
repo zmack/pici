@@ -25,6 +25,8 @@
 [addons]
 # files = ["~/.config/pici/rewind.lua"]  # --hooks-file (repeatable, loads in order)
 # dir   = "~/.config/pici/addons"        # --hooks-dir  (all .lua files in dir)
+# Example costline addon (shows last cost in prompt):
+# files = ["~/.config/pici/addons/costline.lua"]
 
 [display]
 # render  = "auto"   # --render: auto|markdown|raw

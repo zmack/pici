@@ -220,6 +220,7 @@ private:
 struct AgentContext {
   std::string system_prompt;
   std::vector<Message> messages;
+  Model model;
   std::vector<std::shared_ptr<const ToolDefinition>> tools;
 };
 

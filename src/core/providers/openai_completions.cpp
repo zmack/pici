@@ -539,6 +539,18 @@ OpenAICompatibleClient::build_request_json(const Model &model,
   }
   if (compat.supports_store)
     params["store"] = false;
+  // Meta's Chat Completions backend only reliably reuses a cached prefix
+  // across requests that share a routing key (verified live: identical
+  // 803-token prefixes hit 0% without this key, ~78% with it). One
+  // constant key for all pici sessions, per prompt_caching.md's "don't
+  // over-partition" guidance — this is not sent on the Messages API,
+  // which rejects it with HTTP 400 (also verified live). Matched by
+  // base_url rather than model.provider since Meta's registry entries
+  // use different provider strings ("meta", "meta-chat") to stay
+  // separately selectable.
+  if (str_contains(model.base_url, "api.meta.ai")) {
+    params["prompt_cache_key"] = "pici";
+  }
   if (options.max_tokens) {
     params[compat.max_tokens_field] = *options.max_tokens;
   }
