@@ -61,9 +61,12 @@ Returns `nil` before first turn → falls back to default `> `. Return a string 
 
 ```bash
 ./build/pi-cli --test addons/test_costline.lua
+./build/pi-cli --test addons/test_context.lua
 ```
 
-See `test_costline.lua` for `pici.test` examples: cost formatting, cache, session, nil handling.
+See the test files for `pici.test` examples. The context suite exercises the
+genome, heatmap, tool graph, effective-unavailable behavior, and JSON fallback.
+They also run automatically as the `test-addons` CTest target.
 
 ### Customising
 

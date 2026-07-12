@@ -582,6 +582,16 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus)
     add_test(NAME test-config COMMAND test-config)
 
+    add_test(
+        NAME test-addons
+        COMMAND $<TARGET_FILE:pi-cli>
+            --config ${CMAKE_CURRENT_SOURCE_DIR}/config.toml.example
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_costline.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_context.lua
+    )
+    set_tests_properties(test-addons
+                         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
     add_executable(test-acp test/test_acp.cpp)
     target_include_directories(test-acp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test-acp PRIVATE pi-core pi-http httplib::httplib)
