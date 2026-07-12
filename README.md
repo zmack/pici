@@ -282,10 +282,12 @@ wire JSON sent to a model. Lua receives immutable copies, and existing
 three-argument hooks remain compatible.
 
 Messages preserve all content blocks, including thinking/signatures, images,
-tool calls/results, usage, timestamps, and response metadata. Context dumps may
-contain sensitive prompt content, reasoning data, and large base64 image
-payloads. See [`addons/context.lua`](addons/context.lua) for a working
-`/context` diagnostic command.
+tool calls/results, usage, timestamps, and response metadata. The example add-on
+also provides static TUI views: `/context genome`, `/context heatmap`, and
+`/context tools`, with effective-context variants such as
+`/context effective heatmap`. Context dumps may contain sensitive prompt
+content, reasoning data, and large base64 image payloads. See
+[`addons/context.lua`](addons/context.lua) for the implementation.
 
 For a lean local build directory that skips test targets:
 

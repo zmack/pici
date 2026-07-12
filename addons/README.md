@@ -92,10 +92,20 @@ return {
 
 ## context.lua — inspect model context
 
-`context.lua` adds `/context` and `/context effective`. The first command displays
-the current raw agent state; the second displays the most recent request-ready
-context after context transformation and message conversion. Before the first
-model request, `/context effective` reports that no snapshot is available.
+`context.lua` adds static TUI views:
+
+```text
+/context                    full JSON snapshot
+/context genome             compact message-shape visualization
+/context heatmap            content-density visualization
+/context tools              tool-call graph and tool inventory
+/context effective heatmap same view over the last request-ready context
+```
+
+The raw view shows current agent state. Effective views show the most recent
+request-ready context after context transformation and message conversion.
+Before the first model request, effective views report that no snapshot is
+available.
 
 Install it alongside the other add-ons:
 
