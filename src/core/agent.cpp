@@ -108,13 +108,11 @@ Agent::prompt(std::vector<Message> messages) {
 
   join_workers();
 
-  // Run asynchronously
   auto ctx = create_context_snapshot();
   auto config = create_loop_config();
+  begin_run();
 
-  {
-    std::scoped_lock lock(worker_mutex_);
-    workers_.emplace_back([this, messages, ctx, config, stream]() mutable {
+  launch_worker([this, messages, ctx, config, stream]() mutable {
     run_with_lifecycle([this, messages = std::move(messages),
                         ctx = std::move(ctx), config = std::move(config),
                         stream](const std::stop_token &stop_tok) mutable {
@@ -133,8 +131,7 @@ Agent::prompt(std::vector<Message> messages) {
 
       stream.wait();
     });
-    });
-  }
+  });
 
   return stream;
 }
@@ -191,11 +188,10 @@ EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
 
   auto context = create_context_snapshot();
   auto config = create_loop_config();
+  begin_run();
 
-  {
-    std::scoped_lock lock(worker_mutex_);
-    workers_.emplace_back([this, context = std::move(context),
-                           config = std::move(config), stream]() mutable {
+  launch_worker([this, context = std::move(context), config = std::move(config),
+                stream]() mutable {
     run_with_lifecycle([this, context = std::move(context),
                         config = std::move(config),
                         stream](const std::stop_token &stop_tok) mutable {
@@ -209,8 +205,7 @@ EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
 
       stream.wait();
     });
-    });
-  }
+  });
 
   return stream;
 }
@@ -266,11 +261,33 @@ void Agent::join_workers() {
   }
 }
 
-void Agent::run_with_lifecycle(
-    const std::function<void(std::stop_token)> &executor) {
+void Agent::begin_run() {
+  std::scoped_lock lock(worker_mutex_);
+  if (state_.is_streaming()) {
+    throw std::runtime_error(
+        "Agent is already processing a prompt. "
+        "Use steer() or follow_up() to queue messages, or wait for "
+        "completion.");
+  }
+  state_.reset_stop_source();
+  state_.clear_error_message();
   state_.set_streaming(true);
   state_.set_complete(false);
+}
 
+void Agent::launch_worker(std::function<void()> worker) {
+  try {
+    std::scoped_lock lock(worker_mutex_);
+    workers_.emplace_back(std::move(worker));
+  } catch (...) {
+    state_.set_streaming(false);
+    state_.set_complete(true);
+    throw;
+  }
+}
+
+void Agent::run_with_lifecycle(
+    const std::function<void(std::stop_token)> &executor) {
   try {
     executor(state_.stop_token());
   } catch (const std::exception &e) {

@@ -7,8 +7,10 @@
 #include <mutex>
 #include <optional>
 #include <source_location>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "core/agent.h"
@@ -54,6 +56,44 @@ public:
 private:
     std::string name_;
     mutable TestSchema schema_;
+};
+
+class LifecycleClient : public LLMClient {
+public:
+    explicit LifecycleClient(std::shared_ptr<std::atomic<int>> calls)
+        : calls_(std::move(calls)) {}
+
+    std::shared_ptr<AssistantMessage> stream(
+        const Model& model,
+        const AgentContext&,
+        const StreamOptions&,
+        AssistantEventCallback,
+        std::stop_token stop_tok) override {
+        const auto call_number = calls_->fetch_add(1) + 1;
+        auto message = std::make_shared<AssistantMessage>();
+        message->api = model.api;
+        message->provider = model.provider;
+        message->model = model.id;
+
+        if (call_number == 1) {
+            while (!stop_tok.stop_requested()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            message->stop_reason = StopReason::aborted;
+            message->error_message = "aborted";
+            return message;
+        }
+
+        message->stop_reason = StopReason::stop;
+        message->content.emplace_back(TextContent{.text = "second run"});
+        return message;
+    }
+
+    std::string_view provider_name() const override { return "test"; }
+    std::string_view api_id() const override { return "agent-lifecycle-test"; }
+
+private:
+    std::shared_ptr<std::atomic<int>> calls_;
 };
 
 // ─── Simple test harness ──────────────────────────────────────────────────
@@ -222,6 +262,65 @@ void test_agent_prompt_stream() {
     });
 }
 
+void test_agent_run_lifecycle() {
+    tests::register_test("Agent: abort and reuse run lifecycle", []() {
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        LLMClientRegistry::instance().register_client(
+            "agent-lifecycle-test",
+            [calls] { return std::make_shared<LifecycleClient>(calls); });
+
+        Agent::Options opts;
+        opts.model.id = "test-model";
+        opts.model.api = "agent-lifecycle-test";
+        opts.model.provider = "test";
+
+        Agent agent(opts);
+        auto first = agent.prompt("first");
+
+        bool rejected_concurrent_prompt = false;
+        try {
+            auto concurrent = agent.prompt("concurrent");
+            (void)concurrent;
+        } catch (const std::exception&) {
+            rejected_concurrent_prompt = true;
+        }
+        CHECK(rejected_concurrent_prompt);
+
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(1);
+        while (calls->load() == 0 &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        CHECK_EQ(calls->load(), 1);
+
+        agent.abort();
+        bool first_ended = false;
+        for (auto& event : first) {
+            if (std::holds_alternative<AgentEndEvent>(event)) {
+                first_ended = true;
+            }
+        }
+        agent.wait_for_idle();
+        CHECK(first_ended);
+        CHECK(!agent.is_streaming());
+
+        auto second = agent.prompt("second");
+        bool second_ended = false;
+        for (auto& event : second) {
+            if (std::holds_alternative<AgentEndEvent>(event)) {
+                second_ended = true;
+            }
+        }
+        agent.wait_for_idle();
+
+        CHECK(second_ended);
+        CHECK(!agent.is_streaming());
+        CHECK_EQ(calls->load(), 2);
+        CHECK(!agent.state().error_message().has_value());
+    });
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -235,6 +334,7 @@ int main() {
     test_agent_follow_up();
     test_agent_reset();
     test_agent_prompt_stream();
+    test_agent_run_lifecycle();
 
     tests::print_summary();
 

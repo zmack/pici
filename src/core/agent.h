@@ -154,6 +154,8 @@ private:
 
   // Internal helpers
   void join_workers();
+  void begin_run();
+  void launch_worker(std::function<void()> worker);
   void run_with_lifecycle(const std::function<void(std::stop_token)> &executor);
   AgentContext create_context_snapshot();
   AgentLoopConfig create_loop_config();

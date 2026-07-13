@@ -156,8 +156,20 @@ public:
     error_message_ = std::move(err);
   }
 
+  void clear_error_message() {
+    std::scoped_lock lock(mutex_);
+    error_message_.reset();
+  }
+
   std::stop_token stop_token() const { return stop_tok_; }
   std::stop_source &stop_source() { return stop_src_; }
+
+  // Called between runs, when no worker is using the current token.
+  void reset_stop_source() {
+    std::scoped_lock lock(mutex_);
+    stop_src_ = std::stop_source{};
+    stop_tok_ = stop_src_.get_token();
+  }
 
   // ── Session identity ───────────────────────────────────────────────
 
@@ -194,6 +206,8 @@ public:
     error_message_.reset();
     is_streaming_ = false;
     is_complete_ = false;
+    stop_src_ = std::stop_source{};
+    stop_tok_ = stop_src_.get_token();
   }
 
 private:

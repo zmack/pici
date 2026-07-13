@@ -40,6 +40,9 @@ codex-debugging.md
 
 # Generated docs
 docs/
+!docs/
+docs/*
+!docs/pi-gap-analysis.md
 
 # Dependencies (install via package manager)
 # Don't commit system deps

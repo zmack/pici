@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <source_location>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -214,6 +215,29 @@ public:
 
 private:
     std::atomic<int>& executions_;
+    mutable std::unique_ptr<ToolSchema> schema_;
+};
+
+class ThrowingTool : public ToolDefinition {
+public:
+    std::string_view name() const override { return "throwing"; }
+    std::string_view description() const override { return "Throws"; }
+    ToolSchema& schema() const override {
+        if (!schema_) {
+            schema_ = std::make_unique<CounterTool::CounterSchema>();
+        }
+        return *schema_;
+    }
+
+    std::shared_ptr<ToolResult> execute(
+        std::string_view,
+        std::string_view,
+        std::stop_token,
+        ToolUpdateCallback) const override {
+        throw std::runtime_error("tool exploded");
+    }
+
+private:
     mutable std::unique_ptr<ToolSchema> schema_;
 };
 
@@ -680,6 +704,115 @@ void test_agent_loop_no_llm_client() {
         }
 
         CHECK(error_handled);
+    });
+}
+
+void test_agent_loop_provider_exception() {
+    tests::register_test("Agent loop: provider exception settles stream", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [](const AgentContext&, const StreamOptions&,
+               AssistantEventCallback, std::stop_token)
+                -> std::shared_ptr<AssistantMessage> {
+                throw std::runtime_error("provider exploded");
+            });
+
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.convert_to_llm = [](const std::vector<Message>& messages) {
+            return messages;
+        };
+
+        int agent_end_count = 0;
+        std::optional<AssistantMessage> failure;
+        auto stream = run_agent_loop(
+            {}, AgentContext{}, config, [&agent_end_count, &failure](
+                                           const AgentEvent& event) {
+                if (const auto* end = std::get_if<AgentEndEvent>(&event)) {
+                    agent_end_count++;
+                    for (const auto& message : end->messages) {
+                        if (const auto* assistant =
+                                std::get_if<AssistantMessage>(&message)) {
+                            failure = *assistant;
+                        }
+                    }
+                }
+            });
+
+        for (auto& event : stream) {
+            (void)event;
+        }
+
+        auto [result, error] = stream.wait();
+        CHECK_EQ(agent_end_count, 1);
+        CHECK(failure.has_value());
+        CHECK_EQ(failure->stop_reason, StopReason::error);
+        CHECK_EQ(failure->error_message,
+                 std::optional<std::string>{"provider exploded"});
+        CHECK(result.has_value());
+        CHECK(!error.has_value());
+    });
+}
+
+void test_agent_loop_tool_exception() {
+    tests::register_test("Agent loop: tool exception becomes tool error", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [](const AgentContext&, const StreamOptions&,
+               AssistantEventCallback, std::stop_token)
+                -> std::shared_ptr<AssistantMessage> {
+                auto message = std::make_shared<AssistantMessage>();
+                message->api = "test";
+                message->provider = "test";
+                message->model = "test-model";
+                message->stop_reason = StopReason::tool_use;
+                ToolCall call;
+                call.id = "call_throwing";
+                call.name = "throwing";
+                call.arguments["start"] = 0;
+                message->content.emplace_back(std::move(call));
+                return message;
+            });
+
+        AgentContext context;
+        context.tools.emplace_back(std::make_shared<ThrowingTool>());
+
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.tool_execution = ToolExecutionMode::sequential;
+        config.convert_to_llm = [](const std::vector<Message>& messages) {
+            return messages;
+        };
+        config.should_stop_after_turn = [](const Message&,
+                                           const std::vector<ToolResultMessage>&,
+                                           AgentContext&) { return true; };
+
+        std::vector<ToolResultMessage> tool_results;
+        auto stream = run_agent_loop(
+            {}, context, config, [&tool_results](const AgentEvent& event) {
+                if (const auto* turn_end = std::get_if<TurnEndEvent>(&event)) {
+                    tool_results = turn_end->tool_results;
+                }
+            });
+
+        for (auto& event : stream) {
+            (void)event;
+        }
+
+        CHECK_EQ(tool_results.size(), std::size_t(1));
+        CHECK(tool_results[0].is_error);
+        CHECK_EQ(std::get<TextContent>(tool_results[0].content[0]).text,
+                 "tool exploded");
     });
 }
 
@@ -2008,6 +2141,8 @@ int main() {
     test_agent_loop_stop_after_turn();
     test_agent_loop_sequential_tools();
     test_agent_loop_no_llm_client();
+    test_agent_loop_provider_exception();
+    test_agent_loop_tool_exception();
     test_agent_loop_continue();
     test_agent_loop_before_tool_call_blocks_with_reason();
     test_agent_loop_after_tool_call_partial_override();

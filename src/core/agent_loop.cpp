@@ -218,22 +218,33 @@ prepare_tool_call(const AgentContext &context,
 
   auto args_json = tool_call_args_json(prepared_tc);
   if (config.before_tool_call) {
-    auto before = config.before_tool_call(
-        BeforeToolCallContext{
-            .assistant_message = assistant_message,
+    try {
+      auto before = config.before_tool_call(
+          BeforeToolCallContext{
+              .assistant_message = assistant_message,
+              .tool_call = prepared_tc,
+              .args_json = args_json,
+              .context = context,
+          },
+          std::move(stop_tok));
+      if (before && before->block) {
+        auto reason = before->reason.empty()
+                          ? std::string{"Tool execution was blocked"}
+                          : before->reason;
+        return FinalizedToolCall{
             .tool_call = prepared_tc,
-            .args_json = args_json,
-            .context = context,
-        },
-        std::move(stop_tok));
-    if (before && before->block) {
-      auto reason = before->reason.empty()
-                        ? std::string{"Tool execution was blocked"}
-                        : before->reason;
+            .result = make_error_tool_result(std::move(reason)),
+            .is_error = true};
+      }
+    } catch (const std::exception &e) {
       return FinalizedToolCall{.tool_call = prepared_tc,
-                               .result =
-                                   make_error_tool_result(std::move(reason)),
+                               .result = make_error_tool_result(e.what()),
                                .is_error = true};
+    } catch (...) {
+      return FinalizedToolCall{
+          .tool_call = prepared_tc,
+          .result = make_error_tool_result("Unknown before_tool_call error"),
+          .is_error = true};
     }
   }
 
@@ -286,6 +297,32 @@ finalize_tool_call(const AgentContext &context,
 
   return FinalizedToolCall{
       .tool_call = tc, .result = std::move(tool_result), .is_error = is_error};
+}
+
+struct ToolExecutionOutcome {
+  std::shared_ptr<ToolResult> result;
+  bool is_error{false};
+};
+
+ToolExecutionOutcome
+execute_tool_safely(const PreparedToolCall &call, const StreamCallback &emit,
+                    const std::stop_token &stop_tok) {
+  try {
+    auto result = call.tool->execute(
+        call.tool_call.id, call.args_json, stop_tok,
+        [emit, call](const std::shared_ptr<ToolResult> &partial) {
+          emit(ToolExecutionUpdateEvent(
+              call.tool_call.id, call.tool_call.name, call.args_json,
+              partial ? partial->content() : std::string{},
+              std::source_location::current()));
+        });
+    return {.result = std::move(result), .is_error = false};
+  } catch (const std::exception &e) {
+    return {.result = make_error_tool_result(e.what()), .is_error = true};
+  } catch (...) {
+    return {.result = make_error_tool_result("Unknown tool execution error"),
+            .is_error = true};
+  }
 }
 
 bool should_terminate_tool_batch(
@@ -568,22 +605,15 @@ static ToolCallResult execute_tool_calls_sequential(
 
     auto call = std::get<PreparedToolCall>(std::move(prepared));
 
-    auto tool_result = call.tool->execute(
-        call.tool_call.id, call.args_json, stop_tok,
-        [&emit, &call](const std::shared_ptr<ToolResult> &partial) {
-          emit(ToolExecutionUpdateEvent(
-              call.tool_call.id, call.tool_call.name, call.args_json,
-              partial ? partial->content() : std::string{},
-              std::source_location::current()));
-        });
+    auto execution = execute_tool_safely(call, emit, stop_tok);
 
 #ifdef PI_CPP_OTEL_ENABLED
     tool_span->AddEvent("tool.finalize.start");
 #endif
 
     auto finalized = finalize_tool_call(
-        context, assistant_message, call.tool_call, std::move(tool_result),
-        false, config, call.args_json, stop_tok);
+        context, assistant_message, call.tool_call, std::move(execution.result),
+        execution.is_error, config, call.args_json, stop_tok);
 
 #ifdef PI_CPP_OTEL_ENABLED
     tool_span->AddEvent("tool.finalize.end");
@@ -670,21 +700,15 @@ static ToolCallResult execute_tool_calls_parallel(
           otel::trace::Scope tool_scope(tool_span);
           (void)tool_ctx;
 #endif
-          auto tool_result = call.tool->execute(
-              call.tool_call.id, call.args_json, stop_tok,
-              [emit, call](const std::shared_ptr<ToolResult> &partial) {
-                emit(ToolExecutionUpdateEvent(
-                    call.tool_call.id, call.tool_call.name, call.args_json,
-                    partial ? partial->content() : std::string{},
-                    std::source_location::current()));
-              });
+          auto execution = execute_tool_safely(call, emit, stop_tok);
 
 #ifdef PI_CPP_OTEL_ENABLED
           tool_span->AddEvent("tool.finalize.start");
 #endif
           auto finalized = finalize_tool_call(
               context, assistant_message, call.tool_call,
-              std::move(tool_result), false, config, call.args_json, stop_tok);
+              std::move(execution.result), execution.is_error, config,
+              call.args_json, stop_tok);
 #ifdef PI_CPP_OTEL_ENABLED
           tool_span->AddEvent("tool.finalize.end");
           tool_span->SetAttribute("tool.is_error", finalized.is_error);
@@ -768,16 +792,21 @@ ToolCallResult execute_tool_calls(AgentContext &context,
 
 namespace {
 
+using AgentEventStream = EventStream<AgentEvent, std::vector<Message>>;
+using AgentEventPush = AgentEventStream::PushFn;
+
 // Shared worker body for run_agent_loop and run_agent_loop_continue.
 // `prompts` is empty for the continue path, in which case the
 // emit-and-seed-new_messages step below is simply a no-op.
-void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
-                           AgentLoopConfig config, StreamCallback emit,
-                           EventStream<AgentEvent, std::vector<Message>> stream,
-                           std::stop_token stop_tok) {
+void run_agent_loop_worker_impl(std::vector<Message> prompts,
+                                AgentContext context,
+                                const AgentLoopConfig &config,
+                                StreamCallback emit,
+                                const AgentEventPush &push,
+                                std::stop_token stop_tok) {
   auto publish = [&](AgentEvent event) {
     emit(event);
-    stream.push(std::move(event));
+    push(std::move(event));
   };
 
 #ifdef PI_CPP_OTEL_ENABLED
@@ -890,7 +919,6 @@ void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
 #endif
         publish(TurnEndEvent(*assistant_msg, {}));
         publish(AgentEndEvent(new_messages));
-        stream.finish(new_messages);
         return;
       }
 
@@ -926,7 +954,6 @@ void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
                                                   tool_results, context);
         if (stop) {
           publish(AgentEndEvent(new_messages));
-          stream.finish(new_messages);
           return;
         }
       }
@@ -950,10 +977,50 @@ void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
   }
 
   publish(AgentEndEvent(new_messages));
-  stream.finish(new_messages);
 #ifdef PI_CPP_OTEL_ENABLED
   session_span->End();
 #endif
+}
+
+void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
+                           AgentLoopConfig config, StreamCallback emit,
+                           AgentEventPush push, std::stop_token stop_tok) {
+  auto publish_failure = [&](std::string error) {
+    auto failure = std::make_shared<AssistantMessage>();
+    failure->api = config.model.api;
+    failure->provider = config.model.provider;
+    failure->model = config.model.id;
+    failure->stop_reason = stop_tok.stop_requested() ? StopReason::aborted
+                                                      : StopReason::error;
+    failure->error_message = std::move(error);
+    failure->timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+
+    auto publish_failure_event = [&](AgentEvent event) {
+      try {
+        emit(event);
+      } catch (...) {
+      }
+      push(std::move(event));
+    };
+
+    publish_failure_event(MessageStartEvent(*failure));
+    publish_failure_event(MessageEndEvent(*failure));
+    publish_failure_event(TurnEndEvent(*failure, {}));
+    publish_failure_event(AgentEndEvent(std::vector<Message>{*failure}));
+  };
+
+  try {
+    run_agent_loop_worker_impl(std::move(prompts), std::move(context), config,
+                               emit, push, stop_tok);
+  } catch (const std::exception &e) {
+    publish_failure(stop_tok.stop_requested() ? "Operation aborted"
+                                              : e.what());
+  } catch (...) {
+    publish_failure(stop_tok.stop_requested() ? "Operation aborted"
+                                              : "Unknown error");
+  }
 }
 
 } // namespace
@@ -975,9 +1042,12 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
         return {};
       });
 
-  std::thread(run_agent_loop_worker, prompts, std::move(context), config,
-             std::move(emit), stream, stop_tok)
-      .detach();
+  stream.start_worker(
+      [prompts, context = std::move(context), config, emit = std::move(emit),
+       stop_tok](AgentEventPush push) mutable {
+        run_agent_loop_worker(std::move(prompts), std::move(context), config,
+                              std::move(emit), std::move(push), stop_tok);
+      });
 
   return stream;
 }
@@ -1005,11 +1075,11 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
         return {};
       });
 
-  // std::thread copies its arguments, so passing `context` by value here
-  // snapshots it for the worker thread without aliasing the caller's object.
-  std::thread(run_agent_loop_worker, std::vector<Message>{}, context, config,
-             std::move(emit), stream, stop_tok)
-      .detach();
+  stream.start_worker(
+      [context, config, emit = std::move(emit), stop_tok](AgentEventPush push) mutable {
+        run_agent_loop_worker({}, context, config, std::move(emit),
+                              std::move(push), stop_tok);
+      });
 
   return stream;
 }

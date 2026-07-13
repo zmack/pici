@@ -21,9 +21,14 @@ namespace pi::core {
 
 template <typename EventT, typename FinalResultT = std::monostate>
 class EventStream {
+private:
+  struct State;
+  struct WorkerState;
+
 public:
   using Event = EventT;
   using FinalResult = FinalResultT;
+  using PushFn = std::function<bool(Event)>;
 
   // Predicate to determine if an event signals completion
   using DonePredicate = std::function<bool(const Event &)>;
@@ -39,29 +44,36 @@ public:
   EventStream &operator=(EventStream &&) noexcept = default;
   ~EventStream() = default;
 
+  // Start a joinable worker owned by the stream state. The worker receives a
+  // push function instead of an EventStream instance to avoid a self-cycle.
+  void start_worker(std::function<void(PushFn)> worker) {
+    auto state = state_;
+    auto worker_state = std::make_shared<WorkerState>();
+    {
+      std::scoped_lock lock(state->mutex);
+      if (state->worker)
+        return;
+      state->worker = worker_state;
+    }
+
+    std::weak_ptr<State> weak_state = state;
+    worker_state->thread = std::jthread(
+        [weak_state, worker = std::move(worker)](std::stop_token) mutable {
+          PushFn push = [weak_state](Event event) {
+            auto state = weak_state.lock();
+            if (!state)
+              return false;
+            return push_state(state, std::move(event));
+          };
+          worker(std::move(push));
+        });
+  }
+
   // ── Push events ────────────────────────────────────────────────────
 
   // Push an event. Returns true if the stream is not yet complete.
   bool push(Event event) {
-    bool complete = false;
-    {
-      std::lock_guard lock(state_->mutex);
-      if (state_->is_complete)
-        return false;
-      complete = state_->done && state_->done(event);
-      if (complete) {
-        state_->result =
-            state_->extract ? state_->extract(event) : FinalResultT{};
-        state_->has_result = true;
-      }
-      state_->queue.push(std::move(event));
-      state_->has_error = false;
-      if (complete) {
-        state_->is_complete = true;
-      }
-    }
-    state_->condition.notify_all();
-    return !complete;
+    return push_state(state_, std::move(event));
   }
 
   // Push and check if this event marks the stream as done.
@@ -235,6 +247,33 @@ private:
 
     std::string error;
     bool has_error{false};
+
+    std::shared_ptr<WorkerState> worker;
+  };
+
+  struct WorkerState {
+    std::jthread thread;
+  };
+
+  static bool push_state(const std::shared_ptr<State> &state, Event event) {
+    bool complete = false;
+    {
+      std::lock_guard lock(state->mutex);
+      if (state->is_complete)
+        return false;
+      complete = state->done && state->done(event);
+      if (complete) {
+        state->result =
+            state->extract ? state->extract(event) : FinalResultT{};
+        state->has_result = true;
+      }
+      state->queue.push(std::move(event));
+      state->has_error = false;
+      if (complete)
+        state->is_complete = true;
+    }
+    state->condition.notify_all();
+    return !complete;
   };
 
   std::shared_ptr<State> state_;
