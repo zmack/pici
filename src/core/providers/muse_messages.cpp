@@ -49,9 +49,10 @@ std::string normalize_tool_call_id(const std::string &id) {
 
 Json image_block(const ImageContent &image) {
   return {{"type", "image"},
-          {"source", {{"type", "base64"},
-                       {"media_type", image.mime_type},
-                       {"data", image.data}}}};
+          {"source",
+           {{"type", "base64"},
+            {"media_type", image.mime_type},
+            {"data", image.data}}}};
 }
 
 Json tool_result_block(const ToolResultMessage &tool_result) {
@@ -101,8 +102,8 @@ Json convert_messages(const Model &model, const AgentContext &context) {
   auto flush_tool_results = [&] {
     if (pending_tool_results.empty())
       return;
-    messages.push_back({{"role", "user"},
-                        {"content", std::move(pending_tool_results)}});
+    messages.push_back(
+        {{"role", "user"}, {"content", std::move(pending_tool_results)}});
     pending_tool_results.clear();
   };
 
@@ -125,8 +126,7 @@ Json convert_messages(const Model &model, const AgentContext &context) {
       if (content.empty())
         continue;
       if (content.size() == 1 && content[0]["type"] == "text") {
-        messages.push_back({{"role", "user"},
-                            {"content", content[0]["text"]}});
+        messages.push_back({{"role", "user"}, {"content", content[0]["text"]}});
       } else {
         messages.push_back({{"role", "user"}, {"content", content}});
       }
@@ -143,9 +143,8 @@ Json convert_messages(const Model &model, const AgentContext &context) {
           if (thinking->redacted) {
             if (thinking->thinking_signature &&
                 !thinking->thinking_signature->empty()) {
-              content.push_back(
-                  {{"type", "redacted_thinking"},
-                   {"data", *thinking->thinking_signature}});
+              content.push_back({{"type", "redacted_thinking"},
+                                 {"data", *thinking->thinking_signature}});
             }
           } else if (!thinking->thinking.empty()) {
             Json thinking_block = {{"type", "thinking"},
@@ -155,9 +154,8 @@ Json convert_messages(const Model &model, const AgentContext &context) {
             content.push_back(std::move(thinking_block));
           }
         } else if (const auto *tool_call = std::get_if<ToolCall>(&block)) {
-          Json input = tool_call->arguments.is_object()
-                           ? tool_call->arguments
-                           : Json::object();
+          Json input = tool_call->arguments.is_object() ? tool_call->arguments
+                                                        : Json::object();
           content.push_back({{"type", "tool_use"},
                              {"id", tool_call->id},
                              {"name", tool_call->name},
@@ -167,8 +165,8 @@ Json convert_messages(const Model &model, const AgentContext &context) {
       if (content.empty())
         continue;
       if (content.size() == 1 && content[0]["type"] == "text") {
-        messages.push_back({{"role", "assistant"},
-                            {"content", content[0]["text"]}});
+        messages.push_back(
+            {{"role", "assistant"}, {"content", content[0]["text"]}});
       } else {
         messages.push_back({{"role", "assistant"}, {"content", content}});
       }
@@ -192,12 +190,12 @@ void update_usage(const Json &usage_json, TokenUsage &usage) {
     usage.output = usage_json.value("output_tokens", usage.output);
   }
   if (usage_json.contains("cache_read_input_tokens")) {
-    usage.cache_read = usage_json.value("cache_read_input_tokens",
-                                         usage.cache_read);
+    usage.cache_read =
+        usage_json.value("cache_read_input_tokens", usage.cache_read);
   }
   if (usage_json.contains("cache_creation_input_tokens")) {
-    usage.cache_write = usage_json.value("cache_creation_input_tokens",
-                                          usage.cache_write);
+    usage.cache_write =
+        usage_json.value("cache_creation_input_tokens", usage.cache_write);
   }
   if (usage_json.contains("input_tokens")) {
     const auto reported_input =
@@ -206,8 +204,8 @@ void update_usage(const Json &usage_json, TokenUsage &usage) {
                       ? reported_input - usage.cache_read - usage.cache_write
                       : 0;
   }
-  usage.total_tokens = usage.input + usage.output + usage.cache_read +
-                       usage.cache_write;
+  usage.total_tokens =
+      usage.input + usage.output + usage.cache_read + usage.cache_write;
 }
 
 void add_validated_metadata(const Json &metadata, Json &request) {
@@ -304,10 +302,10 @@ void MuseMessagesSseParser::process_data(std::string_view data) {
   }
 
   if (type == "message_start") {
-    const auto &message = event.contains("message") &&
-                                  event["message"].is_object()
-                              ? event["message"]
-                              : event;
+    const auto &message =
+        event.contains("message") && event["message"].is_object()
+            ? event["message"]
+            : event;
     if (auto id_it = message.find("id");
         id_it != message.end() && id_it->is_string()) {
       result_->response_id = id_it->get<std::string>();
@@ -316,8 +314,7 @@ void MuseMessagesSseParser::process_data(std::string_view data) {
         model_it != message.end() && model_it->is_string()) {
       result_->response_model = model_it->get<std::string>();
     }
-    if (auto usage_it = message.find("usage");
-        usage_it != message.end()) {
+    if (auto usage_it = message.find("usage"); usage_it != message.end()) {
       update_usage(*usage_it, result_->usage);
     }
     return;
@@ -386,9 +383,8 @@ void MuseMessagesSseParser::start_block(const nlohmann::json &event) {
     result_->content.emplace_back(std::move(text));
     active_block_index_ = index;
     if (on_event_) {
-      on_event_(AssistantMessageTextStartEvent{.content_index =
-                                                    *state.content_index,
-                                                .partial = *result_});
+      on_event_(AssistantMessageTextStartEvent{
+          .content_index = *state.content_index, .partial = *result_});
     }
   } else if (block_type == "thinking") {
     state.kind = BlockKind::thinking;
@@ -405,9 +401,8 @@ void MuseMessagesSseParser::start_block(const nlohmann::json &event) {
     result_->content.emplace_back(std::move(thinking));
     active_block_index_ = index;
     if (on_event_) {
-      on_event_(AssistantMessageThinkingStartEvent{.content_index =
-                                                       *state.content_index,
-                                                   .partial = *result_});
+      on_event_(AssistantMessageThinkingStartEvent{
+          .content_index = *state.content_index, .partial = *result_});
     }
   } else if (block_type == "redacted_thinking") {
     state.kind = BlockKind::redacted_thinking;
@@ -436,9 +431,8 @@ void MuseMessagesSseParser::start_block(const nlohmann::json &event) {
     result_->content.emplace_back(std::move(tool_call));
     active_block_index_ = index;
     if (on_event_) {
-      on_event_(AssistantMessageToolCallStartEvent{.content_index =
-                                                       *state.content_index,
-                                                   .partial = *result_});
+      on_event_(AssistantMessageToolCallStartEvent{
+          .content_index = *state.content_index, .partial = *result_});
     }
   }
   blocks_[index] = state;
@@ -460,8 +454,7 @@ void MuseMessagesSseParser::process_delta(const nlohmann::json &event) {
     return;
   const auto delta_type = delta_type_it->get<std::string>();
   const auto content_index = *block_it->second.content_index;
-  if (block_it->second.kind == BlockKind::text &&
-      delta_type == "text_delta") {
+  if (block_it->second.kind == BlockKind::text && delta_type == "text_delta") {
     const auto text_it = delta_it->find("text");
     if (text_it == delta_it->end() || !text_it->is_string())
       return;
@@ -469,9 +462,8 @@ void MuseMessagesSseParser::process_delta(const nlohmann::json &event) {
     const auto delta = text_it->get<std::string>();
     text += delta;
     if (on_event_) {
-      on_event_(AssistantMessageTextDeltaEvent{.content_index = content_index,
-                                               .delta = delta,
-                                               .partial = *result_});
+      on_event_(AssistantMessageTextDeltaEvent{
+          .content_index = content_index, .delta = delta, .partial = *result_});
     }
   } else if (block_it->second.kind == BlockKind::thinking &&
              delta_type == "thinking_delta") {
@@ -491,8 +483,7 @@ void MuseMessagesSseParser::process_delta(const nlohmann::json &event) {
     const auto signature_it = delta_it->find("signature");
     if (signature_it == delta_it->end() || !signature_it->is_string())
       return;
-    auto &signature = std::get<ThinkingContent>(
-                          result_->content[content_index])
+    auto &signature = std::get<ThinkingContent>(result_->content[content_index])
                           .thinking_signature;
     if (!signature)
       signature = std::string{};
@@ -502,8 +493,7 @@ void MuseMessagesSseParser::process_delta(const nlohmann::json &event) {
     const auto data_it = delta_it->find("data");
     if (data_it == delta_it->end() || !data_it->is_string())
       return;
-    auto &signature = std::get<ThinkingContent>(
-                          result_->content[content_index])
+    auto &signature = std::get<ThinkingContent>(result_->content[content_index])
                           .thinking_signature;
     if (!signature)
       signature = std::string{};
@@ -516,14 +506,11 @@ void MuseMessagesSseParser::process_delta(const nlohmann::json &event) {
     const auto delta = partial_json_it->get<std::string>();
     auto &block = block_it->second;
     block.partial_json += delta;
-    auto &tool_call =
-        std::get<ToolCall>(result_->content[content_index]);
+    auto &tool_call = std::get<ToolCall>(result_->content[content_index]);
     tool_call.partial_json = block.partial_json;
     if (on_event_) {
-      on_event_(AssistantMessageToolCallDeltaEvent{.content_index =
-                                                        content_index,
-                                                    .delta = delta,
-                                                    .partial = *result_});
+      on_event_(AssistantMessageToolCallDeltaEvent{
+          .content_index = content_index, .delta = delta, .partial = *result_});
     }
   }
 }
@@ -565,20 +552,20 @@ void MuseMessagesSseParser::finish_text_block(std::size_t protocol_index) {
     return;
 
   const auto content_index = *block_it->second.content_index;
-  const auto &text = std::get<TextContent>(result_->content[content_index]).text;
+  const auto &text =
+      std::get<TextContent>(result_->content[content_index]).text;
   if (on_event_) {
-    on_event_(AssistantMessageTextEndEvent{.content_index = content_index,
-                                           .content = text,
-                                           .partial = *result_});
+    on_event_(AssistantMessageTextEndEvent{
+        .content_index = content_index, .content = text, .partial = *result_});
   }
   if (active_block_index_ && *active_block_index_ == protocol_index)
     active_block_index_.reset();
 }
 
-void MuseMessagesSseParser::finish_thinking_block(
-    std::size_t protocol_index) {
+void MuseMessagesSseParser::finish_thinking_block(std::size_t protocol_index) {
   auto block_it = blocks_.find(protocol_index);
-  if (block_it == blocks_.end() || block_it->second.kind != BlockKind::thinking ||
+  if (block_it == blocks_.end() ||
+      block_it->second.kind != BlockKind::thinking ||
       !block_it->second.content_index)
     return;
 
@@ -594,10 +581,10 @@ void MuseMessagesSseParser::finish_thinking_block(
     active_block_index_.reset();
 }
 
-void MuseMessagesSseParser::finish_tool_call_block(
-    std::size_t protocol_index) {
+void MuseMessagesSseParser::finish_tool_call_block(std::size_t protocol_index) {
   auto block_it = blocks_.find(protocol_index);
-  if (block_it == blocks_.end() || block_it->second.kind != BlockKind::tool_call ||
+  if (block_it == blocks_.end() ||
+      block_it->second.kind != BlockKind::tool_call ||
       !block_it->second.content_index)
     return;
 
@@ -639,11 +626,12 @@ MuseMessagesClient::MuseMessagesClient(std::string base_url,
                                        std::string model_id)
     : base_url_(std::move(base_url)), model_id_(std::move(model_id)) {}
 
-nlohmann::json MuseMessagesClient::build_request_json(
-    const Model &model, const AgentContext &context,
-    const StreamOptions &options) {
-  const auto max_tokens = options.max_tokens.value_or(
-      static_cast<std::uint32_t>(model.max_tokens));
+nlohmann::json
+MuseMessagesClient::build_request_json(const Model &model,
+                                       const AgentContext &context,
+                                       const StreamOptions &options) {
+  const auto max_tokens =
+      options.max_tokens.value_or(static_cast<std::uint32_t>(model.max_tokens));
   if (max_tokens == 0)
     throw std::invalid_argument("Muse Messages requires max_tokens");
 
@@ -727,8 +715,7 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
     url += "/v1/messages";
 
   if (options.verbose) {
-    std::string debug = "[request] POST " + url + "\n" + request.dump(2) +
-                        "\n";
+    std::string debug = "[request] POST " + url + "\n" + request.dump(2) + "\n";
     ::write(STDERR_FILENO, debug.data(), debug.size());
   }
 
@@ -755,13 +742,13 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
   parser.finish();
 
   if (stop_tok.stop_requested() || !ok || parser.error() || callback_error) {
-    result->stop_reason = stop_tok.stop_requested() ? StopReason::aborted
-                                                     : StopReason::error;
-    result->error_message = stop_tok.stop_requested()
-                                ? "Request was aborted"
-                                : parser.error().value_or(
-                                      callback_error.value_or(
-                                          "Muse streaming request failed"));
+    result->stop_reason =
+        stop_tok.stop_requested() ? StopReason::aborted : StopReason::error;
+    result->error_message =
+        stop_tok.stop_requested()
+            ? "Request was aborted"
+            : parser.error().value_or(
+                  callback_error.value_or("Muse streaming request failed"));
     if (on_event)
       on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
                                           .error = *result});
@@ -775,7 +762,7 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
 } // namespace pi::core
 
 void pi::core::register_muse_messages_client() {
-  pi::core::LLMClientRegistry::instance().register_client(
-      "muse-messages",
-      [] { return std::make_shared<pi::core::MuseMessagesClient>(); });
+  pi::core::LLMClientRegistry::instance().register_client("muse-messages", [] {
+    return std::make_shared<pi::core::MuseMessagesClient>();
+  });
 }

@@ -191,7 +191,7 @@ EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
   begin_run();
 
   launch_worker([this, context = std::move(context), config = std::move(config),
-                stream]() mutable {
+                 stream]() mutable {
     run_with_lifecycle([this, context = std::move(context),
                         config = std::move(config),
                         stream](const std::stop_token &stop_tok) mutable {
@@ -300,9 +300,7 @@ void Agent::run_with_lifecycle(
   state_.set_complete(true);
 }
 
-AgentContext Agent::create_context_snapshot() {
-  return context_snapshot();
-}
+AgentContext Agent::create_context_snapshot() { return context_snapshot(); }
 
 AgentContext Agent::context_snapshot() const {
   AgentContext ctx;

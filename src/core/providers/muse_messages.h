@@ -67,8 +67,7 @@ private:
 class MuseMessagesClient : public LLMClient {
 public:
   MuseMessagesClient() = default;
-  explicit MuseMessagesClient(std::string base_url,
-                              std::string model_id = "");
+  explicit MuseMessagesClient(std::string base_url, std::string model_id = "");
 
   std::shared_ptr<AssistantMessage> stream(const Model &model,
                                            const AgentContext &context,

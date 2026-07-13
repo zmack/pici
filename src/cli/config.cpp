@@ -31,7 +31,8 @@ static std::string expand_tilde(std::string path) {
 }
 
 std::filesystem::path default_config_path() {
-  const char *xdg = std::getenv("XDG_CONFIG_HOME"); // NOLINT(concurrency-mt-unsafe)
+  const char *xdg =
+      std::getenv("XDG_CONFIG_HOME"); // NOLINT(concurrency-mt-unsafe)
   std::filesystem::path base;
   if ((xdg != nullptr) && xdg[0] != '\0') {
     base = xdg;
@@ -211,7 +212,9 @@ Args load_and_merge(int argc, char *argv[]) {
   std::filesystem::path cfg_path;
   if (!cli.config_path.empty()) {
     cfg_path = expand_tilde(cli.config_path);
-  } else if (const char *env = std::getenv("PICI_CONFIG"); // NOLINT(concurrency-mt-unsafe) — called once at CLI startup, before any worker threads
+  } else if (const char *env = std::getenv(
+                 "PICI_CONFIG"); // NOLINT(concurrency-mt-unsafe) — called once
+                                 // at CLI startup, before any worker threads
              (env != nullptr) && (env[0] != 0)) {
     cfg_path = expand_tilde(env);
   } else {

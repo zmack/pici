@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string>
 #include <string_view>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 namespace pi::core {
 
@@ -205,6 +207,80 @@ int codepoint_width(std::string_view s, std::size_t i) {
   if (is_wide(cp))
     return 2;
   return 1;
+}
+
+int display_columns(std::string_view line) {
+  int columns = 0;
+  for (std::size_t i = 0; i < line.size();) {
+    if (line[i] == '\n' || line[i] == '\r')
+      break;
+    if (line[i] == '\033') {
+      const auto next = skip_ansi_sequence(line, i);
+      if (next > i) {
+        i = next;
+        continue;
+      }
+    }
+    columns += codepoint_width(line, i);
+    i = advance_utf8(line, i);
+  }
+  return columns;
+}
+
+std::string truncate_ansi_line(std::string_view line, int width) {
+  if (width <= 0)
+    return {};
+
+  std::string result;
+  int columns = 0;
+  bool truncated = false;
+  bool saw_escape = false;
+  for (std::size_t i = 0; i < line.size();) {
+    if (line[i] == '\n' || line[i] == '\r') {
+      truncated = true;
+      break;
+    }
+    if (line[i] == '\033') {
+      const auto next = skip_ansi_sequence(line, i);
+      if (next > i) {
+        result.append(line.substr(i, next - i));
+        saw_escape = true;
+        i = next;
+        continue;
+      }
+    }
+
+    const auto next = advance_utf8(line, i);
+    const int columns_for_char = codepoint_width(line, i);
+    if (columns_for_char > 0 && columns + columns_for_char > width) {
+      truncated = true;
+      break;
+    }
+    result.append(line.substr(i, next - i));
+    columns += columns_for_char;
+    i = next;
+  }
+
+  if (truncated && saw_escape)
+    result += "\033[0m";
+  return result;
+}
+
+void set_terminal_title(int fd, std::string_view title) {
+  if (isatty(fd) == 0)
+    return;
+
+  std::string sequence = "\033]0;";
+  sequence.reserve(sequence.size() + title.size() + 1);
+  for (const char c : title) {
+    const auto byte = static_cast<unsigned char>(c);
+    if (c == '\033' || c == '\007' || c == '\n' || c == '\r' || byte < 0x20)
+      sequence += ' ';
+    else
+      sequence += c;
+  }
+  sequence += '\007';
+  ::write(fd, sequence.data(), sequence.size());
 }
 
 int rows_for_line(std::string_view line, int width) {

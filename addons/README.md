@@ -2,9 +2,9 @@
 
 Lua plugins loaded via `--hooks-file`, `--hooks-dir`, or `config.toml [addons]`.
 
-## costline.lua — show last cost in prompt
+## costline.lua — show last cost in the status line
 
-Displays token cost / usage of the last turn in the REPL prompt line.
+Displays token cost / usage of the last turn above the REPL prompt.
 
 ### Install
 
@@ -28,17 +28,17 @@ pici --hooks-file addons/costline.lua
 
 ### What it shows
 
-| Situation | Prompt |
+| Situation | Status line |
 |-----------|--------|
-| First turn (no usage yet) | `> ` |
-| Model with pricing | `[$0.0042 sess:$0.01] > ` |
-| Model without pricing | `[1.0K tok] > ` or `[803→123] >` |
-| With cache hits | `[$0.001 cache:627] >` |
-| With session total | `[$0.002 sess:$0.015] >` |
+| First turn (no usage yet) | no status line |
+| Model with pricing | `[$0.0042 sess:$0.01]` |
+| Model without pricing | `[1.0K tok]` or `[803→123]` |
+| With cache hits | `[$0.001 cache:627]` |
+| With session total | `[$0.002 sess:$0.015]` |
 
 ### How it works
 
-Uses the `prompt_line(ctx)` hook. `ctx` contains:
+Uses the `status_line(ctx)` hook. `ctx` contains:
 
 ```lua
 {
@@ -55,7 +55,11 @@ Uses the `prompt_line(ctx)` hook. `ctx` contains:
 }
 ```
 
-Returns `nil` before first turn → falls back to default `> `. Return a string to replace the prompt.
+Returns `nil` before first turn → leaves the status line empty. Return a string to render above the prompt.
+
+The separate `tab_title(ctx)` hook controls the terminal tab/window title. A
+nil result leaves the current title unchanged. Both hooks receive the same
+context, including `session_id` and optional `session_name`.
 
 ### Testing
 
@@ -74,9 +78,9 @@ Edit `costline.lua` — e.g. to show only cost, no session:
 
 ```lua
 return {
-  prompt_line = function(ctx)
+  status_line = function(ctx)
     if not ctx.last or ctx.last.cost.total == 0 then return nil end
-    return string.format("[$%.4f] > ", ctx.last.cost.total)
+    return string.format("[$%.4f]", ctx.last.cost.total)
   end
 }
 ```
@@ -85,13 +89,27 @@ Or with ANSI colour:
 
 ```lua
 return {
-  prompt_line = function(ctx)
+  status_line = function(ctx)
     local c = ctx.last.cost.total
     if c == 0 then return nil end
-    return string.format("[\27[32m$%.4f\27[0m] > ", c)
+    return string.format("[\27[32m$%.4f\27[0m]", c)
   end
 }
 ```
+
+## turn_guard.lua — one safe diagnostic turn
+
+Blocks `bash`, `edit`, and `write`, then stops after the first assistant/tool
+batch. This is useful for inspecting model behavior without allowing an
+existing worktree to be modified:
+
+```bash
+./build/pi-cli --hooks-file addons/turn_guard.lua
+```
+
+The blocked call is returned to the model as an error result, and the
+`should_stop_after_turn` hook ends the run before the model can choose another
+tool. The completed turn is then persisted to the session JSONL file.
 
 ## context.lua — inspect model context
 

@@ -426,8 +426,8 @@ void push_complete_messages_to_lua(lua_State *L,
   lua_newtable(L);
   std::size_t turn = 0;
   for (std::size_t i = 0; i < messages.size(); ++i) {
-    auto value = nlohmann::json::parse(json::to_json(messages[i]), nullptr,
-                                       false);
+    auto value =
+        nlohmann::json::parse(json::to_json(messages[i]), nullptr, false);
     if (!value.is_object()) {
       value = nlohmann::json{{"role", "unknown"},
                              {"content", nlohmann::json::array()}};
@@ -470,8 +470,8 @@ void push_tools_to_lua(
     lua_pushlstring(L, source.data(), source.size());
     lua_setfield(L, -2, "source_path");
 
-    auto schema = nlohmann::json::parse(tool->schema().serialize(), nullptr,
-                                        false);
+    auto schema =
+        nlohmann::json::parse(tool->schema().serialize(), nullptr, false);
     const bool valid_schema = schema.is_object();
     if (!valid_schema)
       schema = nlohmann::json::object();
@@ -611,6 +611,8 @@ public:
     command_ref_ = extract("on_command");
     complete_ref_ = extract("complete");
     prompt_line_ref_ = extract("prompt_line");
+    status_line_ref_ = extract("status_line");
+    tab_title_ref_ = extract("tab_title");
 
     // Extract commands array (data, not a function)
     lua_getfield(L_, -1, "commands");
@@ -657,6 +659,10 @@ public:
         luaL_unref(L_, LUA_REGISTRYINDEX, complete_ref_);
       if (prompt_line_ref_ != LUA_NOREF)
         luaL_unref(L_, LUA_REGISTRYINDEX, prompt_line_ref_);
+      if (status_line_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, status_line_ref_);
+      if (tab_title_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, tab_title_ref_);
       lua_close(L_);
     }
   }
@@ -672,6 +678,8 @@ public:
   bool has_command() const { return command_ref_ != LUA_NOREF; }
   bool has_complete() const { return complete_ref_ != LUA_NOREF; }
   bool has_prompt_line() const { return prompt_line_ref_ != LUA_NOREF; }
+  bool has_status_line() const { return status_line_ref_ != LUA_NOREF; }
+  bool has_tab_title() const { return tab_title_ref_ != LUA_NOREF; }
 
   void push_usage(lua_State *Ls, const TokenUsage &u) {
     lua_newtable(Ls);
@@ -697,6 +705,28 @@ public:
     lua_pushnumber(Ls, u.cost.total);
     lua_setfield(Ls, -2, "total");
     lua_setfield(Ls, -2, "cost");
+  }
+
+  void push_ui_context(lua_State *Ls, const LuaUiContext &context) {
+    lua_newtable(Ls);
+    lua_pushinteger(Ls, static_cast<lua_Integer>(context.turn));
+    lua_setfield(Ls, -2, "turn");
+    lua_pushlstring(Ls, context.model.data(), context.model.size());
+    lua_setfield(Ls, -2, "model");
+    lua_pushinteger(Ls, static_cast<lua_Integer>(context.tools));
+    lua_setfield(Ls, -2, "tools");
+    push_usage(Ls, context.last);
+    lua_setfield(Ls, -2, "last");
+    push_usage(Ls, context.session);
+    lua_setfield(Ls, -2, "session");
+    lua_pushlstring(Ls, context.session_id.data(), context.session_id.size());
+    lua_setfield(Ls, -2, "session_id");
+    if (context.session_name)
+      lua_pushlstring(Ls, context.session_name->data(),
+                      context.session_name->size());
+    else
+      lua_pushnil(Ls);
+    lua_setfield(Ls, -2, "session_name");
   }
 
   std::optional<std::string> call_prompt_line(std::size_t turn,
@@ -732,6 +762,32 @@ public:
     }
     lua_pop(L_, 1);
     return result;
+  }
+
+  std::optional<std::string> call_ui_line(int ref,
+                                          const LuaUiContext &context) {
+    std::scoped_lock lk(mutex_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
+    push_ui_context(L_, context);
+
+    if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
+      lua_pop(L_, 1);
+      return std::nullopt;
+    }
+
+    std::optional<std::string> result;
+    if (lua_isstring(L_, -1) != 0)
+      result = lua_tostring(L_, -1);
+    lua_pop(L_, 1);
+    return result;
+  }
+
+  std::optional<std::string> call_status_line(const LuaUiContext &context) {
+    return call_ui_line(status_line_ref_, context);
+  }
+
+  std::optional<std::string> call_tab_title(const LuaUiContext &context) {
+    return call_ui_line(tab_title_ref_, context);
   }
   const std::vector<LuaHooks::Command> &commands() const { return commands_; }
 
@@ -1240,6 +1296,8 @@ private:
   int command_ref_{LUA_NOREF};
   int complete_ref_{LUA_NOREF};
   int prompt_line_ref_{LUA_NOREF};
+  int status_line_ref_{LUA_NOREF};
+  int tab_title_ref_{LUA_NOREF};
   std::string source_path_;
   std::vector<PendingTool> pending_tools_;
   std::vector<std::shared_ptr<const ToolDefinition>> inline_tools_;
@@ -1317,10 +1375,9 @@ std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
   }
   if (impl->has_command()) {
     hooks->on_command =
-        [impl](
-            std::string_view cmd, std::string_view args,
-            const std::vector<Message> &transcript,
-            const LuaContextSnapshot &context) -> LuaHooks::CommandResult {
+        [impl](std::string_view cmd, std::string_view args,
+               const std::vector<Message> &transcript,
+               const LuaContextSnapshot &context) -> LuaHooks::CommandResult {
       return impl->call_on_command(cmd, args, transcript, context);
     };
   }
@@ -1344,8 +1401,19 @@ std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
         [impl](std::size_t turn, std::string_view model_id,
                std::size_t tools_count, const TokenUsage &last,
                const TokenUsage &session) -> std::optional<std::string> {
-      return impl->call_prompt_line(turn, model_id, tools_count, last,
-                                     session);
+      return impl->call_prompt_line(turn, model_id, tools_count, last, session);
+    };
+  }
+  if (impl->has_status_line()) {
+    hooks->status_line =
+        [impl](const LuaUiContext &context) -> std::optional<std::string> {
+      return impl->call_status_line(context);
+    };
+  }
+  if (impl->has_tab_title()) {
+    hooks->tab_title =
+        [impl](const LuaUiContext &context) -> std::optional<std::string> {
+      return impl->call_tab_title(context);
     };
   }
   return hooks;
@@ -1533,10 +1601,9 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   if (std::ranges::any_of(list,
                           [](const auto &h) { return !!h->on_command; })) {
     out->on_command =
-        [list](
-            std::string_view cmd, std::string_view args,
-            const std::vector<Message> &transcript,
-            const LuaContextSnapshot &context) -> LuaHooks::CommandResult {
+        [list](std::string_view cmd, std::string_view args,
+               const std::vector<Message> &transcript,
+               const LuaContextSnapshot &context) -> LuaHooks::CommandResult {
       for (const auto &h : list) {
         if (!h->on_command)
           continue;
@@ -1567,15 +1634,46 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   // prompt_line — last non-nil wins (override semantics)
   if (std::ranges::any_of(list,
                           [](const auto &h) { return !!h->prompt_line; })) {
-    out->prompt_line = [list](
-        std::size_t turn, std::string_view model_id,
-        std::size_t tools_count, const TokenUsage &last,
-        const TokenUsage &session) -> std::optional<std::string> {
+    out->prompt_line =
+        [list](std::size_t turn, std::string_view model_id,
+               std::size_t tools_count, const TokenUsage &last,
+               const TokenUsage &session) -> std::optional<std::string> {
       std::optional<std::string> result;
       for (const auto &h : list) {
         if (!h->prompt_line)
           continue;
         auto r = h->prompt_line(turn, model_id, tools_count, last, session);
+        if (r)
+          result = std::move(r);
+      }
+      return result;
+    };
+  }
+
+  // status_line and tab_title — last non-nil wins (override semantics)
+  if (std::ranges::any_of(list,
+                          [](const auto &h) { return !!h->status_line; })) {
+    out->status_line =
+        [list](const LuaUiContext &context) -> std::optional<std::string> {
+      std::optional<std::string> result;
+      for (const auto &h : list) {
+        if (!h->status_line)
+          continue;
+        auto r = h->status_line(context);
+        if (r)
+          result = std::move(r);
+      }
+      return result;
+    };
+  }
+  if (std::ranges::any_of(list, [](const auto &h) { return !!h->tab_title; })) {
+    out->tab_title =
+        [list](const LuaUiContext &context) -> std::optional<std::string> {
+      std::optional<std::string> result;
+      for (const auto &h : list) {
+        if (!h->tab_title)
+          continue;
+        auto r = h->tab_title(context);
         if (r)
           result = std::move(r);
       }

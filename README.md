@@ -293,6 +293,12 @@ Use `/reload-addons` after editing Lua hooks or add-on tools to reload the
 configured files without restarting the session. Built-in and tools-directory
 tools are preserved; registered add-on tools and hook callbacks are replaced.
 
+Add-ons can also customize the interactive UI with `status_line(ctx)` and
+`tab_title(ctx)` hooks. The status line is rendered above the readline prompt
+(or in the viewport renderer's reserved status row), while the title hook
+updates the terminal tab/window title. Both receive model, usage, tool-count,
+and session metadata; ANSI color sequences are supported in the status line.
+
 For a lean local build directory that skips test targets:
 
 ```bash

@@ -5,13 +5,13 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <utility>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <sys/select.h>
 #include <termios.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace pi::cli {
@@ -80,7 +80,7 @@ Key read_key() {
   fd_set fds;
   FD_ZERO(&fds);
   FD_SET(STDIN_FILENO, &fds);
-  struct timeval tv{}; // NOLINT(misc-include-cleaner)
+  struct timeval tv{};      // NOLINT(misc-include-cleaner)
   tv.tv_usec = 50L * 1000L; // 50 ms
   if (select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv) <= 0)
     return Key::Esc; // bare Esc
@@ -102,12 +102,14 @@ Key read_key() {
 }
 
 void write_str(const char *s) { ::write(STDOUT_FILENO, s, std::strlen(s)); }
-void write_str(const std::string &s) { ::write(STDOUT_FILENO, s.data(), s.size()); }
+void write_str(const std::string &s) {
+  ::write(STDOUT_FILENO, s.data(), s.size());
+}
 
 // Render the visible window of lines into the alternate screen.
 // header (title) + footer always shown; middle is the scrolling window.
-void render(const std::vector<core::SessionTreeLine> &lines,
-            std::size_t cursor, std::size_t view_top, int visible_rows) {
+void render(const std::vector<core::SessionTreeLine> &lines, std::size_t cursor,
+            std::size_t view_top, int visible_rows) {
   // Move to top of screen and clear
   write_str("\033[H\033[J");
 
@@ -136,10 +138,10 @@ void render(const std::vector<core::SessionTreeLine> &lines,
 
 } // namespace
 
-TreeSelectorResult run_tree_selector(
-    const std::vector<core::SessionTreeLine> &lines,
-    const std::string & /*current_session_id*/,
-    std::size_t initial_cursor) {
+TreeSelectorResult
+run_tree_selector(const std::vector<core::SessionTreeLine> &lines,
+                  const std::string & /*current_session_id*/,
+                  std::size_t initial_cursor) {
   if (lines.empty())
     return {.cancelled = true};
 

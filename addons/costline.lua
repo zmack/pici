@@ -1,5 +1,5 @@
 return {
-  prompt_line = function(ctx)
+  status_line = function(ctx)
     local last = ctx.last
     if not last or (last.total_tokens == 0 and last.cost.total == 0) then
       return nil
@@ -69,6 +69,6 @@ return {
       end
     end
 
-    return C.gray .. "[" .. C.reset .. table.concat(parts, " ") .. C.gray .. "]" .. C.reset .. " > "
+    return C.gray .. "[" .. C.reset .. table.concat(parts, " ") .. C.gray .. "]" .. C.reset
   end,
 }

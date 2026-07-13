@@ -15,9 +15,9 @@ struct TreeSelectorResult {
 
 // Run the interactive full-screen session-tree selector.
 // Returns the chosen session_id, or cancelled=true on Esc/q.
-TreeSelectorResult run_tree_selector(
-    const std::vector<core::SessionTreeLine> &lines,
-    const std::string &current_session_id,
-    std::size_t initial_cursor);
+TreeSelectorResult
+run_tree_selector(const std::vector<core::SessionTreeLine> &lines,
+                  const std::string &current_session_id,
+                  std::size_t initial_cursor);
 
 } // namespace pi::cli

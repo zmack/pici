@@ -235,6 +235,19 @@ void test_codepoint_width() {
   });
 }
 
+void test_terminal_ui_helpers() {
+  tests::register_test("display_columns: ignores ANSI and counts wide text", [] {
+    CHECK_EQ(display_columns("\033[31mred\033[0m"), 3);
+    CHECK_EQ(display_columns("你"), 2);
+  });
+
+  tests::register_test("truncate_ansi_line: preserves complete ANSI codes", [] {
+    CHECK_EQ(truncate_ansi_line("\033[31mabcdef\033[0m", 3),
+             "\033[31mabc\033[0m");
+    CHECK_EQ(truncate_ansi_line("hello\nworld", 80), "hello");
+  });
+}
+
 // ── cursor_rows_for_rendered ──────────────────────────────────────────────────
 
 void test_cursor_rows() {
@@ -440,6 +453,7 @@ int main() {
   test_skip_ansi_non_escape();
   test_advance_utf8();
   test_codepoint_width();
+  test_terminal_ui_helpers();
   test_cursor_rows();
   test_rows_for_line();
   test_block_boundary_scanner();

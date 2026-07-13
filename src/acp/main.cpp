@@ -7,8 +7,8 @@
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/otel_init.h"
-#include "core/providers/openai_completions.h"
 #include "core/providers/muse_messages.h"
+#include "core/providers/openai_completions.h"
 
 #include <atomic>
 #include <csignal>
@@ -32,8 +32,10 @@ static void print_usage(const char *prog) {
 int main(int argc, char *argv[]) {
   // Installed once, before any worker threads exist, so there is no
   // concurrent std::signal() call to race with.
-  std::signal(SIGINT, [](int) { std::exit(0); });   // NOLINT(concurrency-mt-unsafe)
-  std::signal(SIGTERM, [](int) { std::exit(0); });  // NOLINT(concurrency-mt-unsafe)
+  std::signal(SIGINT,
+              [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
+  std::signal(SIGTERM,
+              [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
 
   pi::core::register_openai_completions_client();
   pi::core::register_muse_messages_client();

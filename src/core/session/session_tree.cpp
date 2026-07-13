@@ -53,10 +53,10 @@ std::size_t count_messages(const SessionStore &store, const std::string &id) {
 
 // Recursively build a SessionNode from the parent→children map.
 // NOLINTNEXTLINE(misc-no-recursion)
-SessionNode build_node(const std::unordered_map<std::string, SessionHeader> &headers,
-                       const std::map<std::string, std::vector<std::string>> &children_map,
-                       const SessionStore &store,
-                       const std::string &id) {
+SessionNode
+build_node(const std::unordered_map<std::string, SessionHeader> &headers,
+           const std::map<std::string, std::vector<std::string>> &children_map,
+           const SessionStore &store, const std::string &id) {
   SessionNode node;
   node.header = headers.at(id);
   node.message_count = count_messages(store, id);
@@ -72,10 +72,8 @@ SessionNode build_node(const std::unordered_map<std::string, SessionHeader> &hea
 
 // Recursively format tree lines with ASCII connectors.
 // NOLINTNEXTLINE(misc-no-recursion)
-void format_node(const SessionNode &node,
-                 const std::string &current_session_id,
-                 const std::string &prefix, bool is_last,
-                 bool is_root,
+void format_node(const SessionNode &node, const std::string &current_session_id,
+                 const std::string &prefix, bool is_last, bool is_root,
                  std::vector<SessionTreeLine> &out) {
   std::string connector;
   std::string child_prefix;
@@ -86,8 +84,8 @@ void format_node(const SessionNode &node,
     connector = "└─ "; // └─
     child_prefix = "   ";
   } else {
-    connector = "├─ "; // ├─
-    child_prefix = "│  ";   // │
+    connector = "├─ ";    // ├─
+    child_prefix = "│  "; // │
   }
 
   const bool is_current = (node.header.id == current_session_id);
@@ -117,13 +115,14 @@ void format_node(const SessionNode &node,
     name_str = "  \"" + *node.header.name + "\"";
 
   std::string line_text = prefix + active_marker + connector + id_str +
-                          name_str + "  " +
-                          std::to_string(node.message_count) + " msgs   " + ts;
+                          name_str + "  " + std::to_string(node.message_count) +
+                          " msgs   " + ts;
 
   SessionTreeLine tl;
   tl.text = std::move(line_text);
   tl.session_id = node.header.id;
-  tl.depth = static_cast<int>(std::count(prefix.begin(), prefix.end(), ' ') / 3);
+  tl.depth =
+      static_cast<int>(std::count(prefix.begin(), prefix.end(), ' ') / 3);
   out.push_back(std::move(tl));
 
   const std::string next_prefix = prefix + child_prefix;
@@ -185,18 +184,20 @@ build_session_tree(const SessionStore &store,
     if (hdr.parent_id && family_ids.contains(*hdr.parent_id))
       children_map[*hdr.parent_id].push_back(id);
     else if (!hdr.parent_id)
-      children_map["__root__"].push_back(id); // shouldn't happen if root_id found
+      children_map["__root__"].push_back(
+          id); // shouldn't happen if root_id found
   }
 
   // Sort children oldest-first
   for (auto &[parent, kids] : children_map) {
-    std::ranges::sort(kids, [&headers](const std::string &a, const std::string &b) {
-      const auto ia = headers.find(a);
-      const auto ib = headers.find(b);
-      const std::int64_t ca = ia != headers.end() ? ia->second.created : 0;
-      const std::int64_t cb = ib != headers.end() ? ib->second.created : 0;
-      return ca < cb;
-    });
+    std::ranges::sort(
+        kids, [&headers](const std::string &a, const std::string &b) {
+          const auto ia = headers.find(a);
+          const auto ib = headers.find(b);
+          const std::int64_t ca = ia != headers.end() ? ia->second.created : 0;
+          const std::int64_t cb = ib != headers.end() ? ib->second.created : 0;
+          return ca < cb;
+        });
   }
 
   return build_node(headers, children_map, store, root_id);

@@ -5,6 +5,8 @@
 #include <memory>
 #include <optional>
 #include <stop_token>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/agent_loop.h"
@@ -18,6 +20,17 @@ namespace pi::core {
 struct LuaContextSnapshot {
   AgentContext raw;
   std::optional<AgentContext> effective;
+};
+
+// Runtime values passed to UI hooks before each readline prompt.
+struct LuaUiContext {
+  std::size_t turn{0};
+  std::string model;
+  std::size_t tools{0};
+  TokenUsage last;
+  TokenUsage session;
+  std::string session_id;
+  std::optional<std::string> session_name;
 };
 
 // Load a single Lua tool from a .lua file.
@@ -43,6 +56,13 @@ load_lua_tools(const std::filesystem::path &directory);
 //
 //   should_stop_after_turn(ctx) → bool
 //     ctx: {message, tool_results=[{tool_name,content,is_error},...]}
+//
+//   status_line(ctx) → string | nil
+//     Render a line above the readline prompt. ANSI color sequences are
+//     supported; embedded newlines are not.
+//
+//   tab_title(ctx) → string | nil
+//     Set the terminal tab/window title. nil leaves the current title alone.
 
 struct LuaHooks {
   // Path of the file this hooks object was loaded from (empty for composed).
@@ -127,6 +147,10 @@ struct LuaHooks {
       std::size_t turn, std::string_view model_id, std::size_t tools_count,
       const TokenUsage &last_usage, const TokenUsage &session_usage)>
       prompt_line;
+
+  // UI hooks — last non-nil result wins when add-ons are composed.
+  std::function<std::optional<std::string>(const LuaUiContext &)> status_line;
+  std::function<std::optional<std::string>(const LuaUiContext &)> tab_title;
 
   // pici uses these to complete command names automatically when the user
   // types /... with no space yet — no Lua needed for that case.

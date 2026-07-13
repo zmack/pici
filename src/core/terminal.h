@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include <string_view>
 
 namespace pi::core {
@@ -8,6 +9,17 @@ namespace pi::core {
 int term_width(int fd);
 int term_height(int fd);
 
+// Return the display-column width of one terminal line, ignoring ANSI/VT
+// escape sequences.
+int display_columns(std::string_view line);
+
+// Truncate one ANSI/VT line to `width` display columns without cutting a
+// multibyte character or escape sequence. Embedded newlines are discarded.
+std::string truncate_ansi_line(std::string_view line, int width);
+
+// Set the terminal tab/window title. No bytes are written when fd is not a
+// TTY. Control characters that could escape the OSC sequence are replaced.
+void set_terminal_title(int fd, std::string_view title);
 
 // Skip one ANSI/VT escape sequence starting at s[i].
 //

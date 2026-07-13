@@ -1,5 +1,7 @@
 #include "cli/readline.h"
 
+#include "core/terminal.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -75,8 +77,8 @@ std::uint32_t utf8_codepoint(std::string_view text, std::size_t offset,
     return first;
   std::uint32_t value = first & ((1U << (8U - length - 1U)) - 1U);
   for (std::size_t i = 1; i < length; ++i) {
-    value = (value << 6U) |
-            (static_cast<unsigned char>(text[offset + i]) & 0x3FU);
+    value =
+        (value << 6U) | (static_cast<unsigned char>(text[offset + i]) & 0x3FU);
   }
   return value;
 }
@@ -101,7 +103,7 @@ int codepoint_width(std::uint32_t codepoint) {
 }
 
 std::size_t terminal_columns() {
-  struct winsize size {};
+  struct winsize size{};
   if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0)
     return size.ws_col;
   return 80;
@@ -122,7 +124,8 @@ std::size_t ansi_escape_length(std::string_view text, std::size_t offset) {
 
 class InputRenderer {
 public:
-  explicit InputRenderer(std::string_view prompt) : prompt_(prompt) {
+  InputRenderer(std::string_view prompt, std::string_view status_line)
+      : prompt_(prompt), status_line_(status_line) {
     while (leading_newlines_ < prompt_.size() &&
            prompt_[leading_newlines_] == '\n') {
       ++leading_newlines_;
@@ -143,6 +146,13 @@ public:
     const auto columns = terminal_columns();
     std::size_t rows = 1;
     std::size_t column = 0;
+    if (!status_line_.empty()) {
+      std::cout << '\r'
+                << core::truncate_ansi_line(status_line_,
+                                            static_cast<int>(columns))
+                << "\033[K\r\n";
+      ++rows;
+    }
     std::cout << "\033[?7l";
     write_wrapped(prompt_, columns, rows, column);
     write_wrapped(buf, columns, rows, column);
@@ -226,6 +236,7 @@ private:
   }
 
   std::string prompt_;
+  std::string status_line_;
   std::size_t leading_newlines_{0};
   std::size_t rendered_rows_{0};
   bool first_draw_{true};
@@ -342,7 +353,8 @@ bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn) {
 
 std::optional<std::string> readline(std::string_view prompt,
                                     const CompleteFn &complete_fn,
-                                    const ControlFn &control_fn) {
+                                    const ControlFn &control_fn,
+                                    std::string_view status_line) {
   // Non-TTY fallback: just use getline (pipes, scripts, tests)
   if (isatty(STDIN_FILENO) == 0) {
     std::cout << prompt << std::flush;
@@ -363,7 +375,7 @@ std::optional<std::string> readline(std::string_view prompt,
   }
 
   std::string buf;
-  InputRenderer renderer(prompt);
+  InputRenderer renderer(prompt, status_line);
   renderer.redraw(buf);
 
   while (true) {

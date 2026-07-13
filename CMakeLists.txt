@@ -588,6 +588,7 @@ if(PI_CPP_BUILD_TESTS)
             --config ${CMAKE_CURRENT_SOURCE_DIR}/config.toml.example
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_costline.lua
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_context.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_turn_guard.lua
     )
     set_tests_properties(test-addons
                          PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

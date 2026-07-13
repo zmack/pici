@@ -57,7 +57,7 @@ struct Args {
 
   // Observability
   std::string otel_endpoint; // --otel-endpoint <url>; empty = no OTel export
-  std::string stream_trace; // --stream-trace <path>; privacy-safe JSONL trace
+  std::string stream_trace;  // --stream-trace <path>; privacy-safe JSONL trace
 
   // Meta
   bool verbose{false};

@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -79,6 +80,11 @@ public:
   // Optional viewport/navigation input. Renderers without an addressable
   // viewport can ignore it.
   virtual void on_scroll(RendererScrollCommand command) {}
+
+  // Optional status line shown above the readline prompt. Full-screen
+  // renderers may own this row and paint it inside their compositor.
+  virtual bool owns_status_line() const { return false; }
+  virtual void set_status_line(const std::optional<std::string> &text) {}
 };
 
 //

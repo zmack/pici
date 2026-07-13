@@ -805,6 +805,49 @@ return {
     CHECK(*r == "cost=0.0042 in=123");
   });
 
+  tests::register_test("LuaHooks: UI hooks expose session context", [&]() {
+    auto p = write_hooks("ui.lua", R"lua(
+return {
+  status_line = function(ctx)
+    return ctx.model .. ":" .. ctx.session_id .. ":" .. (ctx.session_name or "none")
+  end,
+  tab_title = function(ctx)
+    return "pici " .. ctx.turn
+  end,
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    CHECK(hooks->status_line != nullptr);
+    CHECK(hooks->tab_title != nullptr);
+    LuaUiContext context;
+    context.turn = 3;
+    context.model = "gpt-4o";
+    context.tools = 2;
+    context.session_id = "session-1";
+    context.session_name = "demo";
+    CHECK_EQ(*hooks->status_line(context), "gpt-4o:session-1:demo");
+    CHECK_EQ(*hooks->tab_title(context), "pici 3");
+  });
+
+  tests::register_test("compose_hooks: UI hooks last non-nil wins", [&]() {
+    auto p1 = write_hooks("ui1.lua", R"lua(
+return {
+  status_line = function(ctx) return "first" end,
+  tab_title = function(ctx) return nil end,
+}
+)lua");
+    auto p2 = write_hooks("ui2.lua", R"lua(
+return {
+  status_line = function(ctx) return "second" end,
+  tab_title = function(ctx) return "title" end,
+}
+)lua");
+    auto composed = compose_hooks({load_lua_hooks(p1), load_lua_hooks(p2)});
+    LuaUiContext context;
+    CHECK_EQ(*composed->status_line(context), "second");
+    CHECK_EQ(*composed->tab_title(context), "title");
+  });
+
   tests::register_test("LuaHooks: pici.run_agent calls C++ factory", [&]() {
     auto p = write_hooks("subagent.lua", R"lua(
 return {

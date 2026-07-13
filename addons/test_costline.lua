@@ -18,10 +18,9 @@ pici.test.run("shows $ cost when available", function()
     last = make_usage{cost={total=0.0042, input=0, output=0, cache_read=0, cache_write=0}},
     session = make_usage{cost={total=0.01}},
   }
-  local r = addon.prompt_line(ctx)
-  pici.test.ok(r ~= nil, "should return custom prompt")
+  local r = addon.status_line(ctx)
+  pici.test.ok(r ~= nil, "should return a status line")
   pici.test.ok(r:find("%$") ~= nil, "should contain dollar: " .. tostring(r))
-  pici.test.ok(r:find("> $?") ~= nil, "should end with > : " .. tostring(r))
 end)
 
 pici.test.run("nil when no usage yet", function()
@@ -30,7 +29,7 @@ pici.test.run("nil when no usage yet", function()
     last = make_usage{input=0, output=0, total_tokens=0, cost={total=0}},
     session = make_usage{input=0, output=0, total_tokens=0, cost={total=0}},
   }
-  local r = addon.prompt_line(ctx)
+  local r = addon.status_line(ctx)
   pici.test.ok(r == nil, "should be nil, got " .. tostring(r))
 end)
 
@@ -40,7 +39,7 @@ pici.test.run("shows tok count when no pricing", function()
     last = make_usage{input=800, output=200, total_tokens=1000, cost={total=0}},
     session = make_usage{total_tokens=0, cost={total=0}},
   }
-  local r = addon.prompt_line(ctx)
+  local r = addon.status_line(ctx)
   pici.test.ok(r ~= nil)
   pici.test.ok(r:find("tok") ~= nil, "should contain tok: " .. tostring(r))
 end)
@@ -54,7 +53,7 @@ pici.test.run("shows cache_read when present", function()
     },
     session = make_usage{cost={total=0}},
   }
-  local r = addon.prompt_line(ctx)
+  local r = addon.status_line(ctx)
   pici.test.ok(r:find("cache") ~= nil, "should show cache: " .. tostring(r))
 end)
 
@@ -64,14 +63,14 @@ pici.test.run("shows session total", function()
     last = make_usage{cost={total=0.002}},
     session = make_usage{cost={total=0.015}},
   }
-  local r = addon.prompt_line(ctx)
+  local r = addon.status_line(ctx)
   pici.test.ok(r:find("sess:") ~= nil, "should contain sess: " .. tostring(r))
 end)
 
 pici.test.run("handles nil ctx.last gracefully", function()
   local ctx = {turn=0, model="m", tools=0, last=nil, session=nil}
   -- assert no error, returns nil
-  local ok, result = pcall(function() return addon.prompt_line(ctx) end)
+  local ok, result = pcall(function() return addon.status_line(ctx) end)
   pici.test.ok(ok, "should not throw")
   pici.test.ok(result == nil, "nil usage -> nil prompt")
 end)

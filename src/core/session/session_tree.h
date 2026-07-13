@@ -25,8 +25,9 @@ struct SessionTreeLine {
 // Build display tree rooted at the oldest ancestor of current_session_id.
 // Returns nullopt if current_session_id is not found in the store.
 // Individual unreadable session files are silently skipped.
-std::optional<SessionNode> build_session_tree(const SessionStore &store,
-                                              const std::string &current_session_id);
+std::optional<SessionNode>
+build_session_tree(const SessionStore &store,
+                   const std::string &current_session_id);
 
 std::vector<SessionTreeLine>
 format_session_tree(const SessionNode &root,

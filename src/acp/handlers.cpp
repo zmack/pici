@@ -3,8 +3,8 @@
 #include "acp/sse.h"
 #include "acp/types.h"
 #include "core/agent.h"
-#include "core/session/agent_session.h"
 #include "core/message_types.h"
+#include "core/session/agent_session.h"
 #include "core/stream_renderer.h"
 
 #include <atomic>
@@ -310,8 +310,8 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
 
     // ── Sync mode ──────────────────────────────────────────────────────────
     SyncRenderer sr;
-    auto result = session->run_prompt(
-        prompt, [&sr](const core::AgentEvent &event) {
+    auto result =
+        session->run_prompt(prompt, [&sr](const core::AgentEvent &event) {
           core::dispatch_event(event, sr);
         });
     if (result.error && !session->agent().state().error_message())

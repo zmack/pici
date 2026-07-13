@@ -27,6 +27,7 @@
 #include "cli/args.h"
 #include "cli/config.h"
 #include "cli/readline.h"
+#include "cli/tree_selector.h"
 #include "core/agent.h"
 #include "core/agent_state.h"
 #include "core/builtin_tools.h"
@@ -36,9 +37,8 @@
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/otel_init.h"
-#include "core/providers/openai_completions.h"
 #include "core/providers/muse_messages.h"
-#include "cli/tree_selector.h"
+#include "core/providers/openai_completions.h"
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
@@ -46,6 +46,7 @@
 #include "core/session/session_tree.h"
 #include "core/stream_diagnostics.h"
 #include "core/stream_renderer.h"
+#include "core/terminal.h"
 
 namespace pi {
 
@@ -98,6 +99,12 @@ print_addons(const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
       active.emplace_back("on_command");
     if (h->complete)
       active.emplace_back("complete");
+    if (h->prompt_line)
+      active.emplace_back("prompt_line");
+    if (h->status_line)
+      active.emplace_back("status_line");
+    if (h->tab_title)
+      active.emplace_back("tab_title");
     if (!active.empty()) {
       std::cout << "  hooks:";
       for (const auto &a : active)
@@ -270,8 +277,7 @@ static std::string format_tool_result(std::string_view content) {
   if (lines.size() > 5) {
     visible.push_back(lines[0]);
     visible.push_back(lines[1]);
-    omitted =
-        "… +" + std::to_string(lines.size() - 4) + " lines omitted";
+    omitted = "… +" + std::to_string(lines.size() - 4) + " lines omitted";
     visible.push_back(omitted);
     visible.push_back(lines[lines.size() - 2]);
     visible.push_back(lines[lines.size() - 1]);
@@ -338,8 +344,7 @@ public:
       diagnostics_->record_renderer_event("tool_end", result.content().size());
     base_.on_tool_end(call_id, name, result, is_error);
     std::cout << "\033[38;5;245m" << "  [" << name << "] "
-              << format_tool_result(result.content())
-              << "\033[0m\n"
+              << format_tool_result(result.content()) << "\033[0m\n"
               << std::flush;
   }
 
@@ -379,6 +384,12 @@ public:
     base_.on_scroll(command);
   }
 
+  bool owns_status_line() const override { return base_.owns_status_line(); }
+
+  void set_status_line(const std::optional<std::string> &text) override {
+    base_.set_status_line(text);
+  }
+
   const core::TokenUsage &last_usage() const { return last_usage_; }
 
 private:
@@ -388,16 +399,14 @@ private:
   core::TokenUsage last_usage_;
 };
 
-static core::TokenUsage run_turn(core::AgentSession &session,
-                                 const std::string &input,
-                                 core::Renderer &renderer, bool verbose,
-                                 std::shared_ptr<core::StreamDiagnostics>
-                                     diagnostics) {
+static core::TokenUsage
+run_turn(core::AgentSession &session, const std::string &input,
+         core::Renderer &renderer, bool verbose,
+         std::shared_ptr<core::StreamDiagnostics> diagnostics) {
   VerboseRenderer vr(renderer, verbose, std::move(diagnostics));
-  auto result = session.run_prompt(
-      input, [&vr](const core::AgentEvent &event) {
-        core::dispatch_event(event, vr);
-      });
+  auto result = session.run_prompt(input, [&vr](const core::AgentEvent &event) {
+    core::dispatch_event(event, vr);
+  });
   if (result.error && !session.agent().state().error_message())
     renderer.on_error(core::RendererErrorKind::unknown, *result.error);
   return vr.last_usage();
@@ -426,9 +435,9 @@ struct CostAccumulator {
 static void print_usage(const CostAccumulator &last,
                         const CostAccumulator &session, bool has_pricing) {
   auto row = [&](std::string_view label, const CostAccumulator &acc) {
-    std::cout << std::left << std::setw(10) << label
-              << "  in=" << std::setw(8) << format_tokens(acc.input_tokens)
-              << "  out=" << std::setw(8) << format_tokens(acc.output_tokens)
+    std::cout << std::left << std::setw(10) << label << "  in=" << std::setw(8)
+              << format_tokens(acc.input_tokens) << "  out=" << std::setw(8)
+              << format_tokens(acc.output_tokens)
               << "  cache_r=" << std::setw(8)
               << format_tokens(acc.cache_read_tokens)
               << "  cache_w=" << std::setw(8)
@@ -560,11 +569,10 @@ static int cmd_run(const cli::Args &args) {
   auto hook_runtime = std::make_shared<HookRuntime>();
   std::mutex effective_context_mutex;
   std::optional<core::AgentContext> effective_context;
-  opts.on_effective_context =
-      [&](const core::AgentContext &context) {
-        std::scoped_lock lock(effective_context_mutex);
-        effective_context = context;
-      };
+  opts.on_effective_context = [&](const core::AgentContext &context) {
+    std::scoped_lock lock(effective_context_mutex);
+    effective_context = context;
+  };
   std::shared_ptr<core::StreamDiagnostics> stream_diagnostics;
   if (!args.stream_trace.empty()) {
     try {
@@ -616,9 +624,9 @@ static int cmd_run(const cli::Args &args) {
     hook_runtime->hooks = hooks;
   }
 
-  opts.before_tool_call = [hook_runtime](
-                              const core::BeforeToolCallContext &context,
-                              std::stop_token stop_tok)
+  opts.before_tool_call =
+      [hook_runtime](const core::BeforeToolCallContext &context,
+                     std::stop_token stop_tok)
       -> std::optional<core::BeforeToolCallResult> {
     std::shared_ptr<core::LuaHooks> hooks;
     {
@@ -629,9 +637,9 @@ static int cmd_run(const cli::Args &args) {
       return hooks->before_tool_call(context, stop_tok);
     return std::nullopt;
   };
-  opts.after_tool_call = [hook_runtime](
-                             const core::AfterToolCallContext &context,
-                             std::stop_token stop_tok)
+  opts.after_tool_call =
+      [hook_runtime](const core::AfterToolCallContext &context,
+                     std::stop_token stop_tok)
       -> std::optional<core::AfterToolCallResult> {
     std::shared_ptr<core::LuaHooks> hooks;
     {
@@ -642,20 +650,19 @@ static int cmd_run(const cli::Args &args) {
       return hooks->after_tool_call(context, stop_tok);
     return std::nullopt;
   };
-  opts.should_stop_after_turn = [hook_runtime](
-                                    const core::Message &message,
-                                    const std::vector<core::ToolResultMessage>
-                                        &results,
-                                    const core::AgentContext &context) {
-    std::shared_ptr<core::LuaHooks> hooks;
-    {
-      std::scoped_lock lock(hook_runtime->mutex);
-      hooks = hook_runtime->hooks;
-    }
-    return hooks && hooks->should_stop_after_turn
-               ? hooks->should_stop_after_turn(message, results, context)
-               : false;
-  };
+  opts.should_stop_after_turn =
+      [hook_runtime](const core::Message &message,
+                     const std::vector<core::ToolResultMessage> &results,
+                     const core::AgentContext &context) {
+        std::shared_ptr<core::LuaHooks> hooks;
+        {
+          std::scoped_lock lock(hook_runtime->mutex);
+          hooks = hook_runtime->hooks;
+        }
+        return hooks && hooks->should_stop_after_turn
+                   ? hooks->should_stop_after_turn(message, results, context)
+                   : false;
+      };
 
   core::AgentSession runtime({.agent_options = opts, .session_store = store});
   auto &agent = runtime.agent();
@@ -798,6 +805,9 @@ static int cmd_run(const cli::Args &args) {
   apply_hook_tools();
   configure_hooks();
 
+  std::string current_session_id;
+  std::optional<std::string> current_session_name;
+
   auto reload_addons = [&]() {
     hooks = load_hooks();
     {
@@ -808,9 +818,9 @@ static int cmd_run(const cli::Args &args) {
     configure_hooks();
   };
 
-  std::string current_session_id;
   if (loaded_session) {
     current_session_id = loaded_session->header.id;
+    current_session_name = loaded_session->header.name;
     runtime.activate_session(*loaded_session);
     std::cerr << "[session: " << current_session_id;
     if (loaded_session->header.name)
@@ -848,9 +858,9 @@ static int cmd_run(const cli::Args &args) {
       for (std::string_view b :
            {std::string_view("/exit"), std::string_view("/quit"),
             std::string_view("/tools"), std::string_view("/addons"),
-            std::string_view("/reload-addons"),
-            std::string_view("/usage"), std::string_view("/name"),
-            std::string_view("/fork"), std::string_view("/tree")}) {
+            std::string_view("/reload-addons"), std::string_view("/usage"),
+            std::string_view("/name"), std::string_view("/fork"),
+            std::string_view("/tree")}) {
         if (b.starts_with(partial))
           result.emplace_back(b);
       }
@@ -909,6 +919,20 @@ static int cmd_run(const cli::Args &args) {
     u.cost.total = session.total_cost;
     return u;
   };
+  auto build_ui_context = [&]() {
+    core::LuaUiContext context;
+    context.model = model.id;
+    context.tools = agent.state().tools().size();
+    context.last = last_usage_for_prompt;
+    context.session = session_usage_for_prompt;
+    context.session_id = current_session_id;
+    context.session_name = current_session_name;
+    for (const auto &message : agent.state().messages()) {
+      if (std::holds_alternative<core::AssistantMessage>(message))
+        ++context.turn;
+    }
+    return context;
+  };
   bool has_pricing =
       model.cost.input_per_mtok != 0 || model.cost.output_per_mtok != 0;
 
@@ -924,6 +948,19 @@ static int cmd_run(const cli::Args &args) {
   auto run_and_persist = [&](const std::string &input) {
     return run_turn(runtime, input, *renderer, args.verbose,
                     stream_diagnostics);
+  };
+
+  auto update_terminal_ui = [&]() -> std::optional<std::string> {
+    const auto context = build_ui_context();
+    std::optional<std::string> status_line;
+    if (hooks && hooks->status_line)
+      status_line = hooks->status_line(context);
+    renderer->set_status_line(status_line);
+    if (hooks && hooks->tab_title) {
+      if (auto title = hooks->tab_title(context))
+        core::set_terminal_title(STDOUT_FILENO, *title);
+    }
+    return status_line;
   };
 
   // Print mode / initial message
@@ -951,14 +988,18 @@ static int cmd_run(const cli::Args &args) {
       for (const auto &m : msgs)
         if (std::holds_alternative<core::AssistantMessage>(m))
           ++turns;
-      auto custom = hooks->prompt_line(turns, model.id,
-                                        agent.state().tools().size(),
-                                        last_usage_for_prompt,
-                                        session_usage_for_prompt);
+      auto custom =
+          hooks->prompt_line(turns, model.id, agent.state().tools().size(),
+                             last_usage_for_prompt, session_usage_for_prompt);
       if (custom)
         prompt = "\n" + *custom;
     }
-    auto maybe_line = cli::readline(prompt, complete_fn, control_fn);
+    const auto status_line = update_terminal_ui();
+    const std::string_view readline_status =
+        renderer->owns_status_line() || !status_line ? std::string_view{}
+                                                     : *status_line;
+    auto maybe_line =
+        cli::readline(prompt, complete_fn, control_fn, readline_status);
     if (!maybe_line)
       break;
     const std::string &line = *maybe_line;
@@ -977,9 +1018,9 @@ static int cmd_run(const cli::Args &args) {
     if (line == "/reload-addons") {
       try {
         reload_addons();
-        renderer->on_command_output(
-            "reloaded " + std::to_string(hooks_list_saved.size()) +
-            " add-on(s)");
+        renderer->on_command_output("reloaded " +
+                                    std::to_string(hooks_list_saved.size()) +
+                                    " add-on(s)");
       } catch (const std::exception &e) {
         renderer->on_command_output("add-on reload failed: " +
                                     std::string(e.what()));
@@ -997,6 +1038,7 @@ static int cmd_run(const cli::Args &args) {
         std::cerr << "usage: /name <session name>\n";
       } else {
         store->set_name(current_session_id, name);
+        current_session_name = name;
         std::cerr << "[session name: " << name << "]\n";
       }
       continue;
@@ -1007,7 +1049,8 @@ static int cmd_run(const cli::Args &args) {
         std::cerr << "no session tree available\n";
         continue;
       }
-      auto tree_lines = core::format_session_tree(*tree_opt, current_session_id);
+      auto tree_lines =
+          core::format_session_tree(*tree_opt, current_session_id);
 
       std::size_t cursor = 0;
       for (std::size_t i = 0; i < tree_lines.size(); ++i) {
@@ -1017,7 +1060,8 @@ static int cmd_run(const cli::Args &args) {
         }
       }
 
-      auto result = cli::run_tree_selector(tree_lines, current_session_id, cursor);
+      auto result =
+          cli::run_tree_selector(tree_lines, current_session_id, cursor);
       if (result.cancelled || result.selected_session_id == current_session_id)
         continue;
 
@@ -1027,6 +1071,7 @@ static int cmd_run(const cli::Args &args) {
         continue;
       }
       current_session_id = result.selected_session_id;
+      current_session_name = loaded->header.name;
       runtime.activate_session(*loaded);
       {
         std::scoped_lock lock(effective_context_mutex);
@@ -1048,6 +1093,7 @@ static int cmd_run(const cli::Args &args) {
       child_hdr.parent_id = current_session_id;
       child_hdr.parent_offset = agent.state().messages().size();
       current_session_id = runtime.fork_session(child_hdr);
+      current_session_name.reset();
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();
@@ -1098,8 +1144,10 @@ static int cmd_run(const cli::Args &args) {
 int main(int argc, char *argv[]) {
   // Installed once, before any worker threads exist, so there is no
   // concurrent std::signal() call to race with.
-  std::signal(SIGINT, [](int) { std::exit(0); });   // NOLINT(concurrency-mt-unsafe)
-  std::signal(SIGTERM, [](int) { std::exit(0); });  // NOLINT(concurrency-mt-unsafe)
+  std::signal(SIGINT,
+              [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
+  std::signal(SIGTERM,
+              [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
 
   pi::core::register_openai_completions_client();
   pi::core::register_muse_messages_client();

@@ -36,6 +36,7 @@ using ControlFn = std::function<void(ControlAction)>;
 // Ctrl+C exits the process via SIGINT (same as before raw mode).
 std::optional<std::string> readline(std::string_view prompt,
                                     const CompleteFn &complete_fn = {},
-                                    const ControlFn &control_fn = {});
+                                    const ControlFn &control_fn = {},
+                                    std::string_view status_line = {});
 
 } // namespace pi::cli

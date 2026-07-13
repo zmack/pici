@@ -735,10 +735,10 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
     tc.arguments = parsed.is_discarded() ? nlohmann::json::object() : parsed;
     tc.partial_json.clear();
     if (state.on_event) {
-      state.on_event(AssistantMessageToolCallEndEvent{
-          .content_index = *ptc.content_index,
-          .tool_call = tc,
-          .partial = *result});
+      state.on_event(
+          AssistantMessageToolCallEndEvent{.content_index = *ptc.content_index,
+                                           .tool_call = tc,
+                                           .partial = *result});
     }
   }
 

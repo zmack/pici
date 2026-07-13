@@ -13,8 +13,7 @@ namespace {
 
 std::int64_t monotonic_ms() {
   using namespace std::chrono;
-  return duration_cast<milliseconds>(
-             steady_clock::now().time_since_epoch())
+  return duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
       .count();
 }
 
@@ -82,12 +81,12 @@ void StreamDiagnostics::record_transport_chunk(std::size_t bytes) {
 }
 
 void StreamDiagnostics::record_parser_event(std::string_view event,
-                                             std::size_t bytes) {
+                                            std::size_t bytes) {
   record("parser", event, bytes);
 }
 
 void StreamDiagnostics::record_renderer_event(std::string_view event,
-                                               std::size_t bytes) {
+                                              std::size_t bytes) {
   record("renderer", event, bytes);
 }
 

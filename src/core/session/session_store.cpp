@@ -1,6 +1,6 @@
 #include "core/session/session_store.h"
-#include "core/session/session_id.h"
 #include "core/message_types.h"
+#include "core/session/session_id.h"
 #include "core/session/session_record.h"
 
 #include <algorithm>
@@ -28,8 +28,9 @@ namespace pi::core {
 
 namespace {
 
-SessionHeader parse_header_line(const nlohmann::json &j, // NOLINT(misc-include-cleaner)
-                                const std::string &fallback_id) {
+SessionHeader
+parse_header_line(const nlohmann::json &j, // NOLINT(misc-include-cleaner)
+                  const std::string &fallback_id) {
   SessionHeader hdr;
   hdr.id = j.value("id", fallback_id);
   hdr.created = j.value("created", std::int64_t{0});
@@ -84,8 +85,8 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
     if (j.contains("role")) {
       if (auto msg = json::from_json(line))
         messages.push_back(std::move(*msg));
-    } else if (j.value("type", std::string{}) == "meta" &&
-               j.contains("name") && j["name"].is_string()) {
+    } else if (j.value("type", std::string{}) == "meta" && j.contains("name") &&
+               j["name"].is_string()) {
       header.name = j["name"].get<std::string>();
     }
   }
@@ -121,10 +122,12 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
 // worker threads exist, so these std::getenv() calls never race.
 std::filesystem::path SessionStore::default_sessions_dir() {
   std::filesystem::path base;
-  if (const char *xdg = std::getenv("XDG_DATA_HOME"); // NOLINT(concurrency-mt-unsafe)
+  if (const char *xdg =
+          std::getenv("XDG_DATA_HOME"); // NOLINT(concurrency-mt-unsafe)
       xdg != nullptr && *xdg != '\0') {
     base = xdg;
-  } else if (const char *home = std::getenv("HOME"); // NOLINT(concurrency-mt-unsafe)
+  } else if (const char *home =
+                 std::getenv("HOME"); // NOLINT(concurrency-mt-unsafe)
              home != nullptr && *home != '\0') {
     base = std::filesystem::path(home) / ".local" / "share";
   } else {

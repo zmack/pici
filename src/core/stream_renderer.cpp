@@ -14,6 +14,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -58,8 +59,8 @@ std::string format_tokens(std::uint64_t n) {
     ss << std::fixed << std::setprecision(1)
        << static_cast<double>(n) / 1'000'000.0 << 'M';
   } else if (n >= 1'000) {
-    ss << std::fixed << std::setprecision(1)
-       << static_cast<double>(n) / 1'000.0 << 'K';
+    ss << std::fixed << std::setprecision(1) << static_cast<double>(n) / 1'000.0
+       << 'K';
   } else {
     ss << n;
   }
@@ -360,6 +361,13 @@ public:
     repaint();
   }
 
+  bool owns_status_line() const override { return true; }
+
+  void set_status_line(const std::optional<std::string> &text) override {
+    custom_status_line_ = text;
+    paint_status();
+  }
+
   void on_thinking_start() override {
     in_thinking_ = true;
     thinking_buffer_.clear();
@@ -607,7 +615,9 @@ private:
     const int h = term_height(fd_);
 
     std::string text;
-    if (!active_tools_.empty()) {
+    if (custom_status_line_) {
+      text = *custom_status_line_;
+    } else if (!active_tools_.empty()) {
       text = "[";
       bool first = true;
       for (const auto &[id, name] : active_tools_) {
@@ -628,8 +638,7 @@ private:
       text += '/';
       text += std::to_string(max_scroll_rows_);
     }
-    if (std::cmp_greater(text.size(), w))
-      text.resize(static_cast<std::size_t>(w));
+    text = truncate_ansi_line(text, w);
 
     std::string usage_text;
     if (last_usage_.input != 0 || last_usage_.output != 0) {
@@ -642,8 +651,7 @@ private:
         usage_text += format_cost(last_usage_.cost.total);
       }
     }
-    int gap = w - static_cast<int>(text.size()) -
-              static_cast<int>(usage_text.size());
+    int gap = w - display_columns(text) - static_cast<int>(usage_text.size());
     if (usage_text.empty() || gap < 1)
       usage_text.clear();
 
@@ -746,6 +754,7 @@ private:
   std::string thinking_buffer_;
   bool in_thinking_{false};
   std::map<std::string, std::string> active_tools_;
+  std::optional<std::string> custom_status_line_;
   std::string status_text_;
   std::uint64_t total_tokens_{0};
   TokenUsage last_usage_;
