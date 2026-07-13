@@ -1978,6 +1978,7 @@ void test_tool_result_in_context_on_second_llm_call() {
         int call_count = 0;
         std::string captured_tool_result_content;
         bool captured_has_tool_result = false;
+        std::vector<AgentContext> captured_contexts;
 
         auto llm_client = std::make_shared<TestLLMClient>(
             [&](const AgentContext& context,
@@ -2020,20 +2021,39 @@ void test_tool_result_in_context_on_second_llm_call() {
             });
 
         AgentContext ctx;
+        ctx.system_prompt = "captured system";
         ctx.tools.push_back(std::make_shared<CounterTool>());
 
         AgentLoopConfig config;
         config.model = model;
         config.llm_client = llm_client;
         config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.on_effective_context =
+            [&captured_contexts](const AgentContext& context) {
+                captured_contexts.push_back(context);
+            };
         config.should_stop_after_turn = nullptr;
         config.get_steering_messages = [] { return std::vector<Message>{}; };
         config.get_follow_up_messages = [] { return std::vector<Message>{}; };
 
-        auto stream = run_agent_loop({}, ctx, config, [](const AgentEvent&) {});
+        UserMessage user;
+        user.content.emplace_back(TextContent{.text = "inspect the workspace"});
+
+        auto stream = run_agent_loop({user}, ctx, config, [](const AgentEvent&) {});
         for (auto& ev : stream) { (void)ev; }
 
         CHECK_EQ(call_count, 2);
+        CHECK_EQ(captured_contexts.size(), std::size_t(2));
+        CHECK_EQ(captured_contexts[0].system_prompt,
+                 std::string("captured system"));
+        CHECK_EQ(captured_contexts[1].system_prompt,
+                 std::string("captured system"));
+        CHECK_EQ(captured_contexts[0].messages.size(), std::size_t(1));
+        CHECK_EQ(captured_contexts[1].messages.size(), std::size_t(3));
+        CHECK_EQ(captured_contexts[1].tools.size(), std::size_t(1));
+        CHECK(std::holds_alternative<UserMessage>(captured_contexts[1].messages[0]));
+        CHECK(std::holds_alternative<AssistantMessage>(captured_contexts[1].messages[1]));
+        CHECK(std::holds_alternative<ToolResultMessage>(captured_contexts[1].messages[2]));
         CHECK(captured_has_tool_result);
         CHECK_EQ(captured_tool_result_content, std::string("Counter: 6"));
     });

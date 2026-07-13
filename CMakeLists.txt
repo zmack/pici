@@ -530,6 +530,7 @@ add_executable(pi-cli
     src/cli/args.cpp
     src/cli/config.cpp
     src/cli/readline.cpp
+    src/cli/system_prompt.cpp
     src/cli/tree_selector.cpp
 )
 
@@ -545,6 +546,7 @@ add_executable(pi-acp
     src/cli/args.cpp
     src/cli/config.cpp
     src/cli/readline.cpp
+    src/cli/system_prompt.cpp
 )
 target_include_directories(pi-acp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pi-acp PRIVATE pi-core pi-http httplib::httplib tomlplusplus::tomlplusplus)
@@ -581,6 +583,10 @@ if(PI_CPP_BUILD_TESTS)
     target_include_directories(test-config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus)
     add_test(NAME test-config COMMAND test-config)
+
+    add_executable(test-system_prompt test/test_system_prompt.cpp src/cli/system_prompt.cpp)
+    target_include_directories(test-system_prompt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME test-system_prompt COMMAND test-system_prompt)
 
     add_test(
         NAME test-addons

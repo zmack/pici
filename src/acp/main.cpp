@@ -1,6 +1,7 @@
 #include "acp/server.h"
 #include "cli/args.h"
 #include "cli/config.h"
+#include "cli/system_prompt.h"
 #include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
 #include "core/lua_tool.h"
@@ -20,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 static void print_usage(const char *prog) {
   std::cout << "Usage: " << prog
@@ -103,7 +105,6 @@ int main(int argc, char *argv[]) {
     cfg.session_dir = args.session_dir;
 
   cfg.agent_opts.model = model;
-  cfg.agent_opts.system_prompt = args.system_prompt;
   cfg.agent_opts.get_api_key =
       [&args, &model](std::string_view p) -> std::optional<std::string> {
     if (!args.api_key.empty())
@@ -119,6 +120,13 @@ int main(int argc, char *argv[]) {
         cfg.tools.push_back(t);
     }
   }
+
+  std::vector<std::string> tool_names;
+  for (const auto &tool : cfg.tools)
+    tool_names.emplace_back(tool->name());
+  cfg.agent_opts.system_prompt = pi::cli::build_system_prompt(
+      args.system_prompt, args.append_system_prompts, {}, tool_names,
+      std::filesystem::current_path());
 
   std::cerr << "[acp] agent: " << cfg.agent_name
             << "  model: " << model.provider << "/" << model.id << "\n";

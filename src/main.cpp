@@ -27,6 +27,7 @@
 #include "cli/args.h"
 #include "cli/config.h"
 #include "cli/readline.h"
+#include "cli/system_prompt.h"
 #include "cli/tree_selector.h"
 #include "core/agent.h"
 #include "core/agent_state.h"
@@ -455,17 +456,12 @@ static void print_usage(const CostAccumulator &last,
   std::cout << "\n";
 }
 
-struct ContextFile {
-  std::string path;
-  std::string content;
-};
-
-static std::vector<ContextFile> load_context_files() {
+static std::vector<cli::ContextFile> load_context_files() {
   namespace fs = std::filesystem;
   static constexpr std::string_view kCandidates[] = {"AGENTS.md", "AGENTS.MD",
                                                      "CLAUDE.md", "CLAUDE.MD"};
 
-  auto try_load = [&](const fs::path &dir) -> std::optional<ContextFile> {
+  auto try_load = [&](const fs::path &dir) -> std::optional<cli::ContextFile> {
     for (auto name : kCandidates) {
       fs::path p = dir / name;
       std::error_code ec;
@@ -476,16 +472,17 @@ static std::vector<ContextFile> load_context_files() {
         continue;
       std::string content((std::istreambuf_iterator<char>(f)),
                           std::istreambuf_iterator<char>());
-      return ContextFile{.path = p.string(), .content = std::move(content)};
+      return cli::ContextFile{.path = p.string(),
+                              .content = std::move(content)};
     }
     return std::nullopt;
   };
 
-  std::vector<ContextFile> result;
+  std::vector<cli::ContextFile> result;
   std::set<std::string> seen;
 
   // Walk up from cwd to root, collecting innermost-first then reversing
-  std::vector<ContextFile> ancestors;
+  std::vector<cli::ContextFile> ancestors;
   fs::path cur = fs::current_path();
   while (true) {
     if (auto cf = try_load(cur)) {
@@ -541,30 +538,18 @@ static int cmd_run(const cli::Args &args) {
     loaded_session = store->load(matches[0].id);
   }
 
-  // Build system prompt
-  std::string system = args.system_prompt;
-  for (const auto &extra : args.append_system_prompts) {
-    if (!system.empty())
-      system += "\n\n";
-    system += extra;
-  }
-
-  // Inject AGENTS.md / CLAUDE.md context files
+  std::vector<cli::ContextFile> context_files;
   if (!args.no_context_files) {
-    auto ctx_files = load_context_files();
-    if (!ctx_files.empty()) {
-      system += "\n\n# Project Context\n\n";
-      for (const auto &cf : ctx_files) {
-        system += "## " + cf.path + "\n\n" + cf.content + "\n\n";
-        if (args.verbose)
-          std::cerr << "[context: " << cf.path << "]\n";
-      }
+    context_files = load_context_files();
+    for (const auto &cf : context_files) {
+      if (args.verbose)
+        std::cerr << "[context: " << cf.path << "]\n";
     }
   }
 
   core::Agent::Options opts;
   opts.model = model;
-  opts.system_prompt = system;
+  opts.system_prompt = args.system_prompt;
   opts.thinking_level = to_core_thinking(args.thinking);
   auto hook_runtime = std::make_shared<HookRuntime>();
   std::mutex effective_context_mutex;
@@ -696,6 +681,15 @@ static int cmd_run(const cli::Args &args) {
       }
     }
   }
+
+  std::vector<std::string> tool_names;
+  for (const auto &tool : agent.state().tools())
+    tool_names.emplace_back(tool->name());
+  const auto system = cli::build_system_prompt(
+      args.system_prompt, args.append_system_prompts, context_files, tool_names,
+      std::filesystem::current_path());
+  agent.state().set_system_prompt(system);
+  opts.system_prompt = system;
 
   const auto base_tools = agent.state().tools();
 
