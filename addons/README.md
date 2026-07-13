@@ -129,3 +129,6 @@ for add-on diagnostics. Context output can contain sensitive prompt content,
 reasoning/signature data, tool schemas, and large base64 image payloads. The
 effective view is provider-neutral context, not the exact wire JSON sent to a
 provider.
+
+After editing an add-on, run `/reload-addons` to reload the configured hook
+files, callbacks, and registered add-on tools without restarting the session.

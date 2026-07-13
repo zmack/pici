@@ -1,9 +1,9 @@
 #include "acp/handlers.h"
 #include "acp/server.h"
-#include "acp/session_store.h"
 #include "acp/sse.h"
 #include "acp/types.h"
 #include "core/agent.h"
+#include "core/session/agent_session.h"
 #include "core/message_types.h"
 #include "core/stream_renderer.h"
 
@@ -199,7 +199,7 @@ nlohmann::json parse_body(const httplib::Request &req) {
 // ───────────────────────────────────────────────────────
 
 void register_routes(httplib::Server &svr, const ServerConfig &cfg,
-                     const std::shared_ptr<SessionStore> &sessions) {
+                     const std::shared_ptr<core::SessionStore> &sessions) {
   const auto manifest_json = nlohmann::json(build_manifest(cfg));
 
   // ── GET /health ────────────────────────────────────────────────────────────
@@ -256,22 +256,28 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
 
     const std::string run_id = make_run_id();
 
-    // Build agent on heap (Agent is non-movable due to internal mutex)
-    auto agent_ptr = std::make_shared<core::Agent>(cfg.agent_opts);
-    agent_ptr->set_tools(cfg.tools);
+    auto session = std::make_shared<core::AgentSession>(
+        core::AgentSession::Config{.agent_options = cfg.agent_opts,
+                                   .tools = cfg.tools,
+                                   .session_store = sessions});
 
-    // Restore session history if provided
+    std::optional<std::string> active_session_id;
+
+    // Restore or create durable session history if provided.
     if (rcr.session_id) {
-      auto hist = sessions->load(*rcr.session_id);
-      if (!hist.empty())
-        agent_ptr->state().set_messages(std::move(hist));
+      core::SessionHeader header;
+      header.created = std::chrono::system_clock::to_time_t(
+          std::chrono::system_clock::now());
+      header.model = cfg.agent_opts.model.id;
+      header.provider = cfg.agent_opts.model.provider;
+      active_session_id = session->open_session(*rcr.session_id, header);
     }
 
     // ── Streaming mode ─────────────────────────────────────────────────────
     if (rcr.mode == RunMode::stream) {
       res.set_chunked_content_provider(
           "text/event-stream",
-          [&cfg, sessions, run_id, prompt, rcr, agent_ptr](
+          [&cfg, run_id, prompt, rcr, active_session_id, session](
               std::size_t /*offset*/, httplib::DataSink &sink) mutable -> bool {
             SseWriter sse(sink);
 
@@ -279,8 +285,7 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
             r.run_id = run_id;
             r.agent_name = cfg.agent_name;
             r.status = RunStatus::created;
-            if (rcr.session_id)
-              r.session_id = rcr.session_id;
+            r.session_id = active_session_id;
             sse.emit("run.created",
                      {{"type", "run.created"}, {"run", nlohmann::json(r)}});
             r.status = RunStatus::in_progress;
@@ -288,15 +293,13 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
                      {{"type", "run.in-progress"}, {"run", nlohmann::json(r)}});
 
             AcpSseRenderer renderer(sse, cfg.agent_name);
-            try {
-              for (const auto &ev : agent_ptr->prompt(prompt))
-                core::dispatch_event(ev, renderer);
-            } catch (const std::exception &ex) {
-              renderer.on_error(core::RendererErrorKind::unknown, ex.what());
-            }
-
-            if (rcr.session_id)
-              sessions->save(*rcr.session_id, agent_ptr->state().messages());
+            auto result = session->run_prompt(
+                prompt, [&renderer](const core::AgentEvent &event) {
+                  core::dispatch_event(event, renderer);
+                });
+            if (result.error && !session->agent().state().error_message())
+              renderer.on_error(core::RendererErrorKind::unknown,
+                                *result.error);
 
             renderer.emit_run_final(r);
             sink.done();
@@ -307,21 +310,18 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
 
     // ── Sync mode ──────────────────────────────────────────────────────────
     SyncRenderer sr;
-    try {
-      for (const auto &ev : agent_ptr->prompt(prompt))
-        core::dispatch_event(ev, sr);
-    } catch (const std::exception &ex) {
-      sr.on_error(core::RendererErrorKind::unknown, ex.what());
-    }
-
-    if (rcr.session_id)
-      sessions->save(*rcr.session_id, agent_ptr->state().messages());
+    auto result = session->run_prompt(
+        prompt, [&sr](const core::AgentEvent &event) {
+          core::dispatch_event(event, sr);
+        });
+    if (result.error && !session->agent().state().error_message())
+      sr.on_error(core::RendererErrorKind::unknown, *result.error);
 
     Run r;
     r.run_id = run_id;
     r.agent_name = cfg.agent_name;
     r.status = sr.status();
-    r.session_id = rcr.session_id;
+    r.session_id = active_session_id;
     if (!sr.accumulated().empty())
       r.output.push_back({.role = cfg.agent_name,
                           .parts = {{.content_type = "text/plain",

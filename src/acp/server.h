@@ -1,11 +1,12 @@
 #pragma once
 
-#include "acp/session_store.h"
 #include "acp/types.h"
 #include "core/agent.h"
 #include "core/builtin_tools.h"
+#include "core/session/session_store.h"
 
 #include <atomic>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -18,6 +19,8 @@ struct ServerConfig {
   std::string agent_description{"pi-cpp coding agent"};
   core::Agent::Options agent_opts;
   std::vector<std::shared_ptr<const core::ToolDefinition>> tools;
+  std::shared_ptr<core::SessionStore> session_store;
+  std::filesystem::path session_dir;
   int threads{4};
 };
 

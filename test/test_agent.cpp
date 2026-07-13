@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -18,6 +19,9 @@
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
+#include "core/session/agent_session.h"
+#include "core/session/session_id.h"
+#include "core/session/session_store.h"
 #include "core/stream.h"
 
 using namespace pi::core;
@@ -94,6 +98,27 @@ public:
 
 private:
     std::shared_ptr<std::atomic<int>> calls_;
+};
+
+class ImmediateClient : public LLMClient {
+public:
+    std::shared_ptr<AssistantMessage> stream(
+        const Model& model,
+        const AgentContext&,
+        const StreamOptions&,
+        AssistantEventCallback,
+        std::stop_token) override {
+        auto message = std::make_shared<AssistantMessage>();
+        message->api = model.api;
+        message->provider = model.provider;
+        message->model = model.id;
+        message->stop_reason = StopReason::stop;
+        message->content.emplace_back(TextContent{.text = "session response"});
+        return message;
+    }
+
+    std::string_view provider_name() const override { return "test"; }
+    std::string_view api_id() const override { return "agent-session-test"; }
 };
 
 // ─── Simple test harness ──────────────────────────────────────────────────
@@ -321,6 +346,58 @@ void test_agent_run_lifecycle() {
     });
 }
 
+void test_agent_session_runtime() {
+    tests::register_test("AgentSession: runs and persists through shared runtime", []() {
+        LLMClientRegistry::instance().register_client(
+            "agent-session-test",
+            [] { return std::make_shared<ImmediateClient>(); });
+
+        const auto session_dir =
+            std::filesystem::temp_directory_path() /
+            ("pici-agent-session-" + std::to_string(
+                                          std::chrono::steady_clock::now()
+                                              .time_since_epoch()
+                                              .count()));
+
+        auto store = std::make_shared<SessionStore>(session_dir);
+        Agent::Options opts;
+        opts.model.id = "test-model";
+        opts.model.api = "agent-session-test";
+        opts.model.provider = "test";
+
+        {
+            AgentSession runtime({.agent_options = opts,
+                                  .session_store = store});
+            SessionHeader header;
+            header.id = "runtime-session";
+            header.created = std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+            header.model = opts.model.id;
+            header.provider = opts.model.provider;
+            CHECK_EQ(runtime.create_session(header), "runtime-session");
+
+            int agent_end_count = 0;
+            auto result = runtime.run_prompt(
+                "hello", [&agent_end_count](const AgentEvent& event) {
+                    if (std::holds_alternative<AgentEndEvent>(event))
+                        ++agent_end_count;
+                });
+
+            CHECK(!result.error.has_value());
+            CHECK_EQ(agent_end_count, 1);
+            CHECK_EQ(runtime.agent().state().messages().size(), std::size_t(2));
+        }
+
+        auto saved = store->load("runtime-session");
+        CHECK(saved.has_value());
+        CHECK_EQ(saved->messages.size(), std::size_t(2));
+        CHECK(std::holds_alternative<UserMessage>(saved->messages[0]));
+        CHECK(std::holds_alternative<AssistantMessage>(saved->messages[1]));
+        store.reset();
+        std::filesystem::remove_all(session_dir);
+    });
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -335,6 +412,7 @@ int main() {
     test_agent_reset();
     test_agent_prompt_stream();
     test_agent_run_lifecycle();
+    test_agent_session_runtime();
 
     tests::print_summary();
 

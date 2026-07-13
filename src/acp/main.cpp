@@ -97,6 +97,8 @@ int main(int argc, char *argv[]) {
   pi::acp::ServerConfig cfg;
   cfg.agent_description = "pi-cpp coding agent running " + model.id;
   cfg.threads = acp_threads;
+  if (!args.session_dir.empty())
+    cfg.session_dir = args.session_dir;
 
   cfg.agent_opts.model = model;
   cfg.agent_opts.system_prompt = args.system_prompt;

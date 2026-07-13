@@ -57,8 +57,9 @@ public:
     }
 
     std::weak_ptr<State> weak_state = state;
-    worker_state->thread = std::jthread(
-        [weak_state, worker = std::move(worker)](std::stop_token) mutable {
+    worker_state->thread =
+        std::jthread([weak_state, worker = std::move(worker)](
+                         const std::stop_token &) mutable {
           PushFn push = [weak_state](Event event) {
             auto state = weak_state.lock();
             if (!state)
@@ -72,9 +73,7 @@ public:
   // ── Push events ────────────────────────────────────────────────────
 
   // Push an event. Returns true if the stream is not yet complete.
-  bool push(Event event) {
-    return push_state(state_, std::move(event));
-  }
+  bool push(Event event) { return push_state(state_, std::move(event)); }
 
   // Push and check if this event marks the stream as done.
   // If done, the result is computed and the stream is closed.
@@ -263,8 +262,7 @@ private:
         return false;
       complete = state->done && state->done(event);
       if (complete) {
-        state->result =
-            state->extract ? state->extract(event) : FinalResultT{};
+        state->result = state->extract ? state->extract(event) : FinalResultT{};
         state->has_result = true;
       }
       state->queue.push(std::move(event));

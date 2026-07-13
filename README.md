@@ -289,6 +289,10 @@ also provides static TUI views: `/context genome`, `/context heatmap`, and
 content, reasoning data, and large base64 image payloads. See
 [`addons/context.lua`](addons/context.lua) for the implementation.
 
+Use `/reload-addons` after editing Lua hooks or add-on tools to reload the
+configured files without restarting the session. Built-in and tools-directory
+tools are preserved; registered add-on tools and hook callbacks are replaced.
+
 For a lean local build directory that skips test targets:
 
 ```bash

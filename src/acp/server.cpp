@@ -1,7 +1,7 @@
 #include "acp/server.h"
 #include "acp/handlers.h"
-#include "acp/session_store.h"
 #include "acp/types.h"
+#include "core/session/session_id.h"
 #include "nlohmann/json_fwd.hpp"
 
 #include <cstddef>
@@ -32,7 +32,14 @@ AgentManifest build_manifest(const ServerConfig &cfg) {
 }
 
 void run_server(std::atomic<int> &port, ServerConfig config) {
-  auto sessions = std::make_shared<SessionStore>();
+  auto sessions = config.session_store;
+  if (!sessions) {
+    auto session_dir = config.session_dir;
+    if (session_dir.empty())
+      session_dir = std::filesystem::temp_directory_path() /
+                    ("pici-acp-" + core::generate_session_id());
+    sessions = std::make_shared<core::SessionStore>(std::move(session_dir));
+  }
 
   httplib::Server svr;
   svr.new_task_queue = [&config] {

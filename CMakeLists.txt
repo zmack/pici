@@ -475,6 +475,7 @@ add_library(pi-core
     src/core/providers/transform_messages.cpp
     src/core/otel_init.cpp
     src/core/session/session_id.cpp
+    src/core/session/agent_session.cpp
     src/core/session/session_store.cpp
     src/core/session/session_tree.cpp
 )
@@ -540,7 +541,6 @@ add_executable(pi-acp
     src/acp/server.cpp
     src/acp/types.cpp
     src/acp/sse.cpp
-    src/acp/session_store.cpp
     src/acp/handlers.cpp
     src/cli/args.cpp
     src/cli/config.cpp
@@ -597,7 +597,7 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-acp PRIVATE pi-core pi-http httplib::httplib)
     target_sources(test-acp PRIVATE
         src/acp/server.cpp src/acp/handlers.cpp src/acp/types.cpp
-        src/acp/sse.cpp src/acp/session_store.cpp)
+        src/acp/sse.cpp)
     add_test(NAME test-acp COMMAND test-acp)
 endif()
 
@@ -611,8 +611,27 @@ target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl)
 
 # ─── clang-tidy ───────────────────────────────────────────────────────────────
 
-find_program(CLANG_TIDY_BIN NAMES clang-tidy-23 clang-tidy-22 clang-tidy-20 clang-tidy)
-find_program(RUN_CLANG_TIDY_BIN NAMES run-clang-tidy-23 run-clang-tidy-22 run-clang-tidy-20 run-clang-tidy)
+set(PI_CPP_LLVM_BIN_DIR "" CACHE PATH
+    "Directory containing clang-tidy, run-clang-tidy, and clang-format")
+set(PI_CPP_LLVM_TOOL_HINTS)
+if(PI_CPP_LLVM_BIN_DIR)
+    list(APPEND PI_CPP_LLVM_TOOL_HINTS "${PI_CPP_LLVM_BIN_DIR}")
+endif()
+if(APPLE)
+    list(APPEND PI_CPP_LLVM_TOOL_HINTS
+        /opt/homebrew/opt/llvm/bin
+        /usr/local/opt/llvm/bin
+    )
+endif()
+
+find_program(CLANG_TIDY_BIN
+    NAMES clang-tidy-23 clang-tidy-22 clang-tidy-20 clang-tidy
+    HINTS ${PI_CPP_LLVM_TOOL_HINTS}
+)
+find_program(RUN_CLANG_TIDY_BIN
+    NAMES run-clang-tidy-23 run-clang-tidy-22 run-clang-tidy-20 run-clang-tidy
+    HINTS ${PI_CPP_LLVM_TOOL_HINTS}
+)
 
 if(CLANG_TIDY_BIN)
     # Regex passed to run-clang-tidy matching only our src/ files,
@@ -664,12 +683,15 @@ if(CLANG_TIDY_BIN)
 
     message(STATUS "clang-tidy: ${CLANG_TIDY_BIN}  →  'cmake --build build --target tidy'")
 else()
-    message(STATUS "clang-tidy not found — skipping tidy target (install clang-tidy-23)")
+    message(STATUS "clang-tidy not found — skipping tidy target (install LLVM or set PI_CPP_LLVM_BIN_DIR)")
 endif()
 
 # ─── clang-format ─────────────────────────────────────────────────────────────
 
-find_program(CLANG_FORMAT_BIN NAMES clang-format-23 clang-format-22 clang-format-20 clang-format)
+find_program(CLANG_FORMAT_BIN
+    NAMES clang-format-23 clang-format-22 clang-format-20 clang-format
+    HINTS ${PI_CPP_LLVM_TOOL_HINTS}
+)
 
 if(CLANG_FORMAT_BIN)
     # Keep this aligned with tidy: only format our src/ tree, not tests or deps.
@@ -700,5 +722,5 @@ if(CLANG_FORMAT_BIN)
 
     message(STATUS "clang-format: ${CLANG_FORMAT_BIN}  →  'cmake --build build --target format'")
 else()
-    message(STATUS "clang-format not found — skipping format target (install clang-format-23)")
+    message(STATUS "clang-format not found — skipping format target (install LLVM or set PI_CPP_LLVM_BIN_DIR)")
 endif()

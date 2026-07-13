@@ -39,6 +39,7 @@
 #include "core/providers/openai_completions.h"
 #include "core/providers/muse_messages.h"
 #include "cli/tree_selector.h"
+#include "core/session/agent_session.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
@@ -49,6 +50,11 @@
 namespace pi {
 
 static void print_version() { std::cout << "pi-cpp " PI_CPP_VERSION "\n"; }
+
+struct HookRuntime {
+  std::mutex mutex;
+  std::shared_ptr<core::LuaHooks> hooks;
+};
 
 static void print_tools(
     const std::vector<std::shared_ptr<const core::ToolDefinition>> &tools) {
@@ -382,13 +388,18 @@ private:
   core::TokenUsage last_usage_;
 };
 
-static core::TokenUsage run_turn(core::Agent &agent, const std::string &input,
+static core::TokenUsage run_turn(core::AgentSession &session,
+                                 const std::string &input,
                                  core::Renderer &renderer, bool verbose,
                                  std::shared_ptr<core::StreamDiagnostics>
                                      diagnostics) {
   VerboseRenderer vr(renderer, verbose, std::move(diagnostics));
-  for (const auto &ev : agent.prompt(input))
-    core::dispatch_event(ev, vr);
+  auto result = session.run_prompt(
+      input, [&vr](const core::AgentEvent &event) {
+        core::dispatch_event(event, vr);
+      });
+  if (result.error && !session.agent().state().error_message())
+    renderer.on_error(core::RendererErrorKind::unknown, *result.error);
   return vr.last_usage();
 }
 
@@ -491,7 +502,7 @@ static int cmd_run(const cli::Args &args) {
   }
   core::Model model = *model_opt;
 
-  auto store = std::make_unique<core::SessionStore>(
+  auto store = std::make_shared<core::SessionStore>(
       args.session_dir.empty() ? core::SessionStore::default_sessions_dir()
                                : std::filesystem::path(args.session_dir));
 
@@ -546,6 +557,7 @@ static int cmd_run(const cli::Args &args) {
   opts.model = model;
   opts.system_prompt = system;
   opts.thinking_level = to_core_thinking(args.thinking);
+  auto hook_runtime = std::make_shared<HookRuntime>();
   std::mutex effective_context_mutex;
   std::optional<core::AgentContext> effective_context;
   opts.on_effective_context =
@@ -571,41 +583,82 @@ static int cmd_run(const cli::Args &args) {
     return core::get_env_api_key(p.empty() ? model.provider : p);
   };
   opts.verbose = args.verbose;
-  opts.should_stop_after_turn = nullptr;
 
   // Load and compose Lua hooks
-  std::vector<std::shared_ptr<core::LuaHooks>> hooks_list;
-  for (const auto &path : args.hooks_files) {
-    try {
-      hooks_list.push_back(core::load_lua_hooks(path));
-      if (args.verbose)
-        std::cerr << "[hooks: " << path << "]\n";
-    } catch (const std::exception &e) {
-      std::cerr << "warning: failed to load hooks file " << path << ": "
-                << e.what() << "\n";
+  std::vector<std::shared_ptr<core::LuaHooks>> hooks_list_saved;
+  auto load_hooks = [&]() -> std::shared_ptr<core::LuaHooks> {
+    std::vector<std::shared_ptr<core::LuaHooks>> hooks_list;
+    for (const auto &path : args.hooks_files) {
+      try {
+        hooks_list.push_back(core::load_lua_hooks(path));
+        if (args.verbose)
+          std::cerr << "[hooks: " << path << "]\n";
+      } catch (const std::exception &e) {
+        std::cerr << "warning: failed to load hooks file " << path << ": "
+                  << e.what() << "\n";
+      }
     }
-  }
-  if (!args.hooks_dir.empty()) {
-    auto dir_hooks = core::load_lua_hooks_dir(args.hooks_dir);
-    if (dir_hooks) {
-      hooks_list.push_back(dir_hooks);
-      if (args.verbose)
-        std::cerr << "[hooks-dir: " << args.hooks_dir << "]\n";
+    if (!args.hooks_dir.empty()) {
+      auto dir_hooks = core::load_lua_hooks_dir(args.hooks_dir);
+      if (dir_hooks) {
+        hooks_list.push_back(dir_hooks);
+        if (args.verbose)
+          std::cerr << "[hooks-dir: " << args.hooks_dir << "]\n";
+      }
     }
-  }
-  // Keep a copy for --list-addons / /addons before moving into compose
-  auto hooks_list_saved = hooks_list;
-  auto hooks = core::compose_hooks(std::move(hooks_list));
-  if (hooks) {
-    if (hooks->before_tool_call)
-      opts.before_tool_call = hooks->before_tool_call;
-    if (hooks->after_tool_call)
-      opts.after_tool_call = hooks->after_tool_call;
-    if (hooks->should_stop_after_turn)
-      opts.should_stop_after_turn = hooks->should_stop_after_turn;
+
+    hooks_list_saved = hooks_list;
+    return core::compose_hooks(std::move(hooks_list));
+  };
+  auto hooks = load_hooks();
+  {
+    std::scoped_lock lock(hook_runtime->mutex);
+    hook_runtime->hooks = hooks;
   }
 
-  core::Agent agent(opts);
+  opts.before_tool_call = [hook_runtime](
+                              const core::BeforeToolCallContext &context,
+                              std::stop_token stop_tok)
+      -> std::optional<core::BeforeToolCallResult> {
+    std::shared_ptr<core::LuaHooks> hooks;
+    {
+      std::scoped_lock lock(hook_runtime->mutex);
+      hooks = hook_runtime->hooks;
+    }
+    if (hooks && hooks->before_tool_call)
+      return hooks->before_tool_call(context, stop_tok);
+    return std::nullopt;
+  };
+  opts.after_tool_call = [hook_runtime](
+                             const core::AfterToolCallContext &context,
+                             std::stop_token stop_tok)
+      -> std::optional<core::AfterToolCallResult> {
+    std::shared_ptr<core::LuaHooks> hooks;
+    {
+      std::scoped_lock lock(hook_runtime->mutex);
+      hooks = hook_runtime->hooks;
+    }
+    if (hooks && hooks->after_tool_call)
+      return hooks->after_tool_call(context, stop_tok);
+    return std::nullopt;
+  };
+  opts.should_stop_after_turn = [hook_runtime](
+                                    const core::Message &message,
+                                    const std::vector<core::ToolResultMessage>
+                                        &results,
+                                    const core::AgentContext &context) {
+    std::shared_ptr<core::LuaHooks> hooks;
+    {
+      std::scoped_lock lock(hook_runtime->mutex);
+      hooks = hook_runtime->hooks;
+    }
+    return hooks && hooks->should_stop_after_turn
+               ? hooks->should_stop_after_turn(message, results, context)
+               : false;
+  };
+
+  core::AgentSession runtime({.agent_options = opts, .session_store = store});
+  auto &agent = runtime.agent();
 
   if (!args.no_tools && !args.no_builtin_tools) {
     if (args.tools.empty()) {
@@ -637,6 +690,8 @@ static int cmd_run(const cli::Args &args) {
     }
   }
 
+  const auto base_tools = agent.state().tools();
+
   // --list-tools / --list-addons (exit immediately after printing)
   if (args.list_tools) {
     print_tools(agent.state().tools());
@@ -647,20 +702,22 @@ static int cmd_run(const cli::Args &args) {
     return 0;
   }
 
-  // Tools registered via pici.add_tool() in hooks files
-  if (hooks) {
-    for (const auto &t : hooks->registered_tools)
-      agent.add_tool(t);
-  }
+  auto apply_hook_tools = [&]() {
+    auto tools = base_tools;
+    if (hooks)
+      tools.insert(tools.end(), hooks->registered_tools.begin(),
+                   hooks->registered_tools.end());
+    agent.set_tools(std::move(tools));
+  };
 
-  // Configure pici.* globals now that agent + tools exist
-  if (hooks && hooks->configure) {
-    // Build tool name list
+  auto configure_hooks = [&]() {
+    if (!hooks || !hooks->configure)
+      return;
+
     std::vector<std::string> tool_names;
     for (const auto &t : agent.state().tools())
       tool_names.emplace_back(t->name());
 
-    // Storage path: first explicit hooks file name + ".storage.json"
     std::filesystem::path storage_path;
     if (!args.hooks_files.empty())
       storage_path =
@@ -736,13 +793,25 @@ static int cmd_run(const cli::Args &args) {
       return result;
     };
     hooks->configure(info);
-  }
+  };
+
+  apply_hook_tools();
+  configure_hooks();
+
+  auto reload_addons = [&]() {
+    hooks = load_hooks();
+    {
+      std::scoped_lock lock(hook_runtime->mutex);
+      hook_runtime->hooks = hooks;
+    }
+    apply_hook_tools();
+    configure_hooks();
+  };
 
   std::string current_session_id;
   if (loaded_session) {
     current_session_id = loaded_session->header.id;
-    agent.state().set_messages(loaded_session->messages);
-    agent.state().set_session_id(current_session_id);
+    runtime.activate_session(*loaded_session);
     std::cerr << "[session: " << current_session_id;
     if (loaded_session->header.name)
       std::cerr << "  " << *loaded_session->header.name;
@@ -754,8 +823,7 @@ static int cmd_run(const cli::Args &args) {
         std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     hdr.model = model.id;
     hdr.provider = model.provider;
-    current_session_id = store->create(hdr);
-    agent.state().set_session_id(current_session_id);
+    current_session_id = runtime.create_session(hdr);
   }
 
   auto renderer = make_renderer(args);
@@ -780,6 +848,7 @@ static int cmd_run(const cli::Args &args) {
       for (std::string_view b :
            {std::string_view("/exit"), std::string_view("/quit"),
             std::string_view("/tools"), std::string_view("/addons"),
+            std::string_view("/reload-addons"),
             std::string_view("/usage"), std::string_view("/name"),
             std::string_view("/fork"), std::string_view("/tree")}) {
         if (b.starts_with(partial))
@@ -853,13 +922,8 @@ static int cmd_run(const cli::Args &args) {
 
   // Run a turn and persist all new messages to the session file.
   auto run_and_persist = [&](const std::string &input) {
-    auto prev_count = agent.state().messages().size();
-    auto usage =
-        run_turn(agent, input, *renderer, args.verbose, stream_diagnostics);
-    auto msgs = agent.state().messages();
-    for (std::size_t i = prev_count; i < msgs.size(); ++i)
-      store->append_message(current_session_id, msgs[i]);
-    return usage;
+    return run_turn(runtime, input, *renderer, args.verbose,
+                    stream_diagnostics);
   };
 
   // Print mode / initial message
@@ -910,6 +974,18 @@ static int cmd_run(const cli::Args &args) {
       print_addons(hooks_list_saved);
       continue;
     }
+    if (line == "/reload-addons") {
+      try {
+        reload_addons();
+        renderer->on_command_output(
+            "reloaded " + std::to_string(hooks_list_saved.size()) +
+            " add-on(s)");
+      } catch (const std::exception &e) {
+        renderer->on_command_output("add-on reload failed: " +
+                                    std::string(e.what()));
+      }
+      continue;
+    }
     if (line == "/usage") {
       print_usage(last_turn, session, has_pricing);
       continue;
@@ -951,8 +1027,7 @@ static int cmd_run(const cli::Args &args) {
         continue;
       }
       current_session_id = result.selected_session_id;
-      agent.state().set_messages(loaded->messages);
-      agent.state().set_session_id(current_session_id);
+      runtime.activate_session(*loaded);
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();
@@ -972,8 +1047,7 @@ static int cmd_run(const cli::Args &args) {
       child_hdr.provider = model.provider;
       child_hdr.parent_id = current_session_id;
       child_hdr.parent_offset = agent.state().messages().size();
-      current_session_id = store->create(child_hdr);
-      agent.state().set_session_id(current_session_id);
+      current_session_id = runtime.fork_session(child_hdr);
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();

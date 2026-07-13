@@ -165,6 +165,8 @@ void SessionStore::write_line_locked(const std::string &session_id,
 }
 
 std::string SessionStore::create(const SessionHeader &hdr) {
+  std::scoped_lock lock(mutex_);
+
   std::string sid = hdr.id;
   while (std::filesystem::exists(session_path(sid)))
     sid = generate_session_id();
@@ -181,7 +183,6 @@ std::string SessionStore::create(const SessionHeader &hdr) {
   j["model"] = hdr.model;
   j["provider"] = hdr.provider;
 
-  std::scoped_lock lock(mutex_);
   write_line_locked(sid, j);
   return sid;
 }
@@ -209,6 +210,7 @@ void SessionStore::set_name(const std::string &session_id,
 
 std::optional<SessionRecord>
 SessionStore::load(const std::string &session_id) const {
+  std::scoped_lock lock(mutex_);
   std::error_code ec;
   if (!std::filesystem::exists(session_path(session_id), ec))
     return std::nullopt;
@@ -217,6 +219,7 @@ SessionStore::load(const std::string &session_id) const {
 }
 
 std::optional<std::string> SessionStore::latest_session_id() const {
+  std::scoped_lock lock(mutex_);
   std::filesystem::file_time_type latest_time;
   std::string latest_id;
   bool found = false;
@@ -240,6 +243,7 @@ std::optional<std::string> SessionStore::latest_session_id() const {
 }
 
 std::vector<SessionHeader> SessionStore::list() const {
+  std::scoped_lock lock(mutex_);
   using Entry = std::pair<std::filesystem::file_time_type, SessionHeader>;
   std::vector<Entry> entries;
 
