@@ -250,6 +250,26 @@ Compare `transport`, `parser`, and `renderer` timestamps. If transport events
 arrive together, the provider or an intermediary batched the response. If
 parser events advance but renderer events do not, the client path is at fault.
 
+### JSONL RPC mode
+
+`pi-cli --mode rpc` provides a long-lived, machine-facing control stream. Send
+one JSON command per stdin line and read one JSON response or event per stdout
+line; keep stdin open while a prompt is running. Responses preserve the optional
+client-supplied `id`.
+
+```json
+{"id":"p1","type":"prompt","message":"Summarize this repository"}
+{"id":"state","type":"get_state"}
+{"id":"stop","type":"abort"}
+```
+
+The initial command set is `prompt`, `steer`, `follow_up`, `abort`,
+`get_state`, `get_messages`, `set_thinking_level`, `new_session`,
+`switch_session`, `fork`, and `set_session_name`. Prompt events use
+`{"type":"event","event":"message_update",...}` and expose text,
+thinking, tool-call, and tool-execution updates. A run ends with either
+`run.completed` or `run.failed`.
+
 The default configuration keeps tests enabled, but OpenTelemetry API
 instrumentation is off by default because it pulls in a large vendored target
 graph.  Enable it explicitly when working on tracing:

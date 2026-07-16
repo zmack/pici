@@ -66,6 +66,16 @@ Args parse_args(int argc, char *argv[]) {
       result.version = true;
     } else if (arg == "--print" || arg == "-p") {
       result.print_mode = true;
+    } else if (arg == "--mode") {
+      auto v = need("--mode");
+      if (v == "rpc") {
+        result.rpc_mode = true;
+      } else {
+        result.diagnostics.push_back({.is_error = true,
+                                      .message = "unsupported mode \"" +
+                                                 std::string(v) +
+                                                 "\"; supported modes: rpc"});
+      }
     } else if (arg == "--verbose") {
       result.verbose = true;
     } else if (arg == "--model" || arg == "-m") {
@@ -200,6 +210,8 @@ void print_help(const char *prog) {
          "  --message, -M <text>        Send an initial message then enter "
          "REPL\n"
          "  --print, -p                 Non-interactive: run prompt and exit\n"
+         "  --mode rpc                  JSONL control protocol on "
+         "stdin/stdout\n"
          "  --test <file>               Run Lua test file and exit "
          "(repeatable)\n"
          "  --continue, -c              Resume the most recent session\n"

@@ -530,6 +530,7 @@ add_executable(pi-cli
     src/cli/args.cpp
     src/cli/config.cpp
     src/cli/readline.cpp
+    src/cli/rpc_mode.cpp
     src/cli/system_prompt.cpp
     src/cli/tree_selector.cpp
 )
@@ -587,6 +588,11 @@ if(PI_CPP_BUILD_TESTS)
     add_executable(test-system_prompt test/test_system_prompt.cpp src/cli/system_prompt.cpp)
     target_include_directories(test-system_prompt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test-system_prompt COMMAND test-system_prompt)
+
+    add_executable(test-rpc_mode test/test_rpc_mode.cpp src/cli/rpc_mode.cpp)
+    target_include_directories(test-rpc_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-rpc_mode PRIVATE pi-core)
+    add_test(NAME test-rpc_mode COMMAND test-rpc_mode)
 
     add_test(
         NAME test-addons

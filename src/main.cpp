@@ -27,6 +27,7 @@
 #include "cli/args.h"
 #include "cli/config.h"
 #include "cli/readline.h"
+#include "cli/rpc_mode.h"
 #include "cli/system_prompt.h"
 #include "cli/tree_selector.h"
 #include "core/agent.h"
@@ -829,6 +830,9 @@ static int cmd_run(const cli::Args &args) {
     hdr.provider = model.provider;
     current_session_id = runtime.create_session(hdr);
   }
+
+  if (args.rpc_mode)
+    return cli::run_rpc_mode(runtime, std::cin, std::cout);
 
   auto renderer = make_renderer(args);
 

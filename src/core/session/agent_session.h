@@ -59,7 +59,8 @@ public:
 
 private:
   void activate_session_state(std::string session_id,
-                              std::vector<Message> messages);
+                              std::vector<Message> messages,
+                              std::optional<std::string> session_name = {});
   void persist_new_messages(std::size_t previous_message_count,
                             const std::vector<Message> &messages,
                             std::optional<std::string> &error);

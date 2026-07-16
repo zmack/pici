@@ -193,6 +193,11 @@ public:
     session_name_ = std::move(name);
   }
 
+  void clear_session_name() {
+    std::scoped_lock lock(mutex_);
+    session_name_.reset();
+  }
+
   // ── Reset ──────────────────────────────────────────────────────────
 
   void reset() {

@@ -27,7 +27,7 @@ AgentSession::load_session(const std::string &session_id) const {
 }
 
 void AgentSession::activate_session(const SessionRecord &record) {
-  activate_session_state(record.header.id, record.messages);
+  activate_session_state(record.header.id, record.messages, record.header.name);
 }
 
 bool AgentSession::activate_session(const std::string &session_id) {
@@ -57,11 +57,12 @@ std::string AgentSession::create_session(SessionHeader header) {
     header.id = generate_session_id();
 
   auto session_id = header.id;
+  auto session_name = header.name;
   if (session_store_)
     session_id = session_store_->create(header);
 
   const auto active_id = session_id;
-  activate_session_state(std::move(session_id), {});
+  activate_session_state(std::move(session_id), {}, std::move(session_name));
   return active_id;
 }
 
@@ -75,6 +76,10 @@ std::string AgentSession::fork_session(SessionHeader header) {
 
   active_session_id_ = session_id;
   agent_.state().set_session_id(session_id);
+  if (header.name)
+    agent_.state().set_session_name(*header.name);
+  else
+    agent_.state().clear_session_name();
   return session_id;
 }
 
@@ -111,11 +116,16 @@ AgentSession::run_prompt(std::string prompt, const EventCallback &callback) {
   return result;
 }
 
-void AgentSession::activate_session_state(std::string session_id,
-                                          std::vector<Message> messages) {
+void AgentSession::activate_session_state(
+    std::string session_id, std::vector<Message> messages,
+    std::optional<std::string> session_name) {
   agent_.wait_for_idle();
   agent_.state().set_messages(std::move(messages));
   agent_.state().set_session_id(session_id);
+  if (session_name)
+    agent_.state().set_session_name(std::move(*session_name));
+  else
+    agent_.state().clear_session_name();
   active_session_id_ = std::move(session_id);
 }
 
