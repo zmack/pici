@@ -1,6 +1,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <iostream>
@@ -15,9 +16,11 @@
 #include <vector>
 
 #include "core/agent_state.h"
+#include "core/event_json.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/models.h"
+#include "core/session/session_store.h"
 #include "core/stream.h"
 
 using namespace pi::core;
@@ -503,6 +506,67 @@ void test_model_json() {
     });
 }
 
+void test_event_json() {
+    tests::register_test("AgentEvent: canonical JSON envelope", []() {
+        AgentStartEvent event;
+        event.sequence = 42;
+        auto value = event_to_json(event);
+
+        CHECK_STR(value.value("type", ""), "event");
+        CHECK_STR(value.value("event", ""), "agent_start");
+        CHECK_EQ(value.value("sequence", 0ULL), 42ULL);
+        CHECK(value.contains("timestamp"));
+        CHECK(value.contains("data"));
+    });
+
+    tests::register_test("ToolEvent: structured status JSON", []() {
+        ToolExecutionEndEvent event("call-1", "bash", nullptr, true,
+                                    ToolExecutionStatus::blocked);
+        auto value = event_to_json(event);
+        CHECK_STR(value["data"].value("status", ""), "blocked");
+        CHECK(value["data"].value("is_error", false));
+    });
+}
+
+void test_session_journal_replay() {
+    tests::register_test("SessionStore: ordered messages and truncation replay", []() {
+        const auto dir = std::filesystem::temp_directory_path() /
+                         "pici-session-journal-test";
+        std::filesystem::remove_all(dir);
+
+        SessionStore store(dir);
+        SessionHeader header{.id = "session-1"};
+        const auto id = store.create(header);
+
+        auto make_user = [](std::string text) {
+            UserMessage message;
+            message.content.emplace_back(TextContent{.text = std::move(text)});
+            return Message{std::move(message)};
+        };
+
+        store.append_message(id, make_user("one"));
+        store.append_message(id, make_user("two"));
+        store.append_truncate(id, 1);
+        store.append_message(id, make_user("three"));
+
+        auto record = store.load(id);
+        CHECK(record.has_value());
+        CHECK_EQ(record->messages.size(), std::size_t(2));
+        CHECK_EQ(std::get<UserMessage>(record->messages[0]).content.size(),
+                 std::size_t(1));
+        CHECK_EQ(std::get<TextContent>(
+                     std::get<UserMessage>(record->messages[0]).content[0])
+                     .text,
+                 "one");
+        CHECK_EQ(std::get<TextContent>(
+                     std::get<UserMessage>(record->messages[1]).content[0])
+                     .text,
+                 "three");
+
+        std::filesystem::remove_all(dir);
+    });
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -520,6 +584,8 @@ int main() {
     test_token_usage_json();
     test_find_model();
     test_model_json();
+    test_event_json();
+    test_session_journal_replay();
 
     // Stream tests
     test_event_stream_push_consume();

@@ -456,6 +456,7 @@ endif()
 add_library(pi-core
     src/core/message_types.cpp
     src/core/event_types.cpp
+    src/core/event_json.cpp
     src/core/agent_state.cpp
     src/core/stream.cpp
     src/core/agent_loop.cpp
@@ -601,6 +602,8 @@ if(PI_CPP_BUILD_TESTS)
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_costline.lua
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_context.lua
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_turn_guard.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_permissions.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_context_trim.lua
     )
     set_tests_properties(test-addons
                          PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

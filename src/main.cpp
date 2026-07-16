@@ -654,6 +654,29 @@ int cmd_run(const cli::Args &args) {
                    ? hooks->should_stop_after_turn(message, results, context)
                    : false;
       };
+  opts.on_event = [hook_runtime](const core::AgentEvent &event) {
+    std::shared_ptr<core::LuaHooks> hooks;
+    {
+      std::scoped_lock lock(hook_runtime->mutex);
+      hooks = hook_runtime->hooks;
+    }
+    if (hooks && hooks->on_event)
+      hooks->on_event(event);
+  };
+  opts.prepare_context =
+      [hook_runtime](const core::AgentContext &context,
+                     std::size_t estimated_tokens, std::stop_token stop_tok)
+      -> std::optional<std::vector<core::Message>> {
+    std::shared_ptr<core::LuaHooks> hooks;
+    {
+      std::scoped_lock lock(hook_runtime->mutex);
+      hooks = hook_runtime->hooks;
+    }
+    if (hooks && hooks->prepare_context)
+      return hooks->prepare_context(context, estimated_tokens,
+                                    std::move(stop_tok));
+    return std::nullopt;
+  };
 
   core::AgentSession runtime({.agent_options = opts, .session_store = store});
   auto &agent = runtime.agent();
@@ -744,6 +767,8 @@ int cmd_run(const cli::Args &args) {
       sub_opts.after_tool_call = nullptr;
       sub_opts.should_stop_after_turn = nullptr;
       sub_opts.on_effective_context = nullptr;
+      sub_opts.on_event = nullptr;
+      sub_opts.prepare_context = nullptr;
       if (cfg.system_prompt)
         sub_opts.system_prompt = *cfg.system_prompt;
       if (cfg.model_id)
@@ -1123,9 +1148,7 @@ int cmd_run(const cli::Args &args) {
                                       context_snapshot);
       if (result.handled) {
         if (result.truncate_to) {
-          auto msgs = agent.state().messages();
-          msgs.resize(std::min(*result.truncate_to, msgs.size()));
-          agent.state().set_messages(std::move(msgs));
+          runtime.truncate_active_session(*result.truncate_to);
           std::scoped_lock lock(effective_context_mutex);
           effective_context.reset();
         }

@@ -99,6 +99,13 @@ struct AgentLoopConfig {
                                      std::stop_token)>
       transform_context;
 
+  // Optional addon-owned context preparation. The callback may return a
+  // request-local replacement message list; persistence remains a session
+  // concern owned by AgentSession.
+  std::function<std::optional<std::vector<Message>>(
+      const AgentContext &, std::size_t estimated_tokens, std::stop_token)>
+      prepare_context;
+
   // Resolves API key dynamically
   std::function<std::optional<std::string>(std::string_view provider)>
       get_api_key;

@@ -4,6 +4,7 @@
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <exception>
 #include <optional>
@@ -83,19 +84,47 @@ std::string AgentSession::fork_session(SessionHeader header) {
   return session_id;
 }
 
+bool AgentSession::truncate_active_session(std::size_t through) {
+  if (!active_session_id_)
+    return false;
+
+  auto messages = agent_.state().messages();
+  messages.resize(std::min(through, messages.size()));
+  agent_.state().set_messages(messages);
+  if (session_store_)
+    session_store_->append_truncate(*active_session_id_, through);
+  return true;
+}
+
 AgentSession::RunResult
 AgentSession::run_prompt(std::string prompt, const EventCallback &callback) {
   RunResult result;
-  const auto previous_message_count = agent_.state().messages().size();
   bool started = false;
+  std::optional<std::string> persistence_error;
+
+  auto handle_event = [&](const AgentEvent &event) {
+    if (session_store_ && active_session_id_ &&
+        std::holds_alternative<MessageEndEvent>(event)) {
+      try {
+        session_store_->append_message(
+            *active_session_id_, std::get<MessageEndEvent>(event).message);
+      } catch (const std::exception &e) {
+        if (!persistence_error)
+          persistence_error = e.what();
+      } catch (...) {
+        if (!persistence_error)
+          persistence_error = "Unknown session persistence error";
+      }
+    }
+    if (callback)
+      callback(event);
+  };
 
   try {
     auto stream = agent_.prompt(std::move(prompt));
     started = true;
-    for (const auto &event : stream) {
-      if (callback)
-        callback(event);
-    }
+    for (const auto &event : stream)
+      handle_event(event);
     agent_.wait_for_idle();
   } catch (const std::exception &e) {
     result.error = e.what();
@@ -111,8 +140,8 @@ AgentSession::run_prompt(std::string prompt, const EventCallback &callback) {
   if (!result.error)
     result.error = agent_.state().error_message();
 
-  persist_new_messages(previous_message_count, agent_.state().messages(),
-                       result.error);
+  if (!result.error && persistence_error)
+    result.error = persistence_error;
   return result;
 }
 
@@ -127,25 +156,6 @@ void AgentSession::activate_session_state(
   else
     agent_.state().clear_session_name();
   active_session_id_ = std::move(session_id);
-}
-
-void AgentSession::persist_new_messages(std::size_t previous_message_count,
-                                        const std::vector<Message> &messages,
-                                        std::optional<std::string> &error) {
-  if (!session_store_ || !active_session_id_ ||
-      previous_message_count >= messages.size())
-    return;
-
-  try {
-    for (std::size_t i = previous_message_count; i < messages.size(); ++i)
-      session_store_->append_message(*active_session_id_, messages[i]);
-  } catch (const std::exception &e) {
-    if (!error)
-      error = e.what();
-  } catch (...) {
-    if (!error)
-      error = "Unknown session persistence error";
-  }
 }
 
 } // namespace pi::core

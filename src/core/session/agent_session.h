@@ -55,16 +55,16 @@ public:
   std::string create_session(SessionHeader header);
   std::string fork_session(SessionHeader header);
 
+  // Apply a transcript truncation to the active session and persist it as a
+  // replayable journal operation.
+  bool truncate_active_session(std::size_t through);
+
   RunResult run_prompt(std::string prompt, const EventCallback &callback = {});
 
 private:
   void activate_session_state(std::string session_id,
                               std::vector<Message> messages,
                               std::optional<std::string> session_name = {});
-  void persist_new_messages(std::size_t previous_message_count,
-                            const std::vector<Message> &messages,
-                            std::optional<std::string> &error);
-
   Agent agent_;
   std::shared_ptr<SessionStore> session_store_;
   std::optional<std::string> active_session_id_;

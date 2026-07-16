@@ -79,6 +79,7 @@ int main() {
   bool got_state = false;
   bool got_ack = false;
   bool got_delta = false;
+  bool got_sequence = false;
   bool got_complete = false;
   bool got_messages = false;
   bool got_name = false;
@@ -91,6 +92,9 @@ int main() {
     got_delta = got_delta || (line.value("event", "") == "message_update" &&
                               line["data"].value("kind", "") == "text_delta" &&
                               line["data"].value("delta", "") == "rpc reply");
+    got_sequence = got_sequence ||
+                   (line.value("type", "") == "event" &&
+                    line.value("sequence", 0ULL) > 0ULL);
     got_complete = got_complete || line.value("type", "") == "run.completed";
     got_messages =
         got_messages ||
@@ -102,6 +106,7 @@ int main() {
   CHECK(got_state);
   CHECK(got_ack);
   CHECK(got_delta);
+  CHECK(got_sequence);
   CHECK(got_complete);
   CHECK(got_messages);
   CHECK(got_name);

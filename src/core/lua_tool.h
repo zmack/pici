@@ -57,6 +57,15 @@ load_lua_tools(const std::filesystem::path &directory);
 //   should_stop_after_turn(ctx) → bool
 //     ctx: {message, tool_results=[{tool_name,content,is_error},...]}
 //
+//   on_event(event) → nil
+//     Observes the canonical event envelope. This hook is observational;
+//     use the targeted hooks above when a decision is required.
+//
+//   prepare_context(ctx) → nil | {messages={...}}
+//     Returns a request-local message list after pruning or compaction.
+//     ctx includes messages, model, tools, estimated_tokens, and
+//     context_window.
+//
 //   status_line(ctx) → string | nil
 //     Render a line above the readline prompt. ANSI color sequences are
 //     supported; embedded newlines are not.
@@ -79,6 +88,12 @@ struct LuaHooks {
   std::function<std::optional<AfterToolCallResult>(const AfterToolCallContext &,
                                                    std::stop_token)>
       after_tool_call;
+
+  std::function<void(const AgentEvent &)> on_event;
+
+  std::function<std::optional<std::vector<Message>>(
+      const AgentContext &, std::size_t estimated_tokens, std::stop_token)>
+      prepare_context;
 
   std::function<bool(const Message &, const std::vector<ToolResultMessage> &,
                      const AgentContext &)>

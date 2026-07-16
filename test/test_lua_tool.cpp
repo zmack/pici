@@ -138,6 +138,41 @@ return {
     return args.text
   end
 }
+
+void test_lua_tool_progress() {
+  tests::register_test("LuaTool: execute reports progress updates", []() {
+    const auto dir =
+        std::filesystem::temp_directory_path() / "pici-lua-test-progress";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    auto path = write_lua(dir, "progress.lua", R"lua(
+return {
+  name = "progress",
+  description = "Reports progress",
+  execute = function(args, ctx)
+    ctx.update("first")
+    ctx.update({content = "second"})
+    return "done"
+  end
+}
+)lua");
+
+    auto tool = load_lua_tool(path);
+    int updates = 0;
+    std::string last_update;
+    auto result = tool->execute(
+        "1", "{}", {}, [&](const std::shared_ptr<ToolResult> &partial) {
+          ++updates;
+          last_update = partial->content();
+        });
+    CHECK(!result->is_error());
+    CHECK_EQ(updates, 2);
+    CHECK_EQ(last_update, "second");
+
+    std::filesystem::remove_all(dir);
+  });
+}
 )lua");
 
     auto tool = load_lua_tool(path);
@@ -323,6 +358,72 @@ return {
     BeforeToolCallContext bctx2{am, tc, "{}", ctx};
     auto result2 = hooks->before_tool_call(bctx2, std::stop_token{});
     CHECK(!result2.has_value());
+  });
+
+  tests::register_test("LuaHooks: permission hook errors fail closed", [&]() {
+    auto p = write_hooks("before_error.lua", R"lua(
+return {
+  before_tool_call = function(_)
+    error("policy crashed")
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+
+    ToolCall tc;
+    tc.id = "error-call";
+    tc.name = "bash";
+    tc.arguments = nlohmann::json::object();
+    AgentContext ctx;
+    AssistantMessage am;
+    BeforeToolCallContext bctx{am, tc, "{}", ctx};
+    auto result = hooks->before_tool_call(bctx, {});
+    CHECK(result.has_value());
+    CHECK(result->block);
+    CHECK(result->reason.find("policy crashed") != std::string::npos);
+  });
+
+  tests::register_test("LuaHooks: on_event receives canonical envelope", [&]() {
+    auto p = write_hooks("event.lua", R"lua(
+local seen = ""
+return {
+  on_event = function(event)
+    seen = event.event .. ":" .. tostring(event.sequence)
+  end,
+  on_command = function(cmd)
+    if cmd == "seen" then return {handled=true, output=seen} end
+  end,
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    AgentStartEvent event;
+    event.sequence = 7;
+    hooks->on_event(event);
+    auto result = hooks->on_command("seen", "", {}, empty_context());
+    CHECK(result.handled);
+    CHECK(result.output.has_value());
+    CHECK_EQ(*result.output, "agent_start:7");
+  });
+
+  tests::register_test("LuaHooks: prepare_context returns request messages", [&]() {
+    auto p = write_hooks("prepare.lua", R"lua(
+return {
+  prepare_context = function(ctx)
+    if ctx.estimated_tokens > 100 then
+      return {messages={ctx.messages[1]}}
+    end
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    AgentContext context;
+    UserMessage user;
+    user.content.emplace_back(TextContent{.text = "keep me"});
+    context.messages.emplace_back(std::move(user));
+    auto result = hooks->prepare_context(context, 101, {});
+    CHECK(result.has_value());
+    CHECK_EQ(result->size(), std::size_t(1));
+    CHECK(std::holds_alternative<UserMessage>((*result)[0]));
   });
 
   tests::register_test("LuaHooks: after_tool_call overrides content", [&]() {
@@ -731,6 +832,29 @@ return {}
     CHECK(result->content() == "ECHO: hello");
   });
 
+  tests::register_test("pici.add_tool reports progress updates", [&]() {
+    auto p = write_hooks("inline_progress.lua", R"lua(
+pici.add_tool({
+  name = "progress_test",
+  description = "Reports progress",
+  execute = function(_, ctx)
+    ctx.update("working")
+    return "done"
+  end,
+})
+return {}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    int updates = 0;
+    auto result = hooks->registered_tools[0]->execute(
+        "id", "{}", {}, [&](const std::shared_ptr<ToolResult> &partial) {
+          ++updates;
+          CHECK_EQ(partial->content(), "working");
+        });
+    CHECK(!result->is_error());
+    CHECK_EQ(updates, 1);
+  });
+
   tests::register_test("compose_hooks: registered_tools are unioned", [&]() {
     auto p1 = write_hooks("rt1.lua", R"lua(
 pici.add_tool({name="tool_a", description="A", execute=function(a) return "a" end})
@@ -1070,6 +1194,7 @@ int main() {
 
   test_load_and_metadata();
   test_execute_string_return();
+  test_lua_tool_progress();
   test_execute_table_return();
   test_lua_runtime_error();
   test_load_syntax_error();

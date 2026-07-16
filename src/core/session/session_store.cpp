@@ -20,6 +20,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -59,6 +60,7 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
 
   SessionHeader header;
   std::vector<Message> messages;
+  std::vector<std::variant<Message, std::size_t>> records;
   bool first = true;
   std::string line;
 
@@ -84,7 +86,10 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
 
     if (j.contains("role")) {
       if (auto msg = json::from_json(line))
-        messages.push_back(std::move(*msg));
+        records.emplace_back(std::move(*msg));
+    } else if (j.value("type", std::string{}) == "truncate" &&
+               j.contains("through") && j["through"].is_number_unsigned()) {
+      records.emplace_back(j["through"].get<std::size_t>());
     } else if (j.value("type", std::string{}) == "meta" && j.contains("name") &&
                j["name"].is_string()) {
       header.name = j["name"].get<std::string>();
@@ -103,13 +108,18 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
           "corrupted fork: parent \"" + *header.parent_id +
           "\" has fewer messages than parentOffset=" + std::to_string(offset));
 
-    std::vector<Message> full;
-    full.reserve(offset + messages.size());
-    full.insert(full.end(), parent.messages.begin(),
-                std::next(parent.messages.begin(),
-                          static_cast<std::ptrdiff_t>(offset)));
-    full.insert(full.end(), messages.begin(), messages.end());
-    messages = std::move(full);
+    messages.reserve(offset + records.size());
+    messages.insert(messages.end(), parent.messages.begin(),
+                    std::next(parent.messages.begin(),
+                              static_cast<std::ptrdiff_t>(offset)));
+  }
+
+  for (auto &record : records) {
+    if (std::holds_alternative<Message>(record)) {
+      messages.push_back(std::move(std::get<Message>(record)));
+    } else {
+      messages.resize(std::min(std::get<std::size_t>(record), messages.size()));
+    }
   }
 
   return SessionRecord{.header = std::move(header),
@@ -194,6 +204,13 @@ void SessionStore::append_message(const std::string &session_id,
                                   const Message &msg) {
   auto line = json::to_jsonl_line(msg);
   nlohmann::json j = nlohmann::json::parse(line);
+  std::scoped_lock lock(mutex_);
+  write_line_locked(session_id, j);
+}
+
+void SessionStore::append_truncate(const std::string &session_id,
+                                   std::size_t through) {
+  nlohmann::json j = {{"type", "truncate"}, {"through", through}};
   std::scoped_lock lock(mutex_);
   write_line_locked(session_id, j);
 }

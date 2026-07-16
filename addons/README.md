@@ -150,3 +150,24 @@ provider.
 
 After editing an add-on, run `/reload-addons` to reload the configured hook
 files, callbacks, and registered add-on tools without restarting the session.
+
+## Phase 1 examples
+
+`permissions.lua` demonstrates the intended permission split. The Lua hook
+owns the policy, while the core invokes it before every tool execution and
+turns a block into a structured `blocked` tool outcome. Hook failures fail
+closed. Load it explicitly when you want the sample policy:
+
+```bash
+pici --hooks-file addons/permissions.lua
+```
+
+`context_trim.lua` demonstrates request-local context preparation. It keeps
+the first message and the recent tail when the conservative core estimate is
+near the model window. It does not rewrite the durable session transcript;
+more advanced summarization can be implemented in another add-on using the
+same `prepare_context(ctx)` hook.
+
+The standalone Lua tool and `pici.add_tool()` tools may call
+`ctx.update(value)` from their `execute(args, ctx)` function to publish live
+partial output. Existing one-argument tools continue to work unchanged.

@@ -1,6 +1,7 @@
 #include "cli/rpc_mode.h"
 
 #include "core/event_types.h"
+#include "core/event_json.h"
 #include "core/message_types.h"
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
@@ -30,79 +31,6 @@ nlohmann::json as_json( // NOLINT(misc-include-cleaner)
 
 nlohmann::json as_json(const core::Model &model) {
   return nlohmann::json::parse(core::json::to_json(model));
-}
-
-nlohmann::json event_json(const core::AgentEvent &event) {
-  nlohmann::json data;
-  std::visit(
-      [&data](const auto &value) {
-        using T = std::decay_t<decltype(value)>;
-        if constexpr (std::is_same_v<T, core::AgentEndEvent>) {
-          data["message_count"] = value.messages.size();
-        } else if constexpr (std::is_same_v<T, core::TurnEndEvent>) {
-          data["message"] = as_json(value.message);
-          data["tool_result_count"] = value.tool_results.size();
-        } else if constexpr (std::is_same_v<T, core::MessageStartEvent> ||
-                             std::is_same_v<T, core::MessageEndEvent>) {
-          data["message"] = as_json(value.message);
-        } else if constexpr (std::is_same_v<T, core::MessageUpdateEvent>) {
-          std::visit(
-              [&data](const auto &update) {
-                using U = std::decay_t<decltype(update)>;
-                if constexpr (std::is_same_v<
-                                  U, core::AssistantMessageTextDeltaEvent>) {
-                  data["kind"] = "text_delta";
-                  data["delta"] = update.delta;
-                } else if constexpr (
-                    std::is_same_v<U,
-                                   core::AssistantMessageThinkingDeltaEvent>) {
-                  data["kind"] = "thinking_delta";
-                  data["delta"] = update.delta;
-                } else if constexpr (
-                    std::is_same_v<U,
-                                   core::AssistantMessageToolCallDeltaEvent>) {
-                  data["kind"] = "tool_call_delta";
-                  data["delta"] = update.delta;
-                } else if constexpr (
-                    std::is_same_v<U, core::AssistantMessageToolCallEndEvent>) {
-                  data["kind"] = "tool_call";
-                  data["tool_call"] = {
-                      {"id", update.tool_call.id},
-                      {"name", update.tool_call.name},
-                      {"arguments", update.tool_call.arguments}};
-                } else if constexpr (std::is_same_v<
-                                         U, core::AssistantMessageDoneEvent>) {
-                  data["kind"] = "done";
-                  data["reason"] = core::stop_reason_to_string(update.reason);
-                } else if constexpr (std::is_same_v<
-                                         U, core::AssistantMessageErrorEvent>) {
-                  data["kind"] = "error";
-                  data["reason"] = core::stop_reason_to_string(update.reason);
-                }
-              },
-              value.assistant_message_event);
-        } else if constexpr (std::is_same_v<T, core::ToolExecutionStartEvent>) {
-          data = {{"tool_call_id", value.tool_call_id},
-                  {"tool_name", value.tool_name},
-                  {"args", value.args}};
-        } else if constexpr (std::is_same_v<T,
-                                            core::ToolExecutionUpdateEvent>) {
-          data = {{"tool_call_id", value.tool_call_id},
-                  {"tool_name", value.tool_name},
-                  {"partial_result", value.partial_result}};
-        } else if constexpr (std::is_same_v<T, core::ToolExecutionEndEvent>) {
-          data = {{"tool_call_id", value.tool_call_id},
-                  {"tool_name", value.tool_name},
-                  {"is_error", value.is_error}};
-          if (value.result)
-            data["result"] = value.result->content();
-        }
-      },
-      event);
-  return {{"type", "event"},
-          {"event", core::event_type_to_string(std::visit(
-                        [](const auto &e) { return e.type; }, event))},
-          {"data", std::move(data)}};
 }
 
 std::optional<core::ThinkingLevel> parse_thinking(std::string_view level) {
@@ -154,7 +82,7 @@ void RpcMode::start_prompt(const nlohmann::json &command, std::string message) {
   run_thread_ = std::jthread([this, message = std::move(message)] {
     const auto result =
         session_.run_prompt(message, [this](const core::AgentEvent &event) {
-          emit(event_json(event));
+          emit(core::event_to_json(event));
         });
     if (result.error)
       emit({{"type", "run.failed"}, {"error", *result.error}});

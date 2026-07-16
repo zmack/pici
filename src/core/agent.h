@@ -55,6 +55,10 @@ public:
                                        std::stop_token)>
         transform_context;
 
+    std::function<std::optional<std::vector<Message>>(
+        const AgentContext &, std::size_t estimated_tokens, std::stop_token)>
+        prepare_context;
+
     // Message conversion
     std::function<std::vector<Message>(const std::vector<Message> &)>
         convert_to_llm;
@@ -62,6 +66,10 @@ public:
     // Called with an immutable copy of the request-ready context immediately
     // before the LLM client is invoked.
     std::function<void(const AgentContext &)> on_effective_context;
+
+    // Observes every typed event emitted by the agent loop. Observers must
+    // treat the event as immutable and should not perform blocking work.
+    std::function<void(const AgentEvent &)> on_event;
 
     // Tool callbacks
     std::function<std::optional<BeforeToolCallResult>(

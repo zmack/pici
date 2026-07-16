@@ -336,6 +336,7 @@ AgentLoopConfig Agent::create_loop_config() {
                                                   : default_convert_to_llm;
   config.on_effective_context = options_.on_effective_context;
   config.transform_context = options_.transform_context;
+  config.prepare_context = options_.prepare_context;
   config.get_api_key = options_.get_api_key;
   config.should_stop_after_turn = options_.should_stop_after_turn;
   config.get_steering_messages = [this]() {
@@ -356,6 +357,14 @@ AgentLoopConfig Agent::create_loop_config() {
 }
 
 void Agent::process_event(const AgentEvent &event) {
+  if (options_.on_event) {
+    try {
+      options_.on_event(event);
+    } catch (...) {
+      // Observers must not take down the agent loop.
+    }
+  }
+
   std::visit(
       [&](const auto &ev) {
         using T = std::remove_cvref_t<decltype(ev)>;

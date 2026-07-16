@@ -35,6 +35,21 @@ std::string_view event_type_to_string(EventType type) {
   return "unknown";
 }
 
+std::string_view
+tool_execution_status_to_string(ToolExecutionStatus status) {
+  switch (status) {
+  case ToolExecutionStatus::success:
+    return "success";
+  case ToolExecutionStatus::blocked:
+    return "blocked";
+  case ToolExecutionStatus::error:
+    return "error";
+  case ToolExecutionStatus::cancelled:
+    return "cancelled";
+  }
+  return "error";
+}
+
 namespace {
 
 std::string_view msg_type(const Message &msg) {

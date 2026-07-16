@@ -1114,7 +1114,7 @@ public:
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
                                       std::stop_token stop_tok,
-                                      ToolUpdateCallback) const override {
+                                      ToolUpdateCallback on_update) const override {
     try {
       const auto json = parse_args(args);
       const auto command = json.value("command", std::string{});
@@ -1225,6 +1225,8 @@ public:
             if (nr <= 0)
               break;
             output.append(buf.data(), static_cast<std::size_t>(nr));
+            if (on_update)
+              on_update(std::make_shared<TextToolResult>(output));
             if (output.size() >= kMaxBytes)
               break;
           } else if ((fds[0].revents & POLLHUP) != 0) {

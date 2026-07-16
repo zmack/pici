@@ -40,6 +40,18 @@ namespace pi::core {
 
 namespace {
 
+std::size_t estimate_context_tokens(const AgentContext &context) {
+  std::size_t bytes = context.system_prompt.size();
+  for (const auto &message : context.messages)
+    bytes += json::to_json(message).size();
+  for (const auto &tool : context.tools)
+    bytes += tool->name().size() + tool->description().size() +
+             tool->schema().serialize().size();
+  // A conservative character-based estimate keeps the harness provider
+  // agnostic. Provider-specific tokenizers can replace this later.
+  return (bytes + 3) / 4 + context.messages.size() * 8;
+}
+
 // Helper: extract ToolCalls from a content vector
 std::vector<ToolCall>
 extract_tool_calls(const std::vector<ContentBlock> &content) {
@@ -122,6 +134,7 @@ struct FinalizedToolCall {
   ToolCall tool_call;
   std::shared_ptr<ToolResult> result;
   bool is_error{false};
+  ToolExecutionStatus status{ToolExecutionStatus::success};
 };
 
 struct PreparedToolCall {
@@ -138,12 +151,13 @@ struct ExecutedToolCall {
 
 // Helper: emit a tool result message pair (start + end)
 void emit_tool_result(const ToolCall &tc, std::shared_ptr<ToolResult> result,
-                      bool is_err, const StreamCallback &emit) {
+                      bool is_err, ToolExecutionStatus status,
+                      const StreamCallback &emit) {
   ToolResultMessage msg = make_tool_result_message(tc, result);
 
   emit(MessageStartEvent(msg, std::source_location::current()));
   emit(MessageEndEvent(msg, std::source_location::current()));
-  emit(ToolExecutionEndEvent(tc.id, tc.name, std::move(result), is_err,
+  emit(ToolExecutionEndEvent(tc.id, tc.name, std::move(result), is_err, status,
                              std::source_location::current()));
 }
 
@@ -185,12 +199,21 @@ std::variant<PreparedToolCall, FinalizedToolCall>
 prepare_tool_call(const AgentContext &context,
                   const AssistantMessage &assistant_message, const ToolCall &tc,
                   const AgentLoopConfig &config, std::stop_token stop_tok) {
+  if (stop_tok.stop_requested()) {
+    return FinalizedToolCall{
+        .tool_call = tc,
+        .result = make_error_tool_result("Tool execution cancelled"),
+        .is_error = true,
+        .status = ToolExecutionStatus::cancelled};
+  }
+
   auto tool = find_tool(context, tc);
   if (!tool) {
     return FinalizedToolCall{
         .tool_call = tc,
         .result = make_error_tool_result("Tool " + tc.name + " not found"),
-        .is_error = true};
+        .is_error = true,
+        .status = ToolExecutionStatus::error};
   }
 
   ToolCall prepared_tc = tc;
@@ -199,12 +222,14 @@ prepare_tool_call(const AgentContext &context,
   } catch (const std::exception &e) {
     return FinalizedToolCall{.tool_call = tc,
                              .result = make_error_tool_result(e.what()),
-                             .is_error = true};
+                             .is_error = true,
+                             .status = ToolExecutionStatus::error};
   } catch (...) {
     return FinalizedToolCall{.tool_call = tc,
                              .result = make_error_tool_result(
                                  "Unknown tool argument preparation error"),
-                             .is_error = true};
+                             .is_error = true,
+                             .status = ToolExecutionStatus::error};
   }
 
   if (auto validation_error =
@@ -212,7 +237,8 @@ prepare_tool_call(const AgentContext &context,
     return FinalizedToolCall{.tool_call = prepared_tc,
                              .result =
                                  make_error_tool_result(*validation_error),
-                             .is_error = true};
+                             .is_error = true,
+                             .status = ToolExecutionStatus::error};
   }
 
   auto args_json = tool_call_args_json(prepared_tc);
@@ -233,17 +259,22 @@ prepare_tool_call(const AgentContext &context,
         return FinalizedToolCall{.tool_call = prepared_tc,
                                  .result =
                                      make_error_tool_result(std::move(reason)),
-                                 .is_error = true};
+                                 .is_error = true,
+                                 .status = ToolExecutionStatus::blocked};
       }
     } catch (const std::exception &e) {
       return FinalizedToolCall{.tool_call = prepared_tc,
-                               .result = make_error_tool_result(e.what()),
-                               .is_error = true};
+                               .result = make_error_tool_result(
+                                   std::string("Tool permission hook failed: ") +
+                                   e.what()),
+                               .is_error = true,
+                               .status = ToolExecutionStatus::blocked};
     } catch (...) {
       return FinalizedToolCall{
           .tool_call = prepared_tc,
-          .result = make_error_tool_result("Unknown before_tool_call error"),
-          .is_error = true};
+          .result = make_error_tool_result("Unknown tool permission hook error"),
+          .is_error = true,
+          .status = ToolExecutionStatus::blocked};
     }
   }
 
@@ -257,10 +288,12 @@ finalize_tool_call(const AgentContext &context,
                    const AssistantMessage &assistant_message,
                    const ToolCall &tc, std::shared_ptr<ToolResult> tool_result,
                    bool is_error, const AgentLoopConfig &config,
-                   std::string_view args_json, std::stop_token stop_tok) {
+                   std::string_view args_json, std::stop_token stop_tok,
+                   ToolExecutionStatus status = ToolExecutionStatus::success) {
   if (!tool_result) {
     tool_result = make_error_tool_result("Tool returned no result");
     is_error = true;
+    status = ToolExecutionStatus::error;
   }
 
   if (config.after_tool_call) {
@@ -288,24 +321,40 @@ finalize_tool_call(const AgentContext &context,
     } catch (const std::exception &e) {
       tool_result = make_error_tool_result(e.what());
       is_error = true;
+      status = ToolExecutionStatus::error;
     } catch (...) {
       tool_result = make_error_tool_result("Unknown after_tool_call error");
       is_error = true;
+      status = ToolExecutionStatus::error;
     }
   }
 
+  if (status == ToolExecutionStatus::error && !is_error)
+    status = ToolExecutionStatus::success;
+  if (status == ToolExecutionStatus::success && is_error)
+    status = ToolExecutionStatus::error;
+
   return FinalizedToolCall{
-      .tool_call = tc, .result = std::move(tool_result), .is_error = is_error};
+      .tool_call = tc,
+      .result = std::move(tool_result),
+      .is_error = is_error,
+      .status = status};
 }
 
 struct ToolExecutionOutcome {
   std::shared_ptr<ToolResult> result;
   bool is_error{false};
+  ToolExecutionStatus status{ToolExecutionStatus::success};
 };
 
 ToolExecutionOutcome execute_tool_safely(const PreparedToolCall &call,
                                          const StreamCallback &emit,
                                          const std::stop_token &stop_tok) {
+  if (stop_tok.stop_requested()) {
+    return {.result = make_error_tool_result("Tool execution cancelled"),
+            .is_error = true,
+            .status = ToolExecutionStatus::cancelled};
+  }
   try {
     auto result = call.tool->execute(
         call.tool_call.id, call.args_json, stop_tok,
@@ -316,12 +365,23 @@ ToolExecutionOutcome execute_tool_safely(const PreparedToolCall &call,
               partial ? partial->content() : std::string{},
               std::source_location::current()));
         });
-    return {.result = std::move(result), .is_error = false};
+    const bool result_is_error = result && result->is_error();
+    if (stop_tok.stop_requested())
+      return {.result = std::move(result),
+              .is_error = true,
+              .status = ToolExecutionStatus::cancelled};
+    return {.result = std::move(result),
+            .is_error = result_is_error,
+            .status = result_is_error ? ToolExecutionStatus::error
+                                      : ToolExecutionStatus::success};
   } catch (const std::exception &e) {
-    return {.result = make_error_tool_result(e.what()), .is_error = true};
+    return {.result = make_error_tool_result(e.what()),
+            .is_error = true,
+            .status = ToolExecutionStatus::error};
   } catch (...) {
     return {.result = make_error_tool_result("Unknown tool execution error"),
-            .is_error = true};
+            .is_error = true,
+            .status = ToolExecutionStatus::error};
   }
 }
 
@@ -336,7 +396,7 @@ bool should_terminate_tool_batch(
 ToolResultMessage emit_finalized_tool_call(const FinalizedToolCall &finalized,
                                            const StreamCallback &emit) {
   emit_tool_result(finalized.tool_call, finalized.result, finalized.is_error,
-                   emit);
+                   finalized.status, emit);
   return make_tool_result_message(finalized.tool_call, finalized.result);
 }
 
@@ -392,6 +452,12 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
                           StreamCallback emit, const std::stop_token &stop_tok,
                           [[maybe_unused]] const OtelCtx &otel_ctx) {
   auto messages = context.messages;
+
+  if (config.prepare_context) {
+    if (auto prepared = config.prepare_context(
+            context, estimate_context_tokens(context), stop_tok))
+      messages = std::move(*prepared);
+  }
 
 #ifdef PI_CPP_OTEL_ENABLED
   OtelSpan xform_span;
@@ -615,7 +681,7 @@ ToolCallResult execute_tool_calls_sequential(
 
     auto finalized = finalize_tool_call(
         context, assistant_message, call.tool_call, std::move(execution.result),
-        execution.is_error, config, call.args_json, stop_tok);
+        execution.is_error, config, call.args_json, stop_tok, execution.status);
 
 #ifdef PI_CPP_OTEL_ENABLED
     tool_span->AddEvent("tool.finalize.end");
@@ -653,6 +719,11 @@ ToolCallResult execute_tool_calls_parallel(
   for (std::size_t i = 0; i < n; ++i) {
     const auto &tc = tool_calls[i];
 
+    // Publish the start before preparation/async execution so observers can
+    // report live parallel work rather than seeing it only after completion.
+    emit(ToolExecutionStartEvent(tc.id, tc.name, tool_call_args_json(tc),
+                                 std::source_location::current()));
+
 #ifdef PI_CPP_OTEL_ENABLED
     // Create the tool.call span on the worker thread; it will be ended on the
     // async thread. tool_span (shared_ptr) is captured by value so it stays
@@ -680,9 +751,6 @@ ToolCallResult execute_tool_calls_parallel(
         tool_span->SetStatus(opentelemetry::trace::StatusCode::kError, "");
       tool_span->End();
 #endif
-      // ToolExecutionEndEvent is emitted after all futures complete,
-      // in source order, to keep event ordering consistent with the
-      // sequential path and the renderer's expectations.
       slots[i] = std::move(*immediate);
       continue;
     }
@@ -710,7 +778,7 @@ ToolCallResult execute_tool_calls_parallel(
           auto finalized = finalize_tool_call(
               context, assistant_message, call.tool_call,
               std::move(execution.result), execution.is_error, config,
-              call.args_json, stop_tok);
+              call.args_json, stop_tok, execution.status);
 #ifdef PI_CPP_OTEL_ENABLED
           tool_span->AddEvent("tool.finalize.end");
           tool_span->SetAttribute("tool.is_error", finalized.is_error);
@@ -744,20 +812,15 @@ ToolCallResult execute_tool_calls_parallel(
     }
   }
 
-  // Emit tool result events in source order, matching the sequential
-  // path's grouping: ToolExecutionStart → MessageStart → MessageEnd →
-  // ToolExecutionEnd. Start is emitted here (not before async launch) so each
-  // tool's start and result appear as a unit in the renderer.
+  // Emit results in source order while starts and partial updates may already
+  // have arrived from concurrent tools.
   for (const auto &finalized : finalized_calls) {
-    emit(ToolExecutionStartEvent(finalized.tool_call.id,
-                                 finalized.tool_call.name,
-                                 tool_call_args_json(finalized.tool_call),
-                                 std::source_location::current()));
     auto msg = make_tool_result_message(finalized.tool_call, finalized.result);
     emit(MessageStartEvent(msg, std::source_location::current()));
     emit(MessageEndEvent(msg, std::source_location::current()));
     emit(ToolExecutionEndEvent(finalized.tool_call.id, finalized.tool_call.name,
                                finalized.result, finalized.is_error,
+                               finalized.status,
                                std::source_location::current()));
     result.messages.push_back(std::move(msg));
   }
@@ -807,7 +870,11 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
                                 const AgentLoopConfig &config,
                                 StreamCallback emit, const AgentEventPush &push,
                                 const std::stop_token &stop_tok) {
+  std::uint64_t sequence = 0;
   auto publish = [&](AgentEvent event) {
+    std::visit(
+        [&](auto &value) { value.sequence = ++sequence; },
+        event);
     emit(event);
     push(std::move(event));
   };
@@ -1001,7 +1068,11 @@ void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
             std::chrono::steady_clock::now().time_since_epoch())
             .count();
 
+    std::uint64_t sequence = 0;
     auto publish_failure_event = [&](AgentEvent event) {
+      std::visit(
+          [&](auto &value) { value.sequence = ++sequence; },
+          event);
       try {
         emit(event);
       } catch (...) {

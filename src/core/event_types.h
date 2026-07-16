@@ -93,10 +93,24 @@ enum class EventType {
 
 std::string_view event_type_to_string(EventType type);
 
+// Machine-readable outcome for a tool execution. The legacy is_error field on
+// ToolExecutionEndEvent remains for callers that only need success/failure.
+enum class ToolExecutionStatus {
+  success,
+  blocked,
+  error,
+  cancelled,
+};
+
+std::string_view tool_execution_status_to_string(ToolExecutionStatus status);
+
 // Base event — all events carry a timestamp and source location for debugging
 struct EventBase {
   EventType type;
   std::int64_t timestamp{0};
+  // Monotonic within one agent run. Zero means the event was constructed
+  // outside the loop (for example by a unit test).
+  std::uint64_t sequence{0};
   std::string source_file;
   std::uint32_t source_line{0};
 
@@ -207,12 +221,22 @@ struct ToolExecutionEndEvent : EventBase {
   std::string tool_name;
   std::shared_ptr<ToolResult> result;
   bool is_error{false};
+  ToolExecutionStatus status{ToolExecutionStatus::success};
   ToolExecutionEndEvent(
       std::string id, std::string name, std::shared_ptr<ToolResult> res,
       bool err, std::source_location loc = std::source_location::current())
       : EventBase(EventType::tool_execution_end, loc),
         tool_call_id(std::move(id)), tool_name(std::move(name)),
-        result(std::move(res)), is_error(err) {}
+        result(std::move(res)), is_error(err),
+        status(err ? ToolExecutionStatus::error
+                   : ToolExecutionStatus::success) {}
+  ToolExecutionEndEvent(
+      std::string id, std::string name, std::shared_ptr<ToolResult> res,
+      bool err, ToolExecutionStatus outcome,
+      std::source_location loc = std::source_location::current())
+      : EventBase(EventType::tool_execution_end, loc),
+        tool_call_id(std::move(id)), tool_name(std::move(name)),
+        result(std::move(res)), is_error(err), status(outcome) {}
 };
 
 using AgentEvent =
