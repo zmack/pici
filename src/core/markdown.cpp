@@ -8,6 +8,7 @@ extern "C" {
 
 #include <algorithm>
 #include <cstddef>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -124,6 +125,7 @@ void render_code_block(Renderer &r, cmark_node *node) {
   r.out += '\n';
 }
 
+// NOLINTNEXTLINE(misc-no-recursion)
 void render_block(Renderer &r, cmark_node *node) {
   switch (cmark_node_get_type(node)) {
   case CMARK_NODE_DOCUMENT:
@@ -208,6 +210,7 @@ void render_block(Renderer &r, cmark_node *node) {
   }
 }
 
+// NOLINTNEXTLINE(misc-no-recursion)
 void render_inline(Renderer &r, cmark_node *node) {
   switch (cmark_node_get_type(node)) {
   case CMARK_NODE_TEXT:
@@ -239,7 +242,7 @@ void render_inline(Renderer &r, cmark_node *node) {
   case CMARK_NODE_LINK:
     render_children(r, node);
     if (const char *url = cmark_node_get_url(node);
-        url != nullptr && url[0] != '\0') {
+        url != nullptr && *url != '\0') {
       r.out += ' ';
       r.append(kLinkDim);
       r.out += '(';
@@ -257,6 +260,7 @@ void render_inline(Renderer &r, cmark_node *node) {
   }
 }
 
+// NOLINTNEXTLINE(misc-no-recursion)
 void render_node(Renderer &r, cmark_node *node) {
   if (is_inline_node(node)) {
     render_inline(r, node);
@@ -265,6 +269,7 @@ void render_node(Renderer &r, cmark_node *node) {
   }
 }
 
+// NOLINTNEXTLINE(misc-no-recursion)
 void render_children(Renderer &r, cmark_node *node) {
   for (cmark_node *child = cmark_node_first_child(node); child != nullptr;
        child = cmark_node_next(child)) {
@@ -482,7 +487,9 @@ std::string render_markdown_ansi(std::string_view input) {
       const std::size_t start = i;
       while (i < lines.size() && !lines[i].empty() && lines[i].contains('|'))
         ++i;
-      r.out += render_table({lines.begin() + start, lines.begin() + i});
+      r.out += render_table(
+          {std::next(lines.begin(), static_cast<std::ptrdiff_t>(start)),
+           std::next(lines.begin(), static_cast<std::ptrdiff_t>(i))});
     } else {
       buf += lines[i];
       buf += '\n';

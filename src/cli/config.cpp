@@ -10,18 +10,19 @@
 #include <string_view>
 #include <vector>
 
-#define TOML_HEADER_ONLY 1
-#define TOML_EXCEPTIONS 1
-#include <toml++/toml.hpp>
+// toml++ requires these compile-time configuration macros before its header.
+#define TOML_HEADER_ONLY 1 // NOLINT(cppcoreguidelines-macro-usage)
+#define TOML_EXCEPTIONS 1  // NOLINT(cppcoreguidelines-macro-usage)
+#include <toml++/toml.hpp> // NOLINT(misc-include-cleaner)
 
 namespace pi::cli {
 
-// ─────────────────────────────────────────────────────────────
+namespace {
 
 // expand_tilde() and default_config_path() are only ever called during CLI
 // startup (arg/config parsing), before any worker threads exist, so the
 // std::getenv() calls below never race with a concurrent setenv/putenv.
-static std::string expand_tilde(std::string path) {
+std::string expand_tilde(std::string path) {
   if (path.empty() || path[0] != '~')
     return path;
   const char *home = std::getenv("HOME"); // NOLINT(concurrency-mt-unsafe)
@@ -30,11 +31,13 @@ static std::string expand_tilde(std::string path) {
   return std::string(home) + path.substr(1);
 }
 
+} // namespace
+
 std::filesystem::path default_config_path() {
   const char *xdg =
       std::getenv("XDG_CONFIG_HOME"); // NOLINT(concurrency-mt-unsafe)
   std::filesystem::path base;
-  if ((xdg != nullptr) && xdg[0] != '\0') {
+  if ((xdg != nullptr) && *xdg != '\0') {
     base = xdg;
   } else {
     const char *home = std::getenv("HOME"); // NOLINT(concurrency-mt-unsafe)
@@ -43,8 +46,6 @@ std::filesystem::path default_config_path() {
   return base / "pici" / "config.toml";
 }
 
-// ─────────────────────────────────────────────────────────────
-
 Args load_config(const std::filesystem::path &path) {
   Args cfg;
 
@@ -52,10 +53,10 @@ Args load_config(const std::filesystem::path &path) {
   if (!f)
     return cfg; // file absent → empty config (not an error)
 
-  toml::table tbl;
+  toml::table tbl; // NOLINT(misc-include-cleaner)
   try {
-    tbl = toml::parse(f, path.string());
-  } catch (const toml::parse_error &e) {
+    tbl = toml::parse(f, path.string()); // NOLINT(misc-include-cleaner)
+  } catch (const toml::parse_error &e) { // NOLINT(misc-include-cleaner)
     throw std::runtime_error(std::string("config parse error: ") + e.what());
   }
 
@@ -129,8 +130,6 @@ Args load_config(const std::filesystem::path &path) {
   return cfg;
 }
 
-// ────────────────────────────────────────────────────────────────────
-
 Args merge_args(const Args &config, const Args &cli) {
   Args out = config; // start with config defaults
 
@@ -202,8 +201,7 @@ Args merge_args(const Args &config, const Args &cli) {
   return out;
 }
 
-// ────────────────────────────────────────────────────────────
-
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
 Args load_and_merge(int argc, char *argv[]) {
   // 1. Parse CLI first (we need --config path before loading the file)
   Args cli = parse_args(argc, argv);
@@ -212,10 +210,9 @@ Args load_and_merge(int argc, char *argv[]) {
   std::filesystem::path cfg_path;
   if (!cli.config_path.empty()) {
     cfg_path = expand_tilde(cli.config_path);
-  } else if (const char *env = std::getenv(
-                 "PICI_CONFIG"); // NOLINT(concurrency-mt-unsafe) — called once
-                                 // at CLI startup, before any worker threads
-             (env != nullptr) && (env[0] != 0)) {
+  } else if (const char *env =
+                 std::getenv("PICI_CONFIG"); // NOLINT(concurrency-mt-unsafe)
+             (env != nullptr) && (*env != 0)) {
     cfg_path = expand_tilde(env);
   } else {
     cfg_path = default_config_path();

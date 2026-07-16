@@ -1,12 +1,17 @@
 #include "core/stream_diagnostics.h"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <ios>
+#include <mutex>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json.hpp> // NOLINT(misc-include-cleaner)
 
 namespace pi::core {
 namespace {
@@ -59,7 +64,8 @@ void StreamDiagnostics::record_transport_line(std::string_view raw_line) {
     if (data == "[DONE]") {
       event = "done";
     } else {
-      auto parsed = nlohmann::json::parse(data, nullptr, false);
+      auto parsed = nlohmann::json::parse( // NOLINT(misc-include-cleaner)
+          data, nullptr, false);
       if (!parsed.is_discarded() && parsed.is_object()) {
         if (const auto type_it = parsed.find("type");
             type_it != parsed.end() && type_it->is_string()) {

@@ -2,8 +2,12 @@
 
 #include <chrono>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace pi::cli {
 namespace {
@@ -11,12 +15,12 @@ namespace {
 std::string current_date() {
   const auto now =
       std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-  const auto *local = std::localtime(&now);
-  if (!local)
+  std::tm local{};
+  if (localtime_r(&now, &local) == nullptr)
     return "unknown";
 
   std::ostringstream result;
-  result << std::put_time(local, "%Y-%m-%d");
+  result << std::put_time(&local, "%Y-%m-%d");
   return result.str();
 }
 

@@ -1,5 +1,6 @@
 #include "core/lua_tool.h"
 #include "core/agent_loop.h"
+#include "core/agent_state.h"
 #include "nlohmann/json_fwd.hpp"
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,7 @@ extern "C" {
 namespace pi::core {
 namespace {
 
+// NOLINTNEXTLINE(misc-no-recursion)
 void json_to_lua(lua_State *L, const nlohmann::json &j) {
   if (j.is_object()) {
     lua_newtable(L);
@@ -50,7 +52,7 @@ void json_to_lua(lua_State *L, const nlohmann::json &j) {
       lua_rawseti(L, -2, static_cast<lua_Integer>(i) + 1);
     }
   } else if (j.is_string()) {
-    const auto value = j.get_ref<const std::string &>();
+    const auto &value = j.get_ref<const std::string &>();
     lua_pushlstring(L, value.data(), value.size());
   } else if (j.is_number_integer()) {
     lua_pushinteger(L, static_cast<lua_Integer>(j.get<std::int64_t>()));
@@ -67,6 +69,7 @@ void json_to_lua(lua_State *L, const nlohmann::json &j) {
 
 nlohmann::json lua_to_json(lua_State *L, int idx);
 
+// NOLINTNEXTLINE(misc-no-recursion)
 nlohmann::json lua_table_to_json(lua_State *L, int idx) {
   if (idx < 0) {
     idx = lua_gettop(L) + idx + 1;
@@ -112,17 +115,22 @@ nlohmann::json lua_table_to_json(lua_State *L, int idx) {
   return obj;
 }
 
+// NOLINTNEXTLINE(misc-no-recursion)
 nlohmann::json lua_to_json(lua_State *L, int idx) {
   switch (lua_type(L, idx)) {
   case LUA_TSTRING:
-    return nlohmann::json(std::string(lua_tostring(L, idx)));
+    return nlohmann::json( // NOLINT(modernize-return-braced-init-list)
+        std::string(lua_tostring(L, idx)));
   case LUA_TNUMBER:
     if (lua_isinteger(L, idx) != 0) {
-      return nlohmann::json(lua_tointeger(L, idx));
+      return nlohmann::json( // NOLINT(modernize-return-braced-init-list)
+          lua_tointeger(L, idx));
     }
-    return nlohmann::json(lua_tonumber(L, idx));
+    return nlohmann::json( // NOLINT(modernize-return-braced-init-list)
+        lua_tonumber(L, idx));
   case LUA_TBOOLEAN:
-    return nlohmann::json(lua_toboolean(L, idx) != 0);
+    return nlohmann::json( // NOLINT(modernize-return-braced-init-list)
+        lua_toboolean(L, idx) != 0);
   case LUA_TTABLE:
     return lua_table_to_json(L, idx);
   default:
@@ -370,7 +378,7 @@ void push_messages_to_lua(lua_State *L, const std::vector<Message> &messages) {
     lua_newtable(L);
 
     // index (1-based)
-    lua_pushinteger(L, static_cast<lua_Integer>(i + 1));
+    lua_pushinteger(L, static_cast<lua_Integer>(i) + 1);
     lua_setfield(L, -2, "index");
 
     std::visit(
@@ -414,7 +422,7 @@ void push_messages_to_lua(lua_State *L, const std::vector<Message> &messages) {
         },
         messages[i]);
 
-    lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i) + 1);
   }
 }
 
@@ -535,6 +543,10 @@ public:
         schema_(std::make_unique<LuaToolSchema>(std::move(schema_str))) {}
 
   ~InlineLuaTool() override;
+  InlineLuaTool(const InlineLuaTool &) = delete;
+  InlineLuaTool &operator=(const InlineLuaTool &) = delete;
+  InlineLuaTool(InlineLuaTool &&) = delete;
+  InlineLuaTool &operator=(InlineLuaTool &&) = delete;
 
   std::string_view name() const override { return name_; }
   std::string_view description() const override { return description_; }
@@ -681,7 +693,7 @@ public:
   bool has_status_line() const { return status_line_ref_ != LUA_NOREF; }
   bool has_tab_title() const { return tab_title_ref_ != LUA_NOREF; }
 
-  void push_usage(lua_State *Ls, const TokenUsage &u) {
+  static void push_usage(lua_State *Ls, const TokenUsage &u) {
     lua_newtable(Ls);
     lua_pushinteger(Ls, static_cast<lua_Integer>(u.input));
     lua_setfield(Ls, -2, "input");
@@ -707,7 +719,7 @@ public:
     lua_setfield(Ls, -2, "cost");
   }
 
-  void push_ui_context(lua_State *Ls, const LuaUiContext &context) {
+  static void push_ui_context(lua_State *Ls, const LuaUiContext &context) {
     lua_newtable(Ls);
     lua_pushinteger(Ls, static_cast<lua_Integer>(context.turn));
     lua_setfield(Ls, -2, "turn");
@@ -1340,7 +1352,7 @@ load_lua_tools(const std::filesystem::path &directory) {
     }
     try {
       tools.push_back(load_lua_tool(entry.path()));
-    } catch (const std::exception &) {
+    } catch (const std::exception &) { // NOLINT(bugprone-empty-catch)
       // skip tools that fail to load
     }
   }
@@ -1419,7 +1431,8 @@ std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
   return hooks;
 }
 
-static const char kPiciTestLua[] = R"lua(
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)
+static constexpr char kPiciTestLua[] = R"lua(
 do
   local _r = {passed=0, failed=0, total=0}
   pici.test = {}
@@ -1587,13 +1600,10 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
         [list](const Message &msg,
                const std::vector<ToolResultMessage> &results,
                const AgentContext &ctx) -> bool {
-      for (const auto &h : list) {
-        if (!h->should_stop_after_turn)
-          continue;
-        if (h->should_stop_after_turn(msg, results, ctx))
-          return true;
-      }
-      return false;
+      return std::ranges::any_of(list, [&](const auto &h) {
+        return h->should_stop_after_turn &&
+               h->should_stop_after_turn(msg, results, ctx);
+      });
     };
   }
 

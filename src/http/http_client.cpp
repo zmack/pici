@@ -6,12 +6,12 @@
 #include <exception>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 
-#include <nlohmann/json.hpp>
-
-#include <curl/curl.h>
+#include <curl/curl.h>       // NOLINT(misc-include-cleaner)
+#include <nlohmann/json.hpp> // NOLINT(misc-include-cleaner)
 #include <utility>
 
 namespace pi::core {
@@ -20,10 +20,10 @@ namespace {
 
 struct CurlHandle {
   CURL *handle{nullptr};
-  CurlHandle() : handle(curl_easy_init()) {}
+  CurlHandle() : handle(curl_easy_init()) {} // NOLINT(misc-include-cleaner)
   ~CurlHandle() {
     if (handle != nullptr) {
-      curl_easy_cleanup(handle);
+      curl_easy_cleanup(handle); // NOLINT(misc-include-cleaner)
     }
   }
 
@@ -44,14 +44,14 @@ struct CurlHeaders {
   CurlHeaders &operator=(const CurlHeaders &) = delete;
 };
 
-int stop_token_progress(void *p, curl_off_t, curl_off_t, curl_off_t,
-                        curl_off_t) {
+int stop_token_progress(void *p, curl_off_t, // NOLINT(misc-include-cleaner)
+                        curl_off_t, curl_off_t, curl_off_t) {
   return static_cast<const std::stop_token *>(p)->stop_requested() ? 1 : 0;
 }
 
-std::string error_line(std::string message) {
+std::string error_line(const std::string &message) {
   return nlohmann::json{
-      {"error", {{"message", std::move(message)}}},
+      {"error", {{"message", message}}},
   }
       .dump();
 }
@@ -116,7 +116,7 @@ HttpClient::post(const std::string &url, const std::string &body,
       });
   curl_easy_setopt(curl.handle, CURLOPT_WRITEDATA, &result);
 
-  CURLcode res = curl_easy_perform(curl.handle);
+  CURLcode res = curl_easy_perform(curl.handle); // NOLINT(misc-include-cleaner)
 
   if (res != CURLE_OK)
     return std::nullopt;
@@ -253,7 +253,7 @@ bool HttpClient::post_streaming(
     std::string msg = "HTTP status " + std::to_string(status);
     if (!state.buffer.empty())
       msg += ": " + state.buffer;
-    auto line = error_line(std::move(msg));
+    auto line = error_line(msg);
     if (state.diagnostics)
       state.diagnostics->record_transport_line(line);
     state.callback(line);

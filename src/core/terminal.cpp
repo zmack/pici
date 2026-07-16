@@ -1,7 +1,9 @@
 #include "core/terminal.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <ranges> // NOLINT(misc-include-cleaner)
 #include <string>
 #include <string_view>
 #include <sys/ioctl.h>
@@ -10,14 +12,16 @@
 namespace pi::core {
 
 int term_width(int fd) {
-  struct winsize ws{};
+  struct winsize ws{}; // NOLINT(misc-include-cleaner)
+  // NOLINTNEXTLINE(misc-include-cleaner)
   if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
     return static_cast<int>(ws.ws_col);
   return 80;
 }
 
 int term_height(int fd) {
-  struct winsize ws{};
+  struct winsize ws{}; // NOLINT(misc-include-cleaner)
+  // NOLINTNEXTLINE(misc-include-cleaner)
   if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
     return static_cast<int>(ws.ws_row);
   return 24;
@@ -66,7 +70,7 @@ bool is_wide(char32_t cp) {
   struct Range {
     char32_t lo, hi;
   };
-  static constexpr Range kWide[] = {
+  static constexpr std::array<Range, 24> kWide = {{
       {.lo = 0x1100, .hi = 0x115F}, // Hangul Jamo
       {.lo = 0x2329, .hi = 0x232A}, // Angle brackets (wide)
       {.lo = 0x2E80,
@@ -94,11 +98,10 @@ bool is_wide(char32_t cp) {
       {.lo = 0x2CEB0, .hi = 0x2EBEF}, // CJK Extension F
       {.lo = 0x2F800, .hi = 0x2FA1F}, // CJK Compatibility Ideographs Supplement
       {.lo = 0x30000, .hi = 0x3134F}, // CJK Extension G
-  };
-  for (const auto &r : kWide)
-    if (cp >= r.lo && cp <= r.hi)
-      return true;
-  return false;
+  }};
+  return std::ranges::any_of(kWide, [cp](const auto &range) {
+    return cp >= range.lo && cp <= range.hi;
+  });
 }
 
 // Combining/zero-width characters — contribute 0 display columns.
@@ -106,7 +109,7 @@ bool is_combining(char32_t cp) {
   struct Range {
     char32_t lo, hi;
   };
-  static constexpr Range kCombining[] = {
+  static constexpr std::array<Range, 8> kCombining = {{
       {.lo = 0x0300, .hi = 0x036F}, // Combining Diacritical Marks
       {.lo = 0x0483, .hi = 0x0489},
       {.lo = 0x0591, .hi = 0x05BD},   // Hebrew cantillation
@@ -115,11 +118,10 @@ bool is_combining(char32_t cp) {
       {.lo = 0x20D0, .hi = 0x20FF},   // Combining Diacritical Marks for Symbols
       {.lo = 0xFE20, .hi = 0xFE2F},   // Combining Half Marks
       {.lo = 0xE0100, .hi = 0xE01EF}, // Variation Selectors Supplement
-  };
-  for (const auto &r : kCombining)
-    if (cp >= r.lo && cp <= r.hi)
-      return true;
-  return false;
+  }};
+  return std::ranges::any_of(kCombining, [cp](const auto &range) {
+    return cp >= range.lo && cp <= range.hi;
+  });
 }
 
 } // namespace

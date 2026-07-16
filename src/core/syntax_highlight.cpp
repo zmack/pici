@@ -263,6 +263,7 @@ bool node_covers_text(TSNode node) {
   return ts_node_start_byte(node) < ts_node_end_byte(node);
 }
 
+// NOLINTNEXTLINE(misc-no-recursion)
 void collect_highlights(LanguageId id, TSNode node,
                         std::vector<HighlightSpan> &spans) {
   const auto type = std::string_view(ts_node_type(node));
@@ -283,6 +284,7 @@ void collect_highlights(LanguageId id, TSNode node,
   }
 }
 
+// NOLINTNEXTLINE(misc-no-recursion)
 void add_identifier_highlights(LanguageId id, TSNode node,
                                std::vector<HighlightSpan> &spans) {
   const auto type = std::string_view(ts_node_type(node));

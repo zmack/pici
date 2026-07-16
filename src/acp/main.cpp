@@ -18,12 +18,15 @@
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-static void print_usage(const char *prog) {
+namespace {
+
+void print_usage(const char *prog) {
   std::cout << "Usage: " << prog
             << " [--port <n>] [--model <id>] [--provider <name>]"
                " [--base-url <url>] [--api-key <key>]"
@@ -31,7 +34,10 @@ static void print_usage(const char *prog) {
                " [--no-tools] [--acp-threads <n>]\n";
 }
 
-int main(int argc, char *argv[]) {
+} // namespace
+
+// NOLINTNEXTLINE(bugprone-exception-escape)
+int main(int argc, char *argv[]) noexcept {
   // Installed once, before any worker threads exist, so there is no
   // concurrent std::signal() call to race with.
   std::signal(SIGINT,
@@ -44,9 +50,15 @@ int main(int argc, char *argv[]) {
 
   // Parse shared CLI flags
   auto args = pi::cli::load_and_merge(argc, argv);
+  const std::span<char *> argv_view(argv, static_cast<std::size_t>(argc));
 
   struct OtelGuard {
+    OtelGuard() = default;
     ~OtelGuard() { pi::core::shutdown_otel(); }
+    OtelGuard(const OtelGuard &) = delete;
+    OtelGuard &operator=(const OtelGuard &) = delete;
+    OtelGuard(OtelGuard &&) = delete;
+    OtelGuard &operator=(OtelGuard &&) = delete;
   } otel_guard;
   std::atexit([] { pi::core::shutdown_otel(); });
   if (!args.otel_endpoint.empty())
@@ -59,7 +71,7 @@ int main(int argc, char *argv[]) {
       return 1;
   }
   if (args.help) {
-    print_usage(argv[0]);
+    print_usage(argv_view.front());
     return 0;
   }
   if (args.version) {
@@ -71,9 +83,9 @@ int main(int argc, char *argv[]) {
   std::atomic<int> port{8080};
   int acp_threads = 4;
   for (int i = 1; i < argc; ++i) {
-    std::string_view a = argv[i];
+    std::string_view a = argv_view[static_cast<std::size_t>(i)];
     auto next = [&]() -> std::string_view {
-      return (i + 1 < argc) ? argv[++i] : "";
+      return (i + 1 < argc) ? argv_view[static_cast<std::size_t>(++i)] : "";
     };
     if (a == "--port")
       port = std::stoi(std::string(next()));
@@ -122,6 +134,7 @@ int main(int argc, char *argv[]) {
   }
 
   std::vector<std::string> tool_names;
+  tool_names.reserve(cfg.tools.size());
   for (const auto &tool : cfg.tools)
     tool_names.emplace_back(tool->name());
   cfg.agent_opts.system_prompt = pi::cli::build_system_prompt(

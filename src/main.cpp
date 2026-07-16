@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <stop_token>
 #include <string>
 #include <system_error>
 #include <type_traits>
@@ -31,6 +33,7 @@
 #include "cli/system_prompt.h"
 #include "cli/tree_selector.h"
 #include "core/agent.h"
+#include "core/agent_loop.h"
 #include "core/agent_state.h"
 #include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
@@ -52,14 +55,16 @@
 
 namespace pi {
 
-static void print_version() { std::cout << "pi-cpp " PI_CPP_VERSION "\n"; }
+namespace {
+
+void print_version() { std::cout << "pi-cpp " PI_CPP_VERSION "\n"; }
 
 struct HookRuntime {
   std::mutex mutex;
   std::shared_ptr<core::LuaHooks> hooks;
 };
 
-static void print_tools(
+void print_tools(
     const std::vector<std::shared_ptr<const core::ToolDefinition>> &tools) {
   if (tools.empty()) {
     std::cout << "(no tools loaded)\n";
@@ -81,8 +86,8 @@ static void print_tools(
   }
 }
 
-static void
-print_addons(const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
+void print_addons(
+    const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
   if (hooks_list.empty()) {
     std::cout << "(no add-ons loaded)\n";
     return;
@@ -127,7 +132,7 @@ print_addons(const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
 }
 
 // Returns "$0.0023" for 0.002341928, "$1.23" for 1.234, "$12.34" for 12.345
-static std::string format_cost(double usd) {
+std::string format_cost(double usd) {
   std::ostringstream ss;
   ss << '$';
   if (usd < 0.01)
@@ -139,7 +144,7 @@ static std::string format_cost(double usd) {
   return ss.str();
 }
 
-static std::string format_tokens(std::uint64_t n) {
+std::string format_tokens(std::uint64_t n) {
   std::ostringstream ss;
   if (n >= 1'000'000) {
     double m = static_cast<double>(n) / 1'000'000.0;
@@ -153,7 +158,7 @@ static std::string format_tokens(std::uint64_t n) {
   return ss.str();
 }
 
-static int cmd_list_models(const cli::Args &args) {
+int cmd_list_models(const cli::Args &args) {
   auto hits = pi::core::search_models(args.list_models_filter);
   if (hits.empty()) {
     if (!args.list_models_filter.empty())
@@ -202,7 +207,7 @@ static int cmd_list_models(const cli::Args &args) {
   return 0;
 }
 
-static core::ThinkingLevel to_core_thinking(cli::ThinkingLevel t) {
+core::ThinkingLevel to_core_thinking(cli::ThinkingLevel t) {
   switch (t) {
   case cli::ThinkingLevel::off:
     return core::ThinkingLevel::off;
@@ -220,7 +225,7 @@ static core::ThinkingLevel to_core_thinking(cli::ThinkingLevel t) {
   return core::ThinkingLevel::off;
 }
 
-static std::optional<core::Model> resolve_model(const cli::Args &args) {
+std::optional<core::Model> resolve_model(const cli::Args &args) {
   if (!args.model.empty()) {
     auto m = core::find_model(args.model, args.provider);
     if (m && !args.base_url.empty())
@@ -243,7 +248,7 @@ static std::optional<core::Model> resolve_model(const cli::Args &args) {
   return m;
 }
 
-static std::unique_ptr<core::Renderer> make_renderer(const cli::Args &args) {
+std::unique_ptr<core::Renderer> make_renderer(const cli::Args &args) {
   if (!args.render.empty()) {
     auto r = core::StreamRendererRegistry::instance().make(args.render,
                                                            STDOUT_FILENO);
@@ -256,7 +261,7 @@ static std::unique_ptr<core::Renderer> make_renderer(const cli::Args &args) {
   return core::make_auto_renderer(STDOUT_FILENO);
 }
 
-static std::string format_tool_result(std::string_view content) {
+std::string format_tool_result(std::string_view content) {
   while (!content.empty() && (content.back() == '\n' || content.back() == '\r'))
     content.remove_suffix(1);
 
@@ -265,20 +270,20 @@ static std::string format_tool_result(std::string_view content) {
   while (pos <= content.size()) {
     const std::size_t next = content.find('\n', pos);
     if (next == std::string_view::npos) {
-      lines.push_back(content.substr(pos));
+      lines.emplace_back(content.substr(pos));
       break;
     }
-    lines.push_back(content.substr(pos, next - pos));
+    lines.emplace_back(content.substr(pos, next - pos));
     pos = next + 1;
   }
   if (lines.empty())
-    lines.push_back({});
+    lines.emplace_back();
 
   std::vector<std::string_view> visible;
   std::string omitted;
   if (lines.size() > 5) {
-    visible.push_back(lines[0]);
-    visible.push_back(lines[1]);
+    visible.emplace_back(lines[0]);
+    visible.emplace_back(lines[1]);
     omitted = "… +" + std::to_string(lines.size() - 4) + " lines omitted";
     visible.push_back(omitted);
     visible.push_back(lines[lines.size() - 2]);
@@ -401,7 +406,7 @@ private:
   core::TokenUsage last_usage_;
 };
 
-static core::TokenUsage
+core::TokenUsage
 run_turn(core::AgentSession &session, const std::string &input,
          core::Renderer &renderer, bool verbose,
          std::shared_ptr<core::StreamDiagnostics> diagnostics) {
@@ -434,8 +439,8 @@ struct CostAccumulator {
   }
 };
 
-static void print_usage(const CostAccumulator &last,
-                        const CostAccumulator &session, bool has_pricing) {
+void print_usage(const CostAccumulator &last, const CostAccumulator &session,
+                 bool has_pricing) {
   auto row = [&](std::string_view label, const CostAccumulator &acc) {
     std::cout << std::left << std::setw(10) << label << "  in=" << std::setw(8)
               << format_tokens(acc.input_tokens) << "  out=" << std::setw(8)
@@ -457,10 +462,10 @@ static void print_usage(const CostAccumulator &last,
   std::cout << "\n";
 }
 
-static std::vector<cli::ContextFile> load_context_files() {
+std::vector<cli::ContextFile> load_context_files() {
   namespace fs = std::filesystem;
-  static constexpr std::string_view kCandidates[] = {"AGENTS.md", "AGENTS.MD",
-                                                     "CLAUDE.md", "CLAUDE.MD"};
+  static constexpr std::array<std::string_view, 4> kCandidates = {
+      "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"};
 
   auto try_load = [&](const fs::path &dir) -> std::optional<cli::ContextFile> {
     for (auto name : kCandidates) {
@@ -501,7 +506,7 @@ static std::vector<cli::ContextFile> load_context_files() {
   return result;
 }
 
-static int cmd_run(const cli::Args &args) {
+int cmd_run(const cli::Args &args) {
   auto model_opt = resolve_model(args);
   if (!model_opt) {
     std::cerr << "error: could not resolve model\n";
@@ -620,7 +625,7 @@ static int cmd_run(const cli::Args &args) {
       hooks = hook_runtime->hooks;
     }
     if (hooks && hooks->before_tool_call)
-      return hooks->before_tool_call(context, stop_tok);
+      return hooks->before_tool_call(context, std::move(stop_tok));
     return std::nullopt;
   };
   opts.after_tool_call =
@@ -633,7 +638,7 @@ static int cmd_run(const cli::Args &args) {
       hooks = hook_runtime->hooks;
     }
     if (hooks && hooks->after_tool_call)
-      return hooks->after_tool_call(context, stop_tok);
+      return hooks->after_tool_call(context, std::move(stop_tok));
     return std::nullopt;
   };
   opts.should_stop_after_turn =
@@ -1137,9 +1142,12 @@ static int cmd_run(const cli::Args &args) {
   return 0;
 }
 
+} // namespace
+
 } // namespace pi
 
-int main(int argc, char *argv[]) {
+// NOLINTNEXTLINE(bugprone-exception-escape)
+int main(int argc, char *argv[]) noexcept {
   // Installed once, before any worker threads exist, so there is no
   // concurrent std::signal() call to race with.
   std::signal(SIGINT,
@@ -1156,7 +1164,12 @@ int main(int argc, char *argv[]) {
   // BatchSpanProcessor is flushed before process exit (including Ctrl-C via
   // the signal handler above which calls std::exit).
   struct OtelGuard {
+    OtelGuard() = default;
     ~OtelGuard() { pi::core::shutdown_otel(); }
+    OtelGuard(const OtelGuard &) = delete;
+    OtelGuard &operator=(const OtelGuard &) = delete;
+    OtelGuard(OtelGuard &&) = delete;
+    OtelGuard &operator=(OtelGuard &&) = delete;
   } otel_guard;
   std::atexit([] { pi::core::shutdown_otel(); });
   if (!args.otel_endpoint.empty())
@@ -1170,7 +1183,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (args.help) {
-    pi::cli::print_help(argv[0]);
+    pi::cli::print_help(*argv);
     return 0;
   }
   if (args.version) {

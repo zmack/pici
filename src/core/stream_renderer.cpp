@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <ios>
 #include <mutex>
+#include <signal.h> // NOLINT(modernize-deprecated-headers)
 #include <type_traits>
 #include <unistd.h>
 
@@ -217,7 +219,7 @@ public:
       frame += 'A';
     }
     frame += "\033[J";
-    frame.append(rendered.data() + live_start, rendered.size() - live_start);
+    frame.append(rendered.substr(live_start));
 
     ::write(fd_, frame.data(), frame.size());
 
@@ -304,8 +306,11 @@ public:
   ViewportRenderer(ViewportRenderer &&) = delete;
   ViewportRenderer &operator=(ViewportRenderer &&) = delete;
 
-  ~ViewportRenderer() override {
-    leave();
+  ~ViewportRenderer() noexcept override {
+    try {
+      leave();
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+    }
     if (current_ == this)
       current_ = nullptr;
   }
@@ -444,15 +449,15 @@ private:
       std::atexit(atexit_fn);
       atexit_registered_ = true;
     }
-    struct sigaction sa{};
-    sa.sa_handler = sig_handler;
+    struct sigaction sa{};       // NOLINT(misc-include-cleaner)
+    sa.sa_handler = sig_handler; // NOLINT(misc-include-cleaner)
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
-    sigaction(SIGHUP, &sa, nullptr);
-    write_seq("\033[?1049h"     // enter alternate screen
-              "\033[H\033[2J"); // home + clear
+    sigaction(SIGHUP, &sa, nullptr); // NOLINT(misc-include-cleaner)
+    write_seq("\033[?1049h"          // enter alternate screen
+              "\033[H\033[2J");      // home + clear
     set_scroll_region();
   }
 
@@ -462,11 +467,11 @@ private:
     if (!in_alt_)
       return;
     in_alt_ = false;
-    static constexpr char kRestore[] =
+    static constexpr std::string_view kRestore =
         "\033[r"       // reset scroll region
         "\033[?25h"    // show cursor (must precede ?1049l)
         "\033[?1049l"; // exit alternate screen
-    ::write(fd_, kRestore, sizeof(kRestore) - 1);
+    ::write(fd_, kRestore.data(), kRestore.size());
   }
 
   void leave() {
@@ -551,8 +556,8 @@ private:
     } else {
       // ── Cache hit: hot path — render only the suffix (O(tail.size()))
       // ────────
-      const std::string_view tail_raw(content.data() + fin_cache_.raw_end,
-                                      content.size() - fin_cache_.raw_end);
+      const std::string_view tail_raw =
+          std::string_view(content).substr(fin_cache_.raw_end);
       tail_rendered = render_visible_markdown(tail_raw);
     }
 
@@ -688,7 +693,7 @@ private:
       if (s[i] == '\033') {
         const auto nxt = skip_ansi_sequence(s, i);
         if (nxt > i) {
-          cur.append(s.data() + i, nxt - i);
+          cur.append(s.substr(i, nxt - i));
           i = nxt;
           continue;
         }
@@ -700,7 +705,7 @@ private:
         cur.clear();
         col = 0;
       }
-      cur.append(s.data() + i, nxt - i);
+      cur.append(s.substr(i, nxt - i));
       col += cw;
       if (col >= width) {
         out.push_back(std::move(cur));

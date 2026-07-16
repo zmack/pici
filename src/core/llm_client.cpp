@@ -12,6 +12,8 @@
 
 namespace pi::core {
 
+namespace {
+
 class StubLLMClient : public LLMClient {
 public:
   std::shared_ptr<AssistantMessage> stream(const Model &model,
@@ -42,6 +44,8 @@ public:
   std::string_view provider_name() const override { return "stub"; }
   std::string_view api_id() const override { return "none"; }
 };
+
+} // namespace
 
 void LLMClientRegistry::register_client(std::string api_id, Factory factory) {
   std::scoped_lock lock(mutex_);

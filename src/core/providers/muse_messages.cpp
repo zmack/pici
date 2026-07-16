@@ -1,10 +1,12 @@
 #include "core/providers/muse_messages.h"
 
+#include "core/agent_state.h"
+#include "core/event_types.h"
+#include "core/llm_client.h"
 #include "core/message_types.h"
 #include "core/providers/transform_messages.h"
 #include "http/http_client.h"
 
-#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -26,7 +28,7 @@
 namespace pi::core {
 namespace {
 
-using Json = nlohmann::json;
+using Json = nlohmann::json; // NOLINT(misc-include-cleaner)
 
 std::int64_t now_ms() {
   using namespace std::chrono;
@@ -453,7 +455,7 @@ void MuseMessagesSseParser::process_delta(const nlohmann::json &event) {
   if (delta_type_it == delta_it->end() || !delta_type_it->is_string())
     return;
   const auto delta_type = delta_type_it->get<std::string>();
-  const auto content_index = *block_it->second.content_index;
+  const auto content_index = block_it->second.content_index.value_or(0);
   if (block_it->second.kind == BlockKind::text && delta_type == "text_delta") {
     const auto text_it = delta_it->find("text");
     if (text_it == delta_it->end() || !text_it->is_string())
@@ -551,7 +553,7 @@ void MuseMessagesSseParser::finish_text_block(std::size_t protocol_index) {
       !block_it->second.content_index)
     return;
 
-  const auto content_index = *block_it->second.content_index;
+  const auto content_index = block_it->second.content_index.value_or(0);
   const auto &text =
       std::get<TextContent>(result_->content[content_index]).text;
   if (on_event_) {
@@ -569,7 +571,7 @@ void MuseMessagesSseParser::finish_thinking_block(std::size_t protocol_index) {
       !block_it->second.content_index)
     return;
 
-  const auto content_index = *block_it->second.content_index;
+  const auto content_index = block_it->second.content_index.value_or(0);
   const auto &thinking =
       std::get<ThinkingContent>(result_->content[content_index]).thinking;
   if (on_event_) {
@@ -588,7 +590,7 @@ void MuseMessagesSseParser::finish_tool_call_block(std::size_t protocol_index) {
       !block_it->second.content_index)
     return;
 
-  const auto content_index = *block_it->second.content_index;
+  const auto content_index = block_it->second.content_index.value_or(0);
   auto &tool_call = std::get<ToolCall>(result_->content[content_index]);
   if (!block_it->second.partial_json.empty()) {
     auto parsed = Json::parse(block_it->second.partial_json, nullptr, false);
@@ -652,8 +654,9 @@ MuseMessagesClient::build_request_json(const Model &model,
     request["thinking"] = {{"type", "adaptive"}};
     const auto level = std::string(thinking_level_to_string(options.reasoning));
     if (const auto it = model.thinking_level_map.find(level);
-        it != model.thinking_level_map.end() && it->second) {
-      request["output_config"]["effort"] = *it->second;
+        it != model.thinking_level_map.end()) {
+      if (const auto &effort = it->second)
+        request["output_config"]["effort"] = *effort;
     }
   }
   if (!context.system_prompt.empty())

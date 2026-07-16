@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <sys/select.h>
+#include <sys/select.h> // NOLINT(misc-include-cleaner)
 #include <termios.h>
 #include <unistd.h>
 #include <utility>
@@ -77,11 +77,12 @@ Key read_key() {
     return Key::Other;
 
   // Check whether the escape is the start of a CSI sequence.
-  fd_set fds;
-  FD_ZERO(&fds);
-  FD_SET(STDIN_FILENO, &fds);
-  struct timeval tv{};      // NOLINT(misc-include-cleaner)
-  tv.tv_usec = 50L * 1000L; // 50 ms
+  fd_set fds;                 // NOLINT(misc-include-cleaner)
+  FD_ZERO(&fds);              // NOLINT(misc-include-cleaner)
+  FD_SET(STDIN_FILENO, &fds); // NOLINT(misc-include-cleaner)
+  struct timeval tv{};        // NOLINT(misc-include-cleaner)
+  tv.tv_usec = 50L * 1000L;   // 50 ms
+  // NOLINTNEXTLINE(misc-include-cleaner)
   if (select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv) <= 0)
     return Key::Esc; // bare Esc
 
