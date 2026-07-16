@@ -300,7 +300,9 @@ void Agent::run_with_lifecycle(
   state_.set_complete(true);
 }
 
-AgentContext Agent::create_context_snapshot() { return context_snapshot(); }
+AgentContext Agent::create_context_snapshot() const {
+  return context_snapshot();
+}
 
 AgentContext Agent::context_snapshot() const {
   AgentContext ctx;
@@ -357,11 +359,7 @@ void Agent::process_event(const AgentEvent &event) {
   std::visit(
       [&](const auto &ev) {
         using T = std::remove_cvref_t<decltype(ev)>;
-        if constexpr (std::same_as<T, MessageStartEvent>) {
-          // Streaming started
-        } else if constexpr (std::same_as<T, MessageUpdateEvent>) {
-          // Streaming update
-        } else if constexpr (std::same_as<T, MessageEndEvent>) {
+        if constexpr (std::same_as<T, MessageEndEvent>) {
           state_.append_message(ev.message);
         } else if constexpr (std::same_as<T, ToolExecutionStartEvent>) {
           state_.add_pending_tool_call(ev.tool_call_id);
@@ -373,8 +371,6 @@ void Agent::process_event(const AgentEvent &event) {
               state_.set_error_message(*asm_->error_message);
             }
           }
-        } else if constexpr (std::same_as<T, AgentEndEvent>) {
-          // Final event
         }
       },
       event);

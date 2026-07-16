@@ -52,8 +52,8 @@ std::size_t count_messages(const SessionStore &store, const std::string &id) {
 }
 
 // Recursively build a SessionNode from the parent→children map.
-// NOLINTNEXTLINE(misc-no-recursion)
 SessionNode
+// NOLINTNEXTLINE(misc-no-recursion)
 build_node(const std::unordered_map<std::string, SessionHeader> &headers,
            const std::map<std::string, std::vector<std::string>> &children_map,
            const SessionStore &store, const std::string &id) {

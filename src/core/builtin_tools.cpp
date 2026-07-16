@@ -20,14 +20,12 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <regex>
-#include <signal.h>
 #include <sstream>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <string_view>
 #include <sys/poll.h>
-#include <sys/types.h>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -318,14 +316,12 @@ public:
       return false;
     const std::string name = abs_path.filename().string();
     const std::string rel = abs_path.lexically_relative(root).generic_string();
-    for (const auto &p : patterns_) {
+    return std::ranges::any_of(patterns_, [&](const auto &p) {
       if (p.dirs_only && !is_dir)
-        continue;
+        return false;
       const std::string &subject = p.has_slash ? rel : name;
-      if (std::regex_match(subject, p.re))
-        return true;
-    }
-    return false;
+      return std::regex_match(subject, p.re);
+    });
   }
 
   bool empty() const { return patterns_.empty(); }
@@ -353,6 +349,7 @@ private:
       p.re = std::regex(glob_to_regex(pat));
       patterns_.push_back(std::move(p));
     } catch (...) {
+      static_cast<void>(0); // Ignore malformed ignore-file patterns.
     }
   }
 
@@ -362,12 +359,17 @@ private:
 // ────────────────────────────────────────────────────────────
 
 std::string image_mime_type(const std::filesystem::path &path) {
-  static const std::pair<std::string_view, std::string_view> kMimes[] = {
-      {".jpg", "image/jpeg"},   {".jpeg", "image/jpeg"},
-      {".png", "image/png"},    {".gif", "image/gif"},
-      {".webp", "image/webp"},  {".bmp", "image/bmp"},
-      {".ico", "image/x-icon"}, {".svg", "image/svg+xml"},
-  };
+  static const std::array<std::pair<std::string_view, std::string_view>, 8>
+      kMimes = {{
+          {".jpg", "image/jpeg"},
+          {".jpeg", "image/jpeg"},
+          {".png", "image/png"},
+          {".gif", "image/gif"},
+          {".webp", "image/webp"},
+          {".bmp", "image/bmp"},
+          {".ico", "image/x-icon"},
+          {".svg", "image/svg+xml"},
+      }};
   std::string ext = path.extension().string();
   for (char &c : ext)
     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -882,7 +884,8 @@ public:
         entries.push_back(std::move(name));
       }
       std::ranges::sort(entries, {}, [](const std::string &value) {
-        std::string lower = value;
+        std::string lower = value; // NOLINT(clang-analyzer-cplusplus.Move): the
+                                   // projection must preserve entries.
         std::ranges::transform(lower, lower.begin(), [](unsigned char ch) {
           return std::tolower(ch);
         });
@@ -1123,11 +1126,11 @@ public:
           "cd " + shell_quote(cwd().string()) + " && " + command;
 
       // Create pipe for stdout+stderr
-      int pipefd[2];
-      if (::pipe(pipefd) != 0)
+      std::array<int, 2> pipefd{};
+      if (::pipe(pipefd.data()) != 0)
         throw std::runtime_error("Failed to create pipe");
 
-      const pid_t pid = ::fork();
+      const auto pid = ::fork();
       if (pid < 0) {
         ::close(pipefd[0]);
         ::close(pipefd[1]);
@@ -1149,16 +1152,19 @@ public:
       ::close(pipefd[1]);
 
       auto kill_tree = [pid]() {
+        // NOLINTNEXTLINE(misc-include-cleaner): POSIX signal declarations vary.
         ::kill(-pid, SIGTERM);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        // NOLINTNEXTLINE(misc-include-cleaner): POSIX signal declarations vary.
         ::kill(-pid, SIGKILL);
       };
 
+      // NOLINTNEXTLINE(misc-include-cleaner): POSIX fcntl declarations vary.
       ::fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
 
       // Self-pipe: stop_token callback writes here to unblock poll immediately.
-      int wakeup[2];
-      if (::pipe(wakeup) != 0) {
+      std::array<int, 2> wakeup{};
+      if (::pipe(wakeup.data()) != 0) {
         ::close(pipefd[0]);
         ::waitpid(pid, nullptr, 0);
         throw std::runtime_error("Failed to create wakeup pipe");
@@ -1192,11 +1198,12 @@ public:
                                                                     now)
                   .count();
 
-          struct pollfd fds[2] = {
+          std::array<struct pollfd, 2> fds = {{
               {.fd = pipefd[0], .events = POLLIN | POLLHUP, .revents = 0},
               {.fd = wakeup[0], .events = POLLIN, .revents = 0},
-          };
-          const int n = ::poll(fds, 2, static_cast<int>(remaining_ms));
+          }};
+          const int n = ::poll(fds.data(), static_cast<nfds_t>(fds.size()),
+                               static_cast<int>(remaining_ms));
 
           if (n == 0) {
             kill_tree();
@@ -1214,7 +1221,7 @@ public:
             break;
           }
           if ((fds[0].revents & POLLIN) != 0) {
-            const ssize_t nr = ::read(pipefd[0], buf.data(), buf.size());
+            const auto nr = ::read(pipefd[0], buf.data(), buf.size());
             if (nr <= 0)
               break;
             output.append(buf.data(), static_cast<std::size_t>(nr));
@@ -1231,7 +1238,7 @@ public:
 
       // Drain any data that arrived between the last read and process exit
       while (output.size() < kMaxBytes) {
-        const ssize_t nr = ::read(pipefd[0], buf.data(), buf.size());
+        const auto nr = ::read(pipefd[0], buf.data(), buf.size());
         if (nr <= 0)
           break;
         output.append(buf.data(), static_cast<std::size_t>(nr));

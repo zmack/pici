@@ -84,7 +84,7 @@ std::uint32_t utf8_codepoint(std::string_view text, std::size_t offset,
 }
 
 int codepoint_width(std::uint32_t codepoint) {
-  if (codepoint == 0 || codepoint < 0x20U)
+  if (codepoint < 0x20U)
     return 0;
   if ((codepoint >= 0x300U && codepoint <= 0x36FU) ||
       (codepoint >= 0xFE00U && codepoint <= 0xFE0FU))
@@ -103,7 +103,9 @@ int codepoint_width(std::uint32_t codepoint) {
 }
 
 std::size_t terminal_columns() {
+  // NOLINTNEXTLINE(misc-include-cleaner): ioctl declarations vary by platform.
   struct winsize size{};
+  // NOLINTNEXTLINE(misc-include-cleaner): ioctl declarations vary by platform.
   if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0)
     return size.ws_col;
   return 80;
@@ -177,7 +179,7 @@ public:
   void invalidate() { rendered_rows_ = 0; }
 
 private:
-  void clear_previous() {
+  void clear_previous() const {
     if (rendered_rows_ == 0)
       return;
 
@@ -194,13 +196,14 @@ private:
     std::cout << '\r';
   }
 
-  void write_wrapped(std::string_view text, std::size_t columns,
-                     std::size_t &rows, std::size_t &column) {
+  static void write_wrapped(std::string_view text, std::size_t columns,
+                            std::size_t &rows, std::size_t &column) {
     for (std::size_t offset = 0; offset < text.size();) {
       if (const auto escape_length = ansi_escape_length(text, offset);
           escape_length > 0) {
-        std::cout.write(text.data() + static_cast<std::streamoff>(offset),
-                        static_cast<std::streamsize>(escape_length));
+        const auto escape = text.substr(offset, escape_length);
+        std::cout.write(escape.data(),
+                        static_cast<std::streamsize>(escape.size()));
         offset += escape_length;
         continue;
       }
@@ -228,8 +231,9 @@ private:
         column = 0;
       }
 
-      std::cout.write(text.data() + static_cast<std::streamoff>(offset),
-                      static_cast<std::streamsize>(length));
+      const auto character = text.substr(offset, length);
+      std::cout.write(character.data(),
+                      static_cast<std::streamsize>(character.size()));
       column += static_cast<std::size_t>(std::max(width, 0));
       ++offset;
     }

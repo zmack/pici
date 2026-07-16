@@ -2,9 +2,12 @@
 #include "acp/handlers.h"
 #include "acp/types.h"
 #include "core/session/session_id.h"
+#include "core/session/session_store.h"
 #include "nlohmann/json_fwd.hpp"
 
+#include <atomic>
 #include <cstddef>
+#include <filesystem>
 #include <httplib.h>
 
 #include <csignal>
@@ -42,7 +45,8 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
   }
 
   httplib::Server svr;
-  svr.new_task_queue = [&config] {
+  svr.new_task_queue = [&config] -> httplib::TaskQueue * {
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory): cpp-httplib owns it.
     return new httplib::ThreadPool(static_cast<std::size_t>(config.threads));
   };
 

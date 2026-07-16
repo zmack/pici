@@ -35,7 +35,9 @@ std::string_view event_type_to_string(EventType type) {
   return "unknown";
 }
 
-static std::string_view msg_type(const Message &msg) {
+namespace {
+
+std::string_view msg_type(const Message &msg) {
   if (std::holds_alternative<UserMessage>(msg))
     return "user";
   if (std::holds_alternative<AssistantMessage>(msg))
@@ -45,32 +47,31 @@ static std::string_view msg_type(const Message &msg) {
   return "unknown";
 }
 
+} // namespace
+
 std::ostream &operator<<(std::ostream &os, const AgentEvent &event) {
   os << "{";
   std::visit(
       [&](const auto &ev) {
         using T = std::remove_cvref_t<decltype(ev)>;
-        if constexpr (std::same_as<T, AgentStartEvent>) {
+        if constexpr (std::same_as<T, AgentStartEvent> ||
+                      std::same_as<T, TurnStartEvent>) {
           os << "type:" << event_type_to_string(ev.type) << "}";
         } else if constexpr (std::same_as<T, AgentEndEvent>) {
           os << "type:" << event_type_to_string(ev.type)
              << ", messages: " << ev.messages.size() << "}";
-        } else if constexpr (std::same_as<T, TurnStartEvent>) {
-          os << "type:" << event_type_to_string(ev.type) << "}";
         } else if constexpr (std::same_as<T, TurnEndEvent>) {
           os << "type:" << event_type_to_string(ev.type)
              << ", msg: " << msg_type(ev.message)
              << ", tools: " << ev.tool_results.size() << "}";
-        } else if constexpr (std::same_as<T, MessageStartEvent>) {
+        } else if constexpr (std::same_as<T, MessageStartEvent> ||
+                             std::same_as<T, MessageEndEvent>) {
           os << "type:" << event_type_to_string(ev.type)
              << ", msg: " << msg_type(ev.message) << "}";
         } else if constexpr (std::same_as<T, MessageUpdateEvent>) {
           os << "type:" << event_type_to_string(ev.type)
              << ", msg: " << msg_type(ev.message)
              << ", ev_idx: " << ev.assistant_message_event.index() << "}";
-        } else if constexpr (std::same_as<T, MessageEndEvent>) {
-          os << "type:" << event_type_to_string(ev.type)
-             << ", msg: " << msg_type(ev.message) << "}";
         } else if constexpr (std::same_as<T, ToolExecutionStartEvent>) {
           os << "type:" << event_type_to_string(ev.type)
              << ", tool: " << ev.tool_name << ", call: " << ev.tool_call_id

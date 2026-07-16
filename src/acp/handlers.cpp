@@ -3,8 +3,11 @@
 #include "acp/sse.h"
 #include "acp/types.h"
 #include "core/agent.h"
+#include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/session/agent_session.h"
+#include "core/session/session_record.h"
+#include "core/session/session_store.h"
 #include "core/stream_renderer.h"
 
 #include <atomic>
@@ -14,6 +17,7 @@
 #include <exception>
 #include <httplib.h>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -179,8 +183,6 @@ private:
   RunStatus status_{RunStatus::completed};
 };
 
-// ─────────────────────────────────────────────────────────────
-
 void json_response(httplib::Response &res, int status,
                    const nlohmann::json &body) {
   res.status = status;
@@ -196,143 +198,143 @@ nlohmann::json parse_body(const httplib::Request &req) {
 
 } // namespace
 
-// ───────────────────────────────────────────────────────
-
 void register_routes(httplib::Server &svr, const ServerConfig &cfg,
                      const std::shared_ptr<core::SessionStore> &sessions) {
   const auto manifest_json = nlohmann::json(build_manifest(cfg));
 
-  // ── GET /health ────────────────────────────────────────────────────────────
   svr.Get("/health", [](const httplib::Request &, httplib::Response &res) {
     res.set_content(R"({"status":"ok"})", "application/json");
   });
 
-  // ── GET /agents ────────────────────────────────────────────────────────────
   svr.Get("/agents",
+          // NOLINTNEXTLINE(bugprone-exception-escape)
           [manifest_json](const httplib::Request &, httplib::Response &res) {
             json_response(res, 200, nlohmann::json::array({manifest_json}));
           });
 
-  // ── GET /agents/{name} ─────────────────────────────────────────────────────
-  svr.Get("/agents/:name", [&cfg, manifest_json](const httplib::Request &req,
-                                                 httplib::Response &res) {
-    if (req.path_params.at("name") != cfg.agent_name) {
-      json_response(res, 404, {{"error", "agent not found"}});
-      return;
-    }
-    json_response(res, 200, manifest_json);
-  });
-
-  // ── POST /runs ─────────────────────────────────────────────────────────────
-  svr.Post("/runs", [&cfg, sessions](const httplib::Request &req,
-                                     httplib::Response &res) {
-    RunCreateRequest rcr;
-    try {
-      from_json(parse_body(req), rcr);
-    } catch (const std::exception &e) {
-      json_response(res, 400, {{"error", e.what()}});
-      return;
-    }
-    if (rcr.agent_name != cfg.agent_name) {
-      json_response(res, 404, {{"error", "agent not found"}});
-      return;
-    }
-    if (rcr.input.empty()) {
-      json_response(res, 400, {{"error", "input must not be empty"}});
-      return;
-    }
-
-    // Extract user text from first text/plain part
-    std::string prompt;
-    for (const auto &msg : rcr.input) {
-      for (const auto &part : msg.parts) {
-        if (part.content_type == "text/plain") {
-          if (!prompt.empty())
-            prompt += '\n';
-          prompt += part.content;
-        }
-      }
-    }
-
-    const std::string run_id = make_run_id();
-
-    auto session = std::make_shared<core::AgentSession>(
-        core::AgentSession::Config{.agent_options = cfg.agent_opts,
-                                   .tools = cfg.tools,
-                                   .session_store = sessions});
-
-    std::optional<std::string> active_session_id;
-
-    // Restore or create durable session history if provided.
-    if (rcr.session_id) {
-      core::SessionHeader header;
-      header.created = std::chrono::system_clock::to_time_t(
-          std::chrono::system_clock::now());
-      header.model = cfg.agent_opts.model.id;
-      header.provider = cfg.agent_opts.model.provider;
-      active_session_id = session->open_session(*rcr.session_id, header);
-    }
-
-    // ── Streaming mode ─────────────────────────────────────────────────────
-    if (rcr.mode == RunMode::stream) {
-      res.set_chunked_content_provider(
-          "text/event-stream",
-          [&cfg, run_id, prompt, rcr, active_session_id, session](
-              std::size_t /*offset*/, httplib::DataSink &sink) mutable -> bool {
-            SseWriter sse(sink);
-
-            Run r;
-            r.run_id = run_id;
-            r.agent_name = cfg.agent_name;
-            r.status = RunStatus::created;
-            r.session_id = active_session_id;
-            sse.emit("run.created",
-                     {{"type", "run.created"}, {"run", nlohmann::json(r)}});
-            r.status = RunStatus::in_progress;
-            sse.emit("run.in-progress",
-                     {{"type", "run.in-progress"}, {"run", nlohmann::json(r)}});
-
-            AcpSseRenderer renderer(sse, cfg.agent_name);
-            auto result = session->run_prompt(
-                prompt, [&renderer](const core::AgentEvent &event) {
-                  core::dispatch_event(event, renderer);
-                });
-            if (result.error && !session->agent().state().error_message())
-              renderer.on_error(core::RendererErrorKind::unknown,
-                                *result.error);
-
-            renderer.emit_run_final(r);
-            sink.done();
-            return true;
+  svr.Get("/agents/:name",
+          // NOLINTNEXTLINE(bugprone-exception-escape)
+          [&cfg, manifest_json](const httplib::Request &req,
+                                httplib::Response &res) {
+            if (req.path_params.at("name") != cfg.agent_name) {
+              json_response(res, 404, {{"error", "agent not found"}});
+              return;
+            }
+            json_response(res, 200, manifest_json);
           });
-      return;
-    }
 
-    // ── Sync mode ──────────────────────────────────────────────────────────
-    SyncRenderer sr;
-    auto result =
-        session->run_prompt(prompt, [&sr](const core::AgentEvent &event) {
-          core::dispatch_event(event, sr);
-        });
-    if (result.error && !session->agent().state().error_message())
-      sr.on_error(core::RendererErrorKind::unknown, *result.error);
+  svr.Post(
+      "/runs",
+      [&cfg,
+       sessions](const httplib::Request &req,
+                 httplib::Response &res) { // NOLINT(bugprone-exception-escape):
+                                           // httplib owns callback errors.
+        RunCreateRequest rcr;
+        try {
+          from_json(parse_body(req), rcr);
+        } catch (const std::exception &e) {
+          json_response(res, 400, {{"error", e.what()}});
+          return;
+        }
+        if (rcr.agent_name != cfg.agent_name) {
+          json_response(res, 404, {{"error", "agent not found"}});
+          return;
+        }
+        if (rcr.input.empty()) {
+          json_response(res, 400, {{"error", "input must not be empty"}});
+          return;
+        }
 
-    Run r;
-    r.run_id = run_id;
-    r.agent_name = cfg.agent_name;
-    r.status = sr.status();
-    r.session_id = active_session_id;
-    if (!sr.accumulated().empty())
-      r.output.push_back({.role = cfg.agent_name,
-                          .parts = {{.content_type = "text/plain",
-                                     .content = sr.accumulated()}}});
-    if (sr.status() == RunStatus::failed)
-      r.error = sr.error();
+        // Extract user text from first text/plain part
+        std::string prompt;
+        for (const auto &msg : rcr.input) {
+          for (const auto &part : msg.parts) {
+            if (part.content_type == "text/plain") {
+              if (!prompt.empty())
+                prompt += '\n';
+              prompt += part.content;
+            }
+          }
+        }
 
-    json_response(res, 200, nlohmann::json(r));
-  });
+        const std::string run_id = make_run_id();
 
-  // ── GET /runs/{run_id} ─────────────────────────────────────────────────────
+        auto session = std::make_shared<core::AgentSession>(
+            core::AgentSession::Config{.agent_options = cfg.agent_opts,
+                                       .tools = cfg.tools,
+                                       .session_store = sessions});
+
+        std::optional<std::string> active_session_id;
+
+        // Restore or create durable session history if provided.
+        if (rcr.session_id) {
+          core::SessionHeader header;
+          header.created = std::chrono::system_clock::to_time_t(
+              std::chrono::system_clock::now());
+          header.model = cfg.agent_opts.model.id;
+          header.provider = cfg.agent_opts.model.provider;
+          active_session_id = session->open_session(*rcr.session_id, header);
+        }
+
+        if (rcr.mode == RunMode::stream) {
+          res.set_chunked_content_provider(
+              "text/event-stream",
+              // NOLINTNEXTLINE(bugprone-exception-escape)
+              [&cfg, run_id, prompt, rcr, active_session_id,
+               session](std::size_t /*offset*/,
+                        httplib::DataSink &sink) mutable -> bool {
+                SseWriter sse(sink);
+
+                Run r;
+                r.run_id = run_id;
+                r.agent_name = cfg.agent_name;
+                r.status = RunStatus::created;
+                r.session_id = active_session_id;
+                sse.emit("run.created",
+                         {{"type", "run.created"}, {"run", nlohmann::json(r)}});
+                r.status = RunStatus::in_progress;
+                sse.emit("run.in-progress", {{"type", "run.in-progress"},
+                                             {"run", nlohmann::json(r)}});
+
+                AcpSseRenderer renderer(sse, cfg.agent_name);
+                auto result = session->run_prompt(
+                    prompt, [&renderer](const core::AgentEvent &event) {
+                      core::dispatch_event(event, renderer);
+                    });
+                if (result.error && !session->agent().state().error_message())
+                  renderer.on_error(core::RendererErrorKind::unknown,
+                                    *result.error);
+
+                renderer.emit_run_final(r);
+                sink.done();
+                return true;
+              });
+          return;
+        }
+
+        SyncRenderer sr;
+        auto result =
+            session->run_prompt(prompt, [&sr](const core::AgentEvent &event) {
+              core::dispatch_event(event, sr);
+            });
+        if (result.error && !session->agent().state().error_message())
+          sr.on_error(core::RendererErrorKind::unknown, *result.error);
+
+        Run r;
+        r.run_id = run_id;
+        r.agent_name = cfg.agent_name;
+        r.status = sr.status();
+        r.session_id = active_session_id;
+        if (!sr.accumulated().empty())
+          r.output.push_back({.role = cfg.agent_name,
+                              .parts = {{.content_type = "text/plain",
+                                         .content = sr.accumulated()}}});
+        if (sr.status() == RunStatus::failed)
+          r.error = sr.error();
+
+        json_response(res, 200, nlohmann::json(r));
+      });
+
   // Streaming runs complete synchronously so this is mostly a stub.
   svr.Get(
       "/runs/:run_id", [](const httplib::Request &req, httplib::Response &res) {

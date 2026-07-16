@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <exception>
 #include <future>
 #include <map>
@@ -310,6 +309,7 @@ ToolExecutionOutcome execute_tool_safely(const PreparedToolCall &call,
   try {
     auto result = call.tool->execute(
         call.tool_call.id, call.args_json, stop_tok,
+        // NOLINTNEXTLINE(bugprone-exception-escape)
         [emit, call](const std::shared_ptr<ToolResult> &partial) {
           emit(ToolExecutionUpdateEvent(
               call.tool_call.id, call.tool_call.name, call.args_json,
@@ -390,7 +390,7 @@ bool otel_has_thinking(const std::vector<ContentBlock> &content) {
 std::shared_ptr<AssistantMessage>
 stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
                           StreamCallback emit, const std::stop_token &stop_tok,
-                          const OtelCtx &otel_ctx) {
+                          [[maybe_unused]] const OtelCtx &otel_ctx) {
   auto messages = context.messages;
 
 #ifdef PI_CPP_OTEL_ENABLED
@@ -563,11 +563,13 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
   return final_msg;
 }
 
-static ToolCallResult execute_tool_calls_sequential(
+namespace {
+
+ToolCallResult execute_tool_calls_sequential(
     AgentContext &context, const AssistantMessage &assistant_message,
     const std::vector<ToolCall> &tool_calls, const AgentLoopConfig &config,
-    StreamCallback emit, const std::stop_token &stop_tok,
-    const OtelCtx &otel_ctx) {
+    const StreamCallback &emit, const std::stop_token &stop_tok,
+    [[maybe_unused]] const OtelCtx &otel_ctx) {
   ToolCallResult result;
   std::vector<FinalizedToolCall> finalized_calls;
 
@@ -638,11 +640,11 @@ static ToolCallResult execute_tool_calls_sequential(
 // Note: In a full implementation, tools would execute concurrently.
 // For now, we execute them sequentially (simpler, no async complexity).
 
-static ToolCallResult execute_tool_calls_parallel(
+ToolCallResult execute_tool_calls_parallel(
     AgentContext &context, const AssistantMessage &assistant_message,
     const std::vector<ToolCall> &tool_calls, const AgentLoopConfig &config,
     const StreamCallback &emit, const std::stop_token &stop_tok,
-    const OtelCtx &otel_ctx) {
+    [[maybe_unused]] const OtelCtx &otel_ctx) {
   ToolCallResult result;
   const std::size_t n = tool_calls.size();
   std::vector<std::optional<FinalizedToolCall>> slots(n);
@@ -764,6 +766,8 @@ static ToolCallResult execute_tool_calls_parallel(
   return result;
 }
 
+} // namespace
+
 ToolCallResult execute_tool_calls(AgentContext &context,
                                   const AssistantMessage &assistant_message,
                                   const AgentLoopConfig &config,
@@ -802,7 +806,7 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
                                 AgentContext context,
                                 const AgentLoopConfig &config,
                                 StreamCallback emit, const AgentEventPush &push,
-                                std::stop_token stop_tok) {
+                                const std::stop_token &stop_tok) {
   auto publish = [&](AgentEvent event) {
     emit(event);
     push(std::move(event));
@@ -1001,6 +1005,7 @@ void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
       try {
         emit(event);
       } catch (...) {
+        static_cast<void>(0); // Event delivery is best-effort during failure.
       }
       push(std::move(event));
     };
@@ -1041,12 +1046,13 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
         return {};
       });
 
-  stream.start_worker([prompts, context = std::move(context), config,
-                       emit = std::move(emit),
-                       stop_tok](AgentEventPush push) mutable {
-    run_agent_loop_worker(std::move(prompts), std::move(context), config,
-                          std::move(emit), std::move(push), stop_tok);
-  });
+  stream.start_worker(
+      // NOLINTNEXTLINE(bugprone-exception-escape)
+      [prompts = std::vector<Message>(prompts), context = std::move(context),
+       config, emit = std::move(emit), stop_tok](AgentEventPush push) mutable {
+        run_agent_loop_worker(std::move(prompts), std::move(context), config,
+                              std::move(emit), std::move(push), stop_tok);
+      });
 
   return stream;
 }
@@ -1074,11 +1080,13 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
         return {};
       });
 
-  stream.start_worker([context, config, emit = std::move(emit),
-                       stop_tok](AgentEventPush push) mutable {
-    run_agent_loop_worker({}, context, config, std::move(emit), std::move(push),
-                          stop_tok);
-  });
+  stream.start_worker(
+      // NOLINTNEXTLINE(bugprone-exception-escape)
+      [context, config, emit = std::move(emit),
+       stop_tok](AgentEventPush push) mutable {
+        run_agent_loop_worker({}, std::move(context), config, std::move(emit),
+                              std::move(push), stop_tok);
+      });
 
   return stream;
 }

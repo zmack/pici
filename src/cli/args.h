@@ -73,7 +73,7 @@ struct Args {
   std::vector<Diagnostic> diagnostics;
 };
 
-Args parse_args(int argc, char *argv[]);
+Args parse_args(int argc, char **argv);
 void print_help(const char *prog);
 
 } // namespace pi::cli

@@ -647,19 +647,24 @@ find_program(RUN_CLANG_TIDY_BIN
 )
 
 if(CLANG_TIDY_BIN)
-    # Regex passed to run-clang-tidy matching only our src/ files,
-    # excluding FetchContent deps (which live under build/_deps) and tests.
-    set(TIDY_REGEX "^${CMAKE_CURRENT_SOURCE_DIR}/src/(?!acp/handlers[.]cpp$).*")
+    # Enumerate sources instead of relying on run-clang-tidy's path-regex
+    # matching. The latter accepts a regex as a positional argument but a
+    # non-match silently results in no translation units being analyzed.
+    file(GLOB_RECURSE TIDY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+    list(FILTER TIDY_SOURCES EXCLUDE REGEX "/src/acp/handlers[.]cpp$")
     set(TIDY_HANDLERS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/acp/handlers.cpp")
 
     if(RUN_CLANG_TIDY_BIN)
+        set(TIDY_SOURCE_FILTER "^${CMAKE_CURRENT_SOURCE_DIR}/src/(?!acp/handlers[.]cpp$).*")
         add_custom_target(tidy
             COMMAND ${RUN_CLANG_TIDY_BIN}
                 -clang-tidy-binary ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
-                ${TIDY_REGEX}
+                -quiet
+                -source-filter ${TIDY_SOURCE_FILTER}
             COMMAND ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                -quiet
                 -checks=-clang-analyzer-*
                 ${TIDY_HANDLERS_SOURCE}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -670,10 +675,12 @@ if(CLANG_TIDY_BIN)
             COMMAND ${RUN_CLANG_TIDY_BIN}
                 -clang-tidy-binary ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                -quiet
                 -fix
-                ${TIDY_REGEX}
+                -source-filter ${TIDY_SOURCE_FILTER}
             COMMAND ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                -quiet
                 -fix
                 -checks=-clang-analyzer-*
                 ${TIDY_HANDLERS_SOURCE}
@@ -682,14 +689,18 @@ if(CLANG_TIDY_BIN)
             VERBATIM
         )
     else()
-        # Serial fallback — enumerate files manually
-        file(GLOB_RECURSE TIDY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
         add_custom_target(tidy
             COMMAND ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                -quiet
                 ${TIDY_SOURCES}
+            COMMAND ${CLANG_TIDY_BIN}
+                -p ${CMAKE_BINARY_DIR}
+                -quiet
+                -checks=-clang-analyzer-*
+                ${TIDY_HANDLERS_SOURCE}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Running clang-tidy (serial, ${CLANG_TIDY_BIN})"
+            COMMENT "Running clang-tidy (${CLANG_TIDY_BIN})"
             VERBATIM
         )
     endif()

@@ -112,7 +112,9 @@ namespace json {
 
 using nlohmann::json;
 
-static json content_block_to_json(const ContentBlock &block) {
+namespace {
+
+json content_block_to_json(const ContentBlock &block) {
   return std::visit(
       []<typename T>(const T &value) -> json {
         if constexpr (std::same_as<T, TextContent>) {
@@ -152,7 +154,7 @@ static json content_block_to_json(const ContentBlock &block) {
       block);
 }
 
-static std::optional<ContentBlock> json_to_content_block(const json &j) {
+std::optional<ContentBlock> json_to_content_block(const json &j) {
   if (!j.is_object())
     return std::nullopt;
   auto type_it = j.find("type");
@@ -199,7 +201,7 @@ static std::optional<ContentBlock> json_to_content_block(const json &j) {
 
 // Build a JSON object for a Message. Key order is explicitly controlled to
 // match the output the existing tests expect (insertion order in nlohmann).
-static json message_to_json_obj(const Message &msg) {
+json message_to_json_obj(const Message &msg) {
   return std::visit(
       []<typename T>(const T &m) -> json {
         if constexpr (std::same_as<T, UserMessage>) {
@@ -275,6 +277,8 @@ static json message_to_json_obj(const Message &msg) {
       msg);
 }
 
+} // namespace
+
 std::string to_json(const TokenUsage &usage) {
   json j = json::object();
   j["input"] = usage.input;
@@ -311,7 +315,9 @@ std::string to_json(const Model &model) {
   return j.dump(2);
 }
 
-static Message from_json_message(const json &j) {
+namespace {
+
+Message from_json_message(const json &j) {
   std::string role = j.value("role", "");
   if (role == "user") {
     UserMessage msg;
@@ -386,6 +392,8 @@ static Message from_json_message(const json &j) {
   }
   throw std::runtime_error("Unknown message role: " + role);
 }
+
+} // namespace
 
 std::optional<Message> from_json(const std::string &s) {
   try {

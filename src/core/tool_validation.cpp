@@ -25,7 +25,9 @@ using njson = nlohmann::json;
 using nlohmann::json_schema::error_handler;
 using nlohmann::json_schema::json_validator;
 
-static njson coerce_with_schema(const njson &value, const njson &schema);
+// Recursive descent follows nested JSON Schema structures.
+// NOLINTBEGIN(misc-no-recursion)
+njson coerce_with_schema(const njson &value, const njson &schema);
 
 njson coerce_primitive_by_type(const njson &value, const std::string &type) {
   if (type == "number") {
@@ -39,6 +41,7 @@ njson coerce_primitive_by_type(const njson &value, const std::string &type) {
           if (std::isfinite(d))
             return d;
         } catch (...) {
+          static_cast<void>(0); // leave an uncoercible value unchanged
         }
       }
     }
@@ -58,6 +61,7 @@ njson coerce_primitive_by_type(const njson &value, const std::string &type) {
             return static_cast<std::int64_t>(d);
           }
         } catch (...) {
+          static_cast<void>(0); // leave an uncoercible value unchanged
         }
       }
     }
@@ -267,8 +271,14 @@ njson coerce_with_schema(const njson &value, const njson &schema) {
   return next;
 }
 
-std::mutex g_cache_mutex;
-std::unordered_map<std::string, json_validator> g_validator_cache;
+// NOLINTEND(misc-no-recursion)
+
+std::mutex
+    g_cache_mutex; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables):
+                   // protects the cache below.
+std::unordered_map<std::string, json_validator>
+    g_validator_cache; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables):
+                       // memoized validators are mutable.
 
 json_validator &get_or_create_validator(const std::string &schema_str,
                                         const njson &schema_json) {

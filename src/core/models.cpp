@@ -12,7 +12,7 @@ namespace pi::core {
 // clang-format off
 
 // OpenAI — https://openai.com/api/pricing/
-static const std::vector<Model> kModels = {
+const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initialization): the read-only model catalog is process-lifetime data.
   { .id="gpt-4o",       .name="GPT-4o",          .api="openai-completions", .provider="openai",
     .base_url="https://api.openai.com/v1", .reasoning=false,
     .cost={.input_per_mtok=2.50, .output_per_mtok=10.00, .cache_read_per_mtok=1.25, .cache_write_per_mtok=0},

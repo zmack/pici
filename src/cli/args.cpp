@@ -1,7 +1,8 @@
 #include "cli/args.h"
 
-#include <cstring>
+#include <cstddef>
 #include <iostream>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -39,17 +40,12 @@ bool parse_thinking(std::string_view s, ThinkingLevel &out) {
 
 } // namespace
 
-Args parse_args(int argc, char *argv[]) {
+Args parse_args(int argc, char **argv) {
   Args result;
+  const std::span args{argv, static_cast<std::size_t>(argc)};
 
   for (int i = 1; i < argc; ++i) {
-    std::string_view arg = argv[i];
-
-    auto next = [&]() -> std::string_view {
-      if (i + 1 < argc)
-        return argv[++i];
-      return {};
-    };
+    std::string_view arg = args[static_cast<std::size_t>(i)];
     auto need = [&](std::string_view flag) -> std::string_view {
       if (i + 1 >= argc) {
         result.diagnostics.push_back(
@@ -57,7 +53,7 @@ Args parse_args(int argc, char *argv[]) {
              .message = std::string(flag) + " requires an argument"});
         return {};
       }
-      return argv[++i];
+      return args[static_cast<std::size_t>(++i)];
     };
 
     if (arg == "--help" || arg == "-h") {
@@ -165,8 +161,11 @@ Args parse_args(int argc, char *argv[]) {
     } else if (arg == "--list-models") {
       result.list_models = true;
       // optional next arg that isn't a flag
-      if (i + 1 < argc && argv[i + 1][0] != '-') {
-        result.list_models_filter = argv[++i];
+      const auto next_index = static_cast<std::size_t>(i) + 1;
+      const std::string_view next_arg =
+          next_index < args.size() ? args[next_index] : "";
+      if (!next_arg.empty() && next_arg.front() != '-') {
+        result.list_models_filter = args[static_cast<std::size_t>(++i)];
       }
     } else if (!arg.empty() && arg[0] == '-') {
       result.diagnostics.push_back(
