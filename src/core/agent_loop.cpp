@@ -876,6 +876,17 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
     push(std::move(event));
   };
 
+  bool aborted_event_published = false;
+  auto publish_aborted = [&] {
+    if (aborted_event_published)
+      return;
+    aborted_event_published = true;
+    const auto reason = config.get_abort_reason
+                            ? config.get_abort_reason()
+                            : TurnAbortReason::unknown;
+    publish(TurnAbortedEvent(reason));
+  };
+
 #ifdef PI_CPP_OTEL_ENABLED
   auto session_span = otel_child_span(
       config.tracer, otel::context::RuntimeContext::GetCurrent(),
@@ -978,6 +989,12 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
       }
       new_messages.emplace_back(*assistant_msg);
 
+      // A provider may return a generic error message when cancellation is
+      // observed. The run stop token is authoritative for lifecycle status.
+      if (stop_tok.stop_requested() &&
+          assistant_msg->stop_reason != StopReason::aborted)
+        assistant_msg->stop_reason = StopReason::aborted;
+
       // Check for error/abort
       if (assistant_msg->stop_reason == StopReason::error ||
           assistant_msg->stop_reason == StopReason::aborted) {
@@ -985,6 +1002,9 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
         end_turn(*assistant_msg, 0);
 #endif
         publish(TurnEndEvent(*assistant_msg, {}));
+        if (stop_tok.stop_requested() ||
+            assistant_msg->stop_reason == StopReason::aborted)
+          publish_aborted();
         publish(AgentEndEvent(new_messages));
         return;
       }
@@ -1020,6 +1040,8 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
         bool stop = config.should_stop_after_turn(*assistant_msg, tool_results,
                                                   context);
         if (stop) {
+          if (stop_tok.stop_requested())
+            publish_aborted();
           publish(AgentEndEvent(new_messages));
           return;
         }
@@ -1043,6 +1065,8 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
     break;
   }
 
+  if (stop_tok.stop_requested())
+    publish_aborted();
   publish(AgentEndEvent(new_messages));
 #ifdef PI_CPP_OTEL_ENABLED
   session_span->End();
@@ -1078,6 +1102,12 @@ void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
 
     publish_failure_event(MessageStartEvent(*failure));
     publish_failure_event(MessageEndEvent(*failure));
+    if (stop_tok.stop_requested()) {
+      const auto reason = config.get_abort_reason
+                              ? config.get_abort_reason()
+                              : TurnAbortReason::unknown;
+      publish_failure_event(TurnAbortedEvent(reason));
+    }
     publish_failure_event(TurnEndEvent(*failure, {}));
     publish_failure_event(AgentEndEvent(std::vector<Message>{*failure}));
   };

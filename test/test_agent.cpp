@@ -319,15 +319,23 @@ void test_agent_run_lifecycle() {
         }
         CHECK_EQ(calls->load(), 1);
 
-        agent.abort();
+        agent.interrupt(TurnAbortReason::timeout);
         bool first_ended = false;
+        int aborted_events = 0;
+        std::optional<TurnAbortReason> abort_reason;
         for (auto& event : first) {
             if (std::holds_alternative<AgentEndEvent>(event)) {
                 first_ended = true;
             }
+            if (const auto *aborted = std::get_if<TurnAbortedEvent>(&event)) {
+                ++aborted_events;
+                abort_reason = aborted->reason;
+            }
         }
         agent.wait_for_idle();
         CHECK(first_ended);
+        CHECK_EQ(aborted_events, 1);
+        CHECK(abort_reason == TurnAbortReason::timeout);
         CHECK(!agent.is_streaming());
 
         auto second = agent.prompt("second");

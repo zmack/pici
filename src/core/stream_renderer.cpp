@@ -731,6 +731,10 @@ private:
   // Calling cmark/render_visible_markdown from a signal handler is UB because
   // cmark calls malloc, which is not async-signal-safe and can deadlock.
   static void sig_handler(int sig) {
+    if (sig == SIGINT && sigint_pending_ == 0) {
+      note_sigint();
+      return;
+    }
     if (current_ != nullptr)
       current_->restore_terminal();
     struct sigaction sa{};
@@ -741,6 +745,17 @@ private:
     raise(sig);
   }
 
+public:
+  static void note_sigint() noexcept { sigint_pending_ = 1; }
+
+  static bool take_sigint() {
+    if (sigint_pending_ == 0)
+      return false;
+    sigint_pending_ = 0;
+    return true;
+  }
+
+private:
   // Cached rendered ANSI for the finalized (complete-block) prefix of content.
   // Populated when BlockBoundaryScanner finds a new stable boundary.  On the
   // hot path (streaming mid-block), only the tail is re-rendered.
@@ -769,12 +784,18 @@ private:
   FinCache fin_cache_;
 
   static ViewportRenderer *current_;
+  static volatile std::sig_atomic_t sigint_pending_;
 };
 
 ViewportRenderer *ViewportRenderer::current_ = nullptr;
+volatile std::sig_atomic_t ViewportRenderer::sigint_pending_ = 0;
 bool ViewportRenderer::atexit_registered_ = false;
 
 } // namespace
+
+void notify_sigint() noexcept { ViewportRenderer::note_sigint(); }
+
+bool consume_sigint() { return ViewportRenderer::take_sigint(); }
 
 void dispatch_event(const AgentEvent &ev, Renderer &r) {
   std::visit(
@@ -842,6 +863,8 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
 
           // ── Agent abort
           // ──────────────────────────────────────────────────────
+        } else if constexpr (std::is_same_v<T, TurnAbortedEvent>) {
+          r.on_error(RendererErrorKind::abort, "agent turn aborted");
         } else if constexpr (std::is_same_v<T, AgentEndEvent>) {
           // check for aborted stop reason in any final assistant message
           for (const auto &msg : e.messages) {

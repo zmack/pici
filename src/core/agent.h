@@ -137,6 +137,7 @@ public:
 
   // ── Control ────────────────────────────────────────────────────────
 
+  void interrupt(TurnAbortReason reason);
   void abort();
   void reset();
 
@@ -159,6 +160,9 @@ private:
 
   std::mutex worker_mutex_;
   std::vector<std::jthread> workers_;
+
+  mutable std::mutex interrupt_mutex_;
+  std::optional<TurnAbortReason> interrupt_reason_;
 
   // Internal helpers
   void join_workers();

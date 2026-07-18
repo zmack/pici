@@ -106,6 +106,10 @@ struct AgentLoopConfig {
       const AgentContext &, std::size_t estimated_tokens, std::stop_token)>
       prepare_context;
 
+  // Supplies the semantic reason when the run is cancelled. The callback is
+  // queried only while publishing the terminal aborted event.
+  std::function<TurnAbortReason()> get_abort_reason;
+
   // Resolves API key dynamically
   std::function<std::optional<std::string>(std::string_view provider)>
       get_api_key;

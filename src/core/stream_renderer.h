@@ -97,6 +97,13 @@ public:
 //
 void dispatch_event(const AgentEvent &ev, Renderer &renderer);
 
+// Records a Ctrl-C notification. Safe to call from a signal handler.
+void notify_sigint() noexcept;
+
+// Returns and clears the first Ctrl-C notification raised by the interactive
+// renderer. The signal handler itself only flips a sig_atomic_t flag.
+bool consume_sigint();
+
 // Writes raw text deltas as they arrive (suitable for non-TTY / pipes).
 std::unique_ptr<Renderer> make_raw_renderer(int fd = 1);
 

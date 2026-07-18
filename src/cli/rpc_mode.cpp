@@ -32,6 +32,83 @@ nlohmann::json as_json(const core::Model &model) {
   return nlohmann::json::parse(core::json::to_json(model));
 }
 
+nlohmann::json task_snapshot_json(const core::AgentTaskSnapshot &snapshot) {
+  nlohmann::json value = {
+      {"id", snapshot.id},
+      {"task_path", snapshot.task_path},
+      {"task_name", snapshot.task_name},
+      {"status", core::agent_task_status_to_string(snapshot.status)},
+      {"child_count", snapshot.child_count},
+      {"queued_message_count", snapshot.queued_message_count},
+      {"generation", snapshot.generation},
+  };
+  if (snapshot.parent_id)
+    value["parent_id"] = *snapshot.parent_id;
+  else
+    value["parent_id"] = nullptr;
+  if (snapshot.result) {
+    value["result"] = {
+        {"text", snapshot.result->text},
+        {"stop_reason", core::stop_reason_to_string(snapshot.result->stop_reason)},
+        {"truncated", snapshot.result->truncated},
+    };
+    if (snapshot.result->error)
+      value["result"]["error"] = *snapshot.result->error;
+    else
+      value["result"]["error"] = nullptr;
+  }
+  return value;
+}
+
+core::Message rpc_message(const nlohmann::json &command) {
+  core::UserMessage message;
+  message.content.emplace_back(
+      core::TextContent{.text = command.value("message", std::string{})});
+  return message;
+}
+
+core::TurnAbortReason rpc_abort_reason(std::string_view reason) {
+  if (reason == "parent")
+    return core::TurnAbortReason::parent_interrupt;
+  if (reason == "shutdown")
+    return core::TurnAbortReason::shutdown;
+  if (reason == "timeout")
+    return core::TurnAbortReason::timeout;
+  if (reason == "budget")
+    return core::TurnAbortReason::budget;
+  return core::TurnAbortReason::user_interrupt;
+}
+
+std::optional<core::ContextInheritanceMode>
+rpc_context_mode(std::string_view mode) {
+  if (mode == "none")
+    return core::ContextInheritanceMode::none;
+  if (mode == "full")
+    return core::ContextInheritanceMode::full;
+  if (mode == "through_message")
+    return core::ContextInheritanceMode::through_message;
+  if (mode == "recent_messages")
+    return core::ContextInheritanceMode::recent_messages;
+  return std::nullopt;
+}
+
+std::optional<core::AgentInterruptReason>
+rpc_interrupt_reason(std::string_view reason) {
+  if (reason == "user")
+    return core::AgentInterruptReason::user;
+  if (reason == "parent")
+    return core::AgentInterruptReason::parent;
+  if (reason == "shutdown")
+    return core::AgentInterruptReason::shutdown;
+  if (reason == "timeout")
+    return core::AgentInterruptReason::timeout;
+  if (reason == "budget")
+    return core::AgentInterruptReason::budget;
+  if (reason == "replacement_task")
+    return core::AgentInterruptReason::replacement_task;
+  return std::nullopt;
+}
+
 std::optional<core::ThinkingLevel> parse_thinking(std::string_view level) {
   for (const auto candidate :
        {core::ThinkingLevel::off, core::ThinkingLevel::minimal,
@@ -45,8 +122,9 @@ std::optional<core::ThinkingLevel> parse_thinking(std::string_view level) {
 
 } // namespace
 
-RpcMode::RpcMode(core::AgentSession &session, Output output)
-    : session_(session), output_(std::move(output)) {}
+RpcMode::RpcMode(core::AgentSession &session, Output output,
+                 core::AgentTaskManager *task_manager)
+    : session_(session), task_manager_(task_manager), output_(std::move(output)) {}
 
 RpcMode::~RpcMode() { stop(); }
 
@@ -91,6 +169,36 @@ void RpcMode::start_prompt(const nlohmann::json &command, std::string message) {
   });
 }
 
+void RpcMode::start_wait(const nlohmann::json &command) {
+  if (!task_manager_) {
+    response(command, false, nullptr, "agent task manager is unavailable");
+    return;
+  }
+  core::AgentWaitRequest request;
+  if (command.contains("targets"))
+    request.targets = command.at("targets").get<std::vector<std::string>>();
+  request.after_generation = command.value("after_generation", 0ULL);
+  request.timeout = std::chrono::milliseconds(
+      command.value("timeout_ms", 30000ULL));
+  std::scoped_lock lock(wait_mutex_);
+  wait_threads_.emplace_back(
+      [this, command, request](std::stop_token stop_token) {
+        try {
+          const auto result = task_manager_->wait(request, stop_token);
+          nlohmann::json changed = nlohmann::json::array();
+          for (const auto &snapshot : result.changed)
+            changed.push_back(task_snapshot_json(snapshot));
+          response(command, true,
+                   {{"timed_out", result.timed_out},
+                    {"caller_interrupted", result.caller_interrupted},
+                    {"generation", result.generation},
+                    {"changed", std::move(changed)}});
+        } catch (const std::exception &error) {
+          response(command, false, nullptr, error.what());
+        }
+      });
+}
+
 void RpcMode::handle(const nlohmann::json &command) {
   if (!command.is_object() || !command.contains("type") ||
       !command["type"].is_string()) {
@@ -125,8 +233,89 @@ void RpcMode::handle(const nlohmann::json &command) {
         session_.agent().follow_up({std::move(message)});
       response(command, true);
     } else if (type == "abort") {
-      session_.agent().abort();
-      response(command, true);
+      session_.agent().interrupt(rpc_abort_reason(
+          command.value("reason", std::string("user"))));
+      response(command, true,
+               {{"reason", command.value("reason", std::string("user"))}});
+    } else if (type == "spawn_agent") {
+      if (!task_manager_) {
+        response(command, false, nullptr, "agent task manager is unavailable");
+        return;
+      }
+      core::SpawnAgentRequest request;
+      request.parent_id = command.value("parent_id", std::string{});
+      request.task_name = command.value("task_name", std::string{});
+      request.prompt = command.value("message", std::string{});
+      if (command.contains("context")) {
+        const auto &context = command.at("context");
+        const auto mode = rpc_context_mode(
+            context.value("mode", std::string("none")));
+        if (!mode)
+          throw core::AgentTaskError(core::AgentTaskErrorKind::invalid_context,
+                                     "invalid context inheritance mode");
+        request.context.mode = *mode;
+        if (context.contains("through"))
+          request.context.through = context.at("through").get<std::size_t>();
+        if (context.contains("recent_count"))
+          request.context.recent_count =
+              context.at("recent_count").get<std::size_t>();
+      }
+      if (command.contains("model") && !command.at("model").is_null())
+        request.model_spec = command.at("model").get<std::string>();
+      if (command.contains("system_prompt") &&
+          !command.at("system_prompt").is_null())
+        request.system_prompt = command.at("system_prompt").get<std::string>();
+      if (command.contains("tools"))
+        request.requested_tools =
+            command.at("tools").get<std::vector<std::string>>();
+      response(command, true,
+               task_snapshot_json(task_manager_->spawn(request)));
+    } else if (type == "list_agents") {
+      if (!task_manager_) {
+        response(command, false, nullptr, "agent task manager is unavailable");
+        return;
+      }
+      const auto prefix = command.value("path_prefix", std::string{});
+      nlohmann::json agents = nlohmann::json::array();
+      for (const auto &snapshot : task_manager_->list(
+               prefix.empty() ? std::optional<std::string_view>{}
+                              : std::optional<std::string_view>{prefix}))
+        agents.push_back(task_snapshot_json(snapshot));
+      response(command, true, {{"agents", std::move(agents)}});
+    } else if (type == "send_agent" || type == "follow_up_agent") {
+      if (!task_manager_) {
+        response(command, false, nullptr, "agent task manager is unavailable");
+        return;
+      }
+      const auto target = command.value("target", std::string{});
+      auto message = rpc_message(command);
+      const auto snapshot = type == "send_agent"
+                                ? task_manager_->send_message(target, message)
+                                : task_manager_->follow_up(target, message);
+      response(command, true, task_snapshot_json(snapshot));
+    } else if (type == "wait_agents") {
+      start_wait(command);
+    } else if (type == "interrupt_agent") {
+      if (!task_manager_) {
+        response(command, false, nullptr, "agent task manager is unavailable");
+        return;
+      }
+      const auto reason = rpc_interrupt_reason(
+          command.value("reason", std::string("user")));
+      if (!reason)
+        throw core::AgentTaskError(core::AgentTaskErrorKind::invalid_context,
+                                   "invalid interrupt reason");
+      response(command, true,
+               task_snapshot_json(task_manager_->interrupt(
+                   command.value("target", std::string{}), *reason)));
+    } else if (type == "close_agent") {
+      if (!task_manager_) {
+        response(command, false, nullptr, "agent task manager is unavailable");
+        return;
+      }
+      response(command, true,
+               task_snapshot_json(task_manager_->close(
+                   command.value("target", std::string{}))));
     } else if (type == "get_state") {
       const auto messages = session_.agent().state().messages();
       nlohmann::json tools = nlohmann::json::array();
@@ -229,8 +418,17 @@ void RpcMode::handle(const nlohmann::json &command) {
 }
 
 void RpcMode::stop() {
-  session_.agent().abort();
+  session_.agent().interrupt(core::TurnAbortReason::shutdown);
+  if (task_manager_)
+    task_manager_->shutdown();
   wait_for_idle();
+  std::vector<std::jthread> waits;
+  {
+    std::scoped_lock lock(wait_mutex_);
+    waits.swap(wait_threads_);
+  }
+  for (auto &wait : waits)
+    wait.request_stop();
 }
 
 void RpcMode::wait_for_idle() {
@@ -239,10 +437,10 @@ void RpcMode::wait_for_idle() {
 }
 
 int run_rpc_mode(core::AgentSession &session, std::istream &input,
-                 std::ostream &output) {
+                 std::ostream &output, core::AgentTaskManager *task_manager) {
   RpcMode mode(session, [&output](const nlohmann::json &event) {
     output << event.dump() << '\n' << std::flush;
-  });
+  }, task_manager);
   std::string line;
   while (std::getline(input, line)) {
     if (line.empty())

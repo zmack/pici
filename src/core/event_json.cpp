@@ -26,6 +26,8 @@ nlohmann::json event_to_json(const AgentEvent &event) {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<T, AgentEndEvent>) {
           data["message_count"] = value.messages.size();
+        } else if constexpr (std::is_same_v<T, TurnAbortedEvent>) {
+          data["reason"] = turn_abort_reason_to_string(value.reason);
         } else if constexpr (std::is_same_v<T, TurnEndEvent>) {
           data["message"] = message_json(value.message);
           data["tool_result_count"] = value.tool_results.size();

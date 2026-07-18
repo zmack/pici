@@ -618,6 +618,33 @@ public:
     lua_pushlightuserdata(L_, this);
     lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_add_tool, 1);
     lua_setfield(L_, -2, "add_tool");
+
+    lua_newtable(L_);
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_agents_spawn, 1);
+    lua_setfield(L_, -2, "spawn");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_agents_get, 1);
+    lua_setfield(L_, -2, "get");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_agents_list, 1);
+    lua_setfield(L_, -2, "list");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_agents_send, 1);
+    lua_setfield(L_, -2, "send");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_agents_follow_up, 1);
+    lua_setfield(L_, -2, "follow_up");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_agents_interrupt, 1);
+    lua_setfield(L_, -2, "interrupt");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_agents_wait, 1);
+    lua_setfield(L_, -2, "wait");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_agents_close, 1);
+    lua_setfield(L_, -2, "close");
+    lua_setfield(L_, -2, "agents");
     lua_setglobal(L_, "pici");
 
     if (luaL_loadfile(L_, path.c_str()) != LUA_OK) {
@@ -1080,6 +1107,98 @@ public:
     return 0;
   }
 
+  static int push_agent_binding(lua_State *L,
+                                const std::function<nlohmann::json(
+                                    const nlohmann::json &)> &fn,
+                                nlohmann::json args) {
+    if (!fn) {
+      lua_pushnil(L);
+      lua_pushstring(L, "pici.agents is not available");
+      return 2;
+    }
+    try {
+      auto result = fn(args.is_object() ? args : nlohmann::json::object());
+      if (result.contains("error")) {
+        lua_pushnil(L);
+        const auto &error = result["error"];
+        const auto message = error.is_object()
+                                 ? error.value("message", "agent task error")
+                                 : error.get<std::string>();
+        lua_pushstring(L, message.c_str());
+        return 2;
+      }
+      json_to_lua(L, result);
+      return 1;
+    } catch (const std::exception &e) {
+      lua_pushnil(L);
+      lua_pushstring(L, e.what());
+      return 2;
+    }
+  }
+
+  static nlohmann::json agent_args(lua_State *L) {
+    if (lua_istable(L, 1))
+      return lua_to_json(L, 1);
+    nlohmann::json args = nlohmann::json::object();
+    if (lua_isstring(L, 1))
+      args["target"] = lua_tostring(L, 1);
+    if (lua_isstring(L, 2))
+      args["message"] = lua_tostring(L, 2);
+    if (lua_isstring(L, 3))
+      args["reason"] = lua_tostring(L, 3);
+    return args;
+  }
+
+  static int lua_pici_agents_spawn(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->agent_bindings_.spawn,
+                              agent_args(L));
+  }
+
+  static int lua_pici_agents_get(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->agent_bindings_.get, agent_args(L));
+  }
+
+  static int lua_pici_agents_list(lua_State *L) {
+    auto *impl = impl_from(L);
+    nlohmann::json args;
+    if (lua_isstring(L, 1))
+      args = nlohmann::json{{"path_prefix", lua_tostring(L, 1)}};
+    else
+      args = agent_args(L);
+    return push_agent_binding(L, impl->agent_bindings_.list, std::move(args));
+  }
+
+  static int lua_pici_agents_send(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->agent_bindings_.send_message,
+                              agent_args(L));
+  }
+
+  static int lua_pici_agents_follow_up(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->agent_bindings_.follow_up,
+                              agent_args(L));
+  }
+
+  static int lua_pici_agents_interrupt(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->agent_bindings_.interrupt,
+                              agent_args(L));
+  }
+
+  static int lua_pici_agents_wait(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->agent_bindings_.wait, agent_args(L));
+  }
+
+  static int lua_pici_agents_close(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->agent_bindings_.close,
+                              agent_args(L));
+  }
+
   static int lua_pici_run_agent(lua_State *L) {
     auto *impl = impl_from(L);
     // run_agent_fn_ set once before calls — no lock (would deadlock from
@@ -1174,6 +1293,7 @@ public:
   void configure_info(const LuaHooks::AgentInfo &info) {
     std::scoped_lock lk(mutex_);
     run_agent_fn_ = info.run_agent;
+    agent_bindings_ = info.agents;
     storage_path_ = info.storage_path;
     load_storage();
 
@@ -1248,6 +1368,21 @@ public:
 
   // ── Inline tool support ──────────────────────────────────────────────
 
+  static int lua_tool_cancelled(lua_State *L) {
+    auto *token = static_cast<std::stop_token *>(
+        lua_touserdata(L, lua_upvalueindex(1)));
+    lua_pushboolean(L, token != nullptr && token->stop_requested());
+    return 1;
+  }
+
+  static void lua_stop_hook(lua_State *L, lua_Debug *) {
+    lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_stop_token");
+    auto *token = static_cast<std::stop_token *>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    if (token != nullptr && token->stop_requested())
+      luaL_error(L, "Tool execution cancelled");
+  }
+
   static int lua_tool_update(lua_State *L) {
     auto *callback = static_cast<ToolUpdateCallback *>(
         lua_touserdata(L, lua_upvalueindex(1)));
@@ -1278,7 +1413,10 @@ public:
 
   std::shared_ptr<ToolResult>
   execute_inline_tool(int ref, std::string_view args_json,
-                      ToolUpdateCallback on_update) {
+                      std::stop_token stop_tok, ToolUpdateCallback on_update) {
+    if (stop_tok.stop_requested())
+      return std::make_shared<LuaToolResult>(
+          "Tool execution cancelled", true);
     std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
     auto args = nlohmann::json::parse(args_json, nullptr, false);
@@ -1289,7 +1427,26 @@ public:
     lua_pushlightuserdata(L_, &on_update);
     lua_pushcclosure(L_, &LuaHooksImpl::lua_tool_update, 1);
     lua_setfield(L_, -2, "update");
-    if (lua_pcall(L_, 2, 1, 0) != LUA_OK) {
+    lua_pushlightuserdata(L_, &stop_tok);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_tool_cancelled, 1);
+    lua_setfield(L_, -2, "cancelled");
+
+    lua_pushlightuserdata(L_, &stop_tok);
+    lua_setfield(L_, LUA_REGISTRYINDEX, "pici.inline_stop_token");
+    const auto previous_hook = lua_gethook(L_);
+    const auto previous_mask = lua_gethookmask(L_);
+    const auto previous_count = lua_gethookcount(L_);
+    lua_sethook(L_, &LuaHooksImpl::lua_stop_hook, LUA_MASKCOUNT, 1000);
+    const auto call_status = lua_pcall(L_, 2, 1, 0);
+    lua_sethook(L_, previous_hook, previous_mask, previous_count);
+    lua_pushnil(L_);
+    lua_setfield(L_, LUA_REGISTRYINDEX, "pici.inline_stop_token");
+    if (stop_tok.stop_requested()) {
+      lua_pop(L_, 1);
+      return std::make_shared<LuaToolResult>(
+          "Tool execution cancelled", true);
+    }
+    if (call_status != LUA_OK) {
       std::string err = lua_tostring(L_, -1);
       lua_pop(L_, 1);
       return std::make_shared<LuaToolResult>(std::move(err), true);
@@ -1449,6 +1606,7 @@ private:
   std::vector<std::shared_ptr<const ToolDefinition>> inline_tools_;
   std::vector<LuaHooks::Command> commands_;
   LuaHooks::RunAgentFn run_agent_fn_;
+  LuaHooks::AgentBindings agent_bindings_;
   nlohmann::json storage_{nlohmann::json::object()};
   std::filesystem::path storage_path_;
   mutable std::mutex mutex_;
@@ -1461,8 +1619,10 @@ InlineLuaTool::~InlineLuaTool() {
 
 std::shared_ptr<ToolResult>
 InlineLuaTool::execute(std::string_view, std::string_view args_json,
-                       std::stop_token, ToolUpdateCallback on_update) const {
-  return impl_->execute_inline_tool(exec_ref_, args_json, std::move(on_update));
+                       std::stop_token stop_tok,
+                       ToolUpdateCallback on_update) const {
+  return impl_->execute_inline_tool(exec_ref_, args_json, stop_tok,
+                                    std::move(on_update));
 }
 
 } // namespace

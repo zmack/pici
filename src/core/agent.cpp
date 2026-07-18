@@ -238,10 +238,18 @@ void Agent::clear_follow_up_queue() {
 
 // ── Control ───────────────────────────────────────────────────────────────
 
-void Agent::abort() {
-  auto &src = state_.stop_source();
-  src.request_stop();
+void Agent::interrupt(TurnAbortReason reason) {
+  // Synchronize with begin_run(), which replaces the stop source between
+  // turns. The lock is not held while the worker executes.
+  std::scoped_lock run_lock(worker_mutex_);
+  {
+    std::scoped_lock lock(interrupt_mutex_);
+    interrupt_reason_ = reason;
+  }
+  state_.stop_source().request_stop();
 }
+
+void Agent::abort() { interrupt(TurnAbortReason::user_interrupt); }
 
 void Agent::reset() {
   state_.reset();
@@ -270,6 +278,10 @@ void Agent::begin_run() {
         "completion.");
   }
   state_.reset_stop_source();
+  {
+    std::scoped_lock lock(interrupt_mutex_);
+    interrupt_reason_.reset();
+  }
   state_.clear_error_message();
   state_.set_streaming(true);
   state_.set_complete(false);
@@ -337,6 +349,10 @@ AgentLoopConfig Agent::create_loop_config() {
   config.on_effective_context = options_.on_effective_context;
   config.transform_context = options_.transform_context;
   config.prepare_context = options_.prepare_context;
+  config.get_abort_reason = [this] {
+    std::scoped_lock lock(interrupt_mutex_);
+    return interrupt_reason_.value_or(TurnAbortReason::unknown);
+  };
   config.get_api_key = options_.get_api_key;
   config.should_stop_after_turn = options_.should_stop_after_turn;
   config.get_steering_messages = [this]() {

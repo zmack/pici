@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/agent_task.h"
 #include "core/session/agent_session.h"
 
 #include <atomic>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <vector>
 
 namespace pi::cli {
 
@@ -17,7 +19,8 @@ class RpcMode {
 public:
   using Output = std::function<void(const nlohmann::json &)>;
 
-  RpcMode(core::AgentSession &session, Output output);
+  RpcMode(core::AgentSession &session, Output output,
+          core::AgentTaskManager *task_manager = nullptr);
   ~RpcMode();
 
   RpcMode(const RpcMode &) = delete;
@@ -32,15 +35,20 @@ private:
   void response(const nlohmann::json &command, bool success,
                 nlohmann::json data = nullptr, std::string error = {}) const;
   void start_prompt(const nlohmann::json &command, std::string message);
+  void start_wait(const nlohmann::json &command);
 
   core::AgentSession &session_;
+  core::AgentTaskManager *task_manager_{nullptr};
   Output output_;
   mutable std::mutex output_mutex_;
   std::atomic<bool> run_active_{false};
   std::jthread run_thread_;
+  mutable std::mutex wait_mutex_;
+  std::vector<std::jthread> wait_threads_;
 };
 
 int run_rpc_mode(core::AgentSession &session, std::istream &input,
-                 std::ostream &output);
+                 std::ostream &output,
+                 core::AgentTaskManager *task_manager = nullptr);
 
 } // namespace pi::cli

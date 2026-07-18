@@ -83,6 +83,7 @@ enum class EventType {
   agent_end,
   turn_start,
   turn_end,
+  turn_aborted,
   message_start,
   message_update,
   message_end,
@@ -93,6 +94,17 @@ enum class EventType {
 
 std::string_view event_type_to_string(EventType type);
 
+enum class TurnAbortReason {
+  user_interrupt,
+  parent_interrupt,
+  replacement_task,
+  shutdown,
+  timeout,
+  budget,
+  unknown,
+};
+
+std::string_view turn_abort_reason_to_string(TurnAbortReason reason);
 // Machine-readable outcome for a tool execution. The legacy is_error field on
 // ToolExecutionEndEvent remains for callers that only need success/failure.
 enum class ToolExecutionStatus {
@@ -160,6 +172,16 @@ struct TurnEndEvent : EventBase {
                std::source_location loc = std::source_location::current())
       : EventBase(EventType::turn_end, loc), message(std::move(msg)),
         tool_results(std::move(results)) {}
+};
+
+struct TurnAbortedEvent : EventBase {
+  static constexpr EventType type = EventType::turn_aborted;
+  TurnAbortReason reason{TurnAbortReason::unknown};
+
+  explicit TurnAbortedEvent(
+      TurnAbortReason abort_reason = TurnAbortReason::unknown,
+      std::source_location loc = std::source_location::current())
+      : EventBase(EventType::turn_aborted, loc), reason(abort_reason) {}
 };
 
 struct MessageStartEvent : EventBase {
@@ -241,7 +263,8 @@ struct ToolExecutionEndEvent : EventBase {
 
 using AgentEvent =
     std::variant<AgentStartEvent, AgentEndEvent, TurnStartEvent, TurnEndEvent,
-                 MessageStartEvent, MessageUpdateEvent, MessageEndEvent,
+                 TurnAbortedEvent, MessageStartEvent, MessageUpdateEvent,
+                 MessageEndEvent,
                  ToolExecutionStartEvent, ToolExecutionUpdateEvent,
                  ToolExecutionEndEvent>;
 
@@ -250,6 +273,7 @@ template <typename F>
            std::is_invocable_v<F, AgentEndEvent> &&
            std::is_invocable_v<F, TurnStartEvent> &&
            std::is_invocable_v<F, TurnEndEvent> &&
+           std::is_invocable_v<F, TurnAbortedEvent> &&
            std::is_invocable_v<F, MessageStartEvent> &&
            std::is_invocable_v<F, MessageUpdateEvent> &&
            std::is_invocable_v<F, MessageEndEvent> &&
@@ -265,6 +289,7 @@ template <typename F>
            std::is_invocable_v<F, AgentEndEvent> &&
            std::is_invocable_v<F, TurnStartEvent> &&
            std::is_invocable_v<F, TurnEndEvent> &&
+           std::is_invocable_v<F, TurnAbortedEvent> &&
            std::is_invocable_v<F, MessageStartEvent> &&
            std::is_invocable_v<F, MessageUpdateEvent> &&
            std::is_invocable_v<F, MessageEndEvent> &&

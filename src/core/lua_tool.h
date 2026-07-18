@@ -130,6 +130,19 @@ struct LuaHooks {
 
   using RunAgentFn = std::function<AgentRunResult(const AgentRunConfig &)>;
 
+  // Core-owned asynchronous task operations. Each function receives a JSON
+  // request table and returns either a structured result or {error={...}}.
+  struct AgentBindings {
+    std::function<nlohmann::json(const nlohmann::json &)> spawn;
+    std::function<nlohmann::json(const nlohmann::json &)> get;
+    std::function<nlohmann::json(const nlohmann::json &)> list;
+    std::function<nlohmann::json(const nlohmann::json &)> send_message;
+    std::function<nlohmann::json(const nlohmann::json &)> follow_up;
+    std::function<nlohmann::json(const nlohmann::json &)> interrupt;
+    std::function<nlohmann::json(const nlohmann::json &)> wait;
+    std::function<nlohmann::json(const nlohmann::json &)> close;
+  };
+
   // Runtime info injected once after the parent agent is constructed.
   // Enables pici.model(), pici.tools(), pici.cwd(), pici.storage, and
   // pici.run_agent() in Lua.
@@ -142,6 +155,7 @@ struct LuaHooks {
     // Where to persist pici.storage data. Empty = in-memory only.
     std::filesystem::path storage_path;
     RunAgentFn run_agent;
+    AgentBindings agents;
   };
 
   // Call once after the parent agent and tools are fully configured.

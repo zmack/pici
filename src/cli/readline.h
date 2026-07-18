@@ -32,8 +32,9 @@ using ControlFn = std::function<void(ControlAction)>;
 // - When stdin is not a TTY (pipe/script), falls back to std::getline so
 //   automated input works normally.
 //
-// Returns nullopt on EOF (Ctrl+D on empty input) or read error.
-// Ctrl+C exits the process via SIGINT (same as before raw mode).
+// Returns nullopt on EOF (Ctrl+D on empty input) or an interrupted read.
+// Idle Ctrl+C therefore exits the interactive loop; active work consumes it
+// through the agent interrupt path.
 std::optional<std::string> readline(std::string_view prompt,
                                     const CompleteFn &complete_fn = {},
                                     const ControlFn &control_fn = {},

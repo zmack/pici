@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <csignal>
@@ -17,6 +18,7 @@
 #include <stop_token>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -33,6 +35,7 @@
 #include "cli/system_prompt.h"
 #include "cli/tree_selector.h"
 #include "core/agent.h"
+#include "core/agent_task.h"
 #include "core/agent_loop.h"
 #include "core/agent_state.h"
 #include "core/builtin_tools.h"
@@ -411,9 +414,19 @@ run_turn(core::AgentSession &session, const std::string &input,
          core::Renderer &renderer, bool verbose,
          std::shared_ptr<core::StreamDiagnostics> diagnostics) {
   VerboseRenderer vr(renderer, verbose, std::move(diagnostics));
+  std::jthread interrupt_watcher([&session](std::stop_token stop_token) {
+    while (!stop_token.stop_requested()) {
+      if (core::consume_sigint()) {
+        session.agent().interrupt(core::TurnAbortReason::user_interrupt);
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  });
   auto result = session.run_prompt(input, [&vr](const core::AgentEvent &event) {
     core::dispatch_event(event, vr);
   });
+  interrupt_watcher.request_stop();
   if (result.error && !session.agent().state().error_message())
     renderer.on_error(core::RendererErrorKind::unknown, *result.error);
   return vr.last_usage();
@@ -740,6 +753,51 @@ int cmd_run(const cli::Args &args) {
     agent.set_tools(std::move(tools));
   };
 
+  auto task_manager = std::make_shared<core::AgentTaskManager>(runtime, opts);
+  auto compat_counter = std::make_shared<std::atomic_uint64_t>(0);
+
+  auto task_error_json = [](const core::AgentTaskError &error) {
+    return nlohmann::json{{"error", {{"code", error.code()},
+                                      {"message", error.what()}}}};
+  };
+  auto exception_json = [](const std::exception &error) {
+    return nlohmann::json{{"error", {{"code", "internal"},
+                                      {"message", error.what()}}}};
+  };
+  auto snapshot_json = [](const core::AgentTaskSnapshot &snapshot) {
+    nlohmann::json value = {
+        {"id", snapshot.id},
+        {"task_path", snapshot.task_path},
+        {"task_name", snapshot.task_name},
+        {"status", core::agent_task_status_to_string(snapshot.status)},
+        {"child_count", snapshot.child_count},
+        {"queued_message_count", snapshot.queued_message_count},
+        {"generation", snapshot.generation},
+    };
+    if (snapshot.parent_id)
+      value["parent_id"] = *snapshot.parent_id;
+    else
+      value["parent_id"] = nullptr;
+    if (snapshot.result) {
+      value["result"] = {
+          {"text", snapshot.result->text},
+          {"stop_reason",
+           core::stop_reason_to_string(snapshot.result->stop_reason)},
+          {"truncated", snapshot.result->truncated},
+          {"usage", {{"input", snapshot.result->usage.input},
+                      {"output", snapshot.result->usage.output},
+                      {"total_tokens", snapshot.result->usage.total_tokens}}},
+      };
+      if (snapshot.result->error)
+        value["result"]["error"] = *snapshot.result->error;
+      else
+        value["result"]["error"] = nullptr;
+    } else {
+      value["result"] = nullptr;
+    }
+    return value;
+  };
+
   auto configure_hooks = [&]() {
     if (!hooks || !hooks->configure)
       return;
@@ -760,70 +818,209 @@ int cmd_run(const cli::Args &args) {
     info.tool_names = std::move(tool_names);
     info.cwd = std::filesystem::current_path().string();
     info.storage_path = std::move(storage_path);
-    info.run_agent = [&agent, &opts](const core::LuaHooks::AgentRunConfig &cfg)
+    info.run_agent = [task_manager, compat_counter](const core::LuaHooks::AgentRunConfig &cfg)
         -> core::LuaHooks::AgentRunResult {
-      core::Agent::Options sub_opts = opts;
-      sub_opts.before_tool_call = nullptr;
-      sub_opts.after_tool_call = nullptr;
-      sub_opts.should_stop_after_turn = nullptr;
-      sub_opts.on_effective_context = nullptr;
-      sub_opts.on_event = nullptr;
-      sub_opts.prepare_context = nullptr;
-      if (cfg.system_prompt)
-        sub_opts.system_prompt = *cfg.system_prompt;
-      if (cfg.model_id)
-        sub_opts.model.id = *cfg.model_id;
-
-      core::Agent sub(sub_opts);
-
-      if (cfg.fork_at > 0) {
-        auto msgs = agent.state().messages();
-        msgs.resize(std::min(cfg.fork_at, msgs.size()));
-        sub.state().set_messages(std::move(msgs));
-      }
-
-      if (cfg.tools.empty()) {
-        sub.set_tools(agent.state().tools());
-      } else {
-        for (const auto &t : agent.state().tools())
-          for (const auto &name : cfg.tools)
-            if (t->name() == name) {
-              sub.add_tool(t);
-              break;
-            }
-      }
-
       core::LuaHooks::AgentRunResult result;
       try {
-        auto stream = sub.prompt(cfg.prompt);
-        for (const auto &ev : stream) {
-          std::visit(
-              [&result](const auto &e) {
-                using T = std::decay_t<decltype(e)>;
-                if constexpr (std::is_same_v<T, core::MessageUpdateEvent>) {
-                  std::visit(
-                      [&result](const auto &ae) {
-                        using AE = std::decay_t<decltype(ae)>;
-                        if constexpr (std::is_same_v<
-                                          AE,
-                                          core::AssistantMessageTextDeltaEvent>)
-                          result.text += ae.delta;
-                      },
-                      e.assistant_message_event);
-                } else if constexpr (std::is_same_v<T, core::MessageEndEvent>) {
-                  if (const auto *am =
-                          std::get_if<core::AssistantMessage>(&e.message))
-                    if (am->error_message)
-                      result.error = *am->error_message;
-                }
-              },
-              ev);
+        core::SpawnAgentRequest request;
+        request.task_name =
+            "compat_" + std::to_string(compat_counter->fetch_add(1) + 1);
+        request.prompt = cfg.prompt;
+        request.system_prompt = cfg.system_prompt;
+        request.model_spec = cfg.model_id;
+        request.requested_tools = cfg.tools;
+        if (cfg.fork_at > 0) {
+          request.context.mode = core::ContextInheritanceMode::through_message;
+          request.context.through = cfg.fork_at;
         }
-      } catch (const std::exception &e) {
-        result.error = e.what();
+        auto current = task_manager->spawn(request);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(60);
+        for (;;) {
+          if (current.status == core::AgentTaskStatusKind::completed ||
+              current.status == core::AgentTaskStatusKind::errored ||
+              current.status == core::AgentTaskStatusKind::interrupted)
+            break;
+          const auto remaining = std::chrono::duration_cast<
+              std::chrono::milliseconds>(deadline -
+                                         std::chrono::steady_clock::now());
+          if (remaining <= std::chrono::milliseconds::zero()) {
+            task_manager->interrupt(current.id,
+                                    core::AgentInterruptReason::timeout);
+            result.error = "sub-agent wait timed out";
+            break;
+          }
+          core::AgentWaitRequest wait_request;
+          wait_request.targets = {current.id};
+          wait_request.after_generation = current.generation;
+          wait_request.timeout = std::min(remaining, std::chrono::milliseconds(1000));
+          auto update = task_manager->wait(wait_request);
+          if (update.timed_out)
+            continue;
+          for (const auto &changed : update.changed)
+            if (changed.id == current.id)
+              current = changed;
+        }
+        if (!result.error && current.result) {
+          result.text = current.result->text;
+          result.error = current.result->error;
+        }
+        task_manager->close(current.id);
+      } catch (const std::exception &error) {
+        result.error = error.what();
       }
       return result;
     };
+
+    auto make_message = [](const nlohmann::json &value) {
+      core::UserMessage message;
+      message.content.emplace_back(
+          core::TextContent{.text = value.value("message", std::string{})});
+      return core::Message{std::move(message)};
+    };
+    auto parse_context = [](const nlohmann::json &value,
+                            core::ContextInheritance &context) {
+      if (!value.is_object())
+        return;
+      const auto mode = value.value("mode", std::string("none"));
+      if (mode == "none")
+        context.mode = core::ContextInheritanceMode::none;
+      else if (mode == "full")
+        context.mode = core::ContextInheritanceMode::full;
+      else if (mode == "through_message")
+        context.mode = core::ContextInheritanceMode::through_message;
+      else if (mode == "recent_messages")
+        context.mode = core::ContextInheritanceMode::recent_messages;
+      else
+        throw core::AgentTaskError(core::AgentTaskErrorKind::invalid_context,
+                                   "unknown context inheritance mode");
+      if (value.contains("through"))
+        context.through = value.at("through").get<std::size_t>();
+      if (value.contains("recent_count"))
+        context.recent_count = value.at("recent_count").get<std::size_t>();
+    };
+
+    info.agents.spawn = [task_manager, snapshot_json, task_error_json,
+                         exception_json, parse_context](const nlohmann::json &v) {
+      try {
+        core::SpawnAgentRequest request;
+        request.parent_id = v.value("parent_id", std::string{});
+        request.task_name = v.value("task_name", std::string{});
+        request.prompt = v.value("message", v.value("prompt", std::string{}));
+        if (v.contains("context"))
+          parse_context(v.at("context"), request.context);
+        if (v.contains("system_prompt") && !v.at("system_prompt").is_null())
+          request.system_prompt = v.at("system_prompt").get<std::string>();
+        if (v.contains("model") && !v.at("model").is_null())
+          request.model_spec = v.at("model").get<std::string>();
+        if (v.contains("tools"))
+          request.requested_tools =
+              v.at("tools").get<std::vector<std::string>>();
+        request.allow_subagents = v.value("allow_subagents", false);
+        return snapshot_json(task_manager->spawn(request));
+      } catch (const core::AgentTaskError &error) {
+        return task_error_json(error);
+      } catch (const std::exception &error) {
+        return exception_json(error);
+      }
+    };
+    info.agents.get = [task_manager, snapshot_json](const nlohmann::json &v) {
+      try {
+        const auto target = v.value("target", v.value("id", std::string{}));
+        auto snapshot = task_manager->get(target);
+        if (!snapshot)
+          return nlohmann::json{{"error", {{"code", "not_found"},
+                                             {"message", "task not found"}}}};
+        return snapshot_json(*snapshot);
+      } catch (const std::exception &error) {
+        return nlohmann::json{{"error", {{"code", "internal"},
+                                           {"message", error.what()}}}};
+      }
+    };
+    info.agents.list = [task_manager, snapshot_json](const nlohmann::json &v) {
+      nlohmann::json values = nlohmann::json::array();
+      const auto prefix = v.value("path_prefix", std::string{});
+      for (const auto &snapshot : task_manager->list(
+               prefix.empty() ? std::optional<std::string_view>{}
+                              : std::optional<std::string_view>{prefix}))
+        values.push_back(snapshot_json(snapshot));
+      return values;
+    };
+    auto queue_binding = [task_manager, snapshot_json, task_error_json,
+                          exception_json, make_message](const nlohmann::json &v,
+                                                        bool follow_up) {
+      try {
+        const auto target = v.value("target", std::string{});
+        const auto message = make_message(v);
+        auto snapshot = follow_up ? task_manager->follow_up(target, message)
+                                  : task_manager->send_message(target, message);
+        return snapshot_json(snapshot);
+      } catch (const core::AgentTaskError &error) {
+        return task_error_json(error);
+      } catch (const std::exception &error) {
+        return exception_json(error);
+      }
+    };
+    info.agents.send_message = [queue_binding](const nlohmann::json &v) {
+      return queue_binding(v, false);
+    };
+    info.agents.follow_up = [queue_binding](const nlohmann::json &v) {
+      return queue_binding(v, true);
+    };
+    info.agents.interrupt = [task_manager, snapshot_json, task_error_json,
+                             exception_json](const nlohmann::json &v) {
+      try {
+        const auto reason = v.value("reason", std::string("parent"));
+        core::AgentInterruptReason parsed = core::AgentInterruptReason::parent;
+        if (reason == "user")
+          parsed = core::AgentInterruptReason::user;
+        else if (reason == "shutdown")
+          parsed = core::AgentInterruptReason::shutdown;
+        else if (reason == "timeout")
+          parsed = core::AgentInterruptReason::timeout;
+        return snapshot_json(task_manager->interrupt(
+            v.value("target", std::string{}), parsed));
+      } catch (const core::AgentTaskError &error) {
+        return task_error_json(error);
+      } catch (const std::exception &error) {
+        return exception_json(error);
+      }
+    };
+    info.agents.wait = [task_manager, snapshot_json, task_error_json,
+                        exception_json](const nlohmann::json &v) {
+      try {
+        core::AgentWaitRequest request;
+        if (v.contains("targets"))
+          request.targets = v.at("targets").get<std::vector<std::string>>();
+        request.after_generation = v.value("after_generation", 0ULL);
+        request.timeout = std::chrono::milliseconds(
+            v.value("timeout_ms", 30000ULL));
+        const auto result = task_manager->wait(request);
+        nlohmann::json changed = nlohmann::json::array();
+        for (const auto &snapshot : result.changed)
+          changed.push_back(snapshot_json(snapshot));
+        return nlohmann::json{{"timed_out", result.timed_out},
+                              {"caller_interrupted", result.caller_interrupted},
+                              {"generation", result.generation},
+                              {"changed", std::move(changed)}};
+      } catch (const core::AgentTaskError &error) {
+        return task_error_json(error);
+      } catch (const std::exception &error) {
+        return exception_json(error);
+      }
+    };
+    info.agents.close = [task_manager, snapshot_json, task_error_json,
+                         exception_json](const nlohmann::json &v) {
+      try {
+        return snapshot_json(
+            task_manager->close(v.value("target", std::string{})));
+      } catch (const core::AgentTaskError &error) {
+        return task_error_json(error);
+      } catch (const std::exception &error) {
+        return exception_json(error);
+      }
+    };
+
     hooks->configure(info);
   };
 
@@ -862,7 +1059,7 @@ int cmd_run(const cli::Args &args) {
   }
 
   if (args.rpc_mode)
-    return cli::run_rpc_mode(runtime, std::cin, std::cout);
+    return cli::run_rpc_mode(runtime, std::cin, std::cout, task_manager.get());
 
   auto renderer = make_renderer(args);
 
@@ -1173,8 +1370,9 @@ int cmd_run(const cli::Args &args) {
 int main(int argc, char *argv[]) noexcept {
   // Installed once, before any worker threads exist, so there is no
   // concurrent std::signal() call to race with.
-  std::signal(SIGINT,
-              [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
+  std::signal(SIGINT, [](int) {
+    pi::core::notify_sigint();
+  }); // NOLINT(concurrency-mt-unsafe)
   std::signal(SIGTERM,
               [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
 
@@ -1183,9 +1381,8 @@ int main(int argc, char *argv[]) noexcept {
 
   auto args = pi::cli::load_and_merge(argc, argv);
 
-  // Initialise OTel export if requested.  The RAII guard + atexit ensure
-  // BatchSpanProcessor is flushed before process exit (including Ctrl-C via
-  // the signal handler above which calls std::exit).
+  // Initialise OTel export if requested. The RAII guard + atexit ensure
+  // BatchSpanProcessor is flushed before normal process exit.
   struct OtelGuard {
     OtelGuard() = default;
     ~OtelGuard() { pi::core::shutdown_otel(); }

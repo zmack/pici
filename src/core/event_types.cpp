@@ -19,6 +19,8 @@ std::string_view event_type_to_string(EventType type) {
     return "turn_start";
   case EventType::turn_end:
     return "turn_end";
+  case EventType::turn_aborted:
+    return "turn_aborted";
   case EventType::message_start:
     return "message_start";
   case EventType::message_update:
@@ -31,6 +33,26 @@ std::string_view event_type_to_string(EventType type) {
     return "tool_execution_update";
   case EventType::tool_execution_end:
     return "tool_execution_end";
+  }
+  return "unknown";
+}
+
+std::string_view turn_abort_reason_to_string(TurnAbortReason reason) {
+  switch (reason) {
+  case TurnAbortReason::user_interrupt:
+    return "user_interrupt";
+  case TurnAbortReason::parent_interrupt:
+    return "parent_interrupt";
+  case TurnAbortReason::replacement_task:
+    return "replacement_task";
+  case TurnAbortReason::shutdown:
+    return "shutdown";
+  case TurnAbortReason::timeout:
+    return "timeout";
+  case TurnAbortReason::budget:
+    return "budget";
+  case TurnAbortReason::unknown:
+    return "unknown";
   }
   return "unknown";
 }
@@ -71,6 +93,9 @@ std::ostream &operator<<(std::ostream &os, const AgentEvent &event) {
         if constexpr (std::same_as<T, AgentStartEvent> ||
                       std::same_as<T, TurnStartEvent>) {
           os << "type:" << event_type_to_string(ev.type) << "}";
+        } else if constexpr (std::same_as<T, TurnAbortedEvent>) {
+          os << "type:" << event_type_to_string(ev.type)
+             << ", reason: " << turn_abort_reason_to_string(ev.reason) << "}";
         } else if constexpr (std::same_as<T, AgentEndEvent>) {
           os << "type:" << event_type_to_string(ev.type)
              << ", messages: " << ev.messages.size() << "}";
