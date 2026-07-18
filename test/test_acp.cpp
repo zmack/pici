@@ -209,6 +209,109 @@ void test_run_session(AcpFixture &fx) {
   CHECK(j2.value("session_id", "") == session_id);
 }
 
+
+void test_agent_tasks(AcpFixture &fx) {
+  auto cli = fx.client();
+  nlohmann::json body = {
+      {"task_name", "review"},
+      {"prompt", "review the change"},
+  };
+  auto spawn = cli.Post("/tasks", body.dump(), "application/json");
+  CHECK(spawn != nullptr);
+  CHECK(spawn && spawn->status == 202);
+  if (!spawn)
+    return;
+
+  auto task = nlohmann::json::parse(spawn->body);
+  const auto task_id = task.value("id", std::string{});
+  CHECK(!task_id.empty());
+  CHECK(task.value("task_path", "") == "/root/review");
+
+  auto events = cli.Get("/tasks/events?timeout_ms=0");
+  CHECK(events != nullptr);
+  if (events) {
+    CHECK(events->status == 200);
+    const auto event_body = nlohmann::json::parse(events->body);
+    CHECK(event_body["events"].is_array());
+    bool saw_spawn = false;
+    for (const auto &record : event_body["events"]) {
+      if (record.value("event", nlohmann::json::object())
+              .value("type", "") == "task.spawned" &&
+          record["event"].value("task_id", "") == task_id)
+        saw_spawn = true;
+    }
+    CHECK(saw_spawn);
+  }
+
+  auto wait_for_terminal = [&](std::uint64_t &generation) {
+    nlohmann::json current;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+      auto get = cli.Get("/tasks/" + task_id);
+      CHECK(get != nullptr);
+      if (!get)
+        return current;
+      current = nlohmann::json::parse(get->body);
+      generation = current.value("generation", generation);
+      const auto status = current.value("status", "");
+      if (status == "completed" || status == "errored" ||
+          status == "interrupted")
+        return current;
+
+      auto wait = cli.Post(
+          "/tasks/wait",
+          nlohmann::json{{"targets", {task_id}},
+                         {"after_generation", generation},
+                         {"timeout_ms", 1000}}
+              .dump(),
+          "application/json");
+      CHECK(wait != nullptr);
+      CHECK(wait && wait->status == 200);
+      if (wait && wait->status == 200) {
+        const auto changed = nlohmann::json::parse(wait->body)["changed"];
+        if (changed.is_array() && !changed.empty())
+          generation = changed[0].value("generation", generation);
+      }
+    }
+    return current;
+  };
+
+  std::uint64_t generation = task.value("generation", 0ULL);
+  auto completed = wait_for_terminal(generation);
+  const auto first_status = completed.value("status", "");
+  CHECK(first_status == "completed" || first_status == "errored" ||
+        first_status == "interrupted");
+  CHECK(completed.contains("result"));
+
+  auto follow = cli.Post(
+      "/tasks/" + task_id + "/follow-up",
+      nlohmann::json{{"message", "follow up"}}.dump(), "application/json");
+  CHECK(follow != nullptr);
+  CHECK(follow && follow->status == 202);
+  auto followed = wait_for_terminal(generation);
+  CHECK(followed.value("status", "") == "completed" ||
+        followed.value("status", "") == "errored" ||
+        followed.value("status", "") == "interrupted");
+
+  auto list = cli.Get("/tasks");
+  CHECK(list != nullptr);
+  CHECK(list && list->status == 200);
+  if (list) {
+    const auto values = nlohmann::json::parse(list->body);
+    CHECK(values.is_array());
+    bool found = false;
+    for (const auto &value : values)
+      found = found || value.value("id", "") == task_id;
+    CHECK(found);
+  }
+
+  auto close = cli.Post("/tasks/" + task_id + "/close", "{}", "application/json");
+  CHECK(close != nullptr);
+  CHECK(close && close->status == 200);
+  auto gone = cli.Get("/tasks/" + task_id);
+  CHECK(gone != nullptr);
+  CHECK(gone && gone->status == 404);
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -227,6 +330,7 @@ int main() {
   test_run_sync(fx);
   test_run_streaming(fx);
   test_run_session(fx);
+  test_agent_tasks(fx);
 
   std::cout << "\n========================================\n"
             << "  Tests: " << tests::total  << " total, "

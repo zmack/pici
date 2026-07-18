@@ -1,6 +1,9 @@
 #include "acp/server.h"
 #include "acp/handlers.h"
+#include "acp/task_events.h"
 #include "acp/types.h"
+#include "core/agent_task.h"
+#include "core/session/agent_session.h"
 #include "core/session/session_id.h"
 #include "core/session/session_store.h"
 #include "nlohmann/json_fwd.hpp"
@@ -50,7 +53,19 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
     return new httplib::ThreadPool(static_cast<std::size_t>(config.threads));
   };
 
-  register_routes(svr, config, sessions);
+  auto task_root = std::make_shared<core::AgentSession>(
+      core::AgentSession::Config{.agent_options = config.agent_opts,
+                                 .tools = config.tools,
+                                 .session_store = sessions,
+                                 .sandbox_policy = config.sandbox_policy});
+  auto task_events = std::make_shared<TaskEventHub>();
+  auto task_manager = std::make_shared<core::AgentTaskManager>(
+      *task_root, config.agent_opts, core::AgentTaskManager::Limits{},
+      [task_events](const core::AgentTaskEvent &event) {
+        task_events->publish(event);
+      });
+
+  register_routes(svr, config, sessions, task_manager, task_events);
 
   // Determine listen address
   const char *host = "0.0.0.0";

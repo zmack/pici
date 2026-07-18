@@ -289,6 +289,21 @@ The initial command set is `prompt`, `steer`, `follow_up`, `abort`,
 thinking, tool-call, and tool-execution updates. A run ends with either
 `run.completed` or `run.failed`.
 
+### ACP task control
+
+pi-acp owns one asynchronous task manager shared by its HTTP routes. Child
+tasks are controlled through:
+
+- POST /tasks to spawn;
+- GET /tasks and GET /tasks/:id to inspect;
+- POST /tasks/wait for bounded status waits;
+- POST /tasks/:id/message and /follow-up;
+- POST /tasks/:id/interrupt and /close.
+
+GET /tasks/events?after_generation=N&timeout_ms=... returns retained lifecycle
+events. Add stream=1 for an SSE stream. Child agents inherit only the
+currently certified read-only built-in tools.
+
 The default configuration keeps tests enabled, but OpenTelemetry API
 instrumentation is off by default because it pulls in a large vendored target
 graph.  Enable it explicitly when working on tracing:

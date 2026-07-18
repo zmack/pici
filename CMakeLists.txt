@@ -548,6 +548,7 @@ add_executable(pi-acp
     src/acp/server.cpp
     src/acp/types.cpp
     src/acp/sse.cpp
+    src/acp/task_events.cpp
     src/acp/handlers.cpp
     src/cli/args.cpp
     src/cli/config.cpp
@@ -634,7 +635,7 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-acp PRIVATE pi-core pi-http httplib::httplib)
     target_sources(test-acp PRIVATE
         src/acp/server.cpp src/acp/handlers.cpp src/acp/types.cpp
-        src/acp/sse.cpp)
+        src/acp/sse.cpp src/acp/task_events.cpp)
     add_test(NAME test-acp COMMAND test-acp)
 endif()
 
