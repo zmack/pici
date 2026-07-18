@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/agent.h"
 #include "core/event_types.h"
 #include "core/session/agent_session.h"
 
@@ -19,6 +20,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace pi::core {
@@ -194,7 +196,7 @@ public:
   AgentTaskManager(AgentSession &root, Agent::Options child_options);
   AgentTaskManager(AgentSession &root, Agent::Options child_options,
                    Limits limits, EventCallback on_event = {});
-  ~AgentTaskManager();
+  ~AgentTaskManager() noexcept;
 
   AgentTaskManager(const AgentTaskManager &) = delete;
   AgentTaskManager &operator=(const AgentTaskManager &) = delete;
@@ -206,7 +208,8 @@ public:
   list(std::optional<std::string_view> task_path_prefix = {}) const;
 
   AgentTaskSnapshot send_message(const AgentTaskId &target, Message message);
-  AgentTaskSnapshot follow_up(const AgentTaskId &target, Message message);
+  AgentTaskSnapshot follow_up(const AgentTaskId &target,
+                              const Message &message);
   AgentTaskSnapshot interrupt(const AgentTaskId &target,
                               AgentInterruptReason reason);
   AgentTaskSnapshot close(const AgentTaskId &target);
@@ -239,17 +242,18 @@ private:
   std::stop_source shutdown_source_;
 
   std::shared_ptr<Task> find_task_locked(const AgentTaskId &target) const;
-  AgentTaskSnapshot snapshot(const std::shared_ptr<Task> &task) const;
+  static AgentTaskSnapshot snapshot(const std::shared_ptr<Task> &task);
   void touch_locked(const std::shared_ptr<Task> &task);
-  void emit(AgentTaskEvent event) const;
-  void run_task(const std::shared_ptr<Task> &task, std::stop_token stop_token);
+  void emit(const AgentTaskEvent &event) const;
+  void run_task(const std::shared_ptr<Task> &task,
+                const std::stop_token &stop_token);
   void execute_work(const std::shared_ptr<Task> &task, std::string prompt,
                     AgentTaskResult &result, bool &aborted);
   std::vector<Message> inherit_context(const AgentContext &parent,
                                        const ContextInheritance &request) const;
-  std::vector<std::shared_ptr<const ToolDefinition>>
+  static std::vector<std::shared_ptr<const ToolDefinition>>
   inherit_tools(const AgentContext &parent,
-                const std::vector<std::string> &requested) const;
+                const std::vector<std::string> &requested);
   std::shared_ptr<Task> make_task(const SpawnAgentRequest &request,
                                   const std::shared_ptr<Task> &parent,
                                   std::vector<Message> context);

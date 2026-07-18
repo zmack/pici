@@ -18,6 +18,7 @@ extern "C" {
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -1106,7 +1107,7 @@ public:
   static int push_agent_binding(
       lua_State *L,
       const std::function<nlohmann::json(const nlohmann::json &)> &fn,
-      nlohmann::json args) {
+      const nlohmann::json &args) {
     if (!fn) {
       lua_pushnil(L);
       lua_pushstring(L, "pici.agents is not available");
@@ -1136,11 +1137,11 @@ public:
     if (lua_istable(L, 1))
       return lua_to_json(L, 1);
     nlohmann::json args = nlohmann::json::object();
-    if (lua_isstring(L, 1))
+    if (lua_isstring(L, 1) != 0)
       args["target"] = lua_tostring(L, 1);
-    if (lua_isstring(L, 2))
+    if (lua_isstring(L, 2) != 0)
       args["message"] = lua_tostring(L, 2);
-    if (lua_isstring(L, 3))
+    if (lua_isstring(L, 3) != 0)
       args["reason"] = lua_tostring(L, 3);
     return args;
   }
@@ -1158,11 +1159,11 @@ public:
   static int lua_pici_agents_list(lua_State *L) {
     auto *impl = impl_from(L);
     nlohmann::json args;
-    if (lua_isstring(L, 1))
+    if (lua_isstring(L, 1) != 0)
       args = nlohmann::json{{"path_prefix", lua_tostring(L, 1)}};
     else
       args = agent_args(L);
-    return push_agent_binding(L, impl->agent_bindings_.list, std::move(args));
+    return push_agent_binding(L, impl->agent_bindings_.list, args);
   }
 
   static int lua_pici_agents_send(lua_State *L) {
@@ -1361,7 +1362,8 @@ public:
   static int lua_tool_cancelled(lua_State *L) {
     auto *token =
         static_cast<std::stop_token *>(lua_touserdata(L, lua_upvalueindex(1)));
-    lua_pushboolean(L, token != nullptr && token->stop_requested());
+    lua_pushboolean(
+        L, static_cast<int>(token != nullptr && token->stop_requested()));
     return 1;
   }
 

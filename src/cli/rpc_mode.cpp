@@ -1,5 +1,6 @@
 #include "cli/rpc_mode.h"
 
+#include "core/agent_task.h"
 #include "core/event_json.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
@@ -8,14 +9,15 @@
 #include "core/session/session_record.h"
 
 #include <chrono>
+#include <cstddef>
 #include <exception>
 #include <iostream>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -172,7 +174,7 @@ void RpcMode::start_prompt(const nlohmann::json &command, std::string message) {
 }
 
 void RpcMode::start_wait(const nlohmann::json &command) {
-  if (!task_manager_) {
+  if (task_manager_ == nullptr) {
     response(command, false, nullptr, "agent task manager is unavailable");
     return;
   }
@@ -184,7 +186,7 @@ void RpcMode::start_wait(const nlohmann::json &command) {
       std::chrono::milliseconds(command.value("timeout_ms", 30000ULL));
   std::scoped_lock lock(wait_mutex_);
   wait_threads_.emplace_back(
-      [this, command, request](std::stop_token stop_token) {
+      [this, command, request](const std::stop_token &stop_token) {
         try {
           const auto result = task_manager_->wait(request, stop_token);
           nlohmann::json changed = nlohmann::json::array();
@@ -240,7 +242,7 @@ void RpcMode::handle(const nlohmann::json &command) {
       response(command, true,
                {{"reason", command.value("reason", std::string("user"))}});
     } else if (type == "spawn_agent") {
-      if (!task_manager_) {
+      if (task_manager_ == nullptr) {
         response(command, false, nullptr, "agent task manager is unavailable");
         return;
       }
@@ -273,7 +275,7 @@ void RpcMode::handle(const nlohmann::json &command) {
       response(command, true,
                task_snapshot_json(task_manager_->spawn(request)));
     } else if (type == "list_agents") {
-      if (!task_manager_) {
+      if (task_manager_ == nullptr) {
         response(command, false, nullptr, "agent task manager is unavailable");
         return;
       }
@@ -285,7 +287,7 @@ void RpcMode::handle(const nlohmann::json &command) {
         agents.push_back(task_snapshot_json(snapshot));
       response(command, true, {{"agents", std::move(agents)}});
     } else if (type == "send_agent" || type == "follow_up_agent") {
-      if (!task_manager_) {
+      if (task_manager_ == nullptr) {
         response(command, false, nullptr, "agent task manager is unavailable");
         return;
       }
@@ -298,7 +300,7 @@ void RpcMode::handle(const nlohmann::json &command) {
     } else if (type == "wait_agents") {
       start_wait(command);
     } else if (type == "interrupt_agent") {
-      if (!task_manager_) {
+      if (task_manager_ == nullptr) {
         response(command, false, nullptr, "agent task manager is unavailable");
         return;
       }
@@ -311,7 +313,7 @@ void RpcMode::handle(const nlohmann::json &command) {
                task_snapshot_json(task_manager_->interrupt(
                    command.value("target", std::string{}), *reason)));
     } else if (type == "close_agent") {
-      if (!task_manager_) {
+      if (task_manager_ == nullptr) {
         response(command, false, nullptr, "agent task manager is unavailable");
         return;
       }
@@ -421,7 +423,7 @@ void RpcMode::handle(const nlohmann::json &command) {
 
 void RpcMode::stop() {
   session_.agent().interrupt(core::TurnAbortReason::shutdown);
-  if (task_manager_)
+  if (task_manager_ != nullptr)
     task_manager_->shutdown();
   wait_for_idle();
   std::vector<std::jthread> waits;

@@ -1,16 +1,32 @@
 #include "core/agent_task.h"
 
+#include "core/agent.h"
+#include "core/agent_state.h"
+#include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/models.h"
+#include "core/session/agent_session.h"
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <exception>
-#include <ranges>
-#include <stdexcept>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <thread>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace pi::core {
 
@@ -78,7 +94,7 @@ std::vector<Message> normalize_context(std::vector<Message> messages,
   // provider context. Drop that incomplete final exchange.
   while (!result.empty()) {
     const auto *assistant = std::get_if<AssistantMessage>(&result.back());
-    if (!assistant)
+    if (assistant == nullptr)
       break;
     std::set<std::string> ids;
     for (const auto &block : assistant->content)
@@ -238,7 +254,13 @@ AgentTaskManager::AgentTaskManager(AgentSession &root,
   tasks_.emplace(root_task->id, std::move(root_task));
 }
 
-AgentTaskManager::~AgentTaskManager() { shutdown(); }
+AgentTaskManager::~AgentTaskManager() noexcept {
+  try {
+    shutdown();
+  } catch (...) {
+    std::terminate();
+  }
+}
 
 std::shared_ptr<AgentTaskManager::Task>
 AgentTaskManager::find_task_locked(const AgentTaskId &target) const {
@@ -252,7 +274,7 @@ AgentTaskManager::find_task_locked(const AgentTaskId &target) const {
 }
 
 AgentTaskSnapshot
-AgentTaskManager::snapshot(const std::shared_ptr<Task> &task) const {
+AgentTaskManager::snapshot(const std::shared_ptr<Task> &task) {
   std::scoped_lock lock(task->mutex);
   AgentTaskSnapshot result;
   result.id = task->id;
@@ -273,20 +295,21 @@ void AgentTaskManager::touch_locked(const std::shared_ptr<Task> &task) {
   changed_.notify_all();
 }
 
-void AgentTaskManager::emit(AgentTaskEvent event) const {
+void AgentTaskManager::emit(const AgentTaskEvent &event) const {
   if (!on_event_)
     return;
   try {
     on_event_(event);
   } catch (...) {
     // Observers are not allowed to affect lifecycle ownership.
+    static_cast<void>(0);
   }
 }
 
 bool AgentTaskManager::valid_task_name(std::string_view name) {
   if (name.empty() || name.size() > 64)
     return false;
-  if (!std::isalnum(static_cast<unsigned char>(name.front())) &&
+  if (std::isalnum(static_cast<unsigned char>(name.front())) == 0 &&
       name.front() != '_' && name.front() != '-')
     return false;
   return std::ranges::all_of(name, [](char c) {
@@ -296,9 +319,8 @@ bool AgentTaskManager::valid_task_name(std::string_view name) {
 }
 
 std::vector<std::shared_ptr<const ToolDefinition>>
-AgentTaskManager::inherit_tools(
-    const AgentContext &parent,
-    const std::vector<std::string> &requested) const {
+AgentTaskManager::inherit_tools(const AgentContext &parent,
+                                const std::vector<std::string> &requested) {
   std::vector<std::shared_ptr<const ToolDefinition>> safe;
   for (const auto &tool : parent.tools)
     if (is_child_safe_tool(tool))
@@ -336,14 +358,18 @@ AgentTaskManager::inherit_context(const AgentContext &parent,
     const auto count =
         std::min(request.through.value_or(parent.messages.size()),
                  parent.messages.size());
-    messages.assign(parent.messages.begin(), parent.messages.begin() + count);
+    const auto offset =
+        static_cast<std::vector<Message>::difference_type>(count);
+    messages.assign(parent.messages.begin(), parent.messages.begin() + offset);
     break;
   }
   case ContextInheritanceMode::recent_messages: {
     const auto count = request.recent_count.value_or(16);
     const auto begin =
         parent.messages.size() - std::min(count, parent.messages.size());
-    messages.assign(parent.messages.begin() + begin, parent.messages.end());
+    const auto offset =
+        static_cast<std::vector<Message>::difference_type>(begin);
+    messages.assign(parent.messages.begin() + offset, parent.messages.end());
     break;
   }
   }
@@ -463,9 +489,10 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
   }
 
   try {
-    task->runner = std::jthread([this, task](std::stop_token stop_token) {
-      run_task(task, stop_token);
-    });
+    task->runner =
+        std::jthread([this, task](const std::stop_token &stop_token) {
+          run_task(task, stop_token);
+        });
   } catch (...) {
     std::scoped_lock lock(mutex_);
     if (auto parent = find_task_locked(task->parent_id.value_or("")))
@@ -478,8 +505,10 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
                          "failed to start child task runner");
   }
 
-  emit(AgentTaskSpawnedEvent{task->id, task->task_path, task->parent_id,
-                             task->task_name});
+  emit(AgentTaskSpawnedEvent{.id = task->id,
+                             .task_path = task->task_path,
+                             .parent_id = task->parent_id,
+                             .task_name = task->task_name});
   return result;
 }
 
@@ -491,7 +520,7 @@ void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
   std::optional<AssistantMessage> final_message;
   auto callback = [this, task, &result, &aborted, &output_bytes,
                    &saw_text_delta, &final_message](const AgentEvent &event) {
-    emit(ChildAgentEvent{task->id, event});
+    emit(ChildAgentEvent{.task_id = task->id, .event = event});
     if (std::holds_alternative<TurnAbortedEvent>(event)) {
       aborted = true;
       return;
@@ -535,7 +564,7 @@ void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
 }
 
 void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
-                                std::stop_token stop_token) {
+                                const std::stop_token &stop_token) {
   std::stop_callback cancel_callback(stop_token, [task] {
     if (task->session)
       task->session->agent().interrupt(TurnAbortReason::shutdown);
@@ -579,8 +608,10 @@ void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
       }
       if (should_requeue || reserved) {
         if (reserved && previous != AgentTaskStatusKind::running)
-          emit(AgentTaskStatusChangedEvent{task->id, previous,
-                                           AgentTaskStatusKind::running});
+          emit(AgentTaskStatusChangedEvent{.id = task->id,
+                                           .previous = previous,
+                                           .current =
+                                               AgentTaskStatusKind::running});
         break;
       }
       std::unique_lock lock(mutex_);
@@ -593,8 +624,8 @@ void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
     bool aborted = false;
     execute_work(task, std::move(work.prompt), result, aborted);
 
-    AgentTaskStatusKind previous;
-    AgentTaskStatusKind current;
+    AgentTaskStatusKind previous{AgentTaskStatusKind::pending_init};
+    AgentTaskStatusKind current{AgentTaskStatusKind::pending_init};
     bool close_requested = false;
     {
       std::scoped_lock lock(mutex_, task->mutex);
@@ -615,7 +646,8 @@ void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
       task->status = current;
       touch_locked(task);
     }
-    emit(AgentTaskStatusChangedEvent{task->id, previous, current});
+    emit(AgentTaskStatusChangedEvent{
+        .id = task->id, .previous = previous, .current = current});
 
     if (close_requested || stop_token.stop_requested())
       break;
@@ -634,8 +666,9 @@ void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
     }
   }
   if (emit_closing)
-    emit(AgentTaskStatusChangedEvent{task->id, previous,
-                                     AgentTaskStatusKind::closing});
+    emit(AgentTaskStatusChangedEvent{.id = task->id,
+                                     .previous = previous,
+                                     .current = AgentTaskStatusKind::closing});
 }
 
 std::optional<AgentTaskSnapshot>
@@ -683,12 +716,12 @@ AgentTaskSnapshot AgentTaskManager::send_message(const AgentTaskId &target,
     touch_locked(task);
   }
   task->changed.notify_all();
-  emit(AgentTaskMessageQueuedEvent{task->id, false});
+  emit(AgentTaskMessageQueuedEvent{.id = task->id, .triggers_turn = false});
   return snapshot(task);
 }
 
 AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
-                                              Message message) {
+                                              const Message &message) {
   const auto text = message_text(message);
   if (text.empty())
     throw AgentTaskError(AgentTaskErrorKind::invalid_context,
@@ -738,16 +771,18 @@ AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
   }
   task->changed.notify_all();
   if (queued_new_turn)
-    emit(AgentTaskStatusChangedEvent{task->id, previous_status,
-                                     AgentTaskStatusKind::pending_init});
-  emit(AgentTaskMessageQueuedEvent{task->id, true});
+    emit(AgentTaskStatusChangedEvent{.id = task->id,
+                                     .previous = previous_status,
+                                     .current =
+                                         AgentTaskStatusKind::pending_init});
+  emit(AgentTaskMessageQueuedEvent{.id = task->id, .triggers_turn = true});
   return snapshot(task);
 }
 
 AgentTaskSnapshot AgentTaskManager::interrupt(const AgentTaskId &target,
                                               AgentInterruptReason reason) {
   std::shared_ptr<Task> task;
-  AgentTaskStatusKind previous;
+  AgentTaskStatusKind previous{AgentTaskStatusKind::pending_init};
   {
     std::scoped_lock lock(mutex_);
     task = find_task_locked(target);
@@ -762,7 +797,7 @@ AgentTaskSnapshot AgentTaskManager::interrupt(const AgentTaskId &target,
   }
   if (previous == AgentTaskStatusKind::running) {
     task->session->agent().interrupt(turn_abort_reason(reason));
-    emit(AgentTaskInterruptedEvent{task->id, reason});
+    emit(AgentTaskInterruptedEvent{.id = task->id, .reason = reason});
   }
   return snapshot(task);
 }
@@ -915,7 +950,7 @@ std::size_t AgentTaskManager::active_executions() const {
 
 std::size_t AgentTaskManager::resident_tasks() const {
   std::scoped_lock lock(mutex_);
-  return tasks_.size() > 0 ? tasks_.size() - 1 : 0;
+  return !tasks_.empty() ? tasks_.size() - 1 : 0;
 }
 
 } // namespace pi::core

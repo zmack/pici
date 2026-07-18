@@ -20,7 +20,6 @@
 #include <string>
 #include <system_error>
 #include <thread>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -505,7 +504,7 @@ run_turn(core::AgentSession &session, const std::string &input,
          core::Renderer &renderer, bool verbose,
          std::shared_ptr<core::StreamDiagnostics> diagnostics) {
   VerboseRenderer vr(renderer, verbose, std::move(diagnostics));
-  std::jthread interrupt_watcher([&session](std::stop_token stop_token) {
+  std::jthread interrupt_watcher([&session](const std::stop_token &stop_token) {
     while (!stop_token.stop_requested()) {
       if (core::consume_sigint()) {
         session.agent().interrupt(core::TurnAbortReason::user_interrupt);
