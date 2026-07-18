@@ -31,8 +31,9 @@ extern "C" {
 #include <system_error>
 #include <vector>
 
-#include "core/message_types.h"
 #include "core/event_json.h"
+#include "core/event_types.h"
+#include "core/message_types.h"
 
 namespace pi::core {
 namespace {
@@ -185,8 +186,8 @@ private:
 };
 
 int lua_tool_update_callback(lua_State *L) {
-  auto *callback = static_cast<ToolUpdateCallback *>(
-      lua_touserdata(L, lua_upvalueindex(1)));
+  auto *callback =
+      static_cast<ToolUpdateCallback *>(lua_touserdata(L, lua_upvalueindex(1)));
   if (callback == nullptr || !*callback)
     return 0;
 
@@ -195,8 +196,8 @@ int lua_tool_update_callback(lua_State *L) {
   bool is_error = false;
   if (value.is_string()) {
     content = value.get<std::string>();
-  } else if (value.is_object() && value.value("content", nlohmann::json{})
-                                      .is_string()) {
+  } else if (value.is_object() &&
+             value.value("content", nlohmann::json{}).is_string()) {
     content = value["content"].get<std::string>();
     is_error = value.value("is_error", false);
   } else {
@@ -205,7 +206,8 @@ int lua_tool_update_callback(lua_State *L) {
   try {
     (*callback)(std::make_shared<LuaToolResult>(std::move(content), is_error));
   } catch (...) {
-    // Never let a C++ observer exception cross the Lua C ABI boundary.
+    static_cast<void>(
+        0); // Never let a C++ observer exception cross the Lua C ABI boundary.
   }
   return 0;
 }
@@ -326,10 +328,9 @@ public:
   std::string_view source_path() const override { return source_path_; }
   ToolSchema &schema() const override { return *schema_; }
 
-  std::shared_ptr<ToolResult> execute(std::string_view,
-                                      std::string_view args_json,
-                                      std::stop_token,
-                                      ToolUpdateCallback on_update) const override {
+  std::shared_ptr<ToolResult>
+  execute(std::string_view, std::string_view args_json, std::stop_token,
+          ToolUpdateCallback on_update) const override {
     std::scoped_lock lock(mutex_);
 
     lua_rawgeti(L_, LUA_REGISTRYINDEX, execute_ref_);
@@ -585,10 +586,9 @@ public:
   std::string_view source_path() const override { return source_; }
   ToolSchema &schema() const override { return *schema_; }
 
-  std::shared_ptr<ToolResult> execute(std::string_view call_id,
-                                      std::string_view args_json,
-                                      std::stop_token st,
-                                      ToolUpdateCallback cb) const override;
+  std::shared_ptr<ToolResult>
+  execute(std::string_view call_id, std::string_view args_json,
+          std::stop_token st, ToolUpdateCallback on_update) const override;
 
 private:
   std::shared_ptr<LuaHooksImpl> impl_;
@@ -724,9 +724,7 @@ public:
   const std::string &source_path() const { return source_path_; }
   bool has_before() const { return before_ref_ != LUA_NOREF; }
   bool has_on_event() const { return on_event_ref_ != LUA_NOREF; }
-  bool has_prepare_context() const {
-    return prepare_context_ref_ != LUA_NOREF;
-  }
+  bool has_prepare_context() const { return prepare_context_ref_ != LUA_NOREF; }
   bool has_after() const { return after_ref_ != LUA_NOREF; }
   bool has_stop_after() const { return stop_after_ref_ != LUA_NOREF; }
   bool has_command() const { return command_ref_ != LUA_NOREF; }
@@ -855,7 +853,7 @@ public:
   std::optional<std::vector<Message>>
   call_prepare_context(const AgentContext &context,
                        std::size_t estimated_tokens,
-                       std::stop_token stop_tok) {
+                       const std::stop_token &stop_tok) {
     std::scoped_lock lk(mutex_);
     if (stop_tok.stop_requested())
       return std::nullopt;
@@ -923,8 +921,7 @@ public:
       std::string error = lua_tostring(L_, -1);
       lua_pop(L_, 1);
       return BeforeToolCallResult{
-          .block = true,
-          .reason = "before_tool_call hook failed: " + error};
+          .block = true, .reason = "before_tool_call hook failed: " + error};
     }
 
     std::optional<BeforeToolCallResult> result;
@@ -1273,7 +1270,8 @@ public:
       (*callback)(
           std::make_shared<LuaToolResult>(std::move(content), is_error));
     } catch (...) {
-      // Never let a C++ observer exception cross the Lua C ABI boundary.
+      static_cast<void>(0); // Never let a C++ observer exception cross the Lua
+                            // C ABI boundary.
     }
     return 0;
   }
@@ -1461,12 +1459,10 @@ InlineLuaTool::~InlineLuaTool() {
     impl_->unref_tool(exec_ref_);
 }
 
-std::shared_ptr<ToolResult> InlineLuaTool::execute(std::string_view,
-                                                   std::string_view args_json,
-                                                   std::stop_token,
-                                                   ToolUpdateCallback on_update) const {
-  return impl_->execute_inline_tool(exec_ref_, args_json,
-                                    std::move(on_update));
+std::shared_ptr<ToolResult>
+InlineLuaTool::execute(std::string_view, std::string_view args_json,
+                       std::stop_token, ToolUpdateCallback on_update) const {
+  return impl_->execute_inline_tool(exec_ref_, args_json, std::move(on_update));
 }
 
 } // namespace
@@ -1515,10 +1511,9 @@ std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
   if (impl->has_prepare_context()) {
     hooks->prepare_context =
         [impl](const AgentContext &context, std::size_t estimated_tokens,
-               std::stop_token stop_tok) {
-          return impl->call_prepare_context(context, estimated_tokens,
-                                            std::move(stop_tok));
-        };
+               std::stop_token
+                   stop_tok) // NOLINT(performance-unnecessary-value-param)
+    { return impl->call_prepare_context(context, estimated_tokens, stop_tok); };
   }
   if (impl->has_after()) {
     hooks->after_tool_call =
@@ -1736,17 +1731,18 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   }
 
   // prepare_context — first non-null replacement wins.
-  if (std::ranges::any_of(
-          list, [](const auto &h) { return !!h->prepare_context; })) {
+  if (std::ranges::any_of(list,
+                          [](const auto &h) { return !!h->prepare_context; })) {
     out->prepare_context =
         [list](const AgentContext &context, std::size_t estimated_tokens,
-               std::stop_token stop_tok)
+               std::stop_token
+                   stop_tok) // NOLINT(performance-unnecessary-value-param)
         -> std::optional<std::vector<Message>> {
       for (const auto &h : list) {
         if (!h->prepare_context)
           continue;
-        if (auto result = h->prepare_context(context, estimated_tokens,
-                                             stop_tok))
+        if (auto result =
+                h->prepare_context(context, estimated_tokens, stop_tok))
           return result;
       }
       return std::nullopt;

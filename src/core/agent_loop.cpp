@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <future>
 #include <map>
@@ -49,7 +50,7 @@ std::size_t estimate_context_tokens(const AgentContext &context) {
              tool->schema().serialize().size();
   // A conservative character-based estimate keeps the harness provider
   // agnostic. Provider-specific tokenizers can replace this later.
-  return (bytes + 3) / 4 + context.messages.size() * 8;
+  return ((bytes + 3) / 4) + (context.messages.size() * 8);
 }
 
 // Helper: extract ToolCalls from a content vector
@@ -263,18 +264,18 @@ prepare_tool_call(const AgentContext &context,
                                  .status = ToolExecutionStatus::blocked};
       }
     } catch (const std::exception &e) {
-      return FinalizedToolCall{.tool_call = prepared_tc,
-                               .result = make_error_tool_result(
-                                   std::string("Tool permission hook failed: ") +
-                                   e.what()),
-                               .is_error = true,
-                               .status = ToolExecutionStatus::blocked};
-    } catch (...) {
       return FinalizedToolCall{
           .tool_call = prepared_tc,
-          .result = make_error_tool_result("Unknown tool permission hook error"),
+          .result = make_error_tool_result(
+              std::string("Tool permission hook failed: ") + e.what()),
           .is_error = true,
           .status = ToolExecutionStatus::blocked};
+    } catch (...) {
+      return FinalizedToolCall{.tool_call = prepared_tc,
+                               .result = make_error_tool_result(
+                                   "Unknown tool permission hook error"),
+                               .is_error = true,
+                               .status = ToolExecutionStatus::blocked};
     }
   }
 
@@ -334,11 +335,10 @@ finalize_tool_call(const AgentContext &context,
   if (status == ToolExecutionStatus::success && is_error)
     status = ToolExecutionStatus::error;
 
-  return FinalizedToolCall{
-      .tool_call = tc,
-      .result = std::move(tool_result),
-      .is_error = is_error,
-      .status = status};
+  return FinalizedToolCall{.tool_call = tc,
+                           .result = std::move(tool_result),
+                           .is_error = is_error,
+                           .status = status};
 }
 
 struct ToolExecutionOutcome {
@@ -818,10 +818,9 @@ ToolCallResult execute_tool_calls_parallel(
     auto msg = make_tool_result_message(finalized.tool_call, finalized.result);
     emit(MessageStartEvent(msg, std::source_location::current()));
     emit(MessageEndEvent(msg, std::source_location::current()));
-    emit(ToolExecutionEndEvent(finalized.tool_call.id, finalized.tool_call.name,
-                               finalized.result, finalized.is_error,
-                               finalized.status,
-                               std::source_location::current()));
+    emit(ToolExecutionEndEvent(
+        finalized.tool_call.id, finalized.tool_call.name, finalized.result,
+        finalized.is_error, finalized.status, std::source_location::current()));
     result.messages.push_back(std::move(msg));
   }
 
@@ -872,9 +871,7 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
                                 const std::stop_token &stop_tok) {
   std::uint64_t sequence = 0;
   auto publish = [&](AgentEvent event) {
-    std::visit(
-        [&](auto &value) { value.sequence = ++sequence; },
-        event);
+    std::visit([&](auto &value) { value.sequence = ++sequence; }, event);
     emit(event);
     push(std::move(event));
   };
@@ -1070,9 +1067,7 @@ void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
 
     std::uint64_t sequence = 0;
     auto publish_failure_event = [&](AgentEvent event) {
-      std::visit(
-          [&](auto &value) { value.sequence = ++sequence; },
-          event);
+      std::visit([&](auto &value) { value.sequence = ++sequence; }, event);
       try {
         emit(event);
       } catch (...) {

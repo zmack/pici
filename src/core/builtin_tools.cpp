@@ -1112,9 +1112,9 @@ public:
             R"json({"type":"object","properties":{"command":{"type":"string","description":"Bash command to execute"},"timeout":{"type":"number","description":"Timeout in seconds (optional)"}},"required":["command"],"additionalProperties":false})json",
             cwd) {}
 
-  std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
-                                      std::stop_token stop_tok,
-                                      ToolUpdateCallback on_update) const override {
+  std::shared_ptr<ToolResult>
+  execute(std::string_view, std::string_view args, std::stop_token stop_tok,
+          ToolUpdateCallback on_update) const override {
     try {
       const auto json = parse_args(args);
       const auto command = json.value("command", std::string{});
@@ -1263,9 +1263,10 @@ public:
                   std::to_string(timeout_secs) + "s]";
         return std::make_shared<TextToolResult>(output, true);
       }
-      if (status != 0 && WIFEXITED(status)) {
-        output += "\n\nCommand exited with code " +
-                  std::to_string(WEXITSTATUS(status));
+      if (status != 0 && WIFEXITED(status)) { // NOLINT(misc-include-cleaner)
+        output +=
+            "\n\nCommand exited with code " +
+            std::to_string(WEXITSTATUS(status)); // NOLINT(misc-include-cleaner)
         return std::make_shared<TextToolResult>(output, true);
       }
       return std::make_shared<TextToolResult>(output);

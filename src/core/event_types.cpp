@@ -35,8 +35,7 @@ std::string_view event_type_to_string(EventType type) {
   return "unknown";
 }
 
-std::string_view
-tool_execution_status_to_string(ToolExecutionStatus status) {
+std::string_view tool_execution_status_to_string(ToolExecutionStatus status) {
   switch (status) {
   case ToolExecutionStatus::success:
     return "success";

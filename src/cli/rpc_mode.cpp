@@ -1,7 +1,7 @@
 #include "cli/rpc_mode.h"
 
-#include "core/event_types.h"
 #include "core/event_json.h"
+#include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
@@ -17,7 +17,6 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
-#include <variant>
 #include <vector>
 
 namespace pi::cli {

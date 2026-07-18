@@ -1,14 +1,19 @@
 #include "core/event_json.h"
 
+#include "core/event_types.h"
 #include "core/message_types.h"
 
+#include <nlohmann/json.hpp>
 #include <type_traits>
+#include <utility>
+#include <variant>
 
 namespace pi::core {
 
 namespace {
 
-nlohmann::json message_json(const Message &message) {
+nlohmann::json message_json( // NOLINT(misc-include-cleaner)
+    const Message &message) {
   return nlohmann::json::parse(json::to_json(message));
 }
 
@@ -31,8 +36,8 @@ nlohmann::json event_to_json(const AgentEvent &event) {
           std::visit(
               [&data](const auto &update) {
                 using U = std::decay_t<decltype(update)>;
-                if constexpr (std::is_same_v<
-                                  U, AssistantMessageTextDeltaEvent>) {
+                if constexpr (std::is_same_v<U,
+                                             AssistantMessageTextDeltaEvent>) {
                   data["kind"] = "text_delta";
                   data["delta"] = update.delta;
                 } else if constexpr (std::is_same_v<

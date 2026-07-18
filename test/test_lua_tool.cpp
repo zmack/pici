@@ -138,6 +138,16 @@ return {
     return args.text
   end
 }
+)lua");
+
+    auto tool = load_lua_tool(path);
+    auto result = tool->execute("1", R"({"text":"hello world"})");
+    CHECK(!result->is_error());
+    CHECK_EQ(result->content(), "hello world");
+
+    std::filesystem::remove_all(dir);
+  });
+}
 
 void test_lua_tool_progress() {
   tests::register_test("LuaTool: execute reports progress updates", []() {
@@ -169,16 +179,6 @@ return {
     CHECK(!result->is_error());
     CHECK_EQ(updates, 2);
     CHECK_EQ(last_update, "second");
-
-    std::filesystem::remove_all(dir);
-  });
-}
-)lua");
-
-    auto tool = load_lua_tool(path);
-    auto result = tool->execute("1", R"({"text":"hello world"})");
-    CHECK(!result->is_error());
-    CHECK_EQ(result->content(), "hello world");
 
     std::filesystem::remove_all(dir);
   });

@@ -1,5 +1,6 @@
 #include "core/session/agent_session.h"
 
+#include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
@@ -10,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace pi::core {

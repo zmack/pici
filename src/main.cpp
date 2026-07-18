@@ -663,9 +663,9 @@ int cmd_run(const cli::Args &args) {
     if (hooks && hooks->on_event)
       hooks->on_event(event);
   };
-  opts.prepare_context =
-      [hook_runtime](const core::AgentContext &context,
-                     std::size_t estimated_tokens, std::stop_token stop_tok)
+  opts.prepare_context = [hook_runtime](const core::AgentContext &context,
+                                        std::size_t estimated_tokens,
+                                        std::stop_token stop_tok)
       -> std::optional<std::vector<core::Message>> {
     std::shared_ptr<core::LuaHooks> hooks;
     {

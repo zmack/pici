@@ -361,7 +361,7 @@ void Agent::process_event(const AgentEvent &event) {
     try {
       options_.on_event(event);
     } catch (...) {
-      // Observers must not take down the agent loop.
+      static_cast<void>(0); // Observers must not take down the agent loop.
     }
   }
 
