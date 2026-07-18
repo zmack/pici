@@ -60,9 +60,11 @@ struct Args {
   bool no_context_files{false}; // disable AGENTS.md / CLAUDE.md discovery
 
   // Session persistence
-  bool session_continue{false}; // --continue / -c
-  std::string session_resume;   // --resume / -r <prefix>  (empty = unset)
-  std::string session_dir;      // --session-dir <path>
+  bool session_continue{false};      // --continue / -c
+  std::string session_resume;        // --resume / -r <prefix>  (empty = unset)
+  std::string session_dir;           // --session-dir <path>
+  std::string sandbox_mode;          // --sandbox <auto|required|disabled>
+  bool sandbox_mode_explicit{false}; // set by an explicit CLI option
 
   // Config file
   std::string config_path; // --config <path>; empty = use default location

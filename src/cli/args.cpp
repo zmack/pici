@@ -217,6 +217,20 @@ Args parse_args(int argc, char **argv) {
       }
     } else if (arg == "--session-dir") {
       result.session_dir = std::string(need("--session-dir"));
+    } else if (arg == "--sandbox") {
+      auto v = need("--sandbox");
+      if (v == "auto" || v == "required" || v == "disabled" || v == "off") {
+        result.sandbox_mode = v == "off" ? "disabled" : std::string(v);
+        result.sandbox_mode_explicit = true;
+      } else {
+        result.diagnostics.push_back(
+            {.is_error = true,
+             .message = "invalid sandbox mode \"" + std::string(v) +
+                        "\"; valid: auto, required, disabled"});
+      }
+    } else if (arg == "--no-sandbox") {
+      result.sandbox_mode = "disabled";
+      result.sandbox_mode_explicit = true;
     } else if (arg == "--message" || arg == "-M") {
       auto v = need("--message");
       if (!v.empty())
@@ -292,6 +306,9 @@ void print_help(const char *prog) {
          "  --resume, -r <prefix>       Resume session matching partial ID\n"
          "  --session-dir <path>        Override default session storage "
          "directory\n"
+         "  --sandbox <mode>            Sandbox bash: auto, required, "
+         "disabled\n"
+         "  --no-sandbox                Alias for --sandbox disabled\n"
          "  --no-context-files, -nc     Disable AGENTS.md / CLAUDE.md "
          "discovery\n"
          "  --config <file>             Config file (default: "

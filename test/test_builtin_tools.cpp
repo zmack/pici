@@ -3,6 +3,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <source_location>
 #include <stop_token>
 #include <string>
@@ -72,6 +73,10 @@ find_tool(const std::vector<std::shared_ptr<const ToolDefinition>> &tools,
     }
   }
   return {};
+}
+
+static SandboxPolicyPtr disabled_sandbox() {
+  return std::make_shared<SandboxPolicy>(SandboxMode::disabled);
 }
 
 void test_tool_factories() {
@@ -345,7 +350,7 @@ void test_bash_tool() {
         std::filesystem::temp_directory_path() / "pici-builtin-tools-bash-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root);
+    const auto tools = create_all_tools(root, disabled_sandbox());
     auto bash = find_tool(tools, "bash");
     auto result = bash->execute("1", R"({"command":"printf ok"})");
     CHECK(!result->is_error());
@@ -354,7 +359,7 @@ void test_bash_tool() {
   });
 
   tests::register_test("Bash tool: timeout kills command", []() {
-    const auto tools = create_all_tools(std::filesystem::temp_directory_path());
+    const auto tools = create_all_tools(std::filesystem::temp_directory_path(), disabled_sandbox());
     auto bash = find_tool(tools, "bash");
     auto start = std::chrono::steady_clock::now();
     auto result = bash->execute("1", R"({"command":"sleep 60","timeout":1})");
@@ -366,7 +371,7 @@ void test_bash_tool() {
   });
 
   tests::register_test("Bash tool: stop_token aborts command", []() {
-    const auto tools = create_all_tools(std::filesystem::temp_directory_path());
+    const auto tools = create_all_tools(std::filesystem::temp_directory_path(), disabled_sandbox());
     auto bash = find_tool(tools, "bash");
 
     std::stop_source src;
@@ -387,7 +392,7 @@ void test_bash_tool() {
   });
 
   tests::register_test("Bash tool: exit code propagated", []() {
-    const auto tools = create_all_tools(std::filesystem::temp_directory_path());
+    const auto tools = create_all_tools(std::filesystem::temp_directory_path(), disabled_sandbox());
     auto bash = find_tool(tools, "bash");
     auto result = bash->execute("1", R"({"command":"exit 42"})");
     CHECK(result->is_error());

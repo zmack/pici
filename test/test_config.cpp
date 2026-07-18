@@ -89,6 +89,9 @@ verbose = true
 
 [context]
 disabled = true
+
+[sandbox]
+mode = "disabled"
 )toml");
     auto cfg = load_config(p);
     CHECK_EQ(cfg.model,          std::string("gpt-4o"));
@@ -104,6 +107,7 @@ disabled = true
     CHECK_EQ(cfg.render,         std::string("markdown"));
     CHECK(cfg.verbose);
     CHECK(cfg.no_context_files);
+    CHECK_EQ(cfg.sandbox_mode, std::string("disabled"));
   }
 
   // Provider and custom-model definitions remain separate from Args defaults.
@@ -222,6 +226,14 @@ api_key_env = "PICI_CODEX_KEY"
     auto out = merge_args(conf, cli);
     CHECK_EQ(out.model,    std::string("gpt-4o-mini")); // CLI wins
     CHECK_EQ(out.provider, std::string("openai"));       // config wins (CLI empty)
+  }
+
+  // sandbox mode merges like other scalar configuration values
+  {
+    Args conf; conf.sandbox_mode = "required";
+    Args cli;  cli.sandbox_mode = "disabled";
+    auto out = merge_args(conf, cli);
+    CHECK_EQ(out.sandbox_mode, std::string("disabled"));
   }
 
   // stream trace is a CLI-only diagnostic path

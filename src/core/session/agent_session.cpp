@@ -2,13 +2,16 @@
 
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/sandbox.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <exception>
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -16,9 +19,26 @@
 
 namespace pi::core {
 
+namespace {
+
+void apply_sandbox_mode(const std::optional<std::string> &value,
+                        const SandboxPolicyPtr &policy) {
+  if (!value)
+    return;
+  const auto mode = sandbox_mode_from_string(*value);
+  if (!mode)
+    throw std::runtime_error("invalid session sandbox mode: " + *value);
+  policy->set_mode(*mode);
+}
+
+} // namespace
+
 AgentSession::AgentSession(Config config)
     : agent_(config.agent_options),
-      session_store_(std::move(config.session_store)) {
+      session_store_(std::move(config.session_store)),
+      sandbox_policy_(std::move(config.sandbox_policy)) {
+  if (!sandbox_policy_)
+    sandbox_policy_ = std::make_shared<SandboxPolicy>();
   agent_.set_tools(std::move(config.tools));
 }
 
@@ -30,7 +50,19 @@ AgentSession::load_session(const std::string &session_id) const {
 }
 
 void AgentSession::activate_session(const SessionRecord &record) {
+  apply_sandbox_mode(record.header.sandbox_mode, sandbox_policy_);
   activate_session_state(record.header.id, record.messages, record.header.name);
+}
+
+SandboxMode AgentSession::sandbox_mode() const {
+  return sandbox_policy_->mode();
+}
+
+void AgentSession::set_sandbox_mode(SandboxMode mode) {
+  sandbox_policy_->set_mode(mode);
+  if (session_store_ && active_session_id_)
+    session_store_->set_sandbox_mode(*active_session_id_,
+                                     std::string(sandbox_mode_to_string(mode)));
 }
 
 bool AgentSession::activate_session(const std::string &session_id) {
@@ -58,6 +90,9 @@ std::string AgentSession::open_session(std::string session_id,
 std::string AgentSession::create_session(SessionHeader header) {
   if (header.id.empty())
     header.id = generate_session_id();
+  if (!header.sandbox_mode)
+    header.sandbox_mode = std::string(sandbox_mode_to_string(sandbox_mode()));
+  apply_sandbox_mode(header.sandbox_mode, sandbox_policy_);
 
   auto session_id = header.id;
   auto session_name = header.name;
@@ -72,6 +107,9 @@ std::string AgentSession::create_session(SessionHeader header) {
 std::string AgentSession::fork_session(SessionHeader header) {
   if (header.id.empty())
     header.id = generate_session_id();
+  if (!header.sandbox_mode)
+    header.sandbox_mode = std::string(sandbox_mode_to_string(sandbox_mode()));
+  apply_sandbox_mode(header.sandbox_mode, sandbox_policy_);
 
   auto session_id = header.id;
   if (session_store_)

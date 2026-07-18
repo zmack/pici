@@ -1,5 +1,6 @@
 #include "core/builtin_tools.h"
 #include "core/message_types.h"
+#include "core/sandbox.h"
 #include "nlohmann/json_fwd.hpp"
 
 #include <algorithm>
@@ -238,19 +239,6 @@ std::string truncate_head(const std::string &content, std::size_t max_lines,
     }
   }
   return out;
-}
-
-std::string shell_quote(const std::string &value) {
-  std::string quoted = "'";
-  for (char ch : value) {
-    if (ch == '\'') {
-      quoted += "'\\''";
-    } else {
-      quoted.push_back(ch);
-    }
-  }
-  quoted += '\'';
-  return quoted;
 }
 
 std::string glob_to_regex(std::string_view glob) {
@@ -1100,13 +1088,15 @@ public:
 
 class BashTool final : public BuiltinTool {
 public:
-  explicit BashTool(const std::filesystem::path &cwd)
+  explicit BashTool(const std::filesystem::path &cwd,
+                    SandboxPolicyPtr sandbox_policy)
       : BuiltinTool(
             "bash",
             "Execute a bash command in the current working directory. Returns "
             "stdout and stderr. Optionally provide timeout in seconds.",
             R"json({"type":"object","properties":{"command":{"type":"string","description":"Bash command to execute"},"timeout":{"type":"number","description":"Timeout in seconds (optional)"}},"required":["command"],"additionalProperties":false})json",
-            cwd) {}
+            cwd),
+        sandbox_policy_(std::move(sandbox_policy)) {}
 
   std::shared_ptr<ToolResult>
   execute(std::string_view, std::string_view args, std::stop_token stop_tok,
@@ -1118,8 +1108,8 @@ public:
         throw std::runtime_error("command must not be empty");
 
       const int timeout_secs = json.value("timeout", 120);
-      const std::string shell_cmd =
-          "cd " + shell_quote(cwd().string()) + " && " + command;
+      const auto mode = sandbox_policy_->mode();
+      SandboxLauncher::validate(mode);
 
       // Create pipe for stdout+stderr
       std::array<int, 2> pipefd{};
@@ -1140,8 +1130,8 @@ public:
         ::dup2(pipefd[1], STDOUT_FILENO);
         ::dup2(pipefd[1], STDERR_FILENO);
         ::close(pipefd[1]);
-        ::execl("/bin/sh", "sh", "-c", shell_cmd.c_str(), nullptr);
-        ::_exit(127);
+        SandboxLauncher::exec(
+            SandboxCommand{.mode = mode, .cwd = cwd(), .command = command});
       }
 
       // Parent
@@ -1270,15 +1260,21 @@ public:
       return error_result(err);
     }
   }
+
+private:
+  SandboxPolicyPtr sandbox_policy_;
 };
 
 } // namespace
 
 std::vector<std::shared_ptr<const ToolDefinition>>
-create_coding_tools(const std::filesystem::path &cwd) {
+create_coding_tools(const std::filesystem::path &cwd,
+                    SandboxPolicyPtr sandbox_policy) {
+  if (!sandbox_policy)
+    sandbox_policy = std::make_shared<SandboxPolicy>();
   std::vector<std::shared_ptr<const ToolDefinition>> tools;
   tools.push_back(std::make_shared<ReadTool>(cwd));
-  tools.push_back(std::make_shared<BashTool>(cwd));
+  tools.push_back(std::make_shared<BashTool>(cwd, std::move(sandbox_policy)));
   tools.push_back(std::make_shared<EditTool>(cwd));
   tools.push_back(std::make_shared<WriteTool>(cwd));
   return tools;
@@ -1295,8 +1291,9 @@ create_read_only_tools(const std::filesystem::path &cwd) {
 }
 
 std::vector<std::shared_ptr<const ToolDefinition>>
-create_all_tools(const std::filesystem::path &cwd) {
-  auto tools = create_coding_tools(cwd);
+create_all_tools(const std::filesystem::path &cwd,
+                 SandboxPolicyPtr sandbox_policy) {
+  auto tools = create_coding_tools(cwd, std::move(sandbox_policy));
   tools.push_back(std::make_shared<GrepTool>(cwd));
   tools.push_back(std::make_shared<FindTool>(cwd));
   tools.push_back(std::make_shared<LsTool>(cwd));

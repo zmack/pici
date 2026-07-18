@@ -37,6 +37,8 @@ parse_header_line(const nlohmann::json &j, // NOLINT(misc-include-cleaner)
   hdr.created = j.value("created", std::int64_t{0});
   hdr.model = j.value("model", std::string{});
   hdr.provider = j.value("provider", std::string{});
+  if (j.contains("sandboxMode") && j["sandboxMode"].is_string())
+    hdr.sandbox_mode = j["sandboxMode"].get<std::string>();
   if (j.contains("parentId") && j["parentId"].is_string())
     hdr.parent_id = j["parentId"].get<std::string>();
   if (j.contains("parentOffset") && j["parentOffset"].is_number_unsigned())
@@ -93,6 +95,9 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
     } else if (j.value("type", std::string{}) == "meta" && j.contains("name") &&
                j["name"].is_string()) {
       header.name = j["name"].get<std::string>();
+    } else if (j.value("type", std::string{}) == "meta" &&
+               j.contains("sandboxMode") && j["sandboxMode"].is_string()) {
+      header.sandbox_mode = j["sandboxMode"].get<std::string>();
     }
   }
 
@@ -195,6 +200,8 @@ std::string SessionStore::create(const SessionHeader &hdr) {
   j["created"] = hdr.created;
   j["model"] = hdr.model;
   j["provider"] = hdr.provider;
+  j["sandboxMode"] = hdr.sandbox_mode ? nlohmann::json(*hdr.sandbox_mode)
+                                      : nlohmann::json(nullptr);
 
   write_line_locked(sid, j);
   return sid;
@@ -228,6 +235,18 @@ void SessionStore::set_name(const std::string &session_id,
   write_line_locked(session_id, j);
 }
 
+void SessionStore::set_sandbox_mode(const std::string &session_id,
+                                    std::string mode) {
+  auto now =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  nlohmann::json j = nlohmann::json::object();
+  j["type"] = "meta";
+  j["timestamp"] = static_cast<std::int64_t>(now);
+  j["sandboxMode"] = std::move(mode);
+
+  std::scoped_lock lock(mutex_);
+  write_line_locked(session_id, j);
+}
 std::optional<SessionRecord>
 SessionStore::load(const std::string &session_id) const {
   std::scoped_lock lock(mutex_);

@@ -80,6 +80,25 @@ A C++23 implementation of the [pi-mono](https://github.com/badlogic/pi-mono) cor
 - **ToolResult** — abstract result from tool execution
 - Support for sequential and parallel tool execution modes
 
+## Bash sandbox
+
+The `bash` tool supports per-session process isolation on Linux through
+[bubblewrap](https://github.com/containers/bubblewrap). Select the behavior with
+`--sandbox <mode>` or `[sandbox].mode` in the config file:
+
+- `auto` (default): use bubblewrap and fail clearly if it is unavailable.
+- `required`: require bubblewrap explicitly.
+- `disabled`: run bash directly on the host; this is an explicit escape hatch.
+
+Sandboxed commands receive the workspace at `/workspace`, an isolated `/tmp`,
+no network namespace access, and a minimal read-only runtime. The user home
+directory, credentials, and host sockets are not mounted. Existing process-group
+timeouts and cancellation still apply. `--no-sandbox` is an alias for
+`--sandbox disabled`.
+
+The Lua `before_tool_call` hook remains a policy layer; it can block calls but
+cannot weaken the C++ sandbox boundary.
+
 ## Renderer
 
 The `Renderer` interface is a pure presentation observer decoupled from the

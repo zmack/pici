@@ -51,6 +51,7 @@
 #include "core/providers/muse_messages.h"
 #include "core/providers/openai_codex_responses.h"
 #include "core/providers/openai_completions.h"
+#include "core/sandbox.h"
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
@@ -652,6 +653,24 @@ int cmd_run(const cli::Args &args) {
     loaded_session = store->load(matches[0].id);
   }
 
+  core::SandboxMode sandbox_mode = core::SandboxMode::auto_mode;
+  std::optional<std::string_view> sandbox_setting;
+  if (loaded_session && !args.sandbox_mode_explicit &&
+      loaded_session->header.sandbox_mode)
+    sandbox_setting = *loaded_session->header.sandbox_mode;
+  else if (!args.sandbox_mode.empty())
+    sandbox_setting = args.sandbox_mode;
+  if (sandbox_setting) {
+    const auto parsed = core::sandbox_mode_from_string(*sandbox_setting);
+    if (!parsed) {
+      std::cerr << "error: invalid sandbox mode \"" << *sandbox_setting
+                << "\"; valid: auto, required, disabled\n";
+      return 1;
+    }
+    sandbox_mode = *parsed;
+  }
+  auto sandbox_policy = std::make_shared<core::SandboxPolicy>(sandbox_mode);
+
   std::vector<cli::ContextFile> context_files;
   if (!args.no_context_files) {
     context_files = load_context_files();
@@ -791,15 +810,19 @@ int cmd_run(const cli::Args &args) {
     return std::nullopt;
   };
 
-  core::AgentSession runtime({.agent_options = opts, .session_store = store});
+  core::AgentSession runtime({.agent_options = opts,
+                              .session_store = store,
+                              .sandbox_policy = sandbox_policy});
   auto &agent = runtime.agent();
 
   if (!args.no_tools && !args.no_builtin_tools) {
     if (args.tools.empty()) {
-      agent.set_tools(core::create_all_tools());
+      agent.set_tools(core::create_all_tools(std::filesystem::current_path(),
+                                             sandbox_policy));
     } else {
       // Allowlist filter
-      for (auto &t : core::create_all_tools()) {
+      for (auto &t : core::create_all_tools(std::filesystem::current_path(),
+                                            sandbox_policy)) {
         for (const auto &name : args.tools) {
           if (t->name() == name) {
             agent.add_tool(t);
@@ -1149,6 +1172,8 @@ int cmd_run(const cli::Args &args) {
     current_session_id = loaded_session->header.id;
     current_session_name = loaded_session->header.name;
     runtime.activate_session(*loaded_session);
+    if (args.sandbox_mode_explicit)
+      runtime.set_sandbox_mode(sandbox_mode);
     std::cerr << "[session: " << current_session_id;
     if (loaded_session->header.name)
       std::cerr << "  " << *loaded_session->header.name;
@@ -1160,6 +1185,7 @@ int cmd_run(const cli::Args &args) {
         std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     hdr.model = model.id;
     hdr.provider = model.provider;
+    hdr.sandbox_mode = std::string(core::sandbox_mode_to_string(sandbox_mode));
     current_session_id = runtime.create_session(hdr);
   }
 
@@ -1167,6 +1193,12 @@ int cmd_run(const cli::Args &args) {
     return cli::run_rpc_mode(runtime, std::cin, std::cout, task_manager.get());
 
   auto renderer = make_renderer(args);
+
+  if (sandbox_mode == core::SandboxMode::disabled)
+    std::cerr << "[sandbox: disabled; bash runs without bubblewrap]\n";
+  else if (args.verbose)
+    std::cerr << "[sandbox: " << core::sandbox_mode_to_string(sandbox_mode)
+              << "]\n";
 
   if (args.verbose) {
     std::cerr << "[model: " << model.provider << "/" << model.id << "]\n";

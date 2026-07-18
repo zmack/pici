@@ -29,6 +29,7 @@ public:
   void append_message(const std::string &session_id, const Message &msg);
   void append_truncate(const std::string &session_id, std::size_t through);
   void set_name(const std::string &session_id, const std::string &name);
+  void set_sandbox_mode(const std::string &session_id, std::string mode);
 
   std::optional<SessionRecord> load(const std::string &session_id) const;
   std::optional<std::string> latest_session_id() const;

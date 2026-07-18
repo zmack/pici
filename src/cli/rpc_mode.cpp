@@ -4,6 +4,7 @@
 #include "core/event_json.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/sandbox.h"
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
@@ -329,6 +330,8 @@ void RpcMode::handle(const nlohmann::json &command) {
       state["model"] = as_json(session_.agent().state().model());
       state["thinking_level"] = core::thinking_level_to_string(
           session_.agent().state().thinking_level());
+      state["sandbox_mode"] =
+          std::string(core::sandbox_mode_to_string(session_.sandbox_mode()));
       state["is_streaming"] = session_.agent().is_streaming();
       if (const auto &id = session_.active_session_id())
         state["session_id"] = *id;

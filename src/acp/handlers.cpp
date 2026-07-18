@@ -262,7 +262,8 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
         auto session = std::make_shared<core::AgentSession>(
             core::AgentSession::Config{.agent_options = cfg.agent_opts,
                                        .tools = cfg.tools,
-                                       .session_store = sessions});
+                                       .session_store = sessions,
+                                       .sandbox_policy = cfg.sandbox_policy});
 
         std::optional<std::string> active_session_id;
 

@@ -13,6 +13,7 @@
 #include "core/providers/muse_messages.h"
 #include "core/providers/openai_codex_responses.h"
 #include "core/providers/openai_completions.h"
+#include "core/sandbox.h"
 
 #include <atomic>
 #include <csignal>
@@ -35,7 +36,7 @@ void print_usage(const char *prog) {
             << " [--port <n>] [--model <id>] [--provider <name>]"
                " [--base-url <url>] [--api-key <key>]"
                " [--system-prompt <text>] [--tools-dir <dir>]"
-               " [--no-tools] [--acp-threads <n>]\n";
+               " [--no-tools] [--sandbox <mode>] [--acp-threads <n>]\n";
 }
 
 } // namespace
@@ -75,6 +76,18 @@ int main(int argc, char *argv[]) noexcept {
     if (d.is_error)
       return 1;
   }
+
+  auto sandbox_mode = pi::core::SandboxMode::auto_mode;
+  if (!args.sandbox_mode.empty()) {
+    const auto parsed = pi::core::sandbox_mode_from_string(args.sandbox_mode);
+    if (!parsed) {
+      std::cerr << "error: invalid sandbox mode \"" << args.sandbox_mode
+                << "\"; valid: auto, required, disabled\n";
+      return 1;
+    }
+    sandbox_mode = *parsed;
+  }
+  auto sandbox_policy = std::make_shared<pi::core::SandboxPolicy>(sandbox_mode);
   if (args.help) {
     print_usage(argv_view.front());
     return 0;
@@ -128,6 +141,7 @@ int main(int argc, char *argv[]) noexcept {
   pi::acp::ServerConfig cfg;
   cfg.agent_description = "pi-cpp coding agent running " + model.id;
   cfg.threads = acp_threads;
+  cfg.sandbox_policy = sandbox_policy;
   if (!args.session_dir.empty())
     cfg.session_dir = args.session_dir;
 
@@ -155,7 +169,8 @@ int main(int argc, char *argv[]) noexcept {
 
   // Tools
   if (!args.no_tools) {
-    cfg.tools = pi::core::create_all_tools(std::filesystem::current_path());
+    cfg.tools = pi::core::create_all_tools(std::filesystem::current_path(),
+                                           sandbox_policy);
     if (!args.tools_dir.empty()) {
       for (auto &t : pi::core::load_lua_tools(args.tools_dir))
         cfg.tools.push_back(t);

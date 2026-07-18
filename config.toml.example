@@ -34,3 +34,7 @@
 
 [context]
 # disabled = false   # --no-context-files  (skip AGENTS.md / CLAUDE.md discovery)
+
+[sandbox]
+# mode = "auto"       # auto|required|disabled; disabled is an explicit
+#                      # unsandboxed host-execution escape hatch

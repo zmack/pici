@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/agent.h"
+#include "core/sandbox.h"
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
 
@@ -19,6 +20,7 @@ public:
     Agent::Options agent_options;
     std::vector<std::shared_ptr<const ToolDefinition>> tools;
     std::shared_ptr<SessionStore> session_store;
+    SandboxPolicyPtr sandbox_policy;
   };
 
   using EventCallback = std::function<void(const AgentEvent &)>;
@@ -45,6 +47,9 @@ public:
     return active_session_id_;
   }
 
+  SandboxMode sandbox_mode() const;
+  void set_sandbox_mode(SandboxMode mode);
+
   std::optional<SessionRecord>
   load_session(const std::string &session_id) const;
 
@@ -67,6 +72,7 @@ private:
                               std::optional<std::string> session_name = {});
   Agent agent_;
   std::shared_ptr<SessionStore> session_store_;
+  SandboxPolicyPtr sandbox_policy_;
   std::optional<std::string> active_session_id_;
 };
 

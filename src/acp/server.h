@@ -3,6 +3,7 @@
 #include "acp/types.h"
 #include "core/agent.h"
 #include "core/builtin_tools.h"
+#include "core/sandbox.h"
 #include "core/session/session_store.h"
 
 #include <atomic>
@@ -20,6 +21,7 @@ struct ServerConfig {
   core::Agent::Options agent_opts;
   std::vector<std::shared_ptr<const core::ToolDefinition>> tools;
   std::shared_ptr<core::SessionStore> session_store;
+  core::SandboxPolicyPtr sandbox_policy;
   std::filesystem::path session_dir;
   int threads{4};
 };

@@ -18,6 +18,7 @@ struct SessionHeader {
   std::int64_t created{0};
   std::string model;
   std::string provider;
+  std::optional<std::string> sandbox_mode;
 };
 
 struct SessionRecord {

@@ -464,6 +464,7 @@ add_library(pi-core
     src/core/agent.cpp
     src/core/agent_task.cpp
     src/core/builtin_tools.cpp
+    src/core/sandbox.cpp
     src/core/lua_tool.cpp
     src/core/markdown.cpp
     src/core/syntax_highlight.cpp
@@ -601,6 +602,10 @@ if(PI_CPP_BUILD_TESTS)
         test/test_openai_codex_responses.cpp)
     target_link_libraries(test-openai_codex_responses PRIVATE pi-http)
     add_test(NAME test-openai_codex_responses COMMAND test-openai_codex_responses)
+
+    add_executable(test-sandbox test/test_sandbox.cpp)
+    target_link_libraries(test-sandbox PRIVATE pi-core)
+    add_test(NAME test-sandbox COMMAND test-sandbox)
 
     add_executable(test-system_prompt test/test_system_prompt.cpp src/cli/system_prompt.cpp)
     target_include_directories(test-system_prompt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

@@ -475,6 +475,9 @@ static void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
   // [session]
   if (auto d = str("session", "dir"); !d.empty())
     cfg.session_dir = expand_tilde(d);
+
+  // [sandbox]
+  cfg.sandbox_mode = str("sandbox", "mode");
 }
 
 bool Config::has_errors() const {
@@ -577,6 +580,7 @@ Args merge_args(const Args &config, const Args &cli) {
 
   // Session: CLI --session-dir wins over config
   out.session_dir = merge_str(config.session_dir, cli.session_dir);
+  out.sandbox_mode = merge_str(config.sandbox_mode, cli.sandbox_mode);
   // session_continue and session_resume are CLI-only
   out.session_continue = cli.session_continue;
   out.session_resume = cli.session_resume;
