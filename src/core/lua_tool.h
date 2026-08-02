@@ -112,8 +112,6 @@ struct LuaHooks {
     std::optional<std::string> output;
   };
 
-  // ── Sub-agent support ──────────────────────────────────────────────
-
   struct AgentRunConfig {
     std::string prompt; // text to send to the sub-agent
     std::size_t fork_at{

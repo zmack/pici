@@ -406,6 +406,61 @@ void test_agent_session_runtime() {
     });
 }
 
+void test_agent_session_create_session_clears() {
+    tests::register_test("AgentSession: create_session clears existing messages", []() {
+        LLMClientRegistry::instance().register_client(
+            "agent-session-test",
+            [] { return std::make_shared<ImmediateClient>(); });
+
+        const auto session_dir =
+            std::filesystem::temp_directory_path() /
+            ("pici-agent-create-clear-" + std::to_string(
+                                          std::chrono::steady_clock::now()
+                                              .time_since_epoch()
+                                              .count()));
+
+        auto store = std::make_shared<SessionStore>(session_dir);
+        Agent::Options opts;
+        opts.model.id = "test-model";
+        opts.model.api = "agent-session-test";
+        opts.model.provider = "test";
+
+        {
+            AgentSession runtime({.agent_options = opts,
+                                  .session_store = store});
+
+            SessionHeader header;
+            header.id = "first-session";
+            header.created = std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+            header.model = opts.model.id;
+            header.provider = opts.model.provider;
+            CHECK_EQ(runtime.create_session(header), "first-session");
+
+            // Run a prompt to add messages
+            auto result = runtime.run_prompt("hello", [](const AgentEvent &) {});
+            CHECK(!result.error.has_value());
+            CHECK_EQ(runtime.agent().state().messages().size(), std::size_t(2));
+
+            // Now create a fresh session — messages should be cleared
+            SessionHeader fresh;
+            fresh.id = "fresh-session";
+            fresh.created = std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+            fresh.model = opts.model.id;
+            fresh.provider = opts.model.provider;
+            CHECK_EQ(runtime.create_session(fresh), "fresh-session");
+
+            CHECK_EQ(runtime.agent().state().messages().size(), std::size_t(0));
+            CHECK_EQ(runtime.active_session_id().has_value(), true);
+            CHECK_EQ(*runtime.active_session_id(), "fresh-session");
+        }
+
+        store.reset();
+        std::filesystem::remove_all(session_dir);
+    });
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -421,6 +476,7 @@ int main() {
     test_agent_prompt_stream();
     test_agent_run_lifecycle();
     test_agent_session_runtime();
+    test_agent_session_create_session_clears();
 
     tests::print_summary();
 

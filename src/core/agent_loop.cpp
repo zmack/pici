@@ -881,9 +881,8 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
     if (aborted_event_published)
       return;
     aborted_event_published = true;
-    const auto reason = config.get_abort_reason
-                            ? config.get_abort_reason()
-                            : TurnAbortReason::unknown;
+    const auto reason = config.get_abort_reason ? config.get_abort_reason()
+                                                : TurnAbortReason::unknown;
     publish(TurnAbortedEvent(reason));
   };
 
@@ -1103,9 +1102,8 @@ void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
     publish_failure_event(MessageStartEvent(*failure));
     publish_failure_event(MessageEndEvent(*failure));
     if (stop_tok.stop_requested()) {
-      const auto reason = config.get_abort_reason
-                              ? config.get_abort_reason()
-                              : TurnAbortReason::unknown;
+      const auto reason = config.get_abort_reason ? config.get_abort_reason()
+                                                  : TurnAbortReason::unknown;
       publish_failure_event(TurnAbortedEvent(reason));
     }
     publish_failure_event(TurnEndEvent(*failure, {}));

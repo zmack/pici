@@ -288,8 +288,6 @@ bool should_skip_dir(const std::filesystem::path &path) {
          name == "build-asan";
 }
 
-// ────────────────────────────────────────────────────────────────
-
 class GitIgnore {
 public:
   void load(const std::filesystem::path &dir) {
@@ -355,8 +353,6 @@ private:
 
   std::vector<Pattern> patterns_;
 };
-
-// ────────────────────────────────────────────────────────────
 
 std::string image_mime_type(const std::filesystem::path &path) {
   static const std::array<std::pair<std::string_view, std::string_view>, 8>

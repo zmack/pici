@@ -58,8 +58,6 @@ int rows_for_line(std::string_view line, int width);
 // Counts every physical row, including those caused by terminal wrapping.
 int cursor_rows_for_rendered(std::string_view rendered, int width);
 
-// ── BlockBoundaryScanner
-// ──────────────────────────────────────────────────────
 //
 // Incrementally scans raw markdown content (the append-only `content` string
 // that ViewportRenderer builds from thinking + raw buffers) to find the last

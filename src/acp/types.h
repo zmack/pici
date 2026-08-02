@@ -24,8 +24,6 @@ struct Message {
 void to_json(nlohmann::json &j, const Message &m);
 void from_json(const nlohmann::json &j, Message &m);
 
-// ────────────────────────────────────────────────────────��
-
 enum class RunMode { sync, stream };
 
 struct RunCreateRequest {

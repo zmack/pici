@@ -13,8 +13,8 @@
 #include <mutex>
 #include <optional>
 #include <set>
-#include <stop_token>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -117,7 +117,9 @@ public:
       : std::runtime_error(std::move(message)), kind_(kind) {}
 
   AgentTaskErrorKind kind() const noexcept { return kind_; }
-  std::string_view code() const noexcept { return agent_task_error_code(kind_); }
+  std::string_view code() const noexcept {
+    return agent_task_error_code(kind_);
+  }
 
 private:
   AgentTaskErrorKind kind_;
@@ -168,11 +170,10 @@ struct ChildAgentEvent {
   AgentEvent event;
 };
 
-using AgentTaskEvent = std::variant<AgentTaskSpawnedEvent,
-                                    AgentTaskStatusChangedEvent,
-                                    AgentTaskMessageQueuedEvent,
-                                    AgentTaskInterruptedEvent,
-                                    AgentTaskClosedEvent, ChildAgentEvent>;
+using AgentTaskEvent =
+    std::variant<AgentTaskSpawnedEvent, AgentTaskStatusChangedEvent,
+                 AgentTaskMessageQueuedEvent, AgentTaskInterruptedEvent,
+                 AgentTaskClosedEvent, ChildAgentEvent>;
 
 class AgentTaskManager {
 public:
@@ -244,9 +245,8 @@ private:
   void run_task(const std::shared_ptr<Task> &task, std::stop_token stop_token);
   void execute_work(const std::shared_ptr<Task> &task, std::string prompt,
                     AgentTaskResult &result, bool &aborted);
-  std::vector<Message>
-  inherit_context(const AgentContext &parent,
-                  const ContextInheritance &request) const;
+  std::vector<Message> inherit_context(const AgentContext &parent,
+                                       const ContextInheritance &request) const;
   std::vector<std::shared_ptr<const ToolDefinition>>
   inherit_tools(const AgentContext &parent,
                 const std::vector<std::string> &requested) const;

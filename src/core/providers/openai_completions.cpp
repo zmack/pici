@@ -567,9 +567,8 @@ OpenAICompatibleClient::build_request_json(const Model &model,
   // proxy does the broadening; see
   // https://openrouter.ai/docs/features/provider-routing
   if (!tools_arr.empty()) {
-    bool is_openrouter =
-        model.provider == "openrouter" ||
-        str_contains(model.base_url, "openrouter.ai");
+    bool is_openrouter = model.provider == "openrouter" ||
+                         str_contains(model.base_url, "openrouter.ai");
     if (is_openrouter) {
       // Only inject if caller didn't already set provider routing.
       if (!params.contains("provider") && !params.contains("models") &&
@@ -636,8 +635,8 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
   if (url.empty()) {
     result->stop_reason = StopReason::error;
     result->error_message =
-        "Missing base URL for provider '" + model.provider +
-        "' / model '" + model.id +
+        "Missing base URL for provider '" + model.provider + "' / model '" +
+        model.id +
         "'. Set --base-url or use a known provider prefix "
         "(e.g. openrouter/<model> requires provider to map to "
         "https://openrouter.ai/api/v1, or pass --base-url "

@@ -93,9 +93,8 @@ std::vector<Message> normalize_context(std::vector<Message> messages,
       if (std::holds_alternative<UserMessage>(result[i]))
         break;
     }
-    if (std::ranges::all_of(ids, [&results](const auto &id) {
-          return results.contains(id);
-        }))
+    if (std::ranges::all_of(
+            ids, [&results](const auto &id) { return results.contains(id); }))
       break;
     result.pop_back();
   }
@@ -220,8 +219,8 @@ AgentTaskManager::AgentTaskManager(AgentSession &root,
     : AgentTaskManager(root, std::move(child_options), Limits{}, {}) {}
 
 AgentTaskManager::AgentTaskManager(AgentSession &root,
-                                   Agent::Options child_options,
-                                   Limits limits, EventCallback on_event)
+                                   Agent::Options child_options, Limits limits,
+                                   EventCallback on_event)
     : root_(root), child_options_(std::move(child_options)), limits_(limits),
       on_event_(std::move(on_event)) {
   if (limits_.max_active_executions == 0 || limits_.max_resident_tasks == 0)
@@ -316,16 +315,16 @@ AgentTaskManager::inherit_tools(
     if (it == parent.tools.end() || !is_child_safe_tool(*it))
       throw AgentTaskError(AgentTaskErrorKind::invalid_tool,
                            "tool is not available to child agents: " + name);
-    if (std::ranges::none_of(result, [&name](const auto &tool) {
-          return tool->name() == name;
-        }))
+    if (std::ranges::none_of(
+            result, [&name](const auto &tool) { return tool->name() == name; }))
       result.push_back(*it);
   }
   return result;
 }
 
-std::vector<Message> AgentTaskManager::inherit_context(
-    const AgentContext &parent, const ContextInheritance &request) const {
+std::vector<Message>
+AgentTaskManager::inherit_context(const AgentContext &parent,
+                                  const ContextInheritance &request) const {
   std::vector<Message> messages;
   switch (request.mode) {
   case ContextInheritanceMode::none:
@@ -334,15 +333,16 @@ std::vector<Message> AgentTaskManager::inherit_context(
     messages = parent.messages;
     break;
   case ContextInheritanceMode::through_message: {
-    const auto count = std::min(request.through.value_or(parent.messages.size()),
-                                parent.messages.size());
+    const auto count =
+        std::min(request.through.value_or(parent.messages.size()),
+                 parent.messages.size());
     messages.assign(parent.messages.begin(), parent.messages.begin() + count);
     break;
   }
   case ContextInheritanceMode::recent_messages: {
     const auto count = request.recent_count.value_or(16);
-    const auto begin = parent.messages.size() -
-                       std::min(count, parent.messages.size());
+    const auto begin =
+        parent.messages.size() - std::min(count, parent.messages.size());
     messages.assign(parent.messages.begin() + begin, parent.messages.end());
     break;
   }
@@ -350,9 +350,10 @@ std::vector<Message> AgentTaskManager::inherit_context(
   return normalize_context(std::move(messages), limits_.max_context_bytes);
 }
 
-std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
-    const SpawnAgentRequest &request, const std::shared_ptr<Task> &parent,
-    std::vector<Message> context) {
+std::shared_ptr<AgentTaskManager::Task>
+AgentTaskManager::make_task(const SpawnAgentRequest &request,
+                            const std::shared_ptr<Task> &parent,
+                            std::vector<Message> context) {
   const auto parent_context = parent->session->agent().context_snapshot();
   auto options = child_options_;
   options.system_prompt =
@@ -400,8 +401,9 @@ std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
 
 AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
   if (!valid_task_name(request.task_name))
-    throw AgentTaskError(AgentTaskErrorKind::invalid_context,
-                         "task_name must contain only letters, numbers, '_', '-', or '.'");
+    throw AgentTaskError(
+        AgentTaskErrorKind::invalid_context,
+        "task_name must contain only letters, numbers, '_', '-', or '.'");
   if (request.prompt.empty())
     throw AgentTaskError(AgentTaskErrorKind::invalid_context,
                          "spawn prompt must not be empty");
@@ -413,8 +415,8 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
     if (shutting_down_)
       throw AgentTaskError(AgentTaskErrorKind::shutting_down,
                            "agent task manager is shutting down");
-    auto parent = find_task_locked(request.parent_id.empty() ? "root"
-                                                              : request.parent_id);
+    auto parent = find_task_locked(
+        request.parent_id.empty() ? "root" : request.parent_id);
     if (!parent)
       throw AgentTaskError(AgentTaskErrorKind::not_found,
                            "parent task not found");
@@ -482,8 +484,8 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
 }
 
 void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
-                                    std::string prompt,
-                                    AgentTaskResult &result, bool &aborted) {
+                                    std::string prompt, AgentTaskResult &result,
+                                    bool &aborted) {
   std::size_t output_bytes = 0;
   bool saw_text_delta = false;
   std::optional<AssistantMessage> final_message;
@@ -517,8 +519,9 @@ void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
 
   const auto run = task->session->run_prompt(std::move(prompt), callback);
   if (!saw_text_delta && final_message)
-    result.text = final_message->content.empty() ? std::string{}
-                                                 : assistant_text(*final_message);
+    result.text = final_message->content.empty()
+                      ? std::string{}
+                      : assistant_text(*final_message);
   if (final_message) {
     result.stop_reason = final_message->stop_reason;
     result.usage = final_message->usage;
@@ -644,8 +647,8 @@ AgentTaskManager::get(const AgentTaskId &target) const {
   return snapshot(task);
 }
 
-std::vector<AgentTaskSnapshot> AgentTaskManager::list(
-    std::optional<std::string_view> task_path_prefix) const {
+std::vector<AgentTaskSnapshot>
+AgentTaskManager::list(std::optional<std::string_view> task_path_prefix) const {
   std::vector<AgentTaskSnapshot> result;
   std::scoped_lock lock(mutex_);
   for (const auto &[id, task] : tasks_) {
@@ -659,7 +662,7 @@ std::vector<AgentTaskSnapshot> AgentTaskManager::list(
 }
 
 AgentTaskSnapshot AgentTaskManager::send_message(const AgentTaskId &target,
-                                                  Message message) {
+                                                 Message message) {
   if (message_bytes(message) > limits_.max_message_bytes)
     throw AgentTaskError(AgentTaskErrorKind::residency_limit,
                          "task message exceeds size limit");
@@ -672,8 +675,7 @@ AgentTaskSnapshot AgentTaskManager::send_message(const AgentTaskId &target,
     std::scoped_lock task_lock(task->mutex);
     if (task->status == AgentTaskStatusKind::closing ||
         task->status == AgentTaskStatusKind::shutdown)
-      throw AgentTaskError(AgentTaskErrorKind::invalid_state,
-                           "task is closed");
+      throw AgentTaskError(AgentTaskErrorKind::invalid_state, "task is closed");
     if (task->mailbox.size() >= limits_.max_mailbox_items)
       throw AgentTaskError(AgentTaskErrorKind::residency_limit,
                            "task mailbox limit reached");
@@ -686,7 +688,7 @@ AgentTaskSnapshot AgentTaskManager::send_message(const AgentTaskId &target,
 }
 
 AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
-                                               Message message) {
+                                              Message message) {
   const auto text = message_text(message);
   if (text.empty())
     throw AgentTaskError(AgentTaskErrorKind::invalid_context,
@@ -705,8 +707,7 @@ AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
     std::scoped_lock task_lock(task->mutex);
     if (task->status == AgentTaskStatusKind::closing ||
         task->status == AgentTaskStatusKind::shutdown)
-      throw AgentTaskError(AgentTaskErrorKind::invalid_state,
-                           "task is closed");
+      throw AgentTaskError(AgentTaskErrorKind::invalid_state, "task is closed");
     if (task->work.size() + task->mailbox.size() >= limits_.max_mailbox_items)
       throw AgentTaskError(AgentTaskErrorKind::residency_limit,
                            "task work queue limit reached");
@@ -744,7 +745,7 @@ AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
 }
 
 AgentTaskSnapshot AgentTaskManager::interrupt(const AgentTaskId &target,
-                                               AgentInterruptReason reason) {
+                                              AgentInterruptReason reason) {
   std::shared_ptr<Task> task;
   AgentTaskStatusKind previous;
   {
@@ -766,8 +767,8 @@ AgentTaskSnapshot AgentTaskManager::interrupt(const AgentTaskId &target,
   return snapshot(task);
 }
 
-AgentTaskSnapshot AgentTaskManager::close_tasks(
-    std::vector<std::shared_ptr<Task>> tasks) {
+AgentTaskSnapshot
+AgentTaskManager::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
   if (tasks.empty())
     throw AgentTaskError(AgentTaskErrorKind::not_found, "task not found");
 
@@ -876,8 +877,8 @@ AgentWaitResult AgentTaskManager::wait(const AgentWaitRequest &request,
       return task->generation > request.after_generation;
     });
   };
-  const bool observed = changed() || changed_.wait_for(lock, stop_token, timeout,
-                                                        changed);
+  const bool observed =
+      changed() || changed_.wait_for(lock, stop_token, timeout, changed);
   AgentWaitResult result;
   result.caller_interrupted = stop_token.stop_requested();
   result.timed_out = !observed && !result.caller_interrupted;

@@ -29,8 +29,6 @@ int term_height(int fd) {
 
 namespace {
 
-// ── UTF-8 decode ─────────────────────────────────────────────────────────────
-
 char32_t decode_utf8(std::string_view s, std::size_t i) {
   const auto c = static_cast<unsigned char>(s[i]);
   if ((c & 0x80) == 0x00)
@@ -62,7 +60,6 @@ char32_t decode_utf8(std::string_view s, std::size_t i) {
   return 0xFFFD;
 }
 
-// ── East Asian Width ─────────────────────────────────────────────────────────
 // Ranges from Unicode Standard Annex #11 (Wide + Fullwidth categories).
 // Covers the characters most commonly produced by LLM responses.
 
@@ -125,9 +122,6 @@ bool is_combining(char32_t cp) {
 }
 
 } // namespace
-
-// ── Public API
-// ────────────────────────────────────────────────────────────────
 
 std::size_t skip_ansi_sequence(std::string_view s, std::size_t i) {
   if (i >= s.size() || s[i] != '\033')

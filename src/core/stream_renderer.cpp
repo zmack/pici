@@ -132,7 +132,6 @@ public:
     auto rendered = render_visible_markdown(text_buffer_);
     const int w = term_width(fd_);
 
-    // ── Fast path: new render is a pure extension of what we already output ──
     if (!prev_rendered_.empty() && rendered.size() >= prev_rendered_.size() &&
         rendered.starts_with(prev_rendered_)) {
       const auto suffix = rendered.substr(prev_rendered_.size());
@@ -145,8 +144,6 @@ public:
       return;
     }
 
-    // ── First write
-    // ───────────────────────────────────────────────────────────
     if (prev_rendered_.empty()) {
       if (!rendered.empty()) {
         ::write(fd_, rendered.data(), rendered.size());
@@ -157,8 +154,6 @@ public:
       return;
     }
 
-    // ── Structural change: advance commit, then redraw only the live tail
-    // ─────
     //
     // 1. Find how much of `rendered` shares a prefix with the committed
     //    portion of prev_rendered_.  If the committed prefix is no longer
@@ -516,12 +511,9 @@ private:
     }
     content += raw_buffer_;
 
-    // ── Advance scanner (O(new bytes) only) ──────────────────────────────────
     scanner_.advance(content);
     const std::size_t boundary = scanner_.last_stable;
 
-    // ── Invalidate finalized cache on terminal width change
-    // ───────────────────
     if (fin_cache_.width != w) {
       fin_cache_ = {};
     }
@@ -529,7 +521,7 @@ private:
     std::string tail_rendered;
 
     if (boundary > fin_cache_.raw_end) {
-      // ── Cache miss: boundary advanced (or first call after reset).
+
       // Render the full content once and extract the finalized prefix from the
       // actual output — this guarantees byte-exact correctness at the join
       // point. render(prefix_raw) ≠ full_render[0..boundary] in general due to
@@ -554,15 +546,12 @@ private:
       tail_rendered = full_rendered.substr(rendered_boundary);
 
     } else {
-      // ── Cache hit: hot path — render only the suffix (O(tail.size()))
-      // ────────
+
       const std::string_view tail_raw =
           std::string_view(content).substr(fin_cache_.raw_end);
       tail_rendered = render_visible_markdown(tail_raw);
     }
 
-    // ── Build viewport from finalized cache + tail
-    // ──────────────────────────── Count tail rows without allocating line
     // strings (O(tail.size())).
     const int tail_rows = cursor_rows_for_rendered(tail_rendered, w);
 
@@ -802,15 +791,12 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
       [&r](const auto &e) {
         using T = std::decay_t<decltype(e)>;
 
-        // ── Turn boundaries ──────────────────────────────────────────────────
         if constexpr (std::is_same_v<T, TurnStartEvent>) {
           r.on_turn_start();
 
         } else if constexpr (std::is_same_v<T, TurnEndEvent>) {
           r.on_turn_end();
 
-          // ── Streaming assistant message
-          // ──────────────────────────────────────
         } else if constexpr (std::is_same_v<T, MessageUpdateEvent>) {
           std::visit(
               [&r](const auto &ae) {
@@ -843,8 +829,6 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
               },
               e.assistant_message_event);
 
-          // ── Message complete
-          // ─────────────────────────────────────────────────
         } else if constexpr (std::is_same_v<T, MessageEndEvent>) {
           if (const auto *am = std::get_if<AssistantMessage>(&e.message)) {
             if (am->error_message)
@@ -852,8 +836,6 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
             r.on_message_end(am->usage);
           }
 
-          // ── Tool execution
-          // ───────────────────────────────────────────────────
         } else if constexpr (std::is_same_v<T, ToolExecutionStartEvent>) {
           r.on_tool_start(e.tool_call_id, e.tool_name, e.args);
 
@@ -861,8 +843,6 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
           if (e.result)
             r.on_tool_end(e.tool_call_id, e.tool_name, *e.result, e.is_error);
 
-          // ── Agent abort
-          // ──────────────────────────────────────────────────────
         } else if constexpr (std::is_same_v<T, TurnAbortedEvent>) {
           r.on_error(RendererErrorKind::abort, "agent turn aborted");
         } else if constexpr (std::is_same_v<T, AgentEndEvent>) {

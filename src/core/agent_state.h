@@ -23,8 +23,6 @@ public:
       : system_prompt_(std::move(system_prompt)), model_(std::move(model)),
         thinking_level_(thinking_level) {}
 
-  // ── Properties ─────────────────────────────────────────────────────
-
   std::string system_prompt() const {
     std::scoped_lock lock(mutex_);
     return system_prompt_;
@@ -55,8 +53,6 @@ public:
     thinking_level_ = level;
   }
 
-  // ── Messages (transcript) ──────────────────────────────────────────
-
   std::vector<Message> messages() const {
     std::scoped_lock lock(mutex_);
     return messages_;
@@ -83,8 +79,6 @@ public:
     return messages_.back();
   }
 
-  // ── Tools ──────────────────────────────────────────────────────────
-
   std::vector<std::shared_ptr<const ToolDefinition>> tools() const {
     std::scoped_lock lock(mutex_);
     return tools_;
@@ -99,8 +93,6 @@ public:
     std::scoped_lock lock(mutex_);
     tools_.push_back(std::move(t));
   }
-
-  // ── Runtime state ──────────────────────────────────────────────────
 
   bool is_streaming() const {
     std::scoped_lock lock(mutex_);
@@ -171,8 +163,6 @@ public:
     stop_tok_ = stop_src_.get_token();
   }
 
-  // ── Session identity ───────────────────────────────────────────────
-
   std::optional<std::string> session_id() const {
     std::scoped_lock lock(mutex_);
     return session_id_;
@@ -197,8 +187,6 @@ public:
     std::scoped_lock lock(mutex_);
     session_name_.reset();
   }
-
-  // ── Reset ──────────────────────────────────────────────────────────
 
   void reset() {
     std::unique_lock lock(mutex_);

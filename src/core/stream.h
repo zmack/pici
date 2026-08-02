@@ -70,8 +70,6 @@ public:
         });
   }
 
-  // ── Push events ────────────────────────────────────────────────────
-
   // Push an event. Returns true if the stream is not yet complete.
   bool push(Event event) { return push_state(state_, std::move(event)); }
 
@@ -127,7 +125,6 @@ public:
     return state_->is_complete;
   }
 
-  // ── Iterator interface ─────────────────────────────────────────────
   // Blocks until an event is available or the stream is done.
 
   // Returns the next event, blocking. Returns std::nullopt when done.
@@ -142,8 +139,6 @@ public:
     state_->queue.pop();
     return ev;
   }
-
-  // ── Range-based iteration ──────────────────────────────────────────
 
   class iterator {
     EventStream *stream_{nullptr};
@@ -191,15 +186,11 @@ public:
   iterator begin() { return iterator(this); }
   iterator end() { return iterator{}; }
 
-  // ── Consume all events via a callback ──────────────────────────────
-
   void for_each(std::function<void(const Event &)> callback) {
     for (auto &ev : *this) {
       callback(ev);
     }
   }
-
-  // ── Block until done and return final result ───────────────────────
 
   std::pair<std::optional<FinalResultT>, std::optional<std::string>> wait() {
     std::unique_lock lock(state_->mutex);
@@ -213,8 +204,6 @@ public:
     }
     return {std::optional<FinalResultT>{}, std::nullopt};
   }
-
-  // ── Drain remaining events ─────────────────────────────────────────
 
   std::vector<Event> drain() {
     std::vector<Event> events;

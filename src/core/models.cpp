@@ -183,8 +183,8 @@ const std::vector<Model> &all_models() { return kModels; }
 
 std::optional<Model> find_model(std::string_view spec,
                                 std::string_view provider_hint) {
-  auto try_exact = [](std::string_view id, std::string_view prov)
-      -> std::optional<Model> {
+  auto try_exact = [](std::string_view id,
+                      std::string_view prov) -> std::optional<Model> {
     for (const auto &m : kModels) {
       if (m.id == id && (prov.empty() || m.provider == prov))
         return m;
@@ -193,18 +193,22 @@ std::optional<Model> find_model(std::string_view spec,
   };
 
   // Full-id exact match
-  if (auto m = try_exact(spec, provider_hint)) return m;
-  if (auto m = try_exact(spec, {})) return m;
+  if (auto m = try_exact(spec, provider_hint))
+    return m;
+  if (auto m = try_exact(spec, {}))
+    return m;
 
   // If provider_hint present, try spec as OR model id directly
   if (!provider_hint.empty()) {
     // e.g. hint=openrouter, spec=deepseek/deepseek-v4-flash
-    if (auto m = try_exact(spec, provider_hint)) return m;
+    if (auto m = try_exact(spec, provider_hint))
+      return m;
     if (spec.size() > provider_hint.size() &&
         spec.substr(0, provider_hint.size()) == provider_hint &&
         spec[provider_hint.size()] == '/') {
       std::string stripped(spec.substr(provider_hint.size() + 1));
-      if (auto mm = try_exact(stripped, provider_hint)) return mm;
+      if (auto mm = try_exact(stripped, provider_hint))
+        return mm;
     }
   }
 
@@ -219,8 +223,10 @@ std::optional<Model> find_model(std::string_view spec,
     parsed_id = std::string(spec);
   }
 
-  if (auto m = try_exact(parsed_id, parsed_provider)) return m;
-  if (auto m = try_exact(parsed_id, {})) return m;
+  if (auto m = try_exact(parsed_id, parsed_provider))
+    return m;
+  if (auto m = try_exact(parsed_id, {}))
+    return m;
 
   // --- generic fallback ---
   std::string effective_provider;
@@ -241,28 +247,39 @@ std::optional<Model> find_model(std::string_view spec,
       effective_provider = "openrouter";
       effective_id = parsed_id;
     } else {
-      // spec = deepseek/deepseek-v4-flash with no hint -> treat deepseek as part of id if ambiguous
-      // Heuristic: if parsed_provider not known as provider, treat full spec as id
+      // spec = deepseek/deepseek-v4-flash with no hint -> treat deepseek as
+      // part of id if ambiguous Heuristic: if parsed_provider not known as
+      // provider, treat full spec as id
       bool known = false;
-      for (auto &km : kModels) if (km.provider == parsed_provider) { known = true; break; }
-      if (!known && parsed_provider != "custom" && !parsed_provider.empty() && !parsed_id.empty() && parsed_id.contains('/')) {
+      for (auto &km : kModels)
+        if (km.provider == parsed_provider) {
+          known = true;
+          break;
+        }
+      if (!known && parsed_provider != "custom" && !parsed_provider.empty() &&
+          !parsed_id.empty() && parsed_id.contains('/')) {
         effective_provider = "custom";
         effective_id = std::string(spec);
-      } else if (parsed_provider == "openrouter" || parsed_provider.empty() || parsed_provider == "custom") {
-        effective_provider = parsed_provider.empty() ? "custom" : parsed_provider;
+      } else if (parsed_provider == "openrouter" || parsed_provider.empty() ||
+                 parsed_provider == "custom") {
+        effective_provider =
+            parsed_provider.empty() ? "custom" : parsed_provider;
         effective_id = parsed_id;
       } else {
         // default to hint-less split result
         effective_provider = parsed_provider;
         effective_id = parsed_id;
       }
-      if (effective_provider.empty()) effective_provider = "custom";
+      if (effective_provider.empty())
+        effective_provider = "custom";
     }
   }
 
-  if (effective_id.empty()) return std::nullopt;
+  if (effective_id.empty())
+    return std::nullopt;
   // strip leading openrouter/ from id if provider is openrouter
-  if (effective_provider == "openrouter" && effective_id.starts_with("openrouter/")) {
+  if (effective_provider == "openrouter" &&
+      effective_id.starts_with("openrouter/")) {
     effective_id = effective_id.substr(std::string("openrouter/").size());
   }
 
@@ -275,7 +292,8 @@ std::optional<Model> find_model(std::string_view spec,
   generic.max_tokens = 4096;
 
   auto try_infer = [&](std::string_view want) -> bool {
-    if (want.empty() || want == "custom") return false;
+    if (want.empty() || want == "custom")
+      return false;
     for (auto &m : kModels) {
       if (m.provider == want) {
         generic.base_url = m.base_url;
@@ -286,9 +304,12 @@ std::optional<Model> find_model(std::string_view spec,
     return false;
   };
 
-  if (!provider_hint.empty()) try_infer(provider_hint);
-  if (generic.base_url.empty()) try_infer(parsed_provider);
-  if (generic.base_url.empty()) try_infer(effective_provider);
+  if (!provider_hint.empty())
+    try_infer(provider_hint);
+  if (generic.base_url.empty())
+    try_infer(parsed_provider);
+  if (generic.base_url.empty())
+    try_infer(effective_provider);
 
   return generic;
 }
@@ -296,14 +317,19 @@ std::optional<Model> find_model(std::string_view spec,
 std::vector<const Model *> search_models(std::string_view filter) {
   std::vector<const Model *> result;
   auto to_lower = [](std::string s) {
-    for (char &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char &c : s)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
   };
   std::string needle = to_lower(std::string(filter));
   for (auto &m : kModels) {
-    if (needle.empty()) { result.push_back(&m); continue; }
+    if (needle.empty()) {
+      result.push_back(&m);
+      continue;
+    }
     std::string hay = to_lower(m.id + " " + m.provider + " " + m.name);
-    if (hay.contains(needle)) result.push_back(&m);
+    if (hay.contains(needle))
+      result.push_back(&m);
   }
   return result;
 }

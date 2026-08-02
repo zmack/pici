@@ -99,20 +99,14 @@ public:
   Agent(Agent &&) = delete;
   Agent &operator=(Agent &&) = delete;
 
-  // ── State access ───────────────────────────────────────────────────
-
   AgentState &state() { return state_; }
   const AgentState &state() const { return state_; }
 
   // Return an immutable snapshot of the current raw agent context.
   AgentContext context_snapshot() const;
 
-  // ── Tools ──────────────────────────────────────────────────────────
-
   void add_tool(std::shared_ptr<const ToolDefinition> tool);
   void set_tools(std::vector<std::shared_ptr<const ToolDefinition>> tools);
-
-  // ── Prompt / Continue ──────────────────────────────────────────────
 
   // Start a new prompt from text
   EventStream<AgentEvent, std::vector<Message>>
@@ -125,8 +119,6 @@ public:
   // Continue from current transcript
   EventStream<AgentEvent, std::vector<Message>> continue_();
 
-  // ── Steering ───────────────────────────────────────────────────────
-
   // Queue a message to be injected after the current turn
   void steer(std::vector<Message> messages);
   void clear_steering_queue();
@@ -134,8 +126,6 @@ public:
   // Queue a message to run only after the agent would otherwise stop
   void follow_up(std::vector<Message> messages);
   void clear_follow_up_queue();
-
-  // ── Control ────────────────────────────────────────────────────────
 
   void interrupt(TurnAbortReason reason);
   void abort();

@@ -1067,8 +1067,6 @@ public:
     return stop;
   }
 
-  // ── Storage helpers ──────────────────────────────────────────────────
-
   void load_storage() {
     if (storage_path_.empty())
       return;
@@ -1089,8 +1087,6 @@ public:
     f << storage_.dump(2);
   }
 
-  // ── pici C closures ──────────────────────────────────────────────────
-
   static LuaHooksImpl *impl_from(lua_State *L) {
     return static_cast<LuaHooksImpl *>(lua_touserdata(L, lua_upvalueindex(1)));
   }
@@ -1107,10 +1103,10 @@ public:
     return 0;
   }
 
-  static int push_agent_binding(lua_State *L,
-                                const std::function<nlohmann::json(
-                                    const nlohmann::json &)> &fn,
-                                nlohmann::json args) {
+  static int push_agent_binding(
+      lua_State *L,
+      const std::function<nlohmann::json(const nlohmann::json &)> &fn,
+      nlohmann::json args) {
     if (!fn) {
       lua_pushnil(L);
       lua_pushstring(L, "pici.agents is not available");
@@ -1151,8 +1147,7 @@ public:
 
   static int lua_pici_agents_spawn(lua_State *L) {
     auto *impl = impl_from(L);
-    return push_agent_binding(L, impl->agent_bindings_.spawn,
-                              agent_args(L));
+    return push_agent_binding(L, impl->agent_bindings_.spawn, agent_args(L));
   }
 
   static int lua_pici_agents_get(lua_State *L) {
@@ -1195,8 +1190,7 @@ public:
 
   static int lua_pici_agents_close(lua_State *L) {
     auto *impl = impl_from(L);
-    return push_agent_binding(L, impl->agent_bindings_.close,
-                              agent_args(L));
+    return push_agent_binding(L, impl->agent_bindings_.close, agent_args(L));
   }
 
   static int lua_pici_run_agent(lua_State *L) {
@@ -1288,8 +1282,6 @@ public:
     return 0;
   }
 
-  // ── configure_info ────────────────────────────────────────────────────
-
   void configure_info(const LuaHooks::AgentInfo &info) {
     std::scoped_lock lk(mutex_);
     run_agent_fn_ = info.run_agent;
@@ -1366,11 +1358,9 @@ public:
     return result;
   }
 
-  // ── Inline tool support ──────────────────────────────────────────────
-
   static int lua_tool_cancelled(lua_State *L) {
-    auto *token = static_cast<std::stop_token *>(
-        lua_touserdata(L, lua_upvalueindex(1)));
+    auto *token =
+        static_cast<std::stop_token *>(lua_touserdata(L, lua_upvalueindex(1)));
     lua_pushboolean(L, token != nullptr && token->stop_requested());
     return 1;
   }
@@ -1415,8 +1405,7 @@ public:
   execute_inline_tool(int ref, std::string_view args_json,
                       std::stop_token stop_tok, ToolUpdateCallback on_update) {
     if (stop_tok.stop_requested())
-      return std::make_shared<LuaToolResult>(
-          "Tool execution cancelled", true);
+      return std::make_shared<LuaToolResult>("Tool execution cancelled", true);
     std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
     auto args = nlohmann::json::parse(args_json, nullptr, false);
@@ -1443,8 +1432,7 @@ public:
     lua_setfield(L_, LUA_REGISTRYINDEX, "pici.inline_stop_token");
     if (stop_tok.stop_requested()) {
       lua_pop(L_, 1);
-      return std::make_shared<LuaToolResult>(
-          "Tool execution cancelled", true);
+      return std::make_shared<LuaToolResult>("Tool execution cancelled", true);
     }
     if (call_status != LUA_OK) {
       std::string err = lua_tostring(L_, -1);

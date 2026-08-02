@@ -78,8 +78,6 @@ void Agent::set_tools(
   state_.set_tools(std::move(tools));
 }
 
-// ── Prompt ───────────────────────────────────────────────────────────────
-
 EventStream<AgentEvent, std::vector<Message>>
 Agent::prompt(std::string text, std::vector<ImageContent> images) {
   return prompt(std::vector<Message>{
@@ -135,8 +133,6 @@ Agent::prompt(std::vector<Message> messages) {
 
   return stream;
 }
-
-// ── Continue ──────────────────────────────────────────────────────────────
 
 EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
   if (state_.is_streaming()) {
@@ -210,8 +206,6 @@ EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
   return stream;
 }
 
-// ── Steering ──────────────────────────────────────────────────────────────
-
 void Agent::steer(std::vector<Message> messages) {
   std::scoped_lock lock(steering_mutex_);
   steering_queue_.insert(steering_queue_.end(),
@@ -236,8 +230,6 @@ void Agent::clear_follow_up_queue() {
   followup_queue_.clear();
 }
 
-// ── Control ───────────────────────────────────────────────────────────────
-
 void Agent::interrupt(TurnAbortReason reason) {
   // Synchronize with begin_run(), which replaces the stop source between
   // turns. The lock is not held while the worker executes.
@@ -258,8 +250,6 @@ void Agent::reset() {
 }
 
 void Agent::wait_for_idle() { state_.wait_until_idle(); }
-
-// ── Internal helpers ──────────────────────────────────────────────────────
 
 void Agent::join_workers() {
   std::vector<std::jthread> workers;

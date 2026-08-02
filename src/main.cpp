@@ -1,6 +1,6 @@
 #include <algorithm>
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -35,9 +35,9 @@
 #include "cli/system_prompt.h"
 #include "cli/tree_selector.h"
 #include "core/agent.h"
-#include "core/agent_task.h"
 #include "core/agent_loop.h"
 #include "core/agent_state.h"
+#include "core/agent_task.h"
 #include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
 #include "core/event_types.h"
@@ -773,12 +773,12 @@ int cmd_run(const cli::Args &args) {
   auto compat_counter = std::make_shared<std::atomic_uint64_t>(0);
 
   auto task_error_json = [](const core::AgentTaskError &error) {
-    return nlohmann::json{{"error", {{"code", error.code()},
-                                      {"message", error.what()}}}};
+    return nlohmann::json{
+        {"error", {{"code", error.code()}, {"message", error.what()}}}};
   };
   auto exception_json = [](const std::exception &error) {
-    return nlohmann::json{{"error", {{"code", "internal"},
-                                      {"message", error.what()}}}};
+    return nlohmann::json{
+        {"error", {{"code", "internal"}, {"message", error.what()}}}};
   };
   auto snapshot_json = [](const core::AgentTaskSnapshot &snapshot) {
     nlohmann::json value = {
@@ -800,9 +800,10 @@ int cmd_run(const cli::Args &args) {
           {"stop_reason",
            core::stop_reason_to_string(snapshot.result->stop_reason)},
           {"truncated", snapshot.result->truncated},
-          {"usage", {{"input", snapshot.result->usage.input},
-                      {"output", snapshot.result->usage.output},
-                      {"total_tokens", snapshot.result->usage.total_tokens}}},
+          {"usage",
+           {{"input", snapshot.result->usage.input},
+            {"output", snapshot.result->usage.output},
+            {"total_tokens", snapshot.result->usage.total_tokens}}},
       };
       if (snapshot.result->error)
         value["result"]["error"] = *snapshot.result->error;
@@ -834,7 +835,8 @@ int cmd_run(const cli::Args &args) {
     info.tool_names = std::move(tool_names);
     info.cwd = std::filesystem::current_path().string();
     info.storage_path = std::move(storage_path);
-    info.run_agent = [task_manager, compat_counter](const core::LuaHooks::AgentRunConfig &cfg)
+    info.run_agent = [task_manager,
+                      compat_counter](const core::LuaHooks::AgentRunConfig &cfg)
         -> core::LuaHooks::AgentRunResult {
       core::LuaHooks::AgentRunResult result;
       try {
@@ -850,16 +852,16 @@ int cmd_run(const cli::Args &args) {
           request.context.through = cfg.fork_at;
         }
         auto current = task_manager->spawn(request);
-        const auto deadline = std::chrono::steady_clock::now() +
-                              std::chrono::seconds(60);
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(60);
         for (;;) {
           if (current.status == core::AgentTaskStatusKind::completed ||
               current.status == core::AgentTaskStatusKind::errored ||
               current.status == core::AgentTaskStatusKind::interrupted)
             break;
-          const auto remaining = std::chrono::duration_cast<
-              std::chrono::milliseconds>(deadline -
-                                         std::chrono::steady_clock::now());
+          const auto remaining =
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  deadline - std::chrono::steady_clock::now());
           if (remaining <= std::chrono::milliseconds::zero()) {
             task_manager->interrupt(current.id,
                                     core::AgentInterruptReason::timeout);
@@ -869,7 +871,8 @@ int cmd_run(const cli::Args &args) {
           core::AgentWaitRequest wait_request;
           wait_request.targets = {current.id};
           wait_request.after_generation = current.generation;
-          wait_request.timeout = std::min(remaining, std::chrono::milliseconds(1000));
+          wait_request.timeout =
+              std::min(remaining, std::chrono::milliseconds(1000));
           auto update = task_manager->wait(wait_request);
           if (update.timed_out)
             continue;
@@ -917,7 +920,8 @@ int cmd_run(const cli::Args &args) {
     };
 
     info.agents.spawn = [task_manager, snapshot_json, task_error_json,
-                         exception_json, parse_context](const nlohmann::json &v) {
+                         exception_json,
+                         parse_context](const nlohmann::json &v) {
       try {
         core::SpawnAgentRequest request;
         request.parent_id = v.value("parent_id", std::string{});
@@ -945,12 +949,13 @@ int cmd_run(const cli::Args &args) {
         const auto target = v.value("target", v.value("id", std::string{}));
         auto snapshot = task_manager->get(target);
         if (!snapshot)
-          return nlohmann::json{{"error", {{"code", "not_found"},
-                                             {"message", "task not found"}}}};
+          return nlohmann::json{
+              {"error",
+               {{"code", "not_found"}, {"message", "task not found"}}}};
         return snapshot_json(*snapshot);
       } catch (const std::exception &error) {
-        return nlohmann::json{{"error", {{"code", "internal"},
-                                           {"message", error.what()}}}};
+        return nlohmann::json{
+            {"error", {{"code", "internal"}, {"message", error.what()}}}};
       }
     };
     info.agents.list = [task_manager, snapshot_json](const nlohmann::json &v) {
@@ -994,8 +999,8 @@ int cmd_run(const cli::Args &args) {
           parsed = core::AgentInterruptReason::shutdown;
         else if (reason == "timeout")
           parsed = core::AgentInterruptReason::timeout;
-        return snapshot_json(task_manager->interrupt(
-            v.value("target", std::string{}), parsed));
+        return snapshot_json(
+            task_manager->interrupt(v.value("target", std::string{}), parsed));
       } catch (const core::AgentTaskError &error) {
         return task_error_json(error);
       } catch (const std::exception &error) {
@@ -1009,8 +1014,8 @@ int cmd_run(const cli::Args &args) {
         if (v.contains("targets"))
           request.targets = v.at("targets").get<std::vector<std::string>>();
         request.after_generation = v.value("after_generation", 0ULL);
-        request.timeout = std::chrono::milliseconds(
-            v.value("timeout_ms", 30000ULL));
+        request.timeout =
+            std::chrono::milliseconds(v.value("timeout_ms", 30000ULL));
         const auto result = task_manager->wait(request);
         nlohmann::json changed = nlohmann::json::array();
         for (const auto &snapshot : result.changed)
@@ -1322,6 +1327,22 @@ int cmd_run(const cli::Args &args) {
       if (loaded->header.name)
         std::cerr << "  " << *loaded->header.name;
       std::cerr << "]\n";
+      continue;
+    }
+    if (line == "/new") {
+      core::SessionHeader fresh_hdr;
+      fresh_hdr.id = core::generate_session_id();
+      fresh_hdr.created = std::chrono::system_clock::to_time_t(
+          std::chrono::system_clock::now());
+      fresh_hdr.model = model.id;
+      fresh_hdr.provider = model.provider;
+      current_session_id = runtime.create_session(fresh_hdr);
+      current_session_name.reset();
+      {
+        std::scoped_lock lock(effective_context_mutex);
+        effective_context.reset();
+      }
+      std::cerr << "[new session: " << current_session_id << "]\n";
       continue;
     }
     if (line == "/fork") {

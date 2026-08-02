@@ -277,8 +277,6 @@ void render_children(Renderer &r, cmark_node *node) {
   }
 }
 
-// ── GFM table support
-// ─────────────────────────────────────────────────────────
 //
 // cmark 0.31.1 does not parse GFM tables. We pre-process the input, detect
 // table blocks (header + separator + optional body), render them with

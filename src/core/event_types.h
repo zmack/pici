@@ -264,9 +264,8 @@ struct ToolExecutionEndEvent : EventBase {
 using AgentEvent =
     std::variant<AgentStartEvent, AgentEndEvent, TurnStartEvent, TurnEndEvent,
                  TurnAbortedEvent, MessageStartEvent, MessageUpdateEvent,
-                 MessageEndEvent,
-                 ToolExecutionStartEvent, ToolExecutionUpdateEvent,
-                 ToolExecutionEndEvent>;
+                 MessageEndEvent, ToolExecutionStartEvent,
+                 ToolExecutionUpdateEvent, ToolExecutionEndEvent>;
 
 template <typename F>
   requires(std::is_invocable_v<F, AgentStartEvent> &&
