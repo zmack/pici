@@ -231,10 +231,26 @@ core::ThinkingLevel to_core_thinking(cli::ThinkingLevel t) {
 std::optional<core::Model> resolve_model(const cli::Args &args) {
   if (!args.model.empty()) {
     auto m = core::find_model(args.model, args.provider);
-    if (m && !args.base_url.empty())
-      m->base_url = args.base_url;
-    if (m && !args.provider.empty() && m->provider == "custom")
-      m->provider = args.provider;
+    if (m) {
+      // Provider hint wins: user explicitly asked for it, so the id prefix
+      // should be treated as part of the model id, not a separate provider
+      // when the prefix alone doesn't resolve to a known base_url.
+      if (!args.provider.empty() && m->base_url.empty()) {
+        // find_model already tried hint+parsed; if still empty, force hint
+        m->provider = args.provider;
+        for (const auto &known : core::all_models()) {
+          if (known.provider == args.provider) {
+            m->base_url = known.base_url;
+            m->api = known.api;
+            break;
+          }
+        }
+      }
+      if (!args.base_url.empty())
+        m->base_url = args.base_url;
+      if (!args.provider.empty() && m->provider == "custom")
+        m->provider = args.provider;
+    }
     return m;
   }
   // No --model given: build a model from explicit flags or use a sensible

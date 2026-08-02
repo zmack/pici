@@ -559,6 +559,29 @@ OpenAICompatibleClient::build_request_json(const Model &model,
   if (!tools_arr.empty())
     params["tools"] = tools_arr;
 
+  // OpenRouter routing: auto-picks providers; some routes don't support
+  // tool_use, which surfaces as 404 "No endpoints found that support tool
+  // use". Prefer tool-capable routing when tools are present, unless
+  // the user already supplied custom routing via Lua on_payload.
+  // OpenRouter docs: provider.require_parameters + fallback via extra-param
+  // proxy does the broadening; see
+  // https://openrouter.ai/docs/features/provider-routing
+  if (!tools_arr.empty()) {
+    bool is_openrouter =
+        model.provider == "openrouter" ||
+        str_contains(model.base_url, "openrouter.ai");
+    if (is_openrouter) {
+      // Only inject if caller didn't already set provider routing.
+      if (!params.contains("provider") && !params.contains("models") &&
+          !params.contains("route")) {
+        params["provider"] = nlohmann::json::object({
+            {"require_parameters", true},
+            {"sort", "price"},
+        });
+      }
+    }
+  }
+
   if (model.reasoning && options.reasoning != ThinkingLevel::off &&
       compat.supports_reasoning_effort) {
     params["reasoning_effort"] =
@@ -610,6 +633,20 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
   std::string url = base_url_.empty() ? model.base_url : base_url_;
   if (!url.empty() && url.back() == '/')
     url.pop_back();
+  if (url.empty()) {
+    result->stop_reason = StopReason::error;
+    result->error_message =
+        "Missing base URL for provider '" + model.provider +
+        "' / model '" + model.id +
+        "'. Set --base-url or use a known provider prefix "
+        "(e.g. openrouter/<model> requires provider to map to "
+        "https://openrouter.ai/api/v1, or pass --base-url "
+        "https://openrouter.ai/api/v1).";
+    if (on_event)
+      on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
+                                          .error = *result});
+    return result;
+  }
   url += "/chat/completions";
 
   if (on_event)

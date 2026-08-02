@@ -54,7 +54,6 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
     .cost={.input_per_mtok=1.10, .output_per_mtok=4.40, .cache_read_per_mtok=0.275, .cache_write_per_mtok=0},
     .context_window=200000,  .max_tokens=100000 },
 
-  // DeepSeek — https://api-docs.deepseek.com/quick_start/pricing
   { .id="deepseek-chat",     .name="DeepSeek V3",     .api="openai-completions", .provider="deepseek",
     .base_url="https://api.deepseek.com/v1", .reasoning=false,
     .cost={.input_per_mtok=0.27, .output_per_mtok=1.10, .cache_read_per_mtok=0.07, .cache_write_per_mtok=0},
@@ -64,7 +63,6 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
     .cost={.input_per_mtok=0.55, .output_per_mtok=2.19, .cache_read_per_mtok=0.14, .cache_write_per_mtok=0},
     .context_window=64000,  .max_tokens=8192 },
 
-  // Groq — https://groq.com/pricing/ (no cache token pricing)
   { .id="llama-3.3-70b-versatile",  .name="Llama 3.3 70B",  .api="openai-completions", .provider="groq",
     .base_url="https://api.groq.com/openai/v1", .reasoning=false,
     .cost={.input_per_mtok=0.59, .output_per_mtok=0.79, .cache_read_per_mtok=0, .cache_write_per_mtok=0},
@@ -86,7 +84,6 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
     .cost={.input_per_mtok=0.29, .output_per_mtok=0.39, .cache_read_per_mtok=0, .cache_write_per_mtok=0},
     .context_window=128000, .max_tokens=16000 },
 
-  // xAI — https://x.ai/api (no published cache pricing)
   { .id="grok-3",      .name="Grok 3",       .api="openai-completions", .provider="xai",
     .base_url="https://api.x.ai/v1", .reasoning=false,
     .cost={.input_per_mtok=3.00, .output_per_mtok=15.00, .cache_read_per_mtok=0, .cache_write_per_mtok=0},
@@ -100,7 +97,6 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
     .cost={.input_per_mtok=2.00, .output_per_mtok=10.00, .cache_read_per_mtok=0, .cache_write_per_mtok=0},
     .context_window=131072, .max_tokens=8192 },
 
-  // Cerebras — https://cerebras.ai/pricing (no cache pricing)
   { .id="llama3.1-8b",    .name="Llama 3.1 8B",    .api="openai-completions", .provider="cerebras",
     .base_url="https://api.cerebras.ai/v1", .reasoning=false,
     .cost={.input_per_mtok=0.10, .output_per_mtok=0.10, .cache_read_per_mtok=0, .cache_write_per_mtok=0},
@@ -114,7 +110,7 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
     .cost={.input_per_mtok=0.60, .output_per_mtok=0.60, .cache_read_per_mtok=0, .cache_write_per_mtok=0},
     .context_window=131000, .max_tokens=32000 },
 
-  // OpenRouter — https://openrouter.ai/models (cache pricing omitted unless listed)
+  // OpenRouter — https://openrouter.ai/models
   { .id="anthropic/claude-sonnet-4-5",  .name="Claude Sonnet 4.5 (OR)",  .api="openai-completions", .provider="openrouter",
     .base_url="https://openrouter.ai/api/v1", .reasoning=false,
     .cost={.input_per_mtok=3.00, .output_per_mtok=15.00, .cache_read_per_mtok=0, .cache_write_per_mtok=0},
@@ -140,12 +136,10 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
     .cost={.input_per_mtok=0.14, .output_per_mtok=0.60, .cache_read_per_mtok=0, .cache_write_per_mtok=0},
     .context_window=40960,  .max_tokens=16000 },
 
-  // Fireworks — https://fireworks.ai/pricing (GLM-5.2 not publicly listed)
   { .id="accounts/fireworks/models/glm-5p2", .name="GLM 5.2", .api="openai-completions", .provider="fireworks",
     .base_url="https://api.fireworks.ai/inference/v1", .reasoning=false,
     .context_window=128000, .max_tokens=4096 },
 
-  // Google (direct) — https://ai.google.dev/pricing (cache_write billed by storage-hour, not per call)
   { .id="gemini-2.5-pro",         .name="Gemini 2.5 Pro",     .api="openai-completions", .provider="google",
     .base_url="https://generativelanguage.googleapis.com/v1beta/openai", .reasoning=true,
     .cost={.input_per_mtok=1.25, .output_per_mtok=10.00, .cache_read_per_mtok=0.31, .cache_write_per_mtok=0},
@@ -167,12 +161,6 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
     .cost={.input_per_mtok=0.075, .output_per_mtok=0.30, .cache_read_per_mtok=0.01875, .cache_write_per_mtok=0},
     .context_window=1048576, .max_tokens=8192  },
 
-  // Meta Muse — docs/muse/messages_api.md + prompt_caching.md
-  // Pricing per prompt_caching.md: input $1.25/MTok, cached $0.15/MTok.
-  // Output $6.00/MTok is a market-comparable estimate — verify from
-  // https://www.meta.ai/docs/models /pricing-rate-limits before release.
-  // Context window 128k is a conservative placeholder until that page is
-  // vendored; max_tokens 16384 mirrors similar reasoning models.
   { .id="muse-spark-1.1", .name="Muse Spark 1.1", .api="muse-messages", .provider="meta",
     .base_url="https://api.meta.ai", .reasoning=true,
     .input_capabilities={"text", "image"},
@@ -182,16 +170,6 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
       {"off", std::nullopt}, {"minimal", "low"}, {"low", "low"},
       {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"},
     } },
-
-  // Meta Muse via Chat Completions — docs/muse/chat_completion.md.
-  // Same underlying model as the Messages entry above (.id must match the
-  // real API model name), so this uses a distinct .provider ("meta-chat")
-  // to stay separately selectable in the registry — two entries can't
-  // share both .id and .provider, since lookup returns the first match.
-  // Unlike the Messages entry, this wire format does not carry reasoning
-  // across turns (see chat_completion.md's note), but it does accept
-  // prompt_cache_key, which the Messages endpoint rejects (HTTP 400,
-  // verified live). Same pricing/context-window caveats as above.
   { .id="muse-spark-1.1", .name="Muse Spark 1.1 (Chat Completions)",
     .api="openai-completions", .provider="meta-chat",
     .base_url="https://api.meta.ai/v1", .reasoning=true,
@@ -205,66 +183,127 @@ const std::vector<Model> &all_models() { return kModels; }
 
 std::optional<Model> find_model(std::string_view spec,
                                 std::string_view provider_hint) {
-  // Full-ID match first (handles slash-heavy IDs like accounts/foo/models/bar)
-  for (const auto &m : kModels) {
-    bool id_match = m.id == spec;
-    bool prov_match = provider_hint.empty() || m.provider == provider_hint;
-    if (id_match && prov_match)
-      return m;
+  auto try_exact = [](std::string_view id, std::string_view prov)
+      -> std::optional<Model> {
+    for (const auto &m : kModels) {
+      if (m.id == id && (prov.empty() || m.provider == prov))
+        return m;
+    }
+    return std::nullopt;
+  };
+
+  // Full-id exact match
+  if (auto m = try_exact(spec, provider_hint)) return m;
+  if (auto m = try_exact(spec, {})) return m;
+
+  // If provider_hint present, try spec as OR model id directly
+  if (!provider_hint.empty()) {
+    // e.g. hint=openrouter, spec=deepseek/deepseek-v4-flash
+    if (auto m = try_exact(spec, provider_hint)) return m;
+    if (spec.size() > provider_hint.size() &&
+        spec.substr(0, provider_hint.size()) == provider_hint &&
+        spec[provider_hint.size()] == '/') {
+      std::string stripped(spec.substr(provider_hint.size() + 1));
+      if (auto mm = try_exact(stripped, provider_hint)) return mm;
+    }
   }
 
-  // Try "provider/id" split
-  std::string provider;
-  std::string model_id;
-  auto slash = spec.find('/');
-  if (slash != std::string_view::npos) {
-    provider = std::string(spec.substr(0, slash));
-    model_id = std::string(spec.substr(slash + 1));
+  // Standard split on first slash
+  std::string parsed_provider;
+  std::string parsed_id;
+  if (auto slash = spec.find('/'); slash != std::string_view::npos) {
+    parsed_provider = std::string(spec.substr(0, slash));
+    parsed_id = std::string(spec.substr(slash + 1));
   } else {
-    provider = std::string(provider_hint);
-    model_id = std::string(spec);
+    parsed_provider = std::string(provider_hint);
+    parsed_id = std::string(spec);
   }
 
-  for (const auto &m : kModels) {
-    bool id_match = m.id == model_id;
-    bool prov_match = provider.empty() || m.provider == provider;
-    if (id_match && prov_match)
-      return m;
+  if (auto m = try_exact(parsed_id, parsed_provider)) return m;
+  if (auto m = try_exact(parsed_id, {})) return m;
+
+  // --- generic fallback ---
+  std::string effective_provider;
+  std::string effective_id;
+
+  if (!provider_hint.empty()) {
+    effective_provider = std::string(provider_hint);
+    if (spec.size() > provider_hint.size() &&
+        spec.substr(0, provider_hint.size()) == provider_hint &&
+        spec[provider_hint.size()] == '/') {
+      effective_id = std::string(spec.substr(provider_hint.size() + 1));
+    } else {
+      // Keep full spec so deepseek/deepseek-v4-flash stays intact
+      effective_id = std::string(spec);
+    }
+  } else {
+    if (parsed_provider == "openrouter") {
+      effective_provider = "openrouter";
+      effective_id = parsed_id;
+    } else {
+      // spec = deepseek/deepseek-v4-flash with no hint -> treat deepseek as part of id if ambiguous
+      // Heuristic: if parsed_provider not known as provider, treat full spec as id
+      bool known = false;
+      for (auto &km : kModels) if (km.provider == parsed_provider) { known = true; break; }
+      if (!known && parsed_provider != "custom" && !parsed_provider.empty() && !parsed_id.empty() && parsed_id.contains('/')) {
+        effective_provider = "custom";
+        effective_id = std::string(spec);
+      } else if (parsed_provider == "openrouter" || parsed_provider.empty() || parsed_provider == "custom") {
+        effective_provider = parsed_provider.empty() ? "custom" : parsed_provider;
+        effective_id = parsed_id;
+      } else {
+        // default to hint-less split result
+        effective_provider = parsed_provider;
+        effective_id = parsed_id;
+      }
+      if (effective_provider.empty()) effective_provider = "custom";
+    }
   }
 
-  // No registry hit — build a generic model so the user can still run with
-  // --base-url + arbitrary model IDs (local servers, etc.)
-  if (!model_id.empty()) {
-    Model generic;
-    generic.id = model_id;
-    generic.name = model_id;
-    generic.api = "openai-completions";
-    generic.provider = provider.empty() ? "custom" : provider;
-    generic.context_window = 128000;
-    generic.max_tokens = 4096;
-    return generic;
+  if (effective_id.empty()) return std::nullopt;
+  // strip leading openrouter/ from id if provider is openrouter
+  if (effective_provider == "openrouter" && effective_id.starts_with("openrouter/")) {
+    effective_id = effective_id.substr(std::string("openrouter/").size());
   }
-  return std::nullopt;
+
+  Model generic;
+  generic.id = effective_id;
+  generic.name = effective_id;
+  generic.api = "openai-completions";
+  generic.provider = effective_provider;
+  generic.context_window = 128000;
+  generic.max_tokens = 4096;
+
+  auto try_infer = [&](std::string_view want) -> bool {
+    if (want.empty() || want == "custom") return false;
+    for (auto &m : kModels) {
+      if (m.provider == want) {
+        generic.base_url = m.base_url;
+        generic.api = m.api;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (!provider_hint.empty()) try_infer(provider_hint);
+  if (generic.base_url.empty()) try_infer(parsed_provider);
+  if (generic.base_url.empty()) try_infer(effective_provider);
+
+  return generic;
 }
 
 std::vector<const Model *> search_models(std::string_view filter) {
   std::vector<const Model *> result;
-
   auto to_lower = [](std::string s) {
-    for (char &c : s)
-      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
   };
   std::string needle = to_lower(std::string(filter));
-
-  for (const auto &m : kModels) {
-    if (needle.empty()) {
-      result.push_back(&m);
-      continue;
-    }
-    std::string haystack = to_lower(m.id + " " + m.provider + " " + m.name);
-    if (haystack.contains(needle))
-      result.push_back(&m);
+  for (auto &m : kModels) {
+    if (needle.empty()) { result.push_back(&m); continue; }
+    std::string hay = to_lower(m.id + " " + m.provider + " " + m.name);
+    if (hay.contains(needle)) result.push_back(&m);
   }
   return result;
 }
