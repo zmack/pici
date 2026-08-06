@@ -5,9 +5,10 @@
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <algorithm>
 #include <source_location>
-#include <vector>
 #include <string_view>
+#include <vector>
 
 namespace tests {
 int passed{0}, failed{0}, total{0};
@@ -39,6 +40,12 @@ static Args parse(std::initializer_list<std::string> values) {
   for (auto &value : storage)
     argv.push_back(value.data());
   return parse_args(static_cast<int>(argv.size()), argv.data());
+}
+
+static bool has_diagnostic(const Config &config, std::string_view needle) {
+  return std::ranges::any_of(config.diagnostics, [&](const auto &diagnostic) {
+    return diagnostic.message.contains(needle);
+  });
 }
 
 int main() {
@@ -97,6 +104,115 @@ disabled = true
     CHECK_EQ(cfg.render,         std::string("markdown"));
     CHECK(cfg.verbose);
     CHECK(cfg.no_context_files);
+  }
+
+  // Provider and custom-model definitions remain separate from Args defaults.
+  {
+    auto p = write_toml("pici_providers.toml", R"toml(
+[model]
+id = "gpt-4.1"
+provider = "openai"
+
+[providers.local]
+api = "openai-completions"
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = "PICI_LOCAL_KEY"
+headers = { X-Tenant = "engineering" }
+
+[[providers.local.models]]
+id = "qwen3-coder"
+name = "Qwen 3 Coder (Local)"
+context_window = 131072
+max_tokens = 16384
+reasoning = true
+input_capabilities = ["text", "text", "image"]
+headers = { X-Model-Route = "vision" }
+thinking_level_map = { off = false, low = "low", high = "high" }
+
+[providers.local.models.cost]
+input_per_mtok = 0.0
+output_per_mtok = 1.25
+
+[[providers.local.models]]
+id = "accounts/company/models/coder"
+
+[providers.local.model_overrides."accounts/company/models/coder"]
+max_tokens = 32768
+
+[providers.openai.model_overrides."gpt-4.1"]
+context_window = 200000
+)toml");
+    auto config = load_config_document(p);
+    CHECK(!config.has_errors());
+    CHECK_EQ(config.defaults.model, std::string("gpt-4.1"));
+    CHECK_EQ(config.providers.size(), std::size_t(2));
+
+    const auto &local = config.providers.at("local");
+    CHECK_EQ(local.api.value(), std::string("openai-completions"));
+    CHECK_EQ(local.base_url.value(), std::string("http://127.0.0.1:8080/v1"));
+    CHECK_EQ(local.api_key.env_var.value(), std::string("PICI_LOCAL_KEY"));
+    CHECK_EQ(local.headers.at("X-Tenant"), std::string("engineering"));
+    CHECK_EQ(local.models.size(), std::size_t(2));
+    CHECK_EQ(local.models[0].input_capabilities->size(), std::size_t(2));
+    CHECK_EQ(local.models[0].input_capabilities->at(1), std::string("image"));
+    CHECK_EQ(local.models[0].headers.at("X-Model-Route"),
+             std::string("vision"));
+    CHECK_EQ(local.models[0].cost.output_per_mtok.value(), 1.25);
+    CHECK_EQ(local.models[1].id, std::string("accounts/company/models/coder"));
+    CHECK_EQ(local.model_overrides.at("accounts/company/models/coder")
+                 .max_tokens.value(),
+             std::uint64_t(32768));
+    CHECK_EQ(config.providers.at("openai").model_overrides.at("gpt-4.1")
+                 .context_window.value(),
+             std::uint64_t(200000));
+  }
+
+  // Recognized provider/model schema errors carry their TOML paths.
+  {
+    auto p = write_toml("pici_invalid_providers.toml", R"toml(
+[providers.bad]
+api = "unregistered-api"
+base_url = "http://localhost/v1"
+auth = "sometimes"
+api_key = "literal"
+api_key_env = "PICI_BAD_KEY"
+headers = { Authorization = "wrong", X-Number = 42 }
+
+[[providers.bad.models]]
+id = "duplicate"
+reasoning = false
+context_window = 0
+thinking_level_map = { high = "high", unsupported = "low" }
+input_capabilities = ["text", "audio", "text"]
+
+[[providers.bad.models]]
+id = "duplicate"
+)toml");
+    auto config = load_config_document(p);
+    CHECK(config.has_errors());
+    CHECK(has_diagnostic(config, "providers.bad.auth"));
+    CHECK(has_diagnostic(config, "providers.bad.api_key"));
+    CHECK(has_diagnostic(config, "providers.bad.headers.Authorization"));
+    CHECK(has_diagnostic(config, "providers.bad.headers.X-Number"));
+    CHECK(has_diagnostic(config, "providers.bad.models[0].context_window"));
+    CHECK(has_diagnostic(config,
+                        "providers.bad.models[0].input_capabilities[1]"));
+    CHECK(has_diagnostic(config,
+                        "providers.bad.models[0].thinking_level_map.unsupported"));
+    CHECK(has_diagnostic(config, "duplicate model id"));
+  }
+
+  // OAuth-only built-in providers cannot be given a plaintext or env key.
+  {
+    auto p = write_toml("pici_invalid_oauth.toml", R"toml(
+[providers.openai-codex]
+api = "openai-codex-responses"
+base_url = "https://chatgpt.com/backend-api"
+auth = "oauth"
+api_key_env = "PICI_CODEX_KEY"
+)toml");
+    auto config = load_config_document(p);
+    CHECK(has_diagnostic(config, "providers.openai-codex"));
   }
 
   // merge: CLI string wins over config

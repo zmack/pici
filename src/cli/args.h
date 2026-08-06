@@ -1,9 +1,12 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace pi::cli {
+
+struct Config;
 
 enum class ThinkingLevel { off, minimal, low, medium, high, xhigh };
 
@@ -79,6 +82,11 @@ struct Args {
     std::string message;
   };
   std::vector<Diagnostic> diagnostics;
+
+  // The parsed TOML document, when Args came from load_and_merge(). Keeping
+  // this separate from the effective CLI fields lets the model registry
+  // retain provider and custom-model definitions without flattening them.
+  std::shared_ptr<const Config> config_document;
 };
 
 Args parse_args(int argc, char **argv);

@@ -1,13 +1,23 @@
 #include "cli/config.h"
 #include "cli/args.h"
 
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // toml++ requires these compile-time configuration macros before its header.
@@ -33,6 +43,358 @@ std::string expand_tilde(std::string path) {
 
 } // namespace
 
+namespace {
+
+using Diagnostic = Args::Diagnostic;
+
+void diagnostic(Config &config, bool is_error, std::string path,
+                std::string message) {
+  config.diagnostics.push_back(
+      Diagnostic{.is_error = is_error,
+                 .message = std::move(path) + ": " + std::move(message)});
+}
+
+std::string lower_ascii(std::string_view value) {
+  std::string result(value);
+  for (char &c : result)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return result;
+}
+
+bool is_protected_header(std::string_view header) {
+  const auto lower = lower_ascii(header);
+  return lower == "authorization" || lower == "proxy-authorization" ||
+         lower == "cookie" || lower == "set-cookie" || lower == "x-api-key";
+}
+
+std::string child_path(std::string_view parent, std::string_view child) {
+  std::string result(parent);
+  result += '.';
+  result += child;
+  return result;
+}
+
+const toml::node *get(const toml::table &table, std::string_view key) {
+  return table.get(key);
+} // NOLINT(misc-include-cleaner)
+
+std::optional<std::string> read_string(const toml::table &table,
+                                       std::string_view key,
+                                       std::string_view path, Config &config) {
+  const auto *node = get(table, key);
+  if (node == nullptr)
+    return std::nullopt;
+  if (const auto *value = node->as_string())
+    return value->get();
+  diagnostic(config, true, std::string(path) + "." + std::string(key),
+             "expected a string");
+  return std::nullopt;
+}
+
+std::optional<bool> read_boolean(const toml::table &table, std::string_view key,
+                                 std::string_view path, Config &config) {
+  const auto *node = get(table, key);
+  if (node == nullptr)
+    return std::nullopt;
+  if (const auto *value = node->as_boolean())
+    return value->get();
+  diagnostic(config, true, std::string(path) + "." + std::string(key),
+             "expected a boolean");
+  return std::nullopt;
+}
+
+std::optional<std::uint64_t> read_positive_integer(const toml::table &table,
+                                                   std::string_view key,
+                                                   std::string_view path,
+                                                   Config &config) {
+  const auto *node = get(table, key);
+  if (node == nullptr)
+    return std::nullopt;
+  const auto *value = node->as_integer();
+  const auto field_path = std::string(path) + "." + std::string(key);
+  if (value == nullptr) {
+    diagnostic(config, true, field_path, "expected a positive integer");
+    return std::nullopt;
+  }
+  if (value->get() <= 0) {
+    diagnostic(config, true, field_path, "must be greater than zero");
+    return std::nullopt;
+  }
+  return static_cast<std::uint64_t>(value->get());
+}
+
+std::optional<double> read_nonnegative_number(const toml::table &table,
+                                              std::string_view key,
+                                              std::string_view path,
+                                              Config &config) {
+  const auto *node = get(table, key);
+  if (node == nullptr)
+    return std::nullopt;
+
+  double value = 0.0;
+  if (const auto *integer = node->as_integer()) {
+    value = static_cast<double>(integer->get());
+  } else if (const auto *floating = node->as_floating_point()) {
+    value = floating->get();
+  } else {
+    diagnostic(config, true, std::string(path) + "." + std::string(key),
+               "expected a non-negative number");
+    return std::nullopt;
+  }
+
+  const auto field_path = std::string(path) + "." + std::string(key);
+  if (!std::isfinite(value) || value < 0.0) {
+    diagnostic(config, true, field_path,
+               "must be a finite non-negative number");
+    return std::nullopt;
+  }
+  return value;
+}
+
+void parse_headers(const toml::table &table, std::string_view path,
+                   std::map<std::string, std::string> &headers,
+                   Config &config) {
+  const auto *node = get(table, "headers");
+  if (node == nullptr)
+    return;
+  const auto *header_table = node->as_table();
+  const auto header_path = std::string(path) + ".headers";
+  if (header_table == nullptr) {
+    diagnostic(config, true, header_path, "expected a table of strings");
+    return;
+  }
+
+  for (const auto &[key, value] : *header_table) {
+    const auto name = std::string(key.str());
+    const auto field_path = child_path(header_path, name);
+    if (is_protected_header(name)) {
+      diagnostic(config, true, field_path,
+                 "authentication-owned header is not configurable");
+      continue;
+    }
+    const auto *string_value = value.as_string();
+    if (string_value == nullptr) {
+      diagnostic(config, true, field_path, "expected a string");
+      continue;
+    }
+    headers[name] = string_value->get();
+  }
+}
+
+void parse_capabilities(const toml::table &table, std::string_view path,
+                        ConfiguredModel &model, Config &config) {
+  const auto *node = get(table, "input_capabilities");
+  if (node == nullptr)
+    return;
+  const auto field_path = std::string(path) + ".input_capabilities";
+  const auto *array = node->as_array();
+  if (array == nullptr) {
+    diagnostic(config, true, field_path, "expected an array of strings");
+    return;
+  }
+
+  std::vector<std::string> capabilities;
+  for (std::size_t index = 0; index < array->size(); ++index) {
+    const auto &value = (*array)[index];
+    const auto item_path = field_path + "[" + std::to_string(index) + "]";
+    const auto *string_value = value.as_string();
+    if (string_value == nullptr) {
+      diagnostic(config, true, item_path, R"(expected "text" or "image")");
+      continue;
+    }
+    const auto capability = string_value->get();
+    if (capability != "text" && capability != "image") {
+      diagnostic(config, true, item_path,
+                 R"(unsupported capability; expected "text" or "image")");
+      continue;
+    }
+    if (std::ranges::find(capabilities, capability) == capabilities.end())
+      capabilities.push_back(capability);
+  }
+  if (capabilities.empty())
+    diagnostic(config, true, field_path,
+               "must contain at least one capability");
+  model.input_capabilities = std::move(capabilities);
+}
+
+void parse_thinking_level_map(const toml::table &table, std::string_view path,
+                              ConfiguredModel &model, Config &config) {
+  const auto *node = get(table, "thinking_level_map");
+  if (node == nullptr)
+    return;
+  const auto field_path = std::string(path) + ".thinking_level_map";
+  const auto *map_table = node->as_table();
+  if (map_table == nullptr) {
+    diagnostic(config, true, field_path, "expected a table");
+    return;
+  }
+
+  static constexpr std::array<std::string_view, 6> valid_levels = {
+      "off", "minimal", "low", "medium", "high", "xhigh"};
+  std::map<std::string, std::optional<std::string>> result;
+  for (const auto &[key, value] : *map_table) {
+    const auto level = std::string(key.str());
+    const auto item_path = child_path(field_path, level);
+    if (std::ranges::find(valid_levels, level) == valid_levels.end()) {
+      diagnostic(config, true, item_path,
+                 "unknown thinking level; expected off, minimal, low, medium, "
+                 "high, or xhigh");
+      continue;
+    }
+    if (const auto *string_value = value.as_string()) {
+      if (string_value->get().empty()) {
+        diagnostic(config, true, item_path, "mapped value must not be empty");
+        continue;
+      }
+      result[level] = string_value->get();
+    } else if (const auto *boolean_value = value.as_boolean()) {
+      if (boolean_value->get()) {
+        diagnostic(config, true, item_path,
+                   "boolean thinking mappings must be false");
+        continue;
+      }
+      result[level] = std::nullopt;
+    } else {
+      diagnostic(config, true, item_path, "expected a string or false");
+    }
+  }
+  model.thinking_level_map = std::move(result);
+  if (model.reasoning.has_value() && !*model.reasoning &&
+      !model.thinking_level_map->empty()) {
+    diagnostic(config, true, field_path,
+               "cannot be set when reasoning is false");
+  }
+}
+
+void parse_model_fields(const toml::table &table, std::string_view path,
+                        ConfiguredModel &model, Config &config) {
+  model.name = read_string(table, "name", path, config);
+  model.api = read_string(table, "api", path, config);
+  model.base_url = read_string(table, "base_url", path, config);
+  model.reasoning = read_boolean(table, "reasoning", path, config);
+  model.context_window =
+      read_positive_integer(table, "context_window", path, config);
+  model.max_tokens = read_positive_integer(table, "max_tokens", path, config);
+  parse_capabilities(table, path, model, config);
+  parse_headers(table, path, model.headers, config);
+
+  if (const auto *cost_node = get(table, "cost")) {
+    const auto *cost_table = cost_node->as_table();
+    const auto cost_path = std::string(path) + ".cost";
+    if (cost_table == nullptr) {
+      diagnostic(config, true, cost_path, "expected a table");
+    } else {
+      model.cost.input_per_mtok = read_nonnegative_number(
+          *cost_table, "input_per_mtok", cost_path, config);
+      model.cost.output_per_mtok = read_nonnegative_number(
+          *cost_table, "output_per_mtok", cost_path, config);
+      model.cost.cache_read_per_mtok = read_nonnegative_number(
+          *cost_table, "cache_read_per_mtok", cost_path, config);
+      model.cost.cache_write_per_mtok = read_nonnegative_number(
+          *cost_table, "cache_write_per_mtok", cost_path, config);
+    }
+  }
+  parse_thinking_level_map(table, path, model, config);
+}
+
+ProviderAuthPolicy parse_auth_policy(std::string_view value,
+                                     std::string_view path, Config &config) {
+  if (value == "required")
+    return ProviderAuthPolicy::required;
+  if (value == "optional")
+    return ProviderAuthPolicy::optional;
+  if (value == "none")
+    return ProviderAuthPolicy::none;
+  if (value == "oauth")
+    return ProviderAuthPolicy::oauth;
+  diagnostic(config, true, std::string(path) + ".auth",
+             "expected required, optional, none, or oauth");
+  return ProviderAuthPolicy::required;
+}
+
+void parse_provider(const std::string &provider_id, const toml::table &table,
+                    Config &config) {
+  const auto path = "providers." + provider_id;
+  ProviderConfig provider;
+  provider.id = provider_id;
+  provider.api = read_string(table, "api", path, config);
+  provider.base_url = read_string(table, "base_url", path, config);
+  provider.api_key.literal = read_string(table, "api_key", path, config);
+  provider.api_key.env_var = read_string(table, "api_key_env", path, config);
+  if (provider.api_key.literal && provider.api_key.env_var)
+    diagnostic(config, true, path + ".api_key",
+               "api_key and api_key_env are mutually exclusive");
+
+  if (const auto auth = read_string(table, "auth", path, config))
+    provider.auth = parse_auth_policy(*auth, path, config);
+  parse_headers(table, path, provider.headers, config);
+
+  if (provider_id == "openai-codex" &&
+      (provider.api_key.literal || provider.api_key.env_var))
+    diagnostic(
+        config, true, path,
+        "openai-codex accepts OAuth only; remove api_key or api_key_env");
+
+  if (const auto *models_node = get(table, "models")) {
+    const auto *models = models_node->as_array();
+    const auto models_path = path + ".models";
+    if (models == nullptr) {
+      diagnostic(config, true, models_path, "expected an array of tables");
+    } else {
+      for (std::size_t index = 0; index < models->size(); ++index) {
+        const auto item_path = models_path + "[" + std::to_string(index) + "]";
+        const auto *model_table = (*models)[index].as_table();
+        if (model_table == nullptr) {
+          diagnostic(config, true, item_path, "expected a table");
+          continue;
+        }
+        auto id = read_string(*model_table, "id", item_path, config);
+        if (!id || id->empty()) {
+          diagnostic(config, true, item_path,
+                     "id is required and must not be empty");
+          continue;
+        }
+        if (std::ranges::any_of(provider.models, [&](const auto &existing) {
+              return existing.id == *id;
+            })) {
+          diagnostic(config, true, item_path,
+                     "duplicate model id in provider " + provider_id);
+          continue;
+        }
+        ConfiguredModel model;
+        model.id = std::move(*id);
+        parse_model_fields(*model_table, item_path, model, config);
+        provider.models.push_back(std::move(model));
+      }
+    }
+  }
+
+  if (const auto *overrides_node = get(table, "model_overrides")) {
+    const auto *overrides = overrides_node->as_table();
+    const auto overrides_path = path + ".model_overrides";
+    if (overrides == nullptr) {
+      diagnostic(config, true, overrides_path, "expected a table of tables");
+    } else {
+      for (const auto &[key, value] : *overrides) {
+        const auto id = std::string(key.str());
+        const auto item_path = child_path(overrides_path, id);
+        const auto *override_table = value.as_table();
+        if (override_table == nullptr) {
+          diagnostic(config, true, item_path, "expected a table");
+          continue;
+        }
+        ConfiguredModel model;
+        parse_model_fields(*override_table, item_path, model, config);
+        provider.model_overrides.emplace(id, std::move(model));
+      }
+    }
+  }
+
+  config.providers.emplace(provider_id, std::move(provider));
+}
+
+} // namespace
+
 std::filesystem::path default_config_path() {
   const char *xdg =
       std::getenv("XDG_CONFIG_HOME"); // NOLINT(concurrency-mt-unsafe)
@@ -46,35 +408,22 @@ std::filesystem::path default_config_path() {
   return base / "pici" / "config.toml";
 }
 
-Args load_config(const std::filesystem::path &path) {
-  Args cfg;
-
-  std::ifstream f(path);
-  if (!f)
-    return cfg; // file absent → empty config (not an error)
-
-  toml::table tbl; // NOLINT(misc-include-cleaner)
-  try {
-    tbl = toml::parse(f, path.string()); // NOLINT(misc-include-cleaner)
-  } catch (const toml::parse_error &e) { // NOLINT(misc-include-cleaner)
-    throw std::runtime_error(std::string("config parse error: ") + e.what());
-  }
-
+static void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
   auto str = [&](std::string_view section,
                  std::string_view key) -> std::string {
-    if (auto *s = tbl[section][key].as_string())
+    if (const auto *s = tbl[section][key].as_string())
       return s->get();
     return {};
   };
   auto boolean = [&](std::string_view section, std::string_view key) -> bool {
-    if (auto *b = tbl[section][key].as_boolean())
+    if (const auto *b = tbl[section][key].as_boolean())
       return b->get();
     return false;
   };
   auto str_array = [&](std::string_view section,
                        std::string_view key) -> std::vector<std::string> {
     std::vector<std::string> result;
-    if (auto *arr = tbl[section][key].as_array()) {
+    if (const auto *arr = tbl[section][key].as_array()) {
       for (const auto &v : *arr)
         if (const auto *s = v.as_string())
           result.push_back(expand_tilde(s->get()));
@@ -126,8 +475,56 @@ Args load_config(const std::filesystem::path &path) {
   // [session]
   if (auto d = str("session", "dir"); !d.empty())
     cfg.session_dir = expand_tilde(d);
+}
 
-  return cfg;
+bool Config::has_errors() const {
+  return std::ranges::any_of(diagnostics,
+                             [](const auto &item) { return item.is_error; });
+}
+
+Config load_config_document(const std::filesystem::path &path) {
+  Config config;
+
+  std::ifstream f(path);
+  if (!f)
+    return config; // file absent → empty config (not an error)
+
+  toml::table tbl; // NOLINT(misc-include-cleaner)
+  try {
+    tbl = toml::parse(f, path.string()); // NOLINT(misc-include-cleaner)
+  } catch (const toml::parse_error &e) { // NOLINT(misc-include-cleaner)
+    throw std::runtime_error(std::string("config parse error: ") + e.what());
+  }
+
+  parse_legacy_defaults(tbl, config.defaults);
+
+  if (const auto *providers_node = tbl.get("providers")) {
+    const auto *providers = providers_node->as_table();
+    if (providers == nullptr) {
+      diagnostic(config, true, "providers", "expected a table");
+    } else {
+      for (const auto &[key, value] : *providers) {
+        const auto provider_id = std::string(key.str());
+        const auto path_name = "providers." + provider_id;
+        const auto *provider = value.as_table();
+        if (provider == nullptr) {
+          diagnostic(config, true, path_name, "expected a table");
+          continue;
+        }
+        if (provider_id.empty()) {
+          diagnostic(config, true, path_name, "provider id must not be empty");
+          continue;
+        }
+        parse_provider(provider_id, *provider, config);
+      }
+    }
+  }
+
+  return config;
+}
+
+Args load_config(const std::filesystem::path &path) {
+  return load_config_document(path).defaults;
 }
 
 Args merge_args(const Args &config, const Args &cli) {
@@ -224,15 +621,24 @@ Args load_and_merge(int argc, char *argv[]) {
 
   // 3. Load config (silently ignore missing file)
   Args config;
+  std::shared_ptr<const Config> config_document;
   try {
-    config = load_config(cfg_path);
+    auto parsed = std::make_shared<Config>(load_config_document(cfg_path));
+    config = parsed->defaults;
+    config_document = std::move(parsed);
   } catch (const std::exception &e) {
     cli.diagnostics.push_back(
         {.is_error = false, .message = std::string("config: ") + e.what()});
   }
 
   // 4. Merge: CLI wins over config
-  return merge_args(config, cli);
+  auto merged = merge_args(config, cli);
+  merged.config_document = std::move(config_document);
+  if (merged.config_document != nullptr) {
+    for (const auto &diagnostic : merged.config_document->diagnostics)
+      merged.diagnostics.push_back(diagnostic);
+  }
+  return merged;
 }
 
 } // namespace pi::cli
