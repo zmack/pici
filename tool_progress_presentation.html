@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tool Progress & Mutation Safety — pici implementation plan</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172026;
+      --muted: #5a6872;
+      --line: #d9e1e7;
+      --panel: #f7fafb;
+      --panel-2: #edf4f7;
+      --accent: #0f766e;
+      --accent-2: #b45309;
+      --danger: #b42318;
+      --ok: #2563eb;
+      --page: #ffffff;
+      --code: #111b22;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--page);
+      line-height: 1.5;
+    }
+    nav {
+      position: fixed;
+      inset: 0 0 auto 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 22px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,0.93);
+      backdrop-filter: blur(10px);
+    }
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    nav a:hover { color: var(--accent); }
+    .nav-links {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      max-width: 72vw;
+      padding-bottom: 2px;
+    }
+    section {
+      min-height: 100vh;
+      display: grid;
+      align-items: center;
+      padding: 90px 7vw 56px;
+      border-bottom: 1px solid var(--line);
+    }
+    .wrap { width: min(1120px, 100%); margin: 0 auto; }
+    .kicker {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin: 0 0 14px;
+    }
+    h1, h2 { margin: 0; line-height: 1.04; letter-spacing: 0; }
+    h1 { font-size: clamp(40px, 6.5vw, 78px); max-width: 980px; }
+    h2 { font-size: clamp(30px, 4.8vw, 58px); max-width: 980px; }
+    h3 { margin: 0 0 8px; font-size: 19px; }
+    p {
+      color: var(--muted);
+      font-size: clamp(17px, 1.9vw, 22px);
+      max-width: 900px;
+      margin: 18px 0 0;
+    }
+    .lead { font-size: clamp(19px, 2.2vw, 28px); color: #31414c; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 18px; margin-top: 30px; }
+    .three { grid-template-columns: repeat(3, minmax(0,1fr)); }
+    .four { grid-template-columns: repeat(4, minmax(0,1fr)); }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      padding: 20px;
+      min-height: 148px;
+    }
+    .card.dark {
+      background: var(--code);
+      color: #d7e6ec;
+      border-color: #1e2e38;
+    }
+    .card.dark h3 { color: #e8f1f4; }
+    .card.dark p { color: #9ab0bb; }
+    .card p, li { font-size: 16px; color: var(--muted); margin: 0; }
+    .card.dark p { color: #9ab0bb; }
+    ul { margin: 20px 0 0; padding-left: 20px; max-width: 900px; }
+    li { margin: 10px 0; color: var(--muted); font-size: 17px; }
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 0.90em;
+      background: #edf3f5;
+      border: 1px solid #d4e0e6;
+      border-radius: 5px;
+      padding: 2px 5px;
+      color: #17313a;
+    }
+    .card.dark code {
+      background: #1b2a33;
+      border-color: #2a3e4d;
+      color: #cfe4ed;
+    }
+    pre {
+      margin: 16px 0 0;
+      padding: 16px;
+      overflow-x: auto;
+      border-radius: 9px;
+      border: 1px solid #d4e0e6;
+      background: var(--code);
+      color: #e8f1f4;
+      font-size: 13.5px;
+      line-height: 1.5;
+    }
+    pre code { display: block; padding: 0; border: 0; background: transparent; color: inherit; white-space: pre; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+    .bad { background: #fde8e4; color: var(--danger); }
+    .warn { background: #fff3d6; color: var(--accent-2); }
+    .good { background: #e8f2ff; color: var(--ok); }
+    .label {
+      display: inline-flex;
+      align-items: center;
+      height: 26px;
+      padding: 0 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      color: white;
+      background: var(--danger);
+      margin-bottom: 12px;
+    }
+    .label.ok { background: var(--ok); }
+    .label.warn { background: var(--accent-2); }
+    .label.accent { background: var(--accent); }
+    .split { display: grid; grid-template-columns: minmax(0,1fr) minmax(300px, 420px); gap: 32px; align-items: start; margin-top: 30px; }
+    .code-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; margin-top: 26px; }
+    .sample { min-width: 0; }
+    .sample-title { display: inline-flex; align-items: center; height: 26px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 800; color: white; background: var(--danger); }
+    .sample-title.good { background: var(--ok); }
+    .rule {
+      border-left: 4px solid var(--accent);
+      padding: 12px 0 12px 18px;
+      margin-top: 26px;
+      color: #263742;
+      font-size: clamp(18px, 1.8vw, 24px);
+      max-width: 920px;
+      background: linear-gradient(90deg, #eef8f6, transparent);
+    }
+    .flow { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; margin-top: 30px; }
+    .step { border: 1px solid var(--line); border-radius: 9px; background: var(--panel); padding: 18px; }
+    .step strong { display: block; font-size: 14px; margin-bottom: 6px; color: var(--ink); }
+    .step span { font-size: 13.5px; color: var(--muted); }
+    .diagram {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel-2);
+      padding: 18px;
+      margin-top: 26px;
+      font-family: "SFMono-Regular", monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #1a2e38;
+      overflow-x: auto;
+      white-space: pre;
+    }
+    .foot { margin-top: 28px; font-size: 13px; color: #7e8d97; }
+    @media (max-width: 860px) {
+      .grid, .three, .four, .flow, .code-grid, .split { grid-template-columns: 1fr; }
+      nav { padding: 10px 14px; }
+      .nav-links { max-width: 58vw; }
+      section { padding: 84px 20px 40px; }
+      .card { min-height: auto; }
+    }
+    @media print {
+      nav { display: none; }
+      section { min-height: auto; page-break-after: always; padding-top: 40px; }
+    }
+  </style>
+</head>
+<body>
+<nav>
+  <a href="#title">tool progress · pici</a>
+  <div class="nav-links">
+    <a href="#title">01</a>
+    <a href="#problem">02 Problem</a>
+    <a href="#bash">03 BashTool</a>
+    <a href="#callback">04 Callback</a>
+    <a href="#parallel">05 Parallel</a>
+    <a href="#race">06 Race</a>
+    <a href="#trunc">07 Truncation</a>
+    <a href="#arch">08 Arch</a>
+    <a href="#plan">09 Plan</a>
+    <a href="#verify">10 Verify</a>
+  </div>
+</nav>
+
+<!-- SLIDE 1 / 10 — Title -->
+<section id="title">
+  <div class="wrap">
+    <p class="kicker">gap #6 · docs/pi-gap-analysis.md → implementation</p>
+    <h1>Tool progress & mutation safety</h1>
+    <p class="lead">Live bash output, immediate tool-start events, full-output preservation, and serialized file writes. One-day build that turns a blind TUI into a live one.</p>
+    <div class="grid three">
+      <div class="card">
+        <h3>Where we are</h3>
+        <p>7 builtins: <code>read, bash, edit, write, grep, find, ls</code>. Workspace-confined, fuzzy edits, gitignore-aware. Solid — but no live progress.</p>
+      </div>
+      <div class="card">
+        <h3>What pi has</h3>
+        <p>Bounded streaming accumulation, live update callbacks firing during execution, full-output temp files, file-mutation queue, immediate tool-start events.</p>
+      </div>
+      <div class="card">
+        <h3>Goal of this deck</h3>
+        <p>Explain exactly what to change in <code>builtin_tools.cpp</code>, <code>agent_loop.cpp</code>, and <code>stream_renderer.h</code> to close the gap — with minimal risk.</p>
+      </div>
+    </div>
+    <div class="foot">Context: Phase 1 (lifecycle hardening) + Phase 2 (AgentSession) are done. This is the recommended small win before Phase 3 durable context.</div>
+  </div>
+</section>
+
+<!-- SLIDE 2 / 10 — Problem overview -->
+<section id="problem">
+  <div class="wrap">
+    <p class="kicker">02 — why it matters</p>
+    <h2>The agent goes dark for 30 seconds while bash compiles</h2>
+    <p>Today's UX: model calls <code>bash("make test")</code> and the viewport shows only the tool args. No output until the process exits. Three parallel tools show nothing until all finish. Large output is silently truncated. Two edits to the same file can race.</p>
+    <div class="grid four">
+      <div class="card">
+        <h3>⏳ No live bash</h3>
+        <p>pipe → poll → accumulate → return one blob at end. 64KB <code>kMaxBytes</code> buffer. User stares at static screen.</p>
+        <span class="badge bad">UX: bad</span>
+      </div>
+      <div class="card">
+        <h3>👻 Late start events</h3>
+        <p>In parallel mode, <code>on_tool_start</code> emitted after futures join. 3 tools * 10s = 10s of silence then 3 pops.</p>
+        <span class="badge bad">UX: bad</span>
+      </div>
+      <div class="card">
+        <h3>✂️ Truncation loss</h3>
+        <p>Over 64KB → "[Truncated]" suffix. No temp file, no full log path. Important build errors disappear.</p>
+        <span class="badge warn">info loss</span>
+      </div>
+      <div class="card">
+        <h3>⚠️ Write/write race</h3>
+        <p><code>edit</code> + <code>edit</code> on same file can both <code>read_text_file</code> then race <code>write_text_file</code>. Last write wins partially.</p>
+        <span class="badge bad">correctness</span>
+      </div>
+    </div>
+    <div class="rule">If a tool takes &gt;500ms, the user should see it started immediately and see progress streaming.</div>
+  </div>
+</section>
+
+<!-- SLIDE 3 / 10 — BashTool today -->
+<section id="bash">
+  <div class="wrap">
+    <p class="kicker">03 — current implementation</p>
+    <h2>BashTool is a careful fork+poll — but it doesn't stream</h2>
+    <div class="split">
+      <div>
+        <p>Location: <code>src/core/builtin_tools.cpp:712-925</code>. Forks <code>sh -c "cd $cwd && $cmd"</code> in new process group, non-blocking pipe, self-pipe wakeup for <code>stop_token</code>, timeout kills tree, drains remainder, returns single <code>TextToolResult</code>.</p>
+        <ul>
+          <li>New pgid so <code>kill(-pid)</code> kills child tree</li>
+          <li>Self-pipe to unblock poll on abort</li>
+          <li>Timeout kills with TERM → 200ms → KILL</li>
+          <li>Drain loop after exit to capture last bytes</li>
+        </ul>
+        <div class="card" style="margin-top:20px">
+          <h3>The missed opportunity</h3>
+          <p>Poll loop already sees data chunk by chunk (<code>buf[4096]</code>). It appends to <code>output</code> but never forwards that partial buffer to UI. 2 extra lines would fix it.</p>
+        </div>
+      </div>
+      <div>
+<pre><code>// current poll — accumulates only
+string output; reserve 4096
+char buf[4096]
+
+while (true) {
+  if (now >= deadline) { kill_tree(); timed_out=true; break; }
+  poll(fds={pipe, wakeup}, remaining)
+
+  if (wakeup POLLIN) { kill_tree(); aborted=true; break; }
+  if (pipe POLLIN) {
+    nr = read(pipe, buf)
+    output.append(buf, nr)
+    if (output.size() >= kMaxBytes) break
+    // ← should call on_update here
+  }
+}
+close + waitpid
+return TextToolResult(truncate_head(output))</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 4 / 10 — The ignored callback -->
+<section id="callback">
+  <div class="wrap">
+    <p class="kicker">04 — wiring that exists but is unused</p>
+    <h2>The plumbing is there — BashTool just never calls it</h2>
+    <p>Every <code>ToolDefinition::execute</code> receives <code>ToolUpdateCallback on_update</code>. The agent loop wraps it to emit <code>ToolExecutionUpdateEvent</code>. But <code>BashTool::execute</code> ignores the param. So live updates are dead code today.</p>
+    <div class="code-grid">
+      <div class="sample">
+        <span class="sample-title">Message types — already exists</span>
+<pre><code>// src/core/message_types.h
+using ToolUpdateCallback =
+  function&lt;void(shared_ptr&lt;ToolResult&gt;)&gt;;
+
+class ToolDefinition {
+  virtual shared_ptr&lt;ToolResult&gt; execute(
+    string_view call_id,
+    string_view args_json,
+    stop_token,
+    ToolUpdateCallback on_update = {}) const = 0;
+};</code></pre>
+      </div>
+      <div class="sample">
+        <span class="sample-title good">Agent loop — already wired</span>
+<pre><code>// src/core/agent_loop.cpp:329
+ToolExecutionOutcome execute_tool_safely(
+  const PreparedToolCall &call,
+  emit, stop_tok) {
+  return call.tool->execute(
+    call.tool_call.id,
+    call.args_json,
+    stop_tok,
+    [emit, call](auto partial){
+      emit(ToolExecutionUpdateEvent(
+        call.tool_call.id,
+        call.tool_call.name,
+        call.args_json,
+        partial->content(),
+        location()));
+    });
+}</code></pre>
+      </div>
+    </div>
+    <div class="split">
+      <div>
+        <div class="label">Fix for BashTool — ~10 LOC</div>
+        <p>On each successful <code>read</code> from pipe, after accumulating, call <code>on_update(TextToolResult(output_so_far))</code>. Throttle to e.g. every 100ms or 1KB to avoid flooding renderer. Check <code>on_update</code> is not null before calling — Lua tools may not pass it.</p>
+<pre><code>if (on_update) {
+  auto now = steady_clock::now();
+  if (now - last_emit > 100ms ||
+      output.size() - last_emit_size > 1024) {
+    on_update(make_shared&lt;TextToolResult&gt;(output));
+    last_emit = now;
+    last_emit_size = output.size();
+  }
+}</code></pre>
+      </div>
+      <div>
+        <div class="label ok">Renderer side — new hook</div>
+        <p>Today <code>Renderer</code> has <code>on_tool_start</code> and <code>on_tool_end</code>. We need progressive:</p>
+<pre><code>// stream_renderer.h
+virtual void on_tool_update(
+  string_view call_id,
+  string_view tool_name,
+  string_view partial_content) {}
+</code></pre>
+        <p>Default no-op, backward compatible. <code>RawRenderer</code> ignores. <code>DiffMarkdownRenderer</code> could show as expanding block. <code>ViewportRenderer</code> shows as scrollable live output. <code>AcpSseRenderer</code> re-emits <code>message.part</code>.</p>
+        <div class="rule" style="font-size:16px">Throttle in tool, not in renderer. Tool knows byte rate; renderer should be dumb and fast.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 5 / 10 — Parallel ordering -->
+<section id="parallel">
+  <div class="wrap">
+    <p class="kicker">05 — tool start timing</p>
+    <h2>Parallel tools: start must fire before async launch, not after</h2>
+    <div class="split">
+      <div>
+        <p>In <code>execute_tool_calls_parallel</code> (agent_loop.cpp: ~680), intention was source-ordered events for deterministic rendering. So it spawns all futures, waits, <em>then</em> emits <code>ToolExecutionStart</code> + result in order.</p>
+        <div class="label">Today — late events</div>
+<pre><code>for tc in tool_calls:
+  prepare
+  spawn async { execute; finalize }
+
+join all futures
+
+for finalized in source_order:
+  emit Start(id, name, args)   // 10s late
+  emit MessageStart
+  emit MessageEnd
+  emit End(id, result)</code></pre>
+        <p>Result: viewport shows nothing while 3×10s tools run. Then 3 blocks appear instantly. Model already asked for other tools that whole time? No feedback.</p>
+      </div>
+      <div>
+        <div class="label ok">Proposed — immediate start</div>
+<pre><code>for tc in tool_calls:
+  emit Start(id, name, args)   // NOW — visible in <1ms
+  prepare
+  spawn async { execute; finalize }
+
+join all futures
+
+for finalized in source_order:
+  // Start already emitted, only emit result
+  emit MessageStart(result)
+  emit MessageEnd(result)
+  emit End(id, result)</code></pre>
+        <p>This keeps result ordering deterministic (ends in source order) but gives immediate feedback. Sequential path unchanged — it already emits start before execute.</p>
+        <div class="card" style="margin-top:18px">
+          <h3>To think about</h3>
+          <p>Should we also add <code>ToolExecutionUpdateEvent</code> emission between start and end? Yes — carried by <code>execute_tool_safely</code> wrapper, no change needed in parallel harness itself. Start early + updates mid-flight = live UI.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 6 / 10 — File race -->
+<section id="race">
+  <div class="wrap">
+    <p class="kicker">06 — mutation safety</p>
+    <h2>Two edits to the same file should never race</h2>
+    <p>Agent loop's <code>execute_tool_calls_parallel</code> launches all tools whose <code>execution_mode() == parallel</code> concurrently. All builtins currently return <code>parallel</code> (default in <code>ToolDefinition</code>). So <code>edit(A)</code> + <code>edit(B)</code> both <code>read_text_file → apply_edits → write_text_file</code> at same wall time.</p>
+    <div class="code-grid">
+      <div class="sample">
+        <span class="sample-title">Race scenario</span>
+<pre><code>User: "fix both bugs in foo.cpp"
+Model calls:
+  edit(path="foo.cpp",
+    oldText="funcA old", newText="funcA new")
+  edit(path="foo.cpp",
+    oldText="funcB old", newText="funcB new")
+
+Timeline parallel:
+T0  T1 read foo.cpp (same content)
+T1  T1 apply_edits in RAM (different)
+T2  T1 writes → contains fix A only
+T2  T2 writes → contains fix B only
+                     ↑ fix A lost, or partial write
+
+Result: corrupted file or missing one fix.
+No file lock, no mtime check, no queue.
+</code></pre>
+      </div>
+      <div class="sample">
+        <span class="sample-title good">Three levels of fix (escalating)</span>
+<pre><code>// L1 — minimal, correct, 2 lines (RECOMMENDED FOR NOW)
+ToolExecutionMode WriteTool::execution_mode() const {
+  return ToolExecutionMode::sequential;
+}
+ToolExecutionMode EditTool::execution_mode() const {
+  return ToolExecutionMode::sequential;
+}
+// Loop already has has_sequential → sequential path
+
+// L2 — per-path mutex
+static shared_mutex file_mutexes[shards];
+lock = file_mutexes[hash(path)]
+
+read + apply + write under lock
+prevents cross-batch races too
+
+// L3 — FileMutationQueue (pi's approach)
+queue<Mutation>{path, content, mtime}
+single writer thread, dedupes, mtime checks,
+writes coalesced. Overkill for now.
+</code></pre>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <h3>Why L1 is enough today</h3>
+        <p><code>agent_loop.cpp: execute_tool_calls</code> already checks <code>has_sequential &&</code> — if any tool in batch is sequential, whole batch runs sequentially. So marking write/edit sequential serializes them within a batch and guarantees no intra-batch race.</p>
+      </div>
+      <div class="card">
+        <h3>What L1 does NOT fix</h3>
+        <p>Across batches (turn 1 edit + turn 2 edit overlap due to abort/retry, or Lua tools). For that, L2 per-path mutex is ~60 LOC and true fix. L3 queue is ~200 LOC, only if we want pi-parity.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 7 / 10 — Truncation -->
+<section id="trunc">
+  <div class="wrap">
+    <p class="kicker">07 — output loss</p>
+    <h2>Truncation without preservation loses the most useful bits</h2>
+    <div class="split">
+      <div>
+        <p><code>kMaxBytes = 64KB</code> guards model context size. But current <code>truncate_head</code> drops tail and adds note:</p>
+<pre><code>[Truncated: showing 2000 of 8500 lines]
+or
+[Truncated: 884 lines shown (64KB limit)]</code></pre>
+        <p>No temp file. No way for agent or user to recover full output. If build error is at line 8200, it is gone. Agent retries blindly, wasting tokens.</p>
+        <div class="label warn">Current</div>
+        <ul>
+          <li>read: truncates at 64KB + 2000 lines</li>
+          <li>bash: truncates at 64KB after exit</li>
+          <li>grep/find/ls: truncates at limit + 64KB</li>
+          <li>details() always nullopt</li>
+        </ul>
+      </div>
+      <div>
+        <div class="label ok">Proposed: preserve + point</div>
+<pre><code>// builtin_tools.cpp helpers
+path write_full_output(
+  string_view tool_name,
+  string_view call_id,
+  string_view full_content) {
+  auto dir = tmp_dir() / "pici" / "tool-outputs";
+  create_directories(dir);
+  auto p = dir / (tool_name + "-" + call_id + ".log");
+  write_text_file(p, full_content);
+  return p;
+}
+
+shared_ptr&lt;ToolResult&gt; result =
+  make_shared&lt;TextToolResult&gt;(
+    truncated_preview,     // content — goes to model
+    false,
+    full_path.string()     // details — shown to user
+  );</code></pre>
+        <p>Model sees 64KB preview (budget safe). Human sees "<code>Full output at /tmp/pici/tool-outputs/bash-abc123.log</code>" via renderer's details row. Same pattern pi uses: bounded accumulation + full path.</p>
+        <div class="card" style="margin-top:16px; min-height:auto">
+          <h3>Renderer tweak</h3>
+          <p><code>VerboseRenderer::on_tool_end</code> already prints <code>result.content()</code> in gray. If <code>result.details()</code> present, print second line <code>full output: /tmp/...</code> in dim color. ACP renderer can include <code>details</code> as artifact part.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 8 / 10 — Architecture -->
+<section id="arch">
+  <div class="wrap">
+    <p class="kicker">08 — proposed end state</p>
+    <h2>Small changes, clear data flow</h2>
+    <div class="diagram">Agent (prompt)
+  │
+  ├─► AgentLoopConfig { before_tool, after_tool, llm_client, ... }
+  │
+  └─► run_agent_loop_worker_impl
+        │
+        ├─► LLM → AssistantMessage (tool_calls)
+        │
+        └─► execute_tool_calls
+              │
+              ├─ [sequential path]  ──────────────────┐
+              │   emit Start → execute ──on_update──► emit Update ──► Renderer.on_tool_update()
+              │                └───────► emit End  ──► Renderer.on_tool_end()  +  MessageEnd
+              │                                       + SessionStore.append (after turn today,
+              │                                         durably during turn in Phase 3)
+              │
+              └─ [parallel path — FIXED]
+                  for each tc:  emit Start IMMEDIATELY  ─► Renderer live
+                  spawn async { execute ──on_update──► emit Update }
+                  join
+                  for each in source_order: emit End + Message*
+
+ToolDefinition::execute(id, args, stop_token, on_update)
+  │
+  ├─ ReadTool / Grep / Find / Ls : on_update unused (fast, no need)
+  ├─ BashTool  : loop { read(pipe) → output += chunk → on_update(full_so_far) throttled }
+  ├─ Write/Edit : sequential mode → no race. L2: + per-path mutex
+  │
+  └─► returns ToolResult { content=preview (64KB), details=full_path?, is_error }
+
+Renderer
+  ├─ Raw           : ignores update, prints final only
+  ├─ Diff/Viewport : on_tool_start: show "▶ bash ..." + spinner
+  │                 on_tool_update: replace partial in-place, scroll
+  │                 on_tool_end   : final + dim details path
+  └─ AcpSseRenderer : re-emits as message.part (live SSE)
+</div>
+    <div class="grid three">
+      <div class="card">
+        <h3>Touches only 3 files</h3>
+        <p><code>builtin_tools.cpp</code> (bash streaming + full-output file + seq mode), <code>agent_loop.cpp</code> (start timing), <code>stream_renderer.h/cpp</code> (new <code>on_tool_update</code> virtual) + renderers.</p>
+      </div>
+      <div class="card">
+        <h3>Backward compatible</h3>
+        <p><code>on_tool_update</code> default no-op. Lua tools unaffected. Existing tests pass: they only assert final content, not event ordering (need adjustment for new start timing).</p>
+      </div>
+      <div class="card">
+        <h3>Sets up Phase 3</h3>
+        <p>Once live updates work, durable mutation entries become easier: we already have the event stream point where to persist partials if we ever want crash-safe history.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 9 / 10 — Implementation plan -->
+<section id="plan">
+  <div class="wrap">
+    <p class="kicker">09 — implementation plan</p>
+    <h2>Four subtasks, ~130 LOC, one day</h2>
+    <div class="flow">
+      <div class="step">
+        <strong>3a — Bash live streaming</strong>
+        <span>Wire <code>on_update</code> in BashTool poll loop. Throttle 100ms / 1KB. Thread-safe because emit is already mutex-protected in EventStream. ~25 LOC in builtin_tools.cpp</span>
+        <div style="margin-top:10px"><span class="badge good">high impact</span></div>
+      </div>
+      <div class="step">
+        <strong>3c — Immediate tool start</strong>
+        <span>Move <code>ToolExecutionStartEvent</code> before async spawn in <code>execute_tool_calls_parallel</code>. Keep End emission in source order. Adjust 2-3 tests that assert event ordering. ~15 LOC</span>
+        <div style="margin-top:10px"><span class="badge good">high impact</span></div>
+      </div>
+      <div class="step">
+        <strong>3b — Full-output path</strong>
+        <span>Add <code>write_full_output()</code> helper. In every builtin that calls <code>truncate_head</code>, if truncated, write full to temp and return <code>TextToolResult(preview, details=path)</code>. Update renderers to show details. ~50 LOC</span>
+        <div style="margin-top:10px"><span class="badge warn">med impact</span></div>
+      </div>
+      <div class="step">
+        <strong>3d — File mutation safety</strong>
+        <span>L1: override <code>execution_mode()</code> → sequential for Write/Edit. L2 (optional same PR): per-path shared_mutex shards. ~10 LOC L1, ~60 LOC L2</span>
+        <div style="margin-top:10px"><span class="badge good">quick win</span></div>
+      </div>
+    </div>
+    <div class="split">
+      <div>
+        <div class="label accent">Order</div>
+        <ol style="margin:12px 0 0; padding-left:20px; color:var(--muted); font-size:16px">
+          <li style="margin:8px 0"><code>stream_renderer.h</code>: add <code>on_tool_update</code> + <code>on_tool_details</code> plumbing, update <code>dispatch_event</code> for new <code>ToolExecutionUpdateEvent</code>.</li>
+          <li style="margin:8px 0"><code>agent_loop.cpp</code>: move Start emit before spawn in parallel path. Verify sequential path already correct.</li>
+          <li style="margin:8px 0"><code>builtin_tools.cpp</code>: L1 sequential override for write/edit. Add full-output helper + wire details.</li>
+          <li style="margin:8px 0"><code>builtin_tools.cpp</code>: bash live <code>on_update</code> throttling.</li>
+          <li style="margin:8px 0">Renderers: Viewport shows update as expanding block, Raw ignores, Verbose prints dim details.</li>
+        </ol>
+      </div>
+      <div>
+        <div class="label ok">Risks & mitigations</div>
+        <ul>
+          <li><strong>Update flooding</strong> → throttle in tool (100ms) not global debounce</li>
+          <li><strong>Event order test breakage</strong> → update <code>test_agent_loop.cpp</code> expectations: start before end but results still ordered</li>
+          <li><strong>Large live buffer in renderer</strong> → cap rendered live output at 20KB tail, full only at end</li>
+          <li><strong>Temp file leak</strong> → write under <code>/tmp/pici/tool-outputs/</code> + mention in docs, or clean on session start for files &gt;7d</li>
+          <li><strong>Lua tools</strong> → they already receive <code>on_update</code> via <code>lua_tool.cpp</code> shim? Verify; if not, pass through there too</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 10 / 10 — Verification -->
+<section id="verify">
+  <div class="wrap">
+    <p class="kicker">10 — what done looks like</p>
+    <h2>From blind wait to live workshop</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Before</h3>
+<pre><code style="white-space:pre-wrap">[tool: bash({"command":"make test -j8"})]
+... 28s silence ...
+  [bash] make: Entering...
+  200 lines of output
+  [Truncated...]
+
+[tool: read(...)] [tool: edit(...)] [tool: edit(...)]
+... nothing for 4s then all 3 pop ...
+</code></pre>
+      </div>
+      <div class="card">
+        <h3>After (viewport)</h3>
+<pre><code style="white-space:pre-wrap">▶ bash  make test -j8
+  make: Entering directory...
+  [  3%] Building CXX object ...
+  [  8%] Building CXX object ...  ▌ live scrolling
+  [ 42%] Linking test-agent
+  ...
+  ✔ completed  (full log: /tmp/pici/.../bash-a1b2.log)
+
+▶ edit  src/core/builtin_tools.cpp  sequential queue
+✔ write src/main.cpp  waiting for edit turn
+
+▶ read  src/core/session/session_store.h
+✔ completed 42 lines
+</code></pre>
+      </div>
+    </div>
+    <div class="grid three" style="margin-top:22px">
+      <div class="card">
+        <h3>Verification — unit</h3>
+        <p><code>ctest -R test-agent_loop --output-on-failure</code><br>
+        New test: <code>bash streams updates</code> — run echo loop, assert ≥2 update events.<br>
+        New test: <code>parallel start immediate</code> — assert Start before any tool completes.<br>
+        New test: <code>write edit sequential</code> — 2 edits same file both applied.</p>
+      </div>
+      <div class="card">
+        <h3>Verification — manual</h3>
+        <p><code>./build/pi-cli --render viewport chat --tools bash</code><br>
+        Prompt: "run a long build and show me live"<br>
+        Expect spinner + appending live lines.<br>
+        Trigger truncation: <code>seq 10000 | cat</code> via bash → expect details path printed.</p>
+      </div>
+      <div class="card">
+        <h3>Build discipline</h3>
+        <p><code>make dev</code> → <code>make test</code> → <code>make lint</code> before commit.<br>
+        No decorative divider comments (per AGENTS.md).<br>
+        Keep <code>ToolUpdateCallback</code> backward-compat — optional param already.</p>
+      </div>
+    </div>
+    <div class="rule">Success = user never wonders "is it stuck?" — they see it working.</div>
+    <div class="foot">File: <code>tool_progress_presentation.html</code> — generated 2026-07-13 · Gap reference: docs/pi-gap-analysis.md §6</div>
+  </div>
+</section>
+
+</body>
+</html>
