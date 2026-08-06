@@ -451,6 +451,7 @@ bool HttpClient::post_streaming_authenticated(
   WriteState state{.callback = std::move(on_line),
                    .diagnostics = std::move(diagnostics)};
   curl_easy_setopt(curl.handle, CURLOPT_WRITEDATA, &state);
+  curl_easy_setopt(curl.handle, CURLOPT_HEADERDATA, &state);
 
   CURLcode res = curl_easy_perform(curl.handle);
   if (!state.buffer.empty()) {
