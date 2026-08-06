@@ -54,6 +54,44 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
     .cost={.input_per_mtok=1.10, .output_per_mtok=4.40, .cache_read_per_mtok=0.275, .cache_write_per_mtok=0},
     .context_window=200000,  .max_tokens=100000 },
 
+  // OpenAI Codex (ChatGPT OAuth) — limits and pricing mirror the vendored
+  // provider catalog. Authentication is deliberately separate from openai.
+  { .id="gpt-5.3-codex-spark", .name="GPT-5.3 Codex Spark", .api="openai-codex-responses", .provider="openai-codex",
+    .base_url="https://chatgpt.com/backend-api", .reasoning=true,
+    .input_capabilities={"text"},
+    .cost={.input_per_mtok=1.75, .output_per_mtok=14.00, .cache_read_per_mtok=0.175, .cache_write_per_mtok=0},
+    .context_window=128000, .max_tokens=128000 },
+  { .id="gpt-5.4", .name="GPT-5.4", .api="openai-codex-responses", .provider="openai-codex",
+    .base_url="https://chatgpt.com/backend-api", .reasoning=true,
+    .input_capabilities={"text", "image"},
+    .cost={.input_per_mtok=2.50, .output_per_mtok=15.00, .cache_read_per_mtok=0.25, .cache_write_per_mtok=0},
+    .context_window=272000, .max_tokens=128000 },
+  { .id="gpt-5.4-mini", .name="GPT-5.4 mini", .api="openai-codex-responses", .provider="openai-codex",
+    .base_url="https://chatgpt.com/backend-api", .reasoning=true,
+    .input_capabilities={"text", "image"},
+    .cost={.input_per_mtok=0.75, .output_per_mtok=4.50, .cache_read_per_mtok=0.075, .cache_write_per_mtok=0},
+    .context_window=272000, .max_tokens=128000 },
+  { .id="gpt-5.5", .name="GPT-5.5", .api="openai-codex-responses", .provider="openai-codex",
+    .base_url="https://chatgpt.com/backend-api", .reasoning=true,
+    .input_capabilities={"text", "image"},
+    .cost={.input_per_mtok=5.00, .output_per_mtok=30.00, .cache_read_per_mtok=0.50, .cache_write_per_mtok=0},
+    .context_window=272000, .max_tokens=128000 },
+  { .id="gpt-5.6-luna", .name="GPT-5.6 Luna", .api="openai-codex-responses", .provider="openai-codex",
+    .base_url="https://chatgpt.com/backend-api", .reasoning=true,
+    .input_capabilities={"text", "image"},
+    .cost={.input_per_mtok=0.20, .output_per_mtok=1.20, .cache_read_per_mtok=0.02, .cache_write_per_mtok=0.25},
+    .context_window=272000, .max_tokens=128000 },
+  { .id="gpt-5.6-sol", .name="GPT-5.6 Sol", .api="openai-codex-responses", .provider="openai-codex",
+    .base_url="https://chatgpt.com/backend-api", .reasoning=true,
+    .input_capabilities={"text", "image"},
+    .cost={.input_per_mtok=5.00, .output_per_mtok=30.00, .cache_read_per_mtok=0.50, .cache_write_per_mtok=6.25},
+    .context_window=272000, .max_tokens=128000 },
+  { .id="gpt-5.6-terra", .name="GPT-5.6 Terra", .api="openai-codex-responses", .provider="openai-codex",
+    .base_url="https://chatgpt.com/backend-api", .reasoning=true,
+    .input_capabilities={"text", "image"},
+    .cost={.input_per_mtok=2.00, .output_per_mtok=12.00, .cache_read_per_mtok=0.20, .cache_write_per_mtok=2.50},
+    .context_window=272000, .max_tokens=128000 },
+
   { .id="deepseek-chat",     .name="DeepSeek V3",     .api="openai-completions", .provider="deepseek",
     .base_url="https://api.deepseek.com/v1", .reasoning=false,
     .cost={.input_per_mtok=0.27, .output_per_mtok=1.10, .cache_read_per_mtok=0.07, .cache_write_per_mtok=0},
@@ -294,6 +332,11 @@ std::optional<Model> find_model(std::string_view spec,
   auto try_infer = [&](std::string_view want) -> bool {
     if (want.empty() || want == "custom")
       return false;
+    if (want == "openai-codex") {
+      generic.base_url = "https://chatgpt.com/backend-api";
+      generic.api = "openai-codex-responses";
+      return true;
+    }
     for (auto &m : kModels) {
       if (m.provider == want) {
         generic.base_url = m.base_url;

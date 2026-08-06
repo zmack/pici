@@ -16,6 +16,7 @@
 
 #include "core/agent_loop.h"
 #include "core/agent_state.h"
+#include "core/auth_types.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/stream.h"
@@ -47,6 +48,10 @@ public:
     bool verbose{false};
 
     // LLM
+    std::function<std::optional<RequestAuth>(std::string_view provider)>
+        get_auth;
+
+    // Legacy API-key callback retained while providers migrate to get_auth.
     std::function<std::optional<std::string>(std::string_view provider)>
         get_api_key;
 

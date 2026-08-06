@@ -334,6 +334,25 @@ cmake -S . -B build-ninja -G Ninja -DPI_CPP_OTEL_API=OFF
 cmake --build build-ninja --parallel
 ```
 
+## OpenAI authentication
+
+The `openai` provider uses the normal OpenAI Platform API key (`OPENAI_API_KEY`
+or `--api-key`) and is billed through the Platform account. ChatGPT/Codex
+subscription authentication is a separate experimental provider:
+
+```bash
+pi-cli auth login openai-codex
+pi-cli auth status openai-codex
+pi-cli --provider openai-codex --model gpt-5.5 -p "Explain this repository"
+pi-cli auth logout openai-codex
+```
+
+Use `pi-cli auth login openai-codex --device` when the loopback browser callback
+cannot be used. Credentials are stored as a versioned, mode-0600 file under
+`$XDG_CONFIG_HOME/pici/auth.json` (or `~/.config/pici/auth.json`); set
+`PICI_AUTH_FILE` to override the location. `OPENAI_API_KEY` is intentionally
+not used for `openai-codex`, and `--api-key` is rejected for that provider.
+
 ## Local OpenAI-Compatible API
 
 The CLI defaults to the local API at `http://127.0.0.1:8080/v1` and the

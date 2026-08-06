@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include "core/agent_state.h"
+#include "core/auth_types.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/stream_diagnostics.h"
@@ -28,6 +29,9 @@ using AssistantEventCallback =
 struct StreamOptions {
   std::optional<double> temperature;
   std::optional<std::uint32_t> max_tokens;
+  std::optional<RequestAuth> auth;
+  // Kept for source compatibility with providers that have not migrated to
+  // RequestAuth yet. New clients should consume auth.
   std::optional<std::string> api_key;
   ThinkingLevel reasoning{ThinkingLevel::off};
   std::optional<std::string> cache_retention;

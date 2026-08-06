@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "core/agent_state.h"
+#include "core/auth_types.h"
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
@@ -40,6 +41,12 @@
 namespace pi::core {
 
 namespace {
+
+std::int64_t now_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
 
 std::size_t estimate_context_tokens(const AgentContext &context) {
   std::size_t bytes = context.system_prompt.size();
@@ -518,8 +525,30 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
   opts.on_response = config.on_response;
   opts.diagnostics = config.diagnostics;
   opts.verbose = config.verbose;
-  opts.api_key = config.get_api_key ? config.get_api_key(config.model.provider)
-                                    : std::nullopt;
+  std::shared_ptr<AssistantMessage> final_msg;
+  try {
+    if (config.get_auth)
+      opts.auth = config.get_auth(config.model.provider);
+    if (!opts.auth && config.get_api_key) {
+      if (auto key = config.get_api_key(config.model.provider)) {
+        opts.api_key = std::move(key);
+        opts.auth = RequestAuth{.kind = AuthKind::api_key,
+                                .bearer_token = opts.api_key,
+                                .source = "legacy-api-key"};
+      }
+    }
+  } catch (const std::exception &error) {
+    final_msg = std::make_shared<AssistantMessage>();
+    final_msg->api = config.model.api;
+    final_msg->provider = config.model.provider;
+    final_msg->model = config.model.id;
+    final_msg->stop_reason =
+        stop_tok.stop_requested() ? StopReason::aborted : StopReason::error;
+    final_msg->error_message = stop_tok.stop_requested()
+                                   ? "Request was aborted"
+                                   : std::string(error.what());
+    final_msg->timestamp = now_ms();
+  }
 
 #ifdef PI_CPP_OTEL_ENABLED
   // Capture HTTP response metadata via on_response hook (compose with user's).
@@ -583,8 +612,23 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
         ev);
   };
 
-  auto final_msg =
-      client->stream(config.model, llm_context, opts, on_event, stop_tok);
+  if (!final_msg) {
+    try {
+      final_msg =
+          client->stream(config.model, llm_context, opts, on_event, stop_tok);
+    } catch (const std::exception &error) {
+      final_msg = std::make_shared<AssistantMessage>();
+      final_msg->api = config.model.api;
+      final_msg->provider = config.model.provider;
+      final_msg->model = config.model.id;
+      final_msg->stop_reason =
+          stop_tok.stop_requested() ? StopReason::aborted : StopReason::error;
+      final_msg->error_message = stop_tok.stop_requested()
+                                     ? "Request was aborted"
+                                     : std::string(error.what());
+      final_msg->timestamp = now_ms();
+    }
+  }
   compute_cost(final_msg->usage, config.model.cost);
 
   if (added_partial) {

@@ -56,6 +56,81 @@ Args parse_args(int argc, char **argv) {
       return args[static_cast<std::size_t>(++i)];
     };
 
+    if (arg == "auth" && result.messages.empty() &&
+        result.auth_action == AuthAction::none) {
+      if (++i >= argc) {
+        result.auth_action = AuthAction::help;
+        result.diagnostics.push_back(
+            {.is_error = true,
+             .message = "auth requires login, status, or logout"});
+        break;
+      }
+      const std::string_view action = args[static_cast<std::size_t>(i)];
+      if (action == "--help" || action == "-h") {
+        result.auth_action = AuthAction::help;
+        continue;
+      }
+      if (action == "login") {
+        result.auth_action = AuthAction::login;
+      } else if (action == "status") {
+        result.auth_action = AuthAction::status;
+      } else if (action == "logout") {
+        result.auth_action = AuthAction::logout;
+      } else {
+        result.auth_action = AuthAction::help;
+        result.diagnostics.push_back(
+            {.is_error = true,
+             .message = "unknown auth action \"" + std::string(action) + "\""});
+        break;
+      }
+
+      for (++i; i < argc; ++i) {
+        const std::string_view auth_arg = args[static_cast<std::size_t>(i)];
+        if (auth_arg == "--help" || auth_arg == "-h") {
+          result.auth_action = AuthAction::help;
+        } else if (auth_arg == "--verbose") {
+          result.verbose = true;
+        } else if (auth_arg == "--config") {
+          if (i + 1 >= argc) {
+            result.diagnostics.push_back(
+                {.is_error = true, .message = "--config requires an argument"});
+          } else {
+            result.config_path = args[static_cast<std::size_t>(++i)];
+          }
+        } else if (auth_arg == "--device") {
+          result.auth_device = true;
+        } else if (auth_arg == "--browser") {
+          result.auth_browser = true;
+        } else if (!auth_arg.empty() && auth_arg.front() == '-') {
+          result.diagnostics.push_back(
+              {.is_error = true,
+               .message = "option " + std::string(auth_arg) +
+                          " is not valid for auth commands"});
+        } else if (result.auth_provider.empty()) {
+          result.auth_provider = std::string(auth_arg);
+        } else {
+          result.diagnostics.push_back(
+              {.is_error = true,
+               .message = "unexpected auth argument \"" +
+                          std::string(auth_arg) + "\""});
+        }
+      }
+      if (result.auth_device && result.auth_browser) {
+        result.diagnostics.push_back(
+            {.is_error = true,
+             .message =
+                 "auth login accepts only one of --device or --browser"});
+      }
+      break;
+    }
+
+    if (result.auth_action != AuthAction::none) {
+      result.diagnostics.push_back(
+          {.is_error = true,
+           .message = "auth must be the first non-option argument"});
+      break;
+    }
+
     if (arg == "--help" || arg == "-h") {
       result.help = true;
     } else if (arg == "--version" || arg == "-v") {

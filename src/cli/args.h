@@ -7,12 +7,20 @@ namespace pi::cli {
 
 enum class ThinkingLevel { off, minimal, low, medium, high, xhigh };
 
+enum class AuthAction { none, login, status, logout, help };
+
 struct Args {
   // Model selection
   std::string model;    // model id or "provider/id"
   std::string provider; // explicit provider override
   std::string base_url; // explicit base URL (for local / custom endpoints)
   std::string api_key;  // explicit API key
+
+  // Authentication subcommand (CLI-only; never loaded from config).
+  AuthAction auth_action{AuthAction::none};
+  std::string auth_provider;
+  bool auth_device{false};
+  bool auth_browser{false};
 
   // Prompt / session
   std::string system_prompt;

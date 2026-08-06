@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "core/agent_state.h"
+#include "core/auth_types.h"
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
@@ -110,7 +111,10 @@ struct AgentLoopConfig {
   // queried only while publishing the terminal aborted event.
   std::function<TurnAbortReason()> get_abort_reason;
 
-  // Resolves API key dynamically
+  // Resolves request authentication dynamically.
+  std::function<std::optional<RequestAuth>(std::string_view provider)> get_auth;
+
+  // Legacy API-key callback retained while providers migrate to get_auth.
   std::function<std::optional<std::string>(std::string_view provider)>
       get_api_key;
 

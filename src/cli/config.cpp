@@ -196,6 +196,10 @@ Args merge_args(const Args &config, const Args &cli) {
   out.version = cli.version;
   out.config_path = cli.config_path;
   out.stream_trace = cli.stream_trace;
+  out.auth_action = cli.auth_action;
+  out.auth_provider = cli.auth_provider;
+  out.auth_device = cli.auth_device;
+  out.auth_browser = cli.auth_browser;
   out.diagnostics = cli.diagnostics;
 
   return out;

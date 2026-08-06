@@ -2,6 +2,8 @@
 #include "cli/args.h"
 #include "cli/config.h"
 #include "cli/system_prompt.h"
+#include "core/auth/auth_resolver.h"
+#include "core/auth_types.h"
 #include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
 #include "core/lua_tool.h"
@@ -9,6 +11,7 @@
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/providers/muse_messages.h"
+#include "core/providers/openai_codex_responses.h"
 #include "core/providers/openai_completions.h"
 
 #include <atomic>
@@ -17,6 +20,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -46,6 +50,7 @@ int main(int argc, char *argv[]) noexcept {
               [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
 
   pi::core::register_openai_completions_client();
+  pi::core::register_openai_codex_responses_client();
   pi::core::register_muse_messages_client();
 
   // Parse shared CLI flags
@@ -78,6 +83,11 @@ int main(int argc, char *argv[]) noexcept {
     std::cout << "pi-acp " PI_CPP_VERSION "\n";
     return 0;
   }
+  if (args.auth_action != pi::cli::AuthAction::none) {
+    std::cerr << "error: pi-acp does not support auth subcommands; use pi-cli "
+                 "auth ...\n";
+    return 1;
+  }
 
   // --port (not in shared Args, parse manually)
   std::atomic<int> port{8080};
@@ -108,6 +118,11 @@ int main(int argc, char *argv[]) noexcept {
   }
   if (!args.base_url.empty())
     model.base_url = args.base_url;
+  if (model.provider == "openai-codex" && !args.api_key.empty()) {
+    std::cerr << "error: --api-key cannot be used with openai-codex; run "
+                 "pi-cli auth login openai-codex\n";
+    return 1;
+  }
 
   // Build agent options
   pi::acp::ServerConfig cfg;
@@ -117,6 +132,20 @@ int main(int argc, char *argv[]) noexcept {
     cfg.session_dir = args.session_dir;
 
   cfg.agent_opts.model = model;
+  auto auth_resolver = std::make_shared<pi::auth::AuthResolver>();
+  if (model.provider == "openai-codex") {
+    try {
+      (void)auth_resolver->resolve(model.provider, args.api_key);
+    } catch (const std::exception &error) {
+      std::cerr << "error: " << error.what() << "\n";
+      return 1;
+    }
+  }
+  cfg.agent_opts.get_auth =
+      [&args, &model, auth_resolver](
+          std::string_view p) -> std::optional<pi::core::RequestAuth> {
+    return auth_resolver->resolve(p.empty() ? model.provider : p, args.api_key);
+  };
   cfg.agent_opts.get_api_key =
       [&args, &model](std::string_view p) -> std::optional<std::string> {
     if (!args.api_key.empty())

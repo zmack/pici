@@ -1,5 +1,6 @@
 #include "core/providers/openai_completions.h"
 #include "core/agent_state.h"
+#include "core/auth_types.h"
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
@@ -652,9 +653,14 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
     on_event(AssistantMessageStartEvent{*result});
 
   if (compat.uses_non_streaming) {
-    auto response =
-        HttpClient::post(url, request_body, headers, options.api_key,
-                         options.timeout_ms, stop_tok);
+    auto auth = options.auth;
+    if (!auth && options.api_key) {
+      auth = RequestAuth{.kind = AuthKind::api_key,
+                         .bearer_token = options.api_key,
+                         .source = "legacy-api-key"};
+    }
+    auto response = HttpClient::post_authenticated(
+        url, request_body, headers, auth, options.timeout_ms, stop_tok);
     if (!response || response->status_code < 200 ||
         response->status_code >= 300 || stop_tok.stop_requested()) {
       result->stop_reason =
@@ -735,7 +741,13 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
                        .diagnostics = options.diagnostics};
   std::optional<std::string> response_error;
 
-  bool ok = HttpClient::post_streaming(
+  auto auth = options.auth;
+  if (!auth && options.api_key) {
+    auth = RequestAuth{.kind = AuthKind::api_key,
+                       .bearer_token = options.api_key,
+                       .source = "legacy-api-key"};
+  }
+  bool ok = HttpClient::post_streaming_authenticated(
       url, request_body,
       [&state, &response_error](const std::string &line) {
         if (!line.starts_with("data: ")) {
@@ -757,8 +769,7 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
           response_error = e.what();
         }
       },
-      headers, options.api_key, options.timeout_ms, stop_tok,
-      options.diagnostics);
+      headers, auth, options.timeout_ms, stop_tok, options.diagnostics);
   if (response_error) {
     ok = false;
   }

@@ -343,6 +343,7 @@ AgentLoopConfig Agent::create_loop_config() {
     std::scoped_lock lock(interrupt_mutex_);
     return interrupt_reason_.value_or(TurnAbortReason::unknown);
   };
+  config.get_auth = options_.get_auth;
   config.get_api_key = options_.get_api_key;
   config.should_stop_after_turn = options_.should_stop_after_turn;
   config.get_steering_messages = [this]() {

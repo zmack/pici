@@ -1,4 +1,5 @@
 #include "core/providers/muse_messages.h"
+#include "core/auth_types.h"
 
 #include "core/agent_state.h"
 #include "core/event_types.h"
@@ -731,7 +732,13 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
 
   MuseMessagesSseParser parser(result, on_event, options.diagnostics);
   std::optional<std::string> callback_error;
-  bool ok = HttpClient::post_streaming(
+  auto auth = options.auth;
+  if (!auth && options.api_key) {
+    auth = RequestAuth{.kind = AuthKind::api_key,
+                       .bearer_token = options.api_key,
+                       .source = "legacy-api-key"};
+  }
+  bool ok = HttpClient::post_streaming_authenticated(
       url, request.dump(),
       [&parser, &callback_error](const std::string &line) {
         try {
@@ -740,8 +747,7 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
           callback_error = e.what();
         }
       },
-      headers, options.api_key, options.timeout_ms, stop_tok,
-      options.diagnostics);
+      headers, auth, options.timeout_ms, stop_tok, options.diagnostics);
   parser.finish();
 
   if (stop_tok.stop_requested() || !ok || parser.error() || callback_error) {

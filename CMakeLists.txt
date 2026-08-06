@@ -42,6 +42,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(json_schema_validator)
 
 find_package(PkgConfig REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 # ─── cmark (Markdown parser) ─────────────────────────────────────────────────
 FetchContent_Declare(
@@ -471,6 +472,7 @@ add_library(pi-core
     src/core/stream_diagnostics.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
+    src/core/auth/credential_store.cpp
     src/core/env_api_keys.cpp
     src/core/models.cpp
     src/core/providers/faux.cpp
@@ -587,6 +589,19 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus)
     add_test(NAME test-config COMMAND test-config)
 
+    add_executable(test-credential_store test/test_credential_store.cpp)
+    target_link_libraries(test-credential_store PRIVATE pi-core)
+    add_test(NAME test-credential_store COMMAND test-credential_store)
+
+    add_executable(test-openai_codex_oauth test/test_openai_codex_oauth.cpp)
+    target_link_libraries(test-openai_codex_oauth PRIVATE pi-http)
+    add_test(NAME test-openai_codex_oauth COMMAND test-openai_codex_oauth)
+
+    add_executable(test-openai_codex_responses
+        test/test_openai_codex_responses.cpp)
+    target_link_libraries(test-openai_codex_responses PRIVATE pi-http)
+    add_test(NAME test-openai_codex_responses COMMAND test-openai_codex_responses)
+
     add_executable(test-system_prompt test/test_system_prompt.cpp src/cli/system_prompt.cpp)
     target_include_directories(test-system_prompt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test-system_prompt COMMAND test-system_prompt)
@@ -620,11 +635,15 @@ endif()
 
 add_library(pi-http
     src/http/http_client.cpp
+    src/core/auth/auth_resolver.cpp
+    src/core/auth/openai_codex_oauth.cpp
     src/core/providers/openai_completions.cpp
+    src/core/providers/openai_codex_responses.cpp
     src/core/providers/muse_messages.cpp
 )
 target_include_directories(pi-http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl)
+target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl OpenSSL::Crypto
+                                     httplib::httplib)
 
 # ─── clang-tidy ───────────────────────────────────────────────────────────────
 

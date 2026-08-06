@@ -5,6 +5,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <exception>
 #include <format>
 #include <iomanip>
@@ -38,6 +39,9 @@
 #include "core/agent_loop.h"
 #include "core/agent_state.h"
 #include "core/agent_task.h"
+#include "core/auth/auth_resolver.h"
+#include "core/auth/openai_codex_oauth.h"
+#include "core/auth_types.h"
 #include "core/builtin_tools.h"
 #include "core/env_api_keys.h"
 #include "core/event_types.h"
@@ -46,6 +50,7 @@
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/providers/muse_messages.h"
+#include "core/providers/openai_codex_responses.h"
 #include "core/providers/openai_completions.h"
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
@@ -208,6 +213,76 @@ int cmd_list_models(const cli::Args &args) {
         has_image ? "yes" : "no");
   }
   return 0;
+}
+
+void print_auth_help(const char *prog) {
+  std::cout
+      << "Usage: " << prog
+      << " auth <login|status|logout> openai-codex [--device|--browser]\n\n"
+         "Commands:\n"
+         "  login openai-codex       Sign in with ChatGPT/Codex OAuth\n"
+         "  status openai-codex      Show stored authentication status\n"
+         "  logout openai-codex      Remove stored authentication\n\n"
+         "Login defaults to a loopback browser flow. Use --device when a\n"
+         "browser callback cannot be used. Credentials are stored in the\n"
+         "pici auth file with restrictive permissions.\n";
+}
+
+int cmd_auth(const cli::Args &args, const char *prog) {
+  if (args.auth_action == cli::AuthAction::help) {
+    print_auth_help(prog);
+    return 0;
+  }
+  if (args.auth_provider != "openai-codex") {
+    std::cerr << "error: only openai-codex authentication is supported\n";
+    return 1;
+  }
+  if (args.auth_action != cli::AuthAction::login &&
+      (args.auth_device || args.auth_browser)) {
+    std::cerr << "error: login mode flags are only valid with auth login\n";
+    return 1;
+  }
+
+  try {
+    pi::auth::OpenAICodexOAuth oauth;
+    if (args.auth_action == cli::AuthAction::status) {
+      const auto credential = oauth.store().read_oauth("openai-codex");
+      if (!credential) {
+        std::cout << "openai-codex    oauth   not authenticated\n";
+        return 0;
+      }
+      const auto expires = std::chrono::system_clock::time_point(
+          std::chrono::milliseconds(credential->expires_at_ms));
+      const auto time = std::chrono::system_clock::to_time_t(expires);
+      std::tm utc{};
+      gmtime_r(&time, &utc);
+      std::cout << "openai-codex    oauth   authenticated "
+                << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ") << "\n";
+      return 0;
+    }
+    if (args.auth_action == cli::AuthAction::logout) {
+      oauth.store().erase("openai-codex");
+      std::cout << "Logged out of openai-codex.\n";
+      return 0;
+    }
+
+    pi::auth::OpenAICodexLoginOptions options;
+    options.mode = args.auth_device ? pi::auth::OpenAICodexLoginMode::device
+                                    : pi::auth::OpenAICodexLoginMode::browser;
+    options.notify = [](std::string_view message) {
+      std::cout << message << "\n";
+    };
+    const auto credential = oauth.login(options);
+    oauth.store().modify_oauth(
+        "openai-codex", [&](const std::optional<pi::auth::OAuthCredential> &) {
+          return std::optional<pi::auth::OAuthCredential>{credential};
+        });
+    std::cout << "Logged in to openai-codex.\n";
+    return 0;
+  } catch (const std::exception &error) {
+    std::cerr << "error: " << error.what() << "\n";
+    return 1;
+  }
 }
 
 core::ThinkingLevel to_core_thinking(cli::ThinkingLevel t) {
@@ -542,6 +617,11 @@ int cmd_run(const cli::Args &args) {
     return 1;
   }
   core::Model model = *model_opt;
+  if (model.provider == "openai-codex" && !args.api_key.empty()) {
+    std::cerr << "error: --api-key cannot be used with openai-codex; run "
+                 "pi-cli auth login openai-codex\n";
+    return 1;
+  }
 
   auto store = std::make_shared<core::SessionStore>(
       args.session_dir.empty() ? core::SessionStore::default_sessions_dir()
@@ -604,6 +684,11 @@ int cmd_run(const cli::Args &args) {
     }
   }
   opts.diagnostics = stream_diagnostics;
+  auto auth_resolver = std::make_shared<pi::auth::AuthResolver>();
+  opts.get_auth = [&args, &model, auth_resolver](
+                      std::string_view p) -> std::optional<core::RequestAuth> {
+    return auth_resolver->resolve(p.empty() ? model.provider : p, args.api_key);
+  };
   opts.get_api_key =
       [&args, &model](std::string_view p) -> std::optional<std::string> {
     if (!args.api_key.empty())
@@ -1414,9 +1499,27 @@ int main(int argc, char *argv[]) noexcept {
               [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
 
   pi::core::register_openai_completions_client();
+  pi::core::register_openai_codex_responses_client();
   pi::core::register_muse_messages_client();
 
   auto args = pi::cli::load_and_merge(argc, argv);
+
+  for (const auto &d : args.diagnostics) {
+    auto &out = d.is_error ? std::cerr : std::cout;
+    out << (d.is_error ? "error: " : "warning: ") << d.message << "\n";
+    if (d.is_error)
+      return 1;
+  }
+  if (args.help) {
+    pi::cli::print_help(*argv);
+    return 0;
+  }
+  if (args.version) {
+    pi::print_version();
+    return 0;
+  }
+  if (args.auth_action != pi::cli::AuthAction::none)
+    return pi::cmd_auth(args, *argv);
 
   // Initialise OTel export if requested. The RAII guard + atexit ensure
   // BatchSpanProcessor is flushed before normal process exit.
@@ -1432,21 +1535,6 @@ int main(int argc, char *argv[]) noexcept {
   if (!args.otel_endpoint.empty())
     pi::core::init_otel(args.otel_endpoint);
 
-  for (const auto &d : args.diagnostics) {
-    auto &out = d.is_error ? std::cerr : std::cout;
-    out << (d.is_error ? "error: " : "warning: ") << d.message << "\n";
-    if (d.is_error)
-      return 1;
-  }
-
-  if (args.help) {
-    pi::cli::print_help(*argv);
-    return 0;
-  }
-  if (args.version) {
-    pi::print_version();
-    return 0;
-  }
   if (args.list_models) {
     return pi::cmd_list_models(args);
   }

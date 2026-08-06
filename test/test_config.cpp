@@ -3,8 +3,10 @@
 
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <source_location>
+#include <vector>
 #include <string_view>
 
 namespace tests {
@@ -28,6 +30,15 @@ static std::filesystem::path write_toml(const char *name, const char *src) {
   auto p = std::filesystem::temp_directory_path() / name;
   std::ofstream(p) << src;
   return p;
+}
+
+static Args parse(std::initializer_list<std::string> values) {
+  std::vector<std::string> storage(values);
+  std::vector<char *> argv;
+  argv.reserve(storage.size());
+  for (auto &value : storage)
+    argv.push_back(value.data());
+  return parse_args(static_cast<int>(argv.size()), argv.data());
 }
 
 int main() {
@@ -139,6 +150,22 @@ disabled = true
     bool threw = false;
     try { load_config(p); } catch (const std::exception &) { threw = true; }
     CHECK(threw);
+  }
+
+  // auth commands have an explicit, CLI-only grammar
+  {
+    auto args = parse({"pi", "--config", "/tmp/config.toml", "auth", "login",
+                       "openai-codex", "--device", "--verbose"});
+    CHECK(args.auth_action == AuthAction::login);
+    CHECK_EQ(args.auth_provider, std::string("openai-codex"));
+    CHECK(args.auth_device);
+    CHECK(args.verbose);
+    CHECK(args.diagnostics.empty());
+
+    auto invalid = parse({"pi", "auth", "login", "openai-codex", "--model",
+                          "gpt-5.5"});
+    CHECK(!invalid.diagnostics.empty());
+    CHECK(invalid.diagnostics.front().is_error);
   }
 
   std::cout << "\n========================================\n"
