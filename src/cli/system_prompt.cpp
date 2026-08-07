@@ -79,6 +79,9 @@ std::string build_system_prompt(std::string_view custom_prompt,
         "workspace context is needed.\n"
         "- Do not modify files unless the user asks for a change or the task "
         "clearly requires it.\n"
+        "- Do not re-read a file after editing or writing it to verify the "
+        "change: edit/write fail loudly if the operation did not succeed, so "
+        "a successful call already confirms the result.\n"
         "- Be concise in your responses.\n"
         "- Show file paths clearly when working with files.";
   }
