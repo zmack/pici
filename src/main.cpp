@@ -1236,6 +1236,17 @@ int cmd_run(const cli::Args &args,
     return cli::run_rpc_mode(runtime, std::cin, std::cout, task_manager.get(),
                              auth_resolver);
 
+  std::string startup_cwd;
+  try {
+    startup_cwd = std::filesystem::current_path().string();
+  } catch (...) {
+    startup_cwd = "";
+  }
+  const std::string initial_project_label =
+      core::terminal_project_label(startup_cwd);
+  core::TerminalTitleController title_controller(STDOUT_FILENO,
+                                                 initial_project_label);
+
   auto renderer = make_renderer(args);
 
   if (sandbox_mode == core::SandboxMode::disabled)
@@ -1374,6 +1385,7 @@ int cmd_run(const cli::Args &args,
 
   // Run a turn and persist all new messages to the session file.
   auto run_and_persist = [&](const std::string &input) {
+    core::TerminalTitleActivityGuard activity(title_controller);
     return run_turn(runtime, input, *renderer, args.verbose,
                     stream_diagnostics);
   };
@@ -1386,7 +1398,7 @@ int cmd_run(const cli::Args &args,
     renderer->set_status_line(status_line);
     if (hooks && hooks->tab_title) {
       if (auto title = hooks->tab_title(context))
-        core::set_terminal_title(STDOUT_FILENO, *title);
+        title_controller.set_base_title(*title);
     }
     return status_line;
   };

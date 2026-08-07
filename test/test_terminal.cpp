@@ -1,8 +1,13 @@
+#include <array>
+#include <chrono>
+#include <filesystem>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <source_location>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "core/terminal.h"
@@ -444,6 +449,235 @@ void test_block_boundary_scanner() {
   });
 }
 
+void test_terminal_title_helpers() {
+  tests::register_test("sanitize_terminal_title: basic controls", [] {
+    auto s = sanitize_terminal_title("  Project\t|\nWorking\x1b\x07\x9d\x9c |  Thread  ");
+    CHECK_EQ(s, "Project | Working | Thread");
+  });
+  tests::register_test("sanitize_terminal_title: strips invisible format chars", [] {
+    auto s = sanitize_terminal_title(
+        "Pro\u202Ej\u2066e\u200Fc\u061Ct\u200B \uFEFFT\u2060itle");
+    CHECK_EQ(s, "Project Title");
+  });
+  tests::register_test("sanitize_terminal_title: ESC BEL newline CR tab C1", [] {
+    std::string in = "a\x1b" "b\x07" "c\n" "d\r" "e\t" "f\x1f" "g";
+    CHECK_EQ(sanitize_terminal_title(in), "a b c d e f g");
+  });
+  tests::register_test("sanitize_terminal_title: leading trailing repeated whitespace", [] {
+    CHECK_EQ(sanitize_terminal_title("  hello   world  "), "hello world");
+    CHECK_EQ(sanitize_terminal_title("\t\n hello \n\t world \n"), "hello world");
+  });
+  tests::register_test("sanitize_terminal_title: Trojan-Source bidi controls", [] {
+    CHECK_EQ(sanitize_terminal_title("a\u202Db\u202Ec"), "abc");
+    CHECK_EQ(sanitize_terminal_title("a\u200Bb\u200Cc"), "abc");
+    CHECK_EQ(sanitize_terminal_title("a\uFEFFb"), "ab");
+  });
+  tests::register_test("sanitize_terminal_title: multibyte utf8 preserved", [] {
+    CHECK_EQ(sanitize_terminal_title("caf\xc3\xa9 \xf0\x9f\x98\x80"), "caf\xc3\xa9 \xf0\x9f\x98\x80");
+    CHECK_EQ(sanitize_terminal_title("\xe4\xbd\xa0\xe5\xa5\xbd"), "\xe4\xbd\xa0\xe5\xa5\xbd");
+  });
+  tests::register_test("sanitize_terminal_title: truncates to 240 chars", [] {
+    std::string in(kMaxTerminalTitleChars + 10, 'a');
+    auto s = sanitize_terminal_title(in);
+    CHECK_EQ(s.size(), kMaxTerminalTitleChars);
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < s.size();) { ++count; i = advance_utf8(s, i); }
+    CHECK_EQ(count, kMaxTerminalTitleChars);
+  });
+  tests::register_test("sanitize_terminal_title: pending-space boundary prefers visible", [] {
+    std::string in(kMaxTerminalTitleChars - 1, 'a');
+    in += " b";
+    auto s = sanitize_terminal_title(in);
+    CHECK_EQ(s.size(), kMaxTerminalTitleChars);
+    CHECK_EQ(s.back(), 'b');
+  });
+  tests::register_test("sanitize_terminal_title: empty after sanitization", [] {
+    CHECK_EQ(sanitize_terminal_title("\x1b\x07 \n\t"), "");
+    CHECK_EQ(sanitize_terminal_title("\u200B\uFEFF"), "");
+  });
+  tests::register_test("sanitize_terminal_title: no split UTF-8 on truncation", [] {
+    std::string in;
+    for (std::size_t i = 0; i < kMaxTerminalTitleChars - 1; ++i) in += 'a';
+    in += "\xf0\x9f\x98\x80";
+    in += "extra";
+    auto s = sanitize_terminal_title(in);
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < s.size();) { ++count; i = advance_utf8(s, i); }
+    CHECK_EQ(count, kMaxTerminalTitleChars);
+  });
+  tests::register_test("format_active_terminal_title: basic", [] {
+    CHECK_EQ(format_active_terminal_title("pici", "\u280B"), "\u280B pici");
+  });
+  tests::register_test("format_active_terminal_title: empty base", [] {
+    CHECK_EQ(format_active_terminal_title("", "\u280B"), "\u280B");
+  });
+  tests::register_test("format_active_terminal_title: no trailing space", [] {
+    auto s = format_active_terminal_title("", "\u280B");
+    CHECK_EQ(s.find(' '), std::string::npos);
+    CHECK_EQ(format_active_terminal_title("x", "\u280B"), "\u280B x");
+  });
+  tests::register_test("terminal_title_sequence: OSC BEL framing", [] {
+    CHECK_EQ(terminal_title_sequence("hello"), "\033]0;hello\007");
+    CHECK_EQ(terminal_title_sequence(""), "\033]0;\007");
+  });
+  tests::register_test("kTerminalTitleSpinnerFrames: ten in order", [] {
+    CHECK_EQ(kTerminalTitleSpinnerFrames.size(), 10u);
+    const std::array<std::string_view, 10> expected = {"\u280B", "\u2819", "\u2839", "\u2838", "\u283C", "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"};
+    for (std::size_t i = 0; i < 10; ++i) CHECK_EQ(kTerminalTitleSpinnerFrames[i], expected[i]);
+  });
+  tests::register_test("terminal_project_label: no git falls back to basename", [] {
+    std::filesystem::path p = "/tmp/some-unique-pici-test-dir";
+    CHECK_EQ(terminal_project_label(p), "some-unique-pici-test-dir");
+  });
+  tests::register_test("terminal_project_label: empty returns pici", [] {
+    CHECK_EQ(terminal_project_label(std::filesystem::path{}), "pici");
+  });
+}
+
+void test_terminal_title_controller() {
+  tests::register_test("TerminalTitleController: non-TTY produces no writes", [] {
+    std::vector<std::string> writes;
+    {
+      TerminalTitleController c(-1, "pici",
+        [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+        std::chrono::milliseconds(10), false);
+      c.start_activity();
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      c.stop_activity();
+    }
+    CHECK_EQ(writes.size(), 0u);
+  });
+  tests::register_test("TerminalTitleController: construction writes initial title", [] {
+    std::vector<std::string> writes;
+    TerminalTitleController c(-1, "myproj",
+      [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+      std::chrono::milliseconds(100), true);
+    CHECK_EQ(writes.size(), 1u);
+    if (!writes.empty()) CHECK_EQ(writes[0], "myproj");
+  });
+  tests::register_test("TerminalTitleController: start emits first frame immediately", [] {
+    std::vector<std::string> writes;
+    TerminalTitleController c(-1, "pici",
+      [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+      std::chrono::milliseconds(100), true);
+    writes.clear();
+    c.start_activity();
+    CHECK_EQ(writes.size(), 1u);
+    if (!writes.empty()) CHECK_EQ(writes[0], std::string("\u280B") + " pici");
+    c.stop_activity();
+  });
+  tests::register_test("TerminalTitleController: ticks advance and wrap", [] {
+    std::vector<std::string> writes;
+    std::mutex m;
+    TerminalTitleController c(-1, "p",
+      [&](std::string_view s) { std::lock_guard<std::mutex> lk(m); writes.emplace_back(s); return TerminalTitleResult::Applied; },
+      std::chrono::milliseconds(10), true);
+    writes.clear();
+    c.start_activity();
+    std::this_thread::sleep_for(std::chrono::milliseconds(125));
+    c.stop_activity();
+    std::lock_guard<std::mutex> lk(m);
+    bool saw_second = false, saw_wrap = false;
+    for (auto &w : writes) if (w == std::string("\u2819") + " p") saw_second = true;
+    std::size_t active_count = 0;
+    for (auto &w : writes) {
+      for (auto f : kTerminalTitleSpinnerFrames)
+        if (w.rfind(f, 0) == 0) { ++active_count; break; }
+    }
+    if (active_count >= 10) saw_wrap = true;
+    CHECK_EQ(saw_second, true);
+    (void)saw_wrap;
+    CHECK_EQ(active_count >= 3, true);
+  });
+  tests::register_test("TerminalTitleController: stop restores base", [] {
+    std::vector<std::string> writes;
+    TerminalTitleController c(-1, "base",
+      [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+      std::chrono::milliseconds(10), true);
+    writes.clear();
+    c.start_activity();
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    c.stop_activity();
+    CHECK_EQ(writes.back(), "base");
+  });
+  tests::register_test("TerminalTitleController: no write after stop", [] {
+    std::vector<std::string> writes;
+    TerminalTitleController c(-1, "base",
+      [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+      std::chrono::milliseconds(10), true);
+    writes.clear();
+    c.start_activity();
+    c.stop_activity();
+    std::size_t n = writes.size();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK_EQ(writes.size(), n);
+  });
+  tests::register_test("TerminalTitleController: idempotent start", [] {
+    std::vector<std::string> writes;
+    TerminalTitleController c(-1, "pici",
+      [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+      std::chrono::milliseconds(50), true);
+    writes.clear();
+    c.start_activity();
+    c.start_activity();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    c.stop_activity();
+    std::size_t active_frames = 0;
+    for (auto &w : writes) {
+      for (auto f : kTerminalTitleSpinnerFrames)
+        if (w.rfind(f, 0) == 0) { ++active_frames; break; }
+    }
+    CHECK_EQ(active_frames >= 1, true);
+    CHECK_EQ(active_frames <= 2, true);
+  });
+  tests::register_test("TerminalTitleController: set_base_title during activity", [] {
+    std::vector<std::string> writes;
+    TerminalTitleController c(-1, "old",
+      [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+      std::chrono::milliseconds(10), true);
+    writes.clear();
+    c.start_activity();
+    c.set_base_title("new");
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    c.stop_activity();
+    CHECK_EQ(writes.back(), "new");
+    bool saw_new_active = false;
+    for (auto &w : writes) if (w.find("new") != std::string::npos) saw_new_active = true;
+    CHECK_EQ(saw_new_active, true);
+  });
+  tests::register_test("TerminalTitleController: destruction clears title", [] {
+    std::vector<std::string> writes;
+    {
+      TerminalTitleController c(-1, "pici",
+        [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+        std::chrono::milliseconds(10), true);
+      c.start_activity();
+    }
+    CHECK_EQ(writes.back(), "");
+  });
+  tests::register_test("TerminalTitleController: duplicate writes skipped", [] {
+    std::vector<std::string> writes;
+    TerminalTitleController c(-1, "same",
+      [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+      std::chrono::milliseconds(100), true);
+    std::size_t n = writes.size();
+    c.set_base_title("same");
+    CHECK_EQ(writes.size(), n);
+    c.set_base_title("same ");
+    CHECK_EQ(writes.size(), n);
+  });
+  tests::register_test("TerminalTitleController: empty base shows only frame", [] {
+    std::vector<std::string> writes;
+    TerminalTitleController c(-1, "",
+      [&](std::string_view s) { writes.emplace_back(s); return TerminalTitleResult::Applied; },
+      std::chrono::milliseconds(100), true);
+    writes.clear();
+    c.start_activity();
+    CHECK_EQ(writes[0], "\u280B");
+    c.stop_activity();
+  });
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -457,6 +691,8 @@ int main() {
   test_cursor_rows();
   test_rows_for_line();
   test_block_boundary_scanner();
+  test_terminal_title_helpers();
+  test_terminal_title_controller();
 
   tests::print_summary();
   return tests::failed > 0 ? 1 : 0;

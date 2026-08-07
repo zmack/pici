@@ -1,8 +1,16 @@
 #pragma once
 
+#include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <filesystem>
+#include <functional>
+#include <mutex>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace pi::core {
 
@@ -17,9 +25,75 @@ int display_columns(std::string_view line);
 // multibyte character or escape sequence. Embedded newlines are discarded.
 std::string truncate_ansi_line(std::string_view line, int width);
 
-// Set the terminal tab/window title. No bytes are written when fd is not a
-// TTY. Control characters that could escape the OSC sequence are replaced.
-void set_terminal_title(int fd, std::string_view title);
+constexpr std::size_t kMaxTerminalTitleChars = 240;
+extern const std::array<std::string_view, 10> kTerminalTitleSpinnerFrames;
+constexpr std::chrono::milliseconds kTerminalTitleSpinnerInterval{100};
+
+std::string sanitize_terminal_title(std::string_view title);
+std::string format_active_terminal_title(std::string_view base_title,
+                                         std::string_view frame);
+std::string terminal_title_sequence(std::string_view sanitized_title);
+std::string terminal_project_label(const std::filesystem::path &cwd);
+
+enum class TerminalTitleResult { Applied, Skipped };
+TerminalTitleResult set_terminal_title(int fd, std::string_view title);
+TerminalTitleResult clear_terminal_title(int fd);
+
+class TerminalTitleController {
+public:
+  explicit TerminalTitleController(int fd, std::string initial_base_title);
+  using Writer = std::function<TerminalTitleResult(std::string_view)>;
+  TerminalTitleController(int fd, std::string initial_base_title, Writer writer,
+                          std::chrono::milliseconds interval);
+  TerminalTitleController(int fd, std::string initial_base_title, Writer writer,
+                          std::chrono::milliseconds interval, bool is_tty);
+  ~TerminalTitleController() noexcept;
+
+  TerminalTitleController(const TerminalTitleController &) = delete;
+  TerminalTitleController &operator=(const TerminalTitleController &) = delete;
+  TerminalTitleController(TerminalTitleController &&) = delete;
+  TerminalTitleController &operator=(TerminalTitleController &&) = delete;
+
+  void set_base_title(std::string title);
+  void start_activity();
+  void stop_activity();
+
+private:
+  TerminalTitleResult write_title(std::string_view sanitized);
+  void emit_sanitized(std::string_view sanitized);
+  void worker_loop(std::stop_token st);
+
+  int fd_{-1};
+  Writer writer_;
+  std::chrono::milliseconds interval_{kTerminalTitleSpinnerInterval};
+  bool is_tty_{false};
+
+  mutable std::mutex mutex_;
+  std::string base_title_;
+  std::string last_emitted_;
+  bool has_applied_{false};
+  bool active_{false};
+  std::size_t frame_index_{0};
+
+  std::condition_variable_any cv_;
+  std::mutex cv_mutex_;
+  std::jthread worker_;
+};
+
+class TerminalTitleActivityGuard {
+public:
+  explicit TerminalTitleActivityGuard(TerminalTitleController &controller);
+  ~TerminalTitleActivityGuard() noexcept;
+
+  TerminalTitleActivityGuard(const TerminalTitleActivityGuard &) = delete;
+  TerminalTitleActivityGuard &
+  operator=(const TerminalTitleActivityGuard &) = delete;
+  TerminalTitleActivityGuard(TerminalTitleActivityGuard &&) = delete;
+  TerminalTitleActivityGuard &operator=(TerminalTitleActivityGuard &&) = delete;
+
+private:
+  TerminalTitleController &controller_;
+};
 
 // Skip one ANSI/VT escape sequence starting at s[i].
 //

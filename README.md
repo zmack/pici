@@ -377,8 +377,24 @@ tools are preserved; registered add-on tools and hook callbacks are replaced.
 Add-ons can also customize the interactive UI with `status_line(ctx)` and
 `tab_title(ctx)` hooks. The status line is rendered above the readline prompt
 (or in the viewport renderer's reserved status row), while the title hook
-updates the terminal tab/window title. Both receive model, usage, tool-count,
+controls the terminal tab/window title. Both receive model, usage, tool-count,
 and session metadata; ANSI color sequences are supported in the status line.
+
+Terminal title defaults to the startup project label (Git root basename, or
+working-directory basename, falling back to `pici`). During a primary
+`run_prompt` turn the title is prefixed with a Braille spinner (`⠋` … `⠏`,
+100 ms) — for example `⠋ my-project` — and remains active through streamed
+responses, tool execution, and follow-up model requests without flickering
+between internal turn iterations. When the turn completes, errors, or is
+interrupted with Ctrl-C, the idle title is restored. A `tab_title` hook return
+value replaces the default label verbatim (no automatic `pici` prefix is
+added): `nil` leaves the current title unchanged, while `""` sets an empty
+title (spinner only while active). Titles are sanitized (controls, bidi and
+invisible formatting removed, whitespace collapsed, truncated to 240 Unicode
+scalars without splitting UTF-8) and are only emitted when stdout is a TTY;
+piped or redirected output, `pi-cli --rpc`, and `pi-acp` never write title
+sequences. On normal exit pici clears the title it manages with an empty OSC 0
+payload rather than attempting to restore the previous terminal title.
 
 For a lean local build directory that skips test targets:
 

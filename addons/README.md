@@ -57,9 +57,29 @@ Uses the `status_line(ctx)` hook. `ctx` contains:
 
 Returns `nil` before first turn → leaves the status line empty. Return a string to render above the prompt.
 
-The separate `tab_title(ctx)` hook controls the terminal tab/window title. A
-nil result leaves the current title unchanged. Both hooks receive the same
-context, including `session_id` and optional `session_name`.
+The separate `tab_title(ctx)` hook controls the terminal tab/window title.
+Both hooks receive the same context, including `session_id` and optional
+`session_name`.
+
+Terminal title behavior:
+
+- When no hook supplies a title, the idle title is the startup project label
+  (Git root basename, or cwd basename, falling back to `pici`).
+- During a primary `run_prompt` turn the title is prefixed with a Braille
+  spinner (`⠋` … `⠏` every 100 ms), e.g. `⠋ my-project`, and stays active
+  through tool calls and follow-up model requests without flickering.
+- `nil` leaves the current base title unchanged; `""` sets an empty base
+  (idle writes an empty OSC payload, active shows only the spinner frame).
+- A non-nil hook value replaces the default label verbatim — pici does not
+  prepend `pici` automatically.
+- Titles are sanitized (ANSI/OSC controls, bidi and invisible formatting
+  stripped, whitespace collapsed, truncated to 240 Unicode scalars) and built
+  as a single `ESC ] 0 ; <title> BEL` write.
+- Title updates are only emitted when stdout is a TTY; piped output,
+  `pi-cli --rpc`, and `pi-acp` never write them, and background task children
+  do not drive the title independently.
+- On exit pici clears the title it manages with an empty OSC 0 payload rather
+  than trying to restore the previous terminal title.
 
 ### Testing
 
