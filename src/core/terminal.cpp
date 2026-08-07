@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 namespace pi::core {
 
@@ -763,6 +764,83 @@ void BlockBoundaryScanner::advance(std::string_view s) {
     }
   }
   scan_pos = s.size();
+}
+
+std::string truncate_tool_result(std::string_view content) {
+  while (!content.empty() && (content.back() == '\n' || content.back() == '\r'))
+    content.remove_suffix(1);
+
+  std::vector<std::string_view> lines;
+  std::size_t pos = 0;
+  while (pos <= content.size()) {
+    const std::size_t next = content.find('\n', pos);
+    if (next == std::string_view::npos) {
+      lines.emplace_back(content.substr(pos));
+      break;
+    }
+    lines.emplace_back(content.substr(pos, next - pos));
+    pos = next + 1;
+  }
+  if (lines.empty())
+    lines.emplace_back();
+
+  std::vector<std::string_view> visible;
+  std::string omitted;
+  if (lines.size() > 5) {
+    visible.emplace_back(lines[0]);
+    visible.emplace_back(lines[1]);
+    omitted =
+        "\xe2\x80\xa6 +" + std::to_string(lines.size() - 4) + " lines omitted";
+    visible.push_back(omitted);
+    visible.push_back(lines[lines.size() - 2]);
+    visible.push_back(lines[lines.size() - 1]);
+  } else {
+    visible = std::move(lines);
+  }
+
+  std::string out;
+  for (std::size_t i = 0; i < visible.size(); ++i) {
+    out += (i == 0) ? " -> " : "    ";
+    out += visible[i];
+    if (i + 1 < visible.size())
+      out += '\n';
+  }
+  return out;
+}
+
+std::string sanitize_tool_output(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (std::size_t i = 0; i < text.size();) {
+    if (text[i] == '\033') {
+      const std::size_t next = skip_ansi_sequence(text, i);
+      if (next > i) {
+        bool is_sgr = false;
+        if (i + 1 < text.size() && text[i + 1] == '[' && next > 0) {
+          const unsigned char fin = static_cast<unsigned char>(text[next - 1]);
+          if (fin == 'm')
+            is_sgr = true;
+        }
+        if (is_sgr)
+          out.append(text.substr(i, next - i));
+        i = next;
+        continue;
+      }
+      // Unrecognised ESC, drop it
+      ++i;
+      continue;
+    }
+    const auto lead = static_cast<unsigned char>(text[i]);
+    const std::size_t next = advance_utf8(text, i);
+    if (next == i + 1 && lead >= 0x80) {
+      // Invalid UTF-8 byte, strip
+      i = next;
+      continue;
+    }
+    out.append(text.substr(i, next - i));
+    i = next;
+  }
+  return out;
 }
 
 } // namespace pi::core

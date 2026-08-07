@@ -11,6 +11,7 @@
 
 #include "core/agent_loop.h"
 #include "core/message_types.h"
+#include <nlohmann/json.hpp>
 
 namespace pi::core {
 
@@ -72,6 +73,21 @@ load_lua_tools(const std::filesystem::path &directory);
 //
 //   tab_title(ctx) → string | nil
 //     Set the terminal tab/window title. nil leaves the current title alone.
+
+//   format_tool_call(ctx) → string | nil
+//     Format the "[tool: name(args)]" block printed when a tool call starts.
+//     ctx: {tool_name, call_id, args}. Return a string to override the
+//     built-in formatting (may contain ANSI SGR color codes); nil falls back
+//     to the default. A Lua error falls back to the default.
+//     compose_hooks: last non-nil wins. May stall streaming while it runs.
+
+//   format_tool_result(ctx) → string | nil
+//     Format the "  [name] -> result" block printed when a tool result is
+//     available. ctx: {tool_name, call_id, args, content, is_error} where
+//     content is the full untruncated result text. Return a string to
+//     override the built-in 5-line truncation/formatting; nil falls back to
+//     the default. A Lua error falls back to the default.
+//     compose_hooks: last non-nil wins. May stall streaming while it runs.
 
 struct LuaHooks {
   // Path of the file this hooks object was loaded from (empty for composed).
@@ -179,6 +195,27 @@ struct LuaHooks {
   std::function<std::optional<std::string>(const LuaUiContext &)> status_line;
   std::function<std::optional<std::string>(const LuaUiContext &)> tab_title;
 
+  // Tool-call formatting hooks — called from VerboseRenderer.
+  // ctx.args is the decoded arguments table (not a raw JSON string).
+  // format_tool_result receives the full untruncated content; Lua owns
+  // truncation. Return string to override, nil for default. Last non-nil wins.
+  struct FormatToolCallContext {
+    std::string tool_name;
+    std::string call_id;
+    nlohmann::json args = nlohmann::json::object();
+  };
+  struct FormatToolResultContext {
+    std::string tool_name;
+    std::string call_id;
+    nlohmann::json args = nlohmann::json::object();
+    std::string content;
+    bool is_error{false};
+  };
+  std::function<std::optional<std::string>(const FormatToolCallContext &)>
+      format_tool_call;
+  std::function<std::optional<std::string>(const FormatToolResultContext &)>
+      format_tool_result;
+
   // pici uses these to complete command names automatically when the user
   // types /... with no space yet — no Lua needed for that case.
   struct Command {
@@ -270,6 +307,9 @@ load_lua_hooks_dir(const std::filesystem::path &directory);
 //   should_stop_after_turn — OR: stop if any returns true
 //   on_command          — first {handled=true} wins
 //   set_run_agent       — forwarded to all add-ons
+//   prompt_line/status_line/tab_title/format_tool_call/format_tool_result
+//                       — last non-nil wins
+//   complete/commands/registered_tools — union
 // Null entries in the list are ignored.
 std::shared_ptr<LuaHooks>
 compose_hooks(std::vector<std::shared_ptr<LuaHooks>> hooks_list);

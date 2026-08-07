@@ -20,6 +20,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -61,6 +62,7 @@
 #include "core/stream_diagnostics.h"
 #include "core/stream_renderer.h"
 #include "core/terminal.h"
+#include <nlohmann/json.hpp>
 
 namespace pi {
 
@@ -121,6 +123,10 @@ void print_addons(
       active.emplace_back("status_line");
     if (h->tab_title)
       active.emplace_back("tab_title");
+    if (h->format_tool_call)
+      active.emplace_back("format_tool_call");
+    if (h->format_tool_result)
+      active.emplace_back("format_tool_result");
     if (!active.empty()) {
       std::cout << "  hooks:";
       for (const auto &a : active)
@@ -375,44 +381,7 @@ std::unique_ptr<core::Renderer> make_renderer(const cli::Args &args) {
 }
 
 std::string format_tool_result(std::string_view content) {
-  while (!content.empty() && (content.back() == '\n' || content.back() == '\r'))
-    content.remove_suffix(1);
-
-  std::vector<std::string_view> lines;
-  std::size_t pos = 0;
-  while (pos <= content.size()) {
-    const std::size_t next = content.find('\n', pos);
-    if (next == std::string_view::npos) {
-      lines.emplace_back(content.substr(pos));
-      break;
-    }
-    lines.emplace_back(content.substr(pos, next - pos));
-    pos = next + 1;
-  }
-  if (lines.empty())
-    lines.emplace_back();
-
-  std::vector<std::string_view> visible;
-  std::string omitted;
-  if (lines.size() > 5) {
-    visible.emplace_back(lines[0]);
-    visible.emplace_back(lines[1]);
-    omitted = "… +" + std::to_string(lines.size() - 4) + " lines omitted";
-    visible.push_back(omitted);
-    visible.push_back(lines[lines.size() - 2]);
-    visible.push_back(lines[lines.size() - 1]);
-  } else {
-    visible = std::move(lines);
-  }
-
-  std::string out;
-  for (std::size_t i = 0; i < visible.size(); ++i) {
-    out += (i == 0) ? " -> " : "    ";
-    out += visible[i];
-    if (i + 1 < visible.size())
-      out += '\n';
-  }
-  return out;
+  return core::truncate_tool_result(content);
 }
 
 // A renderer adapter that adds verbose tool/usage output on top of any base
@@ -420,8 +389,10 @@ std::string format_tool_result(std::string_view content) {
 class VerboseRenderer final : public core::Renderer {
 public:
   VerboseRenderer(core::Renderer &base, bool verbose,
-                  std::shared_ptr<core::StreamDiagnostics> diagnostics)
-      : base_(base), verbose_(verbose), diagnostics_(std::move(diagnostics)) {}
+                  std::shared_ptr<core::StreamDiagnostics> diagnostics,
+                  std::shared_ptr<HookRuntime> hook_runtime = nullptr)
+      : base_(base), verbose_(verbose), diagnostics_(std::move(diagnostics)),
+        hook_runtime_(std::move(hook_runtime)) {}
 
   void on_turn_start() override {
     if (diagnostics_)
@@ -454,6 +425,35 @@ public:
     if (diagnostics_)
       diagnostics_->record_renderer_event("tool_start", args_json.size());
     base_.on_tool_start(call_id, name, args_json);
+    // Cache parsed args for format_tool_result hook (which doesn't receive them
+    // natively).
+    nlohmann::json parsed_args = nlohmann::json::object();
+    {
+      auto j = nlohmann::json::parse(args_json, nullptr, false);
+      if (!j.is_discarded() && j.is_object())
+        parsed_args = std::move(j);
+    }
+    pending_tool_args_[std::string(call_id)] = parsed_args;
+
+    std::shared_ptr<core::LuaHooks> hooks;
+    if (hook_runtime_) {
+      std::scoped_lock lock(hook_runtime_->mutex);
+      hooks = hook_runtime_->hooks;
+    }
+    if (hooks && hooks->format_tool_call) {
+      core::LuaHooks::FormatToolCallContext ctx;
+      ctx.tool_name = std::string(name);
+      ctx.call_id = std::string(call_id);
+      ctx.args = parsed_args;
+      if (auto custom = hooks->format_tool_call(ctx)) {
+        std::string sanitized = core::sanitize_tool_output(*custom);
+        std::cout << sanitized;
+        if (!sanitized.empty() && sanitized.back() != '\n')
+          std::cout << "\n";
+        std::cout << std::flush;
+        return;
+      }
+    }
     std::cout << "\n[tool: " << name << "(" << "\033[38;5;214m" << args_json
               << "\033[0m" << ")]\n"
               << std::flush;
@@ -463,6 +463,38 @@ public:
     if (diagnostics_)
       diagnostics_->record_renderer_event("tool_end", result.content().size());
     base_.on_tool_end(call_id, name, result, is_error);
+    std::shared_ptr<core::LuaHooks> hooks;
+    if (hook_runtime_) {
+      std::scoped_lock lock(hook_runtime_->mutex);
+      hooks = hook_runtime_->hooks;
+    }
+    if (hooks && hooks->format_tool_result) {
+      nlohmann::json args = nlohmann::json::object();
+      auto it = pending_tool_args_.find(std::string(call_id));
+      if (it != pending_tool_args_.end()) {
+        args = it->second;
+        pending_tool_args_.erase(it);
+      }
+      core::LuaHooks::FormatToolResultContext ctx;
+      ctx.tool_name = std::string(name);
+      ctx.call_id = std::string(call_id);
+      ctx.args = std::move(args);
+      ctx.content = result.content();
+      ctx.is_error = is_error;
+      if (auto custom = hooks->format_tool_result(ctx)) {
+        std::string sanitized = core::sanitize_tool_output(*custom);
+        std::cout << sanitized;
+        if (!sanitized.empty() && sanitized.back() != '\n')
+          std::cout << "\n";
+        std::cout << std::flush;
+        return;
+      } else {
+        // Erase on fallback as well if not already
+        pending_tool_args_.erase(std::string(call_id));
+      }
+    } else {
+      pending_tool_args_.erase(std::string(call_id));
+    }
     std::cout << "\033[38;5;245m" << "  [" << name << "] "
               << format_tool_result(result.content()) << "\033[0m\n"
               << std::flush;
@@ -516,14 +548,17 @@ private:
   core::Renderer &base_;
   bool verbose_;
   std::shared_ptr<core::StreamDiagnostics> diagnostics_;
+  std::shared_ptr<HookRuntime> hook_runtime_;
+  std::unordered_map<std::string, nlohmann::json> pending_tool_args_;
   core::TokenUsage last_usage_;
 };
 
-core::TokenUsage
-run_turn(core::AgentSession &session, const std::string &input,
-         core::Renderer &renderer, bool verbose,
-         std::shared_ptr<core::StreamDiagnostics> diagnostics) {
-  VerboseRenderer vr(renderer, verbose, std::move(diagnostics));
+core::TokenUsage run_turn(core::AgentSession &session, const std::string &input,
+                          core::Renderer &renderer, bool verbose,
+                          std::shared_ptr<core::StreamDiagnostics> diagnostics,
+                          std::shared_ptr<HookRuntime> hook_runtime = nullptr) {
+  VerboseRenderer vr(renderer, verbose, std::move(diagnostics),
+                     std::move(hook_runtime));
   std::jthread interrupt_watcher([&session](const std::stop_token &stop_token) {
     while (!stop_token.stop_requested()) {
       if (core::consume_sigint()) {
@@ -1386,8 +1421,8 @@ int cmd_run(const cli::Args &args,
   // Run a turn and persist all new messages to the session file.
   auto run_and_persist = [&](const std::string &input) {
     core::TerminalTitleActivityGuard activity(title_controller);
-    return run_turn(runtime, input, *renderer, args.verbose,
-                    stream_diagnostics);
+    return run_turn(runtime, input, *renderer, args.verbose, stream_diagnostics,
+                    hook_runtime);
   };
 
   auto update_terminal_ui = [&]() -> std::optional<std::string> {

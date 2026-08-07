@@ -35,6 +35,7 @@ extern "C" {
 #include "core/event_json.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/terminal.h"
 
 namespace pi::core {
 namespace {
@@ -157,6 +158,14 @@ int lua_json_encode(lua_State *L) {
   auto j = lua_to_json(L, 1);
   auto s = j.dump();
   lua_pushstring(L, s.c_str());
+  return 1;
+}
+
+int lua_pici_truncate(lua_State *L) {
+  std::size_t len = 0;
+  const char *s = luaL_checklstring(L, 1, &len);
+  auto out = truncate_tool_result(std::string_view(s, len));
+  lua_pushlstring(L, out.data(), out.size());
   return 1;
 }
 
@@ -619,6 +628,8 @@ public:
     lua_pushlightuserdata(L_, this);
     lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_add_tool, 1);
     lua_setfield(L_, -2, "add_tool");
+    lua_pushcfunction(L_, &lua_pici_truncate);
+    lua_setfield(L_, -2, "truncate_tool_result");
 
     lua_newtable(L_);
     lua_pushlightuserdata(L_, this);
@@ -687,6 +698,8 @@ public:
     prompt_line_ref_ = extract("prompt_line");
     status_line_ref_ = extract("status_line");
     tab_title_ref_ = extract("tab_title");
+    format_tool_call_ref_ = extract("format_tool_call");
+    format_tool_result_ref_ = extract("format_tool_result");
 
     // Extract commands array (data, not a function)
     lua_getfield(L_, -1, "commands");
@@ -741,6 +754,10 @@ public:
         luaL_unref(L_, LUA_REGISTRYINDEX, status_line_ref_);
       if (tab_title_ref_ != LUA_NOREF)
         luaL_unref(L_, LUA_REGISTRYINDEX, tab_title_ref_);
+      if (format_tool_call_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, format_tool_call_ref_);
+      if (format_tool_result_ref_ != LUA_NOREF)
+        luaL_unref(L_, LUA_REGISTRYINDEX, format_tool_result_ref_);
       lua_close(L_);
     }
   }
@@ -760,6 +777,12 @@ public:
   bool has_prompt_line() const { return prompt_line_ref_ != LUA_NOREF; }
   bool has_status_line() const { return status_line_ref_ != LUA_NOREF; }
   bool has_tab_title() const { return tab_title_ref_ != LUA_NOREF; }
+  bool has_format_tool_call() const {
+    return format_tool_call_ref_ != LUA_NOREF;
+  }
+  bool has_format_tool_result() const {
+    return format_tool_result_ref_ != LUA_NOREF;
+  }
 
   static void push_usage(lua_State *Ls, const TokenUsage &u) {
     lua_newtable(Ls);
@@ -868,6 +891,54 @@ public:
 
   std::optional<std::string> call_tab_title(const LuaUiContext &context) {
     return call_ui_line(tab_title_ref_, context);
+  }
+
+  std::optional<std::string>
+  call_format_tool_call(const LuaHooks::FormatToolCallContext &ctx) {
+    std::scoped_lock lk(mutex_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, format_tool_call_ref_);
+    lua_newtable(L_);
+    lua_pushlstring(L_, ctx.tool_name.data(), ctx.tool_name.size());
+    lua_setfield(L_, -2, "tool_name");
+    lua_pushlstring(L_, ctx.call_id.data(), ctx.call_id.size());
+    lua_setfield(L_, -2, "call_id");
+    json_to_lua(L_, ctx.args);
+    lua_setfield(L_, -2, "args");
+    if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
+      lua_pop(L_, 1);
+      return std::nullopt;
+    }
+    std::optional<std::string> result;
+    if (lua_isstring(L_, -1) != 0)
+      result = std::string(lua_tostring(L_, -1));
+    lua_pop(L_, 1);
+    return result;
+  }
+
+  std::optional<std::string>
+  call_format_tool_result(const LuaHooks::FormatToolResultContext &ctx) {
+    std::scoped_lock lk(mutex_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, format_tool_result_ref_);
+    lua_newtable(L_);
+    lua_pushlstring(L_, ctx.tool_name.data(), ctx.tool_name.size());
+    lua_setfield(L_, -2, "tool_name");
+    lua_pushlstring(L_, ctx.call_id.data(), ctx.call_id.size());
+    lua_setfield(L_, -2, "call_id");
+    json_to_lua(L_, ctx.args);
+    lua_setfield(L_, -2, "args");
+    lua_pushlstring(L_, ctx.content.data(), ctx.content.size());
+    lua_setfield(L_, -2, "content");
+    lua_pushboolean(L_, ctx.is_error ? 1 : 0);
+    lua_setfield(L_, -2, "is_error");
+    if (lua_pcall(L_, 1, 1, 0) != LUA_OK) {
+      lua_pop(L_, 1);
+      return std::nullopt;
+    }
+    std::optional<std::string> result;
+    if (lua_isstring(L_, -1) != 0)
+      result = std::string(lua_tostring(L_, -1));
+    lua_pop(L_, 1);
+    return result;
   }
 
   void call_on_event(const AgentEvent &event) {
@@ -1591,6 +1662,8 @@ private:
   int prompt_line_ref_{LUA_NOREF};
   int status_line_ref_{LUA_NOREF};
   int tab_title_ref_{LUA_NOREF};
+  int format_tool_call_ref_{LUA_NOREF};
+  int format_tool_result_ref_{LUA_NOREF};
   std::string source_path_;
   std::vector<PendingTool> pending_tools_;
   std::vector<std::shared_ptr<const ToolDefinition>> inline_tools_;
@@ -1723,6 +1796,19 @@ std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
       return impl->call_tab_title(context);
     };
   }
+  if (impl->has_format_tool_call()) {
+    hooks->format_tool_call = [impl](const LuaHooks::FormatToolCallContext &ctx)
+        -> std::optional<std::string> {
+      return impl->call_format_tool_call(ctx);
+    };
+  }
+  if (impl->has_format_tool_result()) {
+    hooks->format_tool_result =
+        [impl](const LuaHooks::FormatToolResultContext &ctx)
+        -> std::optional<std::string> {
+      return impl->call_format_tool_result(ctx);
+    };
+  }
   return hooks;
 }
 
@@ -1793,6 +1879,8 @@ TestResult run_lua_test_file(const std::filesystem::path &path) {
     return 2;
   });
   lua_setfield(L, -2, "run_agent");
+  lua_pushcfunction(L, &lua_pici_truncate);
+  lua_setfield(L, -2, "truncate_tool_result");
   lua_setglobal(L, "pici");
 
   // Bootstrap pici.test and pici.mock_run_agent
@@ -1977,6 +2065,38 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
         if (!h->prompt_line)
           continue;
         auto r = h->prompt_line(turn, model_id, tools_count, last, session);
+        if (r)
+          result = std::move(r);
+      }
+      return result;
+    };
+  }
+
+  if (std::ranges::any_of(
+          list, [](const auto &h) { return !!h->format_tool_call; })) {
+    out->format_tool_call = [list](const LuaHooks::FormatToolCallContext &ctx)
+        -> std::optional<std::string> {
+      std::optional<std::string> result;
+      for (const auto &h : list) {
+        if (!h->format_tool_call)
+          continue;
+        auto r = h->format_tool_call(ctx);
+        if (r)
+          result = std::move(r);
+      }
+      return result;
+    };
+  }
+  if (std::ranges::any_of(
+          list, [](const auto &h) { return !!h->format_tool_result; })) {
+    out->format_tool_result =
+        [list](const LuaHooks::FormatToolResultContext &ctx)
+        -> std::optional<std::string> {
+      std::optional<std::string> result;
+      for (const auto &h : list) {
+        if (!h->format_tool_result)
+          continue;
+        auto r = h->format_tool_result(ctx);
         if (r)
           result = std::move(r);
       }

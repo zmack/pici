@@ -132,6 +132,16 @@ int rows_for_line(std::string_view line, int width);
 // Counts every physical row, including those caused by terminal wrapping.
 int cursor_rows_for_rendered(std::string_view rendered, int width);
 
+// Truncate a tool result's content to the built-in 5-line / first-2-last-2
+// display format. Used by VerboseRenderer and exposed to Lua as
+// pici.truncate_tool_result(content).
+std::string truncate_tool_result(std::string_view content);
+
+// Sanitize a Lua-returned tool-call or tool-result string before writing to
+// the terminal. Strips invalid UTF-8 and disallows cursor-movement /
+// screen-clearing escape sequences while preserving SGR (color) codes.
+std::string sanitize_tool_output(std::string_view text);
+
 //
 // Incrementally scans raw markdown content (the append-only `content` string
 // that ViewportRenderer builds from thinking + raw buffers) to find the last
