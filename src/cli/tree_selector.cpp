@@ -21,7 +21,7 @@ namespace {
 // RAII raw mode — identical to the one in readline.cpp.
 struct RawMode {
   int fd{-1};
-  struct termios saved{};
+  struct termios saved {};
   bool active{false};
 
   RawMode() = default;
@@ -80,7 +80,7 @@ Key read_key() {
   fd_set fds;                 // NOLINT(misc-include-cleaner)
   FD_ZERO(&fds);              // NOLINT(misc-include-cleaner)
   FD_SET(STDIN_FILENO, &fds); // NOLINT(misc-include-cleaner)
-  struct timeval tv{};        // NOLINT(misc-include-cleaner)
+  struct timeval tv {};       // NOLINT(misc-include-cleaner)
   tv.tv_usec = 50L * 1000L;   // 50 ms
   // NOLINTNEXTLINE(misc-include-cleaner)
   if (select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv) <= 0)

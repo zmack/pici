@@ -295,8 +295,8 @@ template <typename F>
            std::is_invocable_v<F, ToolExecutionStartEvent> &&
            std::is_invocable_v<F, ToolExecutionUpdateEvent> &&
            std::is_invocable_v<F, ToolExecutionEndEvent>)
-auto map_event(const AgentEvent &ev, F &&visitor)
-    -> decltype(visitor(AgentStartEvent{})) {
+auto map_event(const AgentEvent &ev,
+               F &&visitor) -> decltype(visitor(AgentStartEvent{})) {
   return std::visit(std::forward<F>(visitor), ev);
 }
 

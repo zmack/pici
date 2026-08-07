@@ -241,6 +241,27 @@ private:
 
   struct WorkerState {
     std::jthread thread;
+
+    WorkerState() = default;
+    WorkerState(const WorkerState &) = delete;
+    WorkerState &operator=(const WorkerState &) = delete;
+    WorkerState(WorkerState &&) = delete;
+    WorkerState &operator=(WorkerState &&) = delete;
+
+    // The last owning reference to State (and therefore to this WorkerState)
+    // can be dropped from inside the worker thread itself: start_worker's
+    // push callback only holds a weak_ptr<State> (to avoid a State<->thread
+    // reference cycle), and momentarily locks it into a strong ref while
+    // publishing an event. If the external owner releases its reference in
+    // that same window, this thread's own temporary lock ends up being the
+    // last owner, so this destructor runs on the worker thread itself.
+    // std::jthread's default destructor would then call join() on itself,
+    // which throws (EDEADLK). Detach instead in that case; the thread is
+    // already unwinding back to its entry point and will exit on its own.
+    ~WorkerState() {
+      if (thread.joinable() && thread.get_id() == std::this_thread::get_id())
+        thread.detach();
+    }
   };
 
   static bool push_state(const std::shared_ptr<State> &state, Event event) {

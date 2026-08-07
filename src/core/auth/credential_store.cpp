@@ -106,7 +106,7 @@ void ensure_secure_parent(const std::filesystem::path &path) {
   if (ec || !std::filesystem::is_directory(status))
     throw std::runtime_error("auth path parent is not a directory");
   const auto perms = status.permissions();
-  struct stat parent_stat{};
+  struct stat parent_stat {};
   const bool sticky = ::stat(parent.c_str(), &parent_stat) == 0 &&
                       (parent_stat.st_mode & S_ISVTX) != 0;
   if (!sticky && ((perms & (std::filesystem::perms::group_write |
@@ -131,7 +131,7 @@ void ensure_secure_parent(const std::filesystem::path &path) {
 }
 
 void reject_symlink(const std::filesystem::path &path) {
-  struct stat st{};
+  struct stat st {};
   const int result = ::lstat(path.c_str(), &st);
   if (result == 0 && S_ISLNK(st.st_mode))
     throw std::runtime_error("auth path must not be a symbolic link");
@@ -141,7 +141,7 @@ void reject_symlink(const std::filesystem::path &path) {
 }
 
 void ensure_secure_file(const std::filesystem::path &path) {
-  struct stat st{};
+  struct stat st {};
   if (::lstat(path.c_str(), &st) != 0) {
     if (errno == ENOENT)
       return;

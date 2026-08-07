@@ -12,7 +12,7 @@
 namespace pi::core {
 
 int term_width(int fd) {
-  struct winsize ws{}; // NOLINT(misc-include-cleaner)
+  struct winsize ws {}; // NOLINT(misc-include-cleaner)
   // NOLINTNEXTLINE(misc-include-cleaner)
   if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
     return static_cast<int>(ws.ws_col);
@@ -20,7 +20,7 @@ int term_width(int fd) {
 }
 
 int term_height(int fd) {
-  struct winsize ws{}; // NOLINT(misc-include-cleaner)
+  struct winsize ws {}; // NOLINT(misc-include-cleaner)
   // NOLINTNEXTLINE(misc-include-cleaner)
   if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
     return static_cast<int>(ws.ws_row);

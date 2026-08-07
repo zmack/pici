@@ -23,7 +23,7 @@ namespace {
 // ISIG is kept enabled so Ctrl+C still delivers SIGINT.
 struct RawMode {
   int fd{-1};
-  struct termios saved{};
+  struct termios saved {};
   bool active{false};
 
   RawMode() = default;
@@ -104,7 +104,7 @@ int codepoint_width(std::uint32_t codepoint) {
 
 std::size_t terminal_columns() {
   // NOLINTNEXTLINE(misc-include-cleaner): ioctl declarations vary by platform.
-  struct winsize size{};
+  struct winsize size {};
   // NOLINTNEXTLINE(misc-include-cleaner): ioctl declarations vary by platform.
   if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0)
     return size.ws_col;

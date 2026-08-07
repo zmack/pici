@@ -19,7 +19,7 @@ namespace {
 
 struct RawMode {
   int fd{-1};
-  struct termios saved{};
+  struct termios saved {};
   bool active{false};
 
   RawMode() = default;

@@ -444,7 +444,7 @@ private:
       std::atexit(atexit_fn);
       atexit_registered_ = true;
     }
-    struct sigaction sa{};       // NOLINT(misc-include-cleaner)
+    struct sigaction sa {};      // NOLINT(misc-include-cleaner)
     sa.sa_handler = sig_handler; // NOLINT(misc-include-cleaner)
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
@@ -726,7 +726,7 @@ private:
     }
     if (current_ != nullptr)
       current_->restore_terminal();
-    struct sigaction sa{};
+    struct sigaction sa {};
     sa.sa_handler = SIG_DFL;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;

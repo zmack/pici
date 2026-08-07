@@ -454,8 +454,8 @@ public:
     if (diagnostics_)
       diagnostics_->record_renderer_event("tool_start", args_json.size());
     base_.on_tool_start(call_id, name, args_json);
-    std::cout << "\n[tool: " << name << "("
-              << "\033[38;5;214m" << args_json << "\033[0m" << ")]\n"
+    std::cout << "\n[tool: " << name << "(" << "\033[38;5;214m" << args_json
+              << "\033[0m" << ")]\n"
               << std::flush;
   }
   void on_tool_end(std::string_view call_id, std::string_view name,
