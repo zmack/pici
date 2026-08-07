@@ -1,0 +1,48 @@
+-- Tests for minimal_dot addon via pici --test harness.
+local addon = dofile("addons/minimal_dot.lua")
+
+pici.test.run("format_tool_call shows a dot, bold tool name, and args", function()
+  local s = addon.format_tool_call({tool_name = "bash", call_id = "c1", args = {command = "echo hi"}})
+  pici.test.ok(s:find("●", 1, true) ~= nil)
+  pici.test.ok(s:find("bash", 1, true) ~= nil)
+  pici.test.ok(s:find("echo hi", 1, true) ~= nil)
+  pici.test.ok(s:find("\27[1m", 1, true) ~= nil, "tool name should be bold")
+end)
+
+pici.test.run("dot color differs by tool category", function()
+  local bash_s = addon.format_tool_call({tool_name = "bash", call_id = "c1", args = {}})
+  local read_s = addon.format_tool_call({tool_name = "read", call_id = "c2", args = {}})
+  local unknown_s = addon.format_tool_call({tool_name = "some_custom_tool", call_id = "c3", args = {}})
+  pici.test.ok(bash_s:find("\27[35m", 1, true) ~= nil, "bash dot should be magenta")
+  pici.test.ok(read_s:find("\27[36m", 1, true) ~= nil, "read dot should be cyan")
+  pici.test.ok(unknown_s:find("\27[90m", 1, true) ~= nil, "unrecognized tool should fall back to gray")
+end)
+
+pici.test.run("format_tool_call picks known arg fields per tool", function()
+  local s = addon.format_tool_call({tool_name = "grep", call_id = "c4", args = {pattern = "TODO"}})
+  pici.test.ok(s:find("TODO", 1, true) ~= nil)
+end)
+
+pici.test.run("format_tool_result uses gray arrow + dim text on success, red on error", function()
+  local ok_s = addon.format_tool_result({tool_name = "bash", call_id = "c1", args = {}, content = "fine", is_error = false})
+  local err_s = addon.format_tool_result({tool_name = "bash", call_id = "c1", args = {}, content = "boom", is_error = true})
+  pici.test.ok(ok_s:find("↳", 1, true) ~= nil)
+  pici.test.ok(ok_s:find("\27[31m", 1, true) == nil, "success should not be red")
+  pici.test.ok(err_s:find("\27[31m", 1, true) ~= nil, "error should be red")
+end)
+
+pici.test.run("format_tool_result stays single line and counts remaining lines", function()
+  local s = addon.format_tool_result({tool_name = "bash", call_id = "c1", args = {}, content = "a\nb\nc\nd", is_error = false})
+  pici.test.ok(not s:find("\n", 1, true))
+  pici.test.ok(s:find("(+3 more)", 1, true) ~= nil, tostring(s))
+end)
+
+pici.test.run("format_tool_result handles empty content", function()
+  local s = addon.format_tool_result({tool_name = "bash", call_id = "c1", args = {}, content = "", is_error = false})
+  pici.test.ok(s:find("(empty)", 1, true) ~= nil)
+end)
+
+pici.test.run("format_tool_call handles empty args without crashing", function()
+  local s = addon.format_tool_call({tool_name = "write", call_id = "c5", args = {}})
+  pici.test.ok(s ~= nil and s:find("write", 1, true) ~= nil)
+end)

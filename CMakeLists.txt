@@ -643,6 +643,7 @@ if(PI_CPP_BUILD_TESTS)
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_trade_stats.lua
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_hud_brackets.lua
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_block_meter.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_minimal_dot.lua
     )
     set_tests_properties(test-addons
                          PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

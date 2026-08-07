@@ -321,6 +321,51 @@ blending.
 
 All ten also run via `ctest -R test-addons`.
 
+## minimal_dot.lua — clean, distinguished theme (no brackets, no badges)
+
+The ten themes above all share one skeleton — `<glyph>tag<glyph> args` then
+`<glyph> content <badge>` — just reskinned with different brackets and
+colors. `minimal_dot.lua` is structurally different: a single colored dot is
+the only ornament, everything else is plain typographic hierarchy.
+
+```text
+● bash  ls -la /var/log
+  ↳ total 48, drwxr-xr-x … +9 lines
+
+● bash  cat missing.txt
+  ↳ cat: missing.txt: No such file or directory
+```
+
+The dot's color identifies the **tool category** (`bash` magenta, `read`
+cyan, `glob`/`grep` green, `write`/`edit` yellow, anything else gray) — that
+has to be decided at `format_tool_call` time, before the tool has run, so it
+can't reflect success/failure. The `↳` on the result line carries the actual
+outcome color instead (gray/dim on success, red on error), since `is_error`
+is only available in `format_tool_result`. No `[ok]`/`[err]` badges — status
+lives entirely in that one color.
+
+### Install
+
+```bash
+pici --hooks-file addons/minimal_dot.lua
+# or:
+mkdir -p ~/.config/pici/addons && cp addons/minimal_dot.lua ~/.config/pici/addons/
+```
+
+```toml
+# ~/.config/pici/config.toml
+[addons]
+files = ["~/.config/pici/addons/minimal_dot.lua"]
+```
+
+### Testing
+
+```bash
+./build/pi-cli --test addons/test_minimal_dot.lua
+```
+
+Also runs via `ctest -R test-addons`.
+
 ## turn_guard.lua — one safe diagnostic turn
 
 Blocks `bash`, `edit`, and `write`, then stops after the first assistant/tool
