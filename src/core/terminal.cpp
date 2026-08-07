@@ -2,11 +2,16 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <filesystem>
+#include <mutex>
 #include <ranges> // NOLINT(misc-include-cleaner)
 #include <string>
 #include <string_view>
 #include <sys/ioctl.h>
+#include <thread>
 #include <unistd.h>
 
 namespace pi::core {
@@ -262,21 +267,368 @@ std::string truncate_ansi_line(std::string_view line, int width) {
   return result;
 }
 
-void set_terminal_title(int fd, std::string_view title) {
-  if (isatty(fd) == 0)
-    return;
+const std::array<std::string_view, 10> kTerminalTitleSpinnerFrames = {
+    "\u280B", "\u2819", "\u2839", "\u2838", "\u283C",
+    "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"};
 
-  std::string sequence = "\033]0;";
-  sequence.reserve(sequence.size() + title.size() + 1);
-  for (const char c : title) {
-    const auto byte = static_cast<unsigned char>(c);
-    if (c == '\033' || c == '\007' || c == '\n' || c == '\r' || byte < 0x20)
-      sequence += ' ';
-    else
-      sequence += c;
+namespace {
+
+bool is_terminal_title_whitespace(char32_t cp) {
+  return cp == 0x20 || cp == 0x09 || cp == 0x0A || cp == 0x0B || cp == 0x0C ||
+         cp == 0x0D || cp == 0x85 || cp == 0xA0 || cp == 0x1680 ||
+         (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 ||
+         cp == 0x202F || cp == 0x205F || cp == 0x3000;
+}
+
+bool is_disallowed_terminal_title_char(char32_t cp) {
+  if (cp < 0x20 || (cp >= 0x7F && cp < 0xA0))
+    return true;
+  switch (cp) {
+  case 0x00AD:
+  case 0x034F:
+  case 0x061C:
+  case 0x180E:
+  case 0xFEFF:
+    return true;
+  default:
+    break;
   }
-  sequence += '\007';
-  ::write(fd, sequence.data(), sequence.size());
+  if (cp >= 0x200B && cp <= 0x200F)
+    return true;
+  if (cp >= 0x202A && cp <= 0x202E)
+    return true;
+  if (cp >= 0x2060 && cp <= 0x206F)
+    return true;
+  if (cp >= 0xFE00 && cp <= 0xFE0F)
+    return true;
+  if (cp >= 0xFFF9 && cp <= 0xFFFB)
+    return true;
+  if (cp >= 0x1BCA0 && cp <= 0x1BCA3)
+    return true;
+  if (cp >= 0xE0100 && cp <= 0xE01EF)
+    return true;
+  return false;
+}
+
+} // namespace
+
+std::string sanitize_terminal_title(std::string_view title) {
+  std::string sanitized;
+  sanitized.reserve(title.size());
+  std::size_t chars_written = 0;
+  bool pending_space = false;
+  for (std::size_t i = 0; i < title.size();) {
+    const auto lead = static_cast<unsigned char>(title[i]);
+    const std::size_t next = advance_utf8(title, i);
+    // advance_utf8 steps a single byte both for plain ASCII (lead < 0x80)
+    // and for an orphan/invalid lead byte with no recognized multi-byte
+    // pattern (lead >= 0x80). decode_utf8 maps the latter to the U+FFFD
+    // sentinel, but U+FFFD isn't itself disallowed, so without this check
+    // the raw invalid byte gets copied straight into the "sanitized"
+    // output below instead of being dropped.
+    if (next == i + 1 && lead >= 0x80) {
+      i = next;
+      continue;
+    }
+    const char32_t cp = decode_utf8(title, i);
+    if (is_terminal_title_whitespace(cp)) {
+      pending_space = !sanitized.empty();
+      i = next;
+      continue;
+    }
+    if (is_disallowed_terminal_title_char(cp)) {
+      // C0/C1 control characters act as word separators, like whitespace
+      // (e.g. ESC/BEL between two words should collapse to one space, not
+      // glue the words together). Invisible Unicode format characters
+      // (zero-width joiners, bidi overrides, BOM, ...) are the opposite:
+      // they occur mid-word and must be removed without introducing a
+      // space.
+      if (cp < 0x20 || (cp >= 0x7F && cp < 0xA0))
+        pending_space = !sanitized.empty();
+      i = next;
+      continue;
+    }
+    if (pending_space) {
+      const std::size_t remaining = kMaxTerminalTitleChars > chars_written
+                                        ? kMaxTerminalTitleChars - chars_written
+                                        : 0;
+      if (remaining > 1) {
+        sanitized.push_back(' ');
+        ++chars_written;
+        pending_space = false;
+      }
+    }
+    if (chars_written >= kMaxTerminalTitleChars)
+      break;
+    sanitized.append(title.substr(i, next - i));
+    ++chars_written;
+    i = next;
+  }
+  return sanitized;
+}
+
+std::string format_active_terminal_title(std::string_view base_title,
+                                         std::string_view frame) {
+  if (base_title.empty())
+    return std::string(frame);
+  std::string out;
+  out.reserve(frame.size() + 1 + base_title.size());
+  out.append(frame);
+  out.push_back(' ');
+  out.append(base_title);
+  return out;
+}
+
+std::string terminal_title_sequence(std::string_view sanitized_title) {
+  std::string seq;
+  seq.reserve(4 + sanitized_title.size() + 1);
+  seq.append("\033]0;");
+  seq.append(sanitized_title);
+  seq.push_back('\007');
+  return seq;
+}
+
+std::string terminal_project_label(const std::filesystem::path &cwd) {
+  std::error_code ec;
+  std::filesystem::path cur = cwd;
+  if (cur.empty())
+    return "pici";
+  std::filesystem::path search = cur;
+  while (true) {
+    const auto git_path = search / ".git";
+    if (std::filesystem::exists(git_path, ec)) {
+      auto name = search.filename().string();
+      if (!name.empty())
+        return name;
+      return "pici";
+    }
+    auto parent = search.parent_path();
+    if (parent.empty() || parent == search)
+      break;
+    search = parent;
+  }
+  auto name = cur.filename().string();
+  if (!name.empty())
+    return name;
+  if (!cur.empty()) {
+    auto parent = cur.parent_path();
+    if (!parent.empty()) {
+      auto fallback = parent.filename().string();
+      if (!fallback.empty())
+        return fallback;
+    }
+  }
+  return "pici";
+}
+
+TerminalTitleResult set_terminal_title(int fd, std::string_view title) {
+  if (isatty(fd) == 0)
+    return TerminalTitleResult::Skipped;
+  const std::string sanitized = sanitize_terminal_title(title);
+  const std::string seq = terminal_title_sequence(sanitized);
+  const ssize_t n = ::write(fd, seq.data(), seq.size());
+  if (n < 0 || static_cast<std::size_t>(n) != seq.size())
+    return TerminalTitleResult::Skipped;
+  return TerminalTitleResult::Applied;
+}
+
+TerminalTitleResult clear_terminal_title(int fd) {
+  if (isatty(fd) == 0)
+    return TerminalTitleResult::Skipped;
+  const std::string seq = terminal_title_sequence("");
+  const ssize_t n = ::write(fd, seq.data(), seq.size());
+  if (n < 0 || static_cast<std::size_t>(n) != seq.size())
+    return TerminalTitleResult::Skipped;
+  return TerminalTitleResult::Applied;
+}
+
+TerminalTitleController::TerminalTitleController(int fd,
+                                                 std::string initial_base_title)
+    : fd_(fd), interval_(kTerminalTitleSpinnerInterval) {
+  is_tty_ = (isatty(fd_) != 0);
+  if (!is_tty_) {
+    base_title_ = sanitize_terminal_title(initial_base_title);
+    return;
+  }
+  writer_ = [this](std::string_view sanitized) -> TerminalTitleResult {
+    const std::string seq = terminal_title_sequence(sanitized);
+    const ssize_t n = ::write(fd_, seq.data(), seq.size());
+    if (n < 0 || static_cast<std::size_t>(n) != seq.size())
+      return TerminalTitleResult::Skipped;
+    return TerminalTitleResult::Applied;
+  };
+  base_title_ = sanitize_terminal_title(initial_base_title);
+  emit_sanitized(base_title_);
+}
+
+TerminalTitleController::TerminalTitleController(
+    int fd, std::string initial_base_title, Writer writer,
+    std::chrono::milliseconds interval)
+    : fd_(fd), writer_(std::move(writer)), interval_(interval) {
+  if (writer_)
+    is_tty_ = true;
+  else
+    is_tty_ = (isatty(fd_) != 0);
+  base_title_ = sanitize_terminal_title(initial_base_title);
+  if (is_tty_)
+    emit_sanitized(base_title_);
+}
+
+TerminalTitleController::TerminalTitleController(
+    int fd, std::string initial_base_title, Writer writer,
+    std::chrono::milliseconds interval, bool is_tty)
+    : fd_(fd), writer_(std::move(writer)), interval_(interval),
+      is_tty_(is_tty) {
+  base_title_ = sanitize_terminal_title(initial_base_title);
+  if (is_tty_)
+    emit_sanitized(base_title_);
+}
+
+TerminalTitleController::~TerminalTitleController() noexcept {
+  try {
+    stop_activity();
+    if (has_applied_ && is_tty_) {
+      const std::string seq = terminal_title_sequence("");
+      if (writer_) {
+        writer_("");
+      } else if (isatty(fd_) != 0) {
+        ::write(fd_, seq.data(), seq.size());
+      }
+      has_applied_ = false;
+      last_emitted_.clear();
+    }
+  } catch (...) {
+  }
+}
+
+void TerminalTitleController::set_base_title(std::string title) {
+  const std::string sanitized = sanitize_terminal_title(title);
+  bool should_emit = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (sanitized == base_title_ && !active_) {
+      return;
+    }
+    base_title_ = sanitized;
+    should_emit = !active_;
+  }
+  if (should_emit)
+    emit_sanitized(sanitized);
+}
+
+void TerminalTitleController::start_activity() {
+  std::string base_copy;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_ || !is_tty_)
+      return;
+    active_ = true;
+    frame_index_ = 0;
+    base_copy = base_title_;
+  }
+  const std::string active_title =
+      format_active_terminal_title(base_copy, kTerminalTitleSpinnerFrames[0]);
+  const std::string sanitized = sanitize_terminal_title(active_title);
+  emit_sanitized(sanitized);
+  worker_ = std::jthread([this](std::stop_token st) { worker_loop(st); });
+}
+
+void TerminalTitleController::stop_activity() {
+  bool was_active = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    was_active = active_;
+    if (!was_active)
+      return;
+  }
+  if (worker_.joinable()) {
+    worker_.request_stop();
+    cv_.notify_all();
+    worker_.join();
+  }
+  std::string base_copy;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_ = false;
+    base_copy = base_title_;
+  }
+  emit_sanitized(base_copy);
+}
+
+TerminalTitleResult
+TerminalTitleController::write_title(std::string_view sanitized) {
+  if (!is_tty_)
+    return TerminalTitleResult::Skipped;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (sanitized == last_emitted_ && has_applied_)
+      return TerminalTitleResult::Applied;
+  }
+  TerminalTitleResult res = TerminalTitleResult::Skipped;
+  if (writer_) {
+    res = writer_(sanitized);
+  } else {
+    if (isatty(fd_) == 0)
+      return TerminalTitleResult::Skipped;
+    const std::string seq = terminal_title_sequence(sanitized);
+    const ssize_t n = ::write(fd_, seq.data(), seq.size());
+    res = (n >= 0 && static_cast<std::size_t>(n) == seq.size())
+              ? TerminalTitleResult::Applied
+              : TerminalTitleResult::Skipped;
+  }
+  if (res == TerminalTitleResult::Applied) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_emitted_ = std::string(sanitized);
+    has_applied_ = true;
+  }
+  return res;
+}
+
+void TerminalTitleController::emit_sanitized(std::string_view sanitized) {
+  (void)write_title(sanitized);
+}
+
+void TerminalTitleController::worker_loop(std::stop_token st) {
+  while (!st.stop_requested()) {
+    {
+      std::unique_lock<std::mutex> lk(cv_mutex_);
+      cv_.wait_for(lk, st, interval_, [&] { return st.stop_requested(); });
+      if (st.stop_requested())
+        break;
+    }
+    std::string base_copy;
+    std::size_t idx = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_)
+        break;
+      frame_index_ = (frame_index_ + 1) % kTerminalTitleSpinnerFrames.size();
+      idx = frame_index_;
+      base_copy = base_title_;
+    }
+    const std::string active_title = format_active_terminal_title(
+        base_copy, kTerminalTitleSpinnerFrames[idx]);
+    const std::string sanitized = sanitize_terminal_title(active_title);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_ || st.stop_requested())
+        break;
+    }
+    emit_sanitized(sanitized);
+  }
+}
+
+TerminalTitleActivityGuard::TerminalTitleActivityGuard(
+    TerminalTitleController &controller)
+    : controller_(controller) {
+  controller_.start_activity();
+}
+
+TerminalTitleActivityGuard::~TerminalTitleActivityGuard() noexcept {
+  try {
+    controller_.stop_activity();
+  } catch (...) {
+  }
 }
 
 int rows_for_line(std::string_view line, int width) {
