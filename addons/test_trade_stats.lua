@@ -1,0 +1,35 @@
+-- Tests for trade_stats addon via pici --test harness.
+local addon = dofile("addons/trade_stats.lua")
+
+pici.test.run("format_tool_call shows bracketed tool name and args", function()
+  local s = addon.format_tool_call({tool_name = "bash", call_id = "c1", args = {command = "echo hi"}})
+  pici.test.ok(s:find("[", 1, true) ~= nil and s:find("]", 1, true) ~= nil, "should have brackets")
+  pici.test.ok(s:find("bash", 1, true) ~= nil)
+  pici.test.ok(s:find("echo hi", 1, true) ~= nil)
+end)
+
+pici.test.run("format_tool_result derives EXIT from is_error, not a fabricated code", function()
+  local ok_s = addon.format_tool_result({tool_name = "bash", call_id = "c1", args = {}, content = "fine", is_error = false})
+  local err_s = addon.format_tool_result({tool_name = "bash", call_id = "c1", args = {}, content = "boom", is_error = true})
+  pici.test.ok(ok_s:find("EXIT 0", 1, true) ~= nil, tostring(ok_s))
+  pici.test.ok(err_s:find("EXIT 1", 1, true) ~= nil, tostring(err_s))
+  pici.test.ok(ok_s:find("\27[32m", 1, true) ~= nil, "EXIT 0 should be green")
+  pici.test.ok(err_s:find("\27[31m", 1, true) ~= nil, "EXIT 1 should be red")
+end)
+
+pici.test.run("format_tool_result stays single line with a separator before EXIT", function()
+  local s = addon.format_tool_result({tool_name = "bash", call_id = "c1", args = {}, content = "a\nb\nc", is_error = false})
+  pici.test.ok(not s:find("\n", 1, true))
+  pici.test.ok(s:find("│", 1, true) ~= nil)
+  pici.test.ok(s:find("(+2 more)", 1, true) ~= nil, tostring(s))
+end)
+
+pici.test.run("format_tool_call handles empty args", function()
+  local s = addon.format_tool_call({tool_name = "read", call_id = "c2", args = {}})
+  pici.test.ok(s ~= nil and s:find("read", 1, true) ~= nil)
+end)
+
+pici.test.run("format_tool_result handles empty content", function()
+  local s = addon.format_tool_result({tool_name = "bash", call_id = "c1", args = {}, content = "", is_error = false})
+  pici.test.ok(s:find("(empty)", 1, true) ~= nil)
+end)

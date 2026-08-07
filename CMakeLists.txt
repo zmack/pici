@@ -631,6 +631,18 @@ if(PI_CPP_BUILD_TESTS)
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_turn_guard.lua
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_permissions.lua
             --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_context_trim.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_tool_format.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_nfo_format.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_nfo_classic.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_scene_release.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_matrix_drop.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_root_shell.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_circuit_board.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_glitch_tag.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_ascii_skull.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_trade_stats.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_hud_brackets.lua
+            --test ${CMAKE_CURRENT_SOURCE_DIR}/addons/test_block_meter.lua
     )
     set_tests_properties(test-addons
                          PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
