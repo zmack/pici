@@ -387,7 +387,19 @@ AgentTaskManager::make_task(const SpawnAgentRequest &request,
   options.model = parent_context.model;
 
   if (request.model_spec) {
-    auto model = find_model(*request.model_spec, parent_context.model.provider);
+    std::optional<Model> model;
+    if (options.model_registry) {
+      ModelSelection selection;
+      if (!request.model_spec->contains('/'))
+        selection.provider = parent_context.model.provider;
+      selection.model = *request.model_spec;
+      selection.source = "child";
+      auto resolution = options.model_registry->resolve(selection);
+      if (resolution)
+        model = std::move(resolution.model);
+    } else {
+      model = find_model(*request.model_spec, parent_context.model.provider);
+    }
     if (!model)
       throw AgentTaskError(AgentTaskErrorKind::invalid_model,
                            "unable to resolve child model: " +

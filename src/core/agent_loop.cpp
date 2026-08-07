@@ -516,7 +516,8 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
   opts.cache_retention = config.cache_retention;
   opts.session_id = config.session_id;
   opts.transport = config.transport;
-  opts.headers = config.headers;
+  opts.headers = config.model.headers;
+  merge_headers_case_insensitive(opts.headers, config.headers);
   opts.timeout_ms = config.timeout_ms;
   opts.max_retries = config.max_retries;
   opts.max_retry_delay_ms = config.max_retry_delay_ms;

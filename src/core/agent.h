@@ -23,11 +23,21 @@
 
 namespace pi::core {
 
+class ModelRegistry;
+
+struct ModelSwitchResult {
+  Model previous;
+  Model current;
+  ThinkingLevel thinking_level{ThinkingLevel::off};
+  std::optional<std::string> warning;
+};
+
 class Agent {
 public:
   struct Options {
     std::string system_prompt;
     Model model;
+    std::shared_ptr<const ModelRegistry> model_registry;
     ThinkingLevel thinking_level{ThinkingLevel::off};
     ToolExecutionMode tool_execution{ToolExecutionMode::parallel};
     Options() = default;
@@ -136,6 +146,21 @@ public:
   void abort();
   void reset();
 
+  // Change the model only between turns. If persist is supplied it runs while
+  // the lifecycle lock is held and before the in-memory state is committed.
+  ModelSwitchResult set_model(Model model, ThinkingLevel thinking,
+                              const std::function<void()> &persist = {});
+
+  // Restore durable session state as one idle-only lifecycle transition. This
+  // intentionally has no persistence callback: loading a session must never
+  // append metadata to whichever session happened to be active previously.
+  ModelSwitchResult restore_session(Model model, ThinkingLevel thinking,
+                                    std::vector<Message> messages,
+                                    std::string session_id,
+                                    std::optional<std::string> session_name);
+  void set_session_identity(std::string session_id,
+                            std::optional<std::string> session_name = {});
+
   // Wait for the agent to become idle
   void wait_for_idle();
 
@@ -162,7 +187,9 @@ private:
   // Internal helpers
   void join_workers();
   void begin_run();
+  void begin_run_locked();
   void launch_worker(std::function<void()> worker);
+  void launch_worker_locked(std::function<void()> worker);
   void run_with_lifecycle(const std::function<void(std::stop_token)> &executor);
   AgentContext create_context_snapshot() const;
   AgentLoopConfig create_loop_config();

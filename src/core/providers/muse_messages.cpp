@@ -723,7 +723,8 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
     ::write(STDERR_FILENO, debug.data(), debug.size());
   }
 
-  std::map<std::string, std::string> headers = options.headers;
+  std::map<std::string, std::string> headers = model.headers;
+  merge_headers_case_insensitive(headers, options.headers);
   headers["Content-Type"] = "application/json";
   headers["Accept"] = "text/event-stream";
 

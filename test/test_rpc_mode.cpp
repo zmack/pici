@@ -55,10 +55,26 @@ int main() {
   model.provider = "faux";
   auto store = std::make_shared<core::SessionStore>(
       std::filesystem::temp_directory_path() / "pici-rpc-mode-test");
+  core::ProviderConfig provider;
+  provider.id = "faux";
+  provider.api = "rpc-faux";
+  provider.base_url = "http://faux.test/v1";
+  provider.auth = core::ProviderAuthPolicy::none;
+  core::ConfiguredModel configured;
+  configured.id = "faux";
+  provider.models.push_back(configured);
+  core::ConfiguredModel other;
+  other.id = "other";
+  provider.models.push_back(other);
+  auto registry = std::make_shared<const core::ModelRegistry>(
+      std::map<std::string, core::ProviderConfig>{{"faux", provider}});
+
   core::Agent::Options options;
   options.model = std::move(model);
-  core::AgentSession session(
-      {.agent_options = std::move(options), .session_store = store});
+  options.model_registry = registry;
+  core::AgentSession session({.agent_options = std::move(options),
+                              .model_registry = registry,
+                              .session_store = store});
   core::SessionHeader header{.id = "rpc-test"};
   session.create_session(header);
 
@@ -69,6 +85,9 @@ int main() {
     output.push_back(line);
   });
 
+  mode.handle({{"id", "models"}, {"type", "list_models"}});
+  mode.handle({{"id", "switch"}, {"type", "set_model"},
+               {"provider", "faux"}, {"model", "other"}});
   mode.handle({{"id", "state"}, {"type", "get_state"}});
   mode.handle({{"id", "prompt"}, {"type", "prompt"}, {"message", "hello"}});
   mode.wait_for_idle();
@@ -77,6 +96,8 @@ int main() {
       {{"id", "name"}, {"type", "set_session_name"}, {"name", "RPC test"}});
 
   bool got_state = false;
+  bool got_models = false;
+  bool got_switch = false;
   bool got_ack = false;
   bool got_delta = false;
   bool got_sequence = false;
@@ -86,7 +107,16 @@ int main() {
   std::scoped_lock lock(mutex);
   for (const auto &line : output) {
     got_state = got_state || (line.value("command", "") == "get_state" &&
-                              line.value("success", false));
+                              line.value("success", false) &&
+                              line["data"]["model"]["id"] == "other");
+    got_models = got_models ||
+                 (line.value("command", "") == "list_models" &&
+                  line.value("success", false) &&
+                  line["data"]["models"].size() >= 2);
+    got_switch = got_switch ||
+                 (line.value("command", "") == "set_model" &&
+                  line.value("success", false) &&
+                  line["data"]["current"]["id"] == "other");
     got_ack = got_ack || (line.value("command", "") == "prompt" &&
                           line.value("success", false));
     got_delta = got_delta || (line.value("event", "") == "message_update" &&
@@ -104,6 +134,8 @@ int main() {
                             line.value("success", false));
   }
   CHECK(got_state);
+  CHECK(got_models);
+  CHECK(got_switch);
   CHECK(got_ack);
   CHECK(got_delta);
   CHECK(got_sequence);

@@ -19,6 +19,7 @@
 #include <exception>
 #include <httplib.h>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -32,6 +33,8 @@ namespace pi::acp {
 namespace {
 
 // Translates Renderer callbacks into ACP SSE events.
+
+std::mutex durable_run_mutex;
 
 class AcpSseRenderer final : public core::Renderer {
 public:
@@ -570,8 +573,11 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
 
         const std::string run_id = make_run_id();
 
+        auto session_lock =
+            std::make_shared<std::unique_lock<std::mutex>>(durable_run_mutex);
         auto session = std::make_shared<core::AgentSession>(
             core::AgentSession::Config{.agent_options = cfg.agent_opts,
+                                       .model_registry = cfg.model_registry,
                                        .tools = cfg.tools,
                                        .session_store = sessions,
                                        .sandbox_policy = cfg.sandbox_policy});
@@ -588,13 +594,50 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
           active_session_id = session->open_session(*rcr.session_id, header);
         }
 
+        // An explicit request selection always wins over the restored model,
+        // and is journaled before the run starts.
+        if (rcr.provider || rcr.model) {
+          if (!rcr.model || rcr.model->empty()) {
+            json_response(
+                res, 400,
+                {{"error", "model is required when selecting a provider"}});
+            return;
+          }
+          core::ModelSelection selection{.model = *rcr.model, .source = "acp"};
+          if (rcr.provider)
+            selection.provider = *rcr.provider;
+          const auto resolution = session->resolve_model(selection);
+          if (!resolution) {
+            json_response(res, 400, {{"error", resolution.error}});
+            return;
+          }
+          if (cfg.auth_resolver &&
+              cfg.auth_resolver->availability(resolution.model->provider) ==
+                  auth::AuthAvailability::missing) {
+            json_response(res, 400,
+                          {{"error", "missing authentication for provider '" +
+                                         resolution.model->provider + "'"}});
+            return;
+          }
+          try {
+            session->set_model(*resolution.model,
+                               session->agent().state().thinking_level());
+          } catch (const std::exception &error) {
+            json_response(res, 409, {{"error", error.what()}});
+            return;
+          }
+        }
+
+        const auto effective_model = session->agent().state().model();
+
         if (rcr.mode == RunMode::stream) {
           res.set_chunked_content_provider(
               "text/event-stream",
               // NOLINTNEXTLINE(bugprone-exception-escape)
-              [&cfg, run_id, prompt, rcr, active_session_id,
-               session](std::size_t /*offset*/,
-                        httplib::DataSink &sink) mutable -> bool {
+              [&cfg, run_id, prompt, rcr, active_session_id, session,
+               session_lock,
+               effective_model](std::size_t /*offset*/,
+                                httplib::DataSink &sink) mutable -> bool {
                 SseWriter sse(sink);
 
                 Run r;
@@ -602,6 +645,8 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
                 r.agent_name = cfg.agent_name;
                 r.status = RunStatus::created;
                 r.session_id = active_session_id;
+                r.provider = effective_model.provider;
+                r.model = effective_model.id;
                 sse.emit("run.created",
                          {{"type", "run.created"}, {"run", nlohmann::json(r)}});
                 r.status = RunStatus::in_progress;
@@ -637,6 +682,8 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
         r.agent_name = cfg.agent_name;
         r.status = sr.status();
         r.session_id = active_session_id;
+        r.provider = effective_model.provider;
+        r.model = effective_model.id;
         if (!sr.accumulated().empty())
           r.output.push_back({.role = cfg.agent_name,
                               .parts = {{.content_type = "text/plain",

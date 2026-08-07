@@ -488,6 +488,99 @@ void test_find_model() {
     });
 }
 
+void test_model_registry() {
+    tests::register_test("ModelRegistry: configured resolution and merge", []() {
+        ProviderConfig local;
+        local.id = "local";
+        local.api = "registry-faux";
+        local.base_url = "http://local.test/v1";
+        local.auth = ProviderAuthPolicy::none;
+        local.headers["X-Provider"] = "local";
+        ConfiguredModel local_model;
+        local_model.id = "same";
+        local_model.headers["X-Model"] = "yes";
+        local.models.push_back(local_model);
+        ConfiguredModel slash_model;
+        slash_model.id = "accounts/company/models/coder";
+        local.models.push_back(slash_model);
+
+        ProviderConfig remote;
+        remote.id = "remote";
+        remote.api = "registry-faux";
+        remote.base_url = "http://remote.test/v1";
+        remote.auth = ProviderAuthPolicy::none;
+        ConfiguredModel remote_model;
+        remote_model.id = "same";
+        remote.models.push_back(remote_model);
+
+        ModelRegistry registry({{"local", local}, {"remote", remote}});
+        const auto *merged = registry.exact("LOCAL", "same");
+        CHECK(merged != nullptr);
+        CHECK_STR(merged->base_url, "http://local.test/v1");
+        CHECK_STR(merged->headers.at("X-Provider"), "local");
+        CHECK_STR(merged->headers.at("X-Model"), "yes");
+
+        auto explicit_model = registry.resolve(
+            {.provider = "local", .model = "local/same", .source = "test"});
+        CHECK(explicit_model);
+        CHECK_STR(explicit_model.model->id, "same");
+
+        auto ambiguous = registry.resolve({.model = "same", .source = "test"});
+        CHECK(!ambiguous);
+        CHECK(ambiguous.error.find("local/same") != std::string::npos);
+        CHECK(ambiguous.error.find("remote/same") != std::string::npos);
+
+        auto slash = registry.resolve(
+            {.provider = "local",
+             .model = "accounts/company/models/coder",
+             .source = "test"});
+        CHECK(slash);
+        CHECK_STR(slash.model->id, "accounts/company/models/coder");
+
+        auto unknown_provider = registry.resolve(
+            {.provider = "missing", .model = "model", .source = "test"});
+        CHECK(!unknown_provider);
+        auto custom = registry.resolve({.provider = "missing",
+                                        .model = "model",
+                                        .base_url = "http://missing.test/v1",
+                                        .source = "test"});
+        CHECK(custom);
+        CHECK_STR(custom.model->provider, "missing");
+        CHECK_STR(custom.model->base_url, "http://missing.test/v1");
+
+        ProviderConfig override;
+        override.id = "openai";
+        ConfiguredModel sparse;
+        sparse.context_window = 999;
+        override.model_overrides.emplace("gpt-4o", sparse);
+        ModelRegistry overridden({{"openai", override}});
+        const auto *gpt = overridden.exact("openai", "gpt-4o");
+        CHECK(gpt != nullptr);
+        CHECK_EQ(gpt->context_window, 999ULL);
+        CHECK_EQ(gpt->max_tokens, 16384ULL);
+        CHECK(!gpt->base_url.empty());
+    });
+
+    tests::register_test("Thinking resolution: clamps unsupported levels", []() {
+        Model model;
+        model.provider = "local";
+        model.id = "reasoning";
+        model.reasoning = true;
+        model.thinking_level_map = {{"off", std::nullopt},
+                                    {"low", std::string("low")},
+                                    {"high", std::string("high")}};
+        const auto result = resolve_thinking_level(model, ThinkingLevel::medium);
+        CHECK_EQ(result.level, ThinkingLevel::low);
+        CHECK(result.warning.has_value());
+
+        model.reasoning = false;
+        model.thinking_level_map.clear();
+        const auto off = resolve_thinking_level(model, ThinkingLevel::high);
+        CHECK_EQ(off.level, ThinkingLevel::off);
+        CHECK(off.warning.has_value());
+    });
+}
+
 void test_model_json() {
     tests::register_test("Model: JSON serialization", []() {
         Model model;
@@ -549,8 +642,12 @@ void test_session_journal_replay() {
         store.append_truncate(id, 1);
         store.append_message(id, make_user("three"));
 
+        store.set_model(id, "remote", "accounts/company/models/coder");
+
         auto record = store.load(id);
         CHECK(record.has_value());
+        CHECK_STR(record->header.provider, "remote");
+        CHECK_STR(record->header.model, "accounts/company/models/coder");
         CHECK_EQ(record->messages.size(), std::size_t(2));
         CHECK_EQ(std::get<UserMessage>(record->messages[0]).content.size(),
                  std::size_t(1));
@@ -562,6 +659,10 @@ void test_session_journal_replay() {
                      std::get<UserMessage>(record->messages[1]).content[0])
                      .text,
                  "three");
+        const auto listed = store.list();
+        CHECK_EQ(listed.size(), std::size_t(1));
+        CHECK_STR(listed.front().provider, "remote");
+        CHECK_STR(listed.front().model, "accounts/company/models/coder");
 
         std::filesystem::remove_all(dir);
     });
@@ -583,6 +684,7 @@ int main() {
     test_tool_result_message_json();
     test_token_usage_json();
     test_find_model();
+    test_model_registry();
     test_model_json();
     test_event_json();
     test_session_journal_replay();

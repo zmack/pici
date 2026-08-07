@@ -535,6 +535,7 @@ add_executable(pi-cli
     src/cli/args.cpp
     src/cli/config.cpp
     src/cli/readline.cpp
+    src/cli/model_selector.cpp
     src/cli/rpc_mode.cpp
     src/cli/system_prompt.cpp
     src/cli/tree_selector.cpp
@@ -578,6 +579,10 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-faux_client PRIVATE pi-core)
     add_test(NAME test-faux_client COMMAND test-faux_client)
 
+    add_executable(test-auth_resolver test/test_auth_resolver.cpp)
+    target_link_libraries(test-auth_resolver PRIVATE pi-http)
+    add_test(NAME test-auth_resolver COMMAND test-auth_resolver)
+
     add_executable(test-openai_completions test/test_openai_completions.cpp)
     target_link_libraries(test-openai_completions PRIVATE pi-http)
     add_test(NAME test-openai_completions COMMAND test-openai_completions)
@@ -588,7 +593,7 @@ if(PI_CPP_BUILD_TESTS)
 
     add_executable(test-config test/test_config.cpp src/cli/config.cpp src/cli/args.cpp)
     target_include_directories(test-config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus)
+    target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json)
     add_test(NAME test-config COMMAND test-config)
 
     add_executable(test-credential_store test/test_credential_store.cpp)
@@ -614,7 +619,7 @@ if(PI_CPP_BUILD_TESTS)
 
     add_executable(test-rpc_mode test/test_rpc_mode.cpp src/cli/rpc_mode.cpp)
     target_include_directories(test-rpc_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test-rpc_mode PRIVATE pi-core)
+    target_link_libraries(test-rpc_mode PRIVATE pi-http)
     add_test(NAME test-rpc_mode COMMAND test-rpc_mode)
 
     add_test(

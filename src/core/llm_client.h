@@ -85,6 +85,10 @@ public:
   // Get a client for a model, or create the default
   std::shared_ptr<LLMClient> get_client(const Model &model);
 
+  // Read-only validation hook used when building the effective model
+  // registry at startup.
+  bool has_client(std::string_view api_id) const;
+
   static LLMClientRegistry &instance();
 
 private:

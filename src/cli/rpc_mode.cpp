@@ -1,9 +1,11 @@
 #include "cli/rpc_mode.h"
 
 #include "core/agent_task.h"
+#include "core/auth/auth_resolver.h"
 #include "core/event_json.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/models.h"
 #include "core/sandbox.h"
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
@@ -13,6 +15,7 @@
 #include <cstddef>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -124,12 +127,52 @@ std::optional<core::ThinkingLevel> parse_thinking(std::string_view level) {
   return std::nullopt;
 }
 
+nlohmann::json
+model_summary(const core::Model &model, const core::ModelRegistry &registry,
+              const std::shared_ptr<auth::AuthResolver> &resolver) {
+  const auto *provider = registry.provider(model.provider);
+  std::string auth = "not_required";
+  if (resolver) {
+    switch (resolver->availability(model.provider)) {
+    case pi::auth::AuthAvailability::configured:
+      auth = "configured";
+      break;
+    case pi::auth::AuthAvailability::not_required:
+      auth = "not_required";
+      break;
+    case pi::auth::AuthAvailability::missing:
+      auth = "missing";
+      break;
+    case pi::auth::AuthAvailability::expired_or_refresh_needed:
+      auth = "expired_or_refresh_needed";
+      break;
+    }
+  } else if (provider != nullptr) {
+    if (provider->auth == core::ProviderAuthPolicy::required)
+      auth = provider->api_key.literal || provider->api_key.env_var
+                 ? "configured"
+                 : "missing";
+    else if (provider->auth == core::ProviderAuthPolicy::oauth)
+      auth = "expired_or_refresh_needed";
+  }
+  return {{"provider", model.provider},
+          {"model", model.id},
+          {"name", model.name},
+          {"api", model.api},
+          {"context_window", model.context_window},
+          {"max_tokens", model.max_tokens},
+          {"reasoning", model.reasoning},
+          {"input_capabilities", model.input_capabilities},
+          {"auth_availability", auth}};
+}
+
 } // namespace
 
 RpcMode::RpcMode(core::AgentSession &session, Output output,
-                 core::AgentTaskManager *task_manager)
+                 core::AgentTaskManager *task_manager,
+                 std::shared_ptr<auth::AuthResolver> auth_resolver)
     : session_(session), task_manager_(task_manager),
-      output_(std::move(output)) {}
+      auth_resolver_(std::move(auth_resolver)), output_(std::move(output)) {}
 
 RpcMode::~RpcMode() { stop(); }
 
@@ -321,6 +364,63 @@ void RpcMode::handle(const nlohmann::json &command) {
       response(command, true,
                task_snapshot_json(task_manager_->close(
                    command.value("target", std::string{}))));
+    } else if (type == "list_models") {
+      const auto registry = session_.model_registry();
+      if (!registry) {
+        response(command, false, nullptr, "model registry is unavailable");
+        return;
+      }
+      const auto filter = command.value("filter", std::string{});
+      nlohmann::json models = nlohmann::json::array();
+      for (const auto *model : registry->search(filter))
+        models.push_back(model_summary(*model, *registry, auth_resolver_));
+      response(command, true, {{"models", std::move(models)}});
+    } else if (type == "set_model") {
+      if (run_active_ || session_.agent().is_streaming()) {
+        response(command, false, nullptr,
+                 "model switching requires an idle agent");
+        return;
+      }
+      const auto model_id = command.value("model", std::string{});
+      if (model_id.empty()) {
+        response(command, false, nullptr, "set_model requires a model");
+        return;
+      }
+      core::ModelSelection selection{.model = model_id, .source = "rpc"};
+      if (command.contains("provider") && command.at("provider").is_string())
+        selection.provider = command.at("provider").get<std::string>();
+      const auto resolution = session_.resolve_model(selection);
+      if (!resolution) {
+        response(command, false, nullptr, resolution.error);
+        return;
+      }
+      const auto &selected_model = resolution.model.value();
+      if (auth_resolver_ &&
+          auth_resolver_->availability(selected_model.provider) ==
+              pi::auth::AuthAvailability::missing) {
+        response(command, false, nullptr,
+                 "missing authentication for provider '" +
+                     selected_model.provider + "'");
+        return;
+      }
+      auto requested = session_.agent().state().thinking_level();
+      if (command.contains("thinking_level")) {
+        const auto parsed =
+            parse_thinking(command.at("thinking_level").get<std::string>());
+        if (!parsed) {
+          response(command, false, nullptr, "invalid thinking level");
+          return;
+        }
+        requested = *parsed;
+      }
+      const auto result = session_.set_model(selected_model, requested);
+      nlohmann::json data = {{"previous", as_json(result.previous)},
+                             {"current", as_json(result.current)},
+                             {"thinking_level", core::thinking_level_to_string(
+                                                    result.thinking_level)}};
+      if (result.warning)
+        data["warning"] = *result.warning;
+      response(command, true, std::move(data));
     } else if (type == "get_state") {
       const auto messages = session_.agent().state().messages();
       nlohmann::json tools = nlohmann::json::array();
@@ -444,13 +544,14 @@ void RpcMode::wait_for_idle() {
 }
 
 int run_rpc_mode(core::AgentSession &session, std::istream &input,
-                 std::ostream &output, core::AgentTaskManager *task_manager) {
+                 std::ostream &output, core::AgentTaskManager *task_manager,
+                 std::shared_ptr<auth::AuthResolver> auth_resolver) {
   RpcMode mode(
       session,
       [&output](const nlohmann::json &event) {
         output << event.dump() << '\n' << std::flush;
       },
-      task_manager);
+      task_manager, std::move(auth_resolver));
   std::string line;
   while (std::getline(input, line)) {
     if (line.empty())

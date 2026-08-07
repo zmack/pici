@@ -30,6 +30,7 @@
 
 #include "cli/args.h"
 #include "cli/config.h"
+#include "cli/model_selector.h"
 #include "cli/readline.h"
 #include "cli/rpc_mode.h"
 #include "cli/system_prompt.h"
@@ -166,17 +167,26 @@ std::string format_tokens(std::uint64_t n) {
   return ss.str();
 }
 
-int cmd_list_models(const cli::Args &args) {
-  auto hits = pi::core::search_models(args.list_models_filter);
+std::shared_ptr<const core::ModelRegistry>
+build_model_registry(const cli::Args &args) {
+  static const std::map<std::string, cli::ProviderConfig> empty;
+  const auto &configured =
+      args.config_document ? args.config_document->providers : empty;
+  auto registry = std::make_shared<core::ModelRegistry>(configured);
+  registry->validate_registered_apis();
+  return registry;
+}
+
+std::string format_model_catalog(
+    std::string_view filter,
+    const std::shared_ptr<const core::ModelRegistry> &registry) {
+  auto hits = registry->search(filter);
   if (hits.empty()) {
-    if (!args.list_models_filter.empty())
-      std::cout << "No models matching \"" << args.list_models_filter << "\"\n";
-    else
-      std::cout << "No models available.\n";
-    return 0;
+    if (!filter.empty())
+      return "No models matching \"" + std::string(filter) + "\"\n";
+    return "No models available.\n";
   }
 
-  // Column widths
   std::size_t wprov = 8;
   std::size_t wid = 5;
   std::size_t wctx = 7;
@@ -188,30 +198,31 @@ int cmd_list_models(const cli::Args &args) {
     wmax = std::max(wmax, format_tokens(m->max_tokens).size());
   }
 
+  std::ostringstream out;
   auto row = [&](std::string_view prov, std::string_view id,
                  std::string_view ctx, std::string_view mx,
                  std::string_view reason, std::string_view img) {
-    std::cout << std::left << std::setw(static_cast<int>(wprov + 2)) << prov
-              << std::setw(static_cast<int>(wid + 2)) << id
-              << std::setw(static_cast<int>(wctx + 2)) << ctx
-              << std::setw(static_cast<int>(wmax + 2)) << mx << std::setw(10)
-              << reason << img << "\n";
+    out << std::left << std::setw(static_cast<int>(wprov + 2)) << prov
+        << std::setw(static_cast<int>(wid + 2)) << id
+        << std::setw(static_cast<int>(wctx + 2)) << ctx
+        << std::setw(static_cast<int>(wmax + 2)) << mx << std::setw(10)
+        << reason << img << "\n";
   };
-
   row("provider", "model", "context", "max-out", "thinking", "images");
-
   for (const auto *m : hits) {
-    bool has_image = false;
-    for (const auto &cap : m->input_capabilities)
-      if (cap == "image") {
-        has_image = true;
-        break;
-      }
-
+    const bool has_image = std::ranges::find(m->input_capabilities, "image") !=
+                           m->input_capabilities.end();
     row(m->provider, m->id, format_tokens(m->context_window),
         format_tokens(m->max_tokens), m->reasoning ? "yes" : "no",
         has_image ? "yes" : "no");
   }
+  return out.str();
+}
+
+int cmd_list_models(
+    const cli::Args &args,
+    const std::shared_ptr<const core::ModelRegistry> &registry) {
+  std::cout << format_model_catalog(args.list_models_filter, registry);
   return 0;
 }
 
@@ -303,43 +314,51 @@ core::ThinkingLevel to_core_thinking(cli::ThinkingLevel t) {
   return core::ThinkingLevel::off;
 }
 
-std::optional<core::Model> resolve_model(const cli::Args &args) {
+core::ModelResolution
+resolve_model(const cli::Args &args,
+              const std::shared_ptr<const core::ModelRegistry> &registry) {
   if (!args.model.empty()) {
-    auto m = core::find_model(args.model, args.provider);
-    if (m) {
-      // Provider hint wins: user explicitly asked for it, so the id prefix
-      // should be treated as part of the model id, not a separate provider
-      // when the prefix alone doesn't resolve to a known base_url.
-      if (!args.provider.empty() && m->base_url.empty()) {
-        // find_model already tried hint+parsed; if still empty, force hint
-        m->provider = args.provider;
-        for (const auto &known : core::all_models()) {
-          if (known.provider == args.provider) {
-            m->base_url = known.base_url;
-            m->api = known.api;
-            break;
-          }
-        }
-      }
-      if (!args.base_url.empty())
-        m->base_url = args.base_url;
-      if (!args.provider.empty() && m->provider == "custom")
-        m->provider = args.provider;
-    }
-    return m;
+    core::ModelSelection selection;
+    if (!args.provider.empty())
+      selection.provider = args.provider;
+    selection.model = args.model;
+    if (!args.base_url.empty())
+      selection.base_url = args.base_url;
+    selection.source = "cli";
+    auto resolution = registry->resolve(selection);
+    return resolution;
   }
-  // No --model given: build a model from explicit flags or use a sensible
-  // default
-  core::Model m;
-  m.api = "openai-completions";
-  m.provider = args.provider.empty() ? "local" : args.provider;
-  m.base_url =
+
+  if (!args.provider.empty()) {
+    if (const auto *provider = registry->provider(args.provider)) {
+      core::Model model;
+      model.id = "default";
+      model.name = "default";
+      model.api = provider->api;
+      model.provider = provider->id;
+      model.base_url = provider->base_url;
+      model.input_capabilities = {"text"};
+      model.context_window = 128000;
+      model.max_tokens = 4096;
+      if (!args.base_url.empty())
+        model.base_url = args.base_url;
+      return {.model = std::move(model)};
+    }
+    if (args.base_url.empty())
+      return {.error = "cli: unknown provider '" + args.provider + "'"};
+  }
+
+  core::Model model;
+  model.id = "default";
+  model.name = "default";
+  model.api = "openai-completions";
+  model.provider = args.provider.empty() ? "local" : args.provider;
+  model.base_url =
       args.base_url.empty() ? "http://127.0.0.1:8080/v1" : args.base_url;
-  m.id = "default";
-  m.name = "default";
-  m.context_window = 128000;
-  m.max_tokens = 4096;
-  return m;
+  model.input_capabilities = {"text"};
+  model.context_window = 128000;
+  model.max_tokens = 4096;
+  return {.model = std::move(model)};
 }
 
 std::unique_ptr<core::Renderer> make_renderer(const cli::Args &args) {
@@ -610,13 +629,14 @@ std::vector<cli::ContextFile> load_context_files() {
   return result;
 }
 
-int cmd_run(const cli::Args &args) {
-  auto model_opt = resolve_model(args);
-  if (!model_opt) {
-    std::cerr << "error: could not resolve model\n";
+int cmd_run(const cli::Args &args,
+            const std::shared_ptr<const core::ModelRegistry> &registry) {
+  const auto resolution = resolve_model(args, registry);
+  if (!resolution) {
+    std::cerr << "error: " << resolution.error << "\n";
     return 1;
   }
-  core::Model model = *model_opt;
+  core::Model model = *resolution.model;
   if (model.provider == "openai-codex" && !args.api_key.empty()) {
     std::cerr << "error: --api-key cannot be used with openai-codex; run "
                  "pi-cli auth login openai-codex\n";
@@ -682,6 +702,7 @@ int cmd_run(const cli::Args &args) {
 
   core::Agent::Options opts;
   opts.model = model;
+  opts.model_registry = registry;
   opts.system_prompt = args.system_prompt;
   opts.thinking_level = to_core_thinking(args.thinking);
   auto hook_runtime = std::make_shared<HookRuntime>();
@@ -702,16 +723,19 @@ int cmd_run(const cli::Args &args) {
     }
   }
   opts.diagnostics = stream_diagnostics;
-  auto auth_resolver = std::make_shared<pi::auth::AuthResolver>();
-  opts.get_auth = [&args, &model, auth_resolver](
-                      std::string_view p) -> std::optional<core::RequestAuth> {
-    return auth_resolver->resolve(p.empty() ? model.provider : p, args.api_key);
+  auto auth_resolver = std::make_shared<pi::auth::AuthResolver>(registry);
+  if (!args.api_key.empty())
+    auth_resolver->set_runtime_api_key(model.provider, args.api_key);
+  opts.get_auth =
+      [auth_resolver](std::string_view p) -> std::optional<core::RequestAuth> {
+    return auth_resolver->resolve(p);
   };
   opts.get_api_key =
-      [&args, &model](std::string_view p) -> std::optional<std::string> {
-    if (!args.api_key.empty())
-      return args.api_key;
-    return core::get_env_api_key(p.empty() ? model.provider : p);
+      [auth_resolver](std::string_view p) -> std::optional<std::string> {
+    auto auth = auth_resolver->resolve(p);
+    if (!auth || !auth->bearer_token)
+      return std::nullopt;
+    return auth->bearer_token;
   };
   opts.verbose = args.verbose;
 
@@ -935,10 +959,11 @@ int cmd_run(const cli::Args &args) {
       storage_path =
           std::filesystem::path(args.hooks_files[0]).string() + ".storage.json";
 
+    const auto current_model = agent.state().model();
     core::LuaHooks::AgentInfo info;
-    info.model_id = model.id;
-    info.model_provider = model.provider;
-    info.model_api = model.api;
+    info.model_id = current_model.id;
+    info.model_provider = current_model.provider;
+    info.model_api = current_model.api;
     info.tool_names = std::move(tool_names);
     info.cwd = std::filesystem::current_path().string();
     info.storage_path = std::move(storage_path);
@@ -1153,7 +1178,6 @@ int cmd_run(const cli::Args &args) {
   };
 
   apply_hook_tools();
-  configure_hooks();
 
   std::string current_session_id;
   std::optional<std::string> current_session_name;
@@ -1172,6 +1196,8 @@ int cmd_run(const cli::Args &args) {
     current_session_id = loaded_session->header.id;
     current_session_name = loaded_session->header.name;
     runtime.activate_session(*loaded_session);
+    if (runtime.last_warning())
+      std::cerr << "warning: " << *runtime.last_warning() << "\n";
     if (args.sandbox_mode_explicit)
       runtime.set_sandbox_mode(sandbox_mode);
     std::cerr << "[session: " << current_session_id;
@@ -1183,14 +1209,32 @@ int cmd_run(const cli::Args &args) {
     hdr.id = core::generate_session_id();
     hdr.created =
         std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    hdr.model = model.id;
-    hdr.provider = model.provider;
+    const auto current_model = agent.state().model();
+    hdr.model = current_model.id;
+    hdr.provider = current_model.provider;
     hdr.sandbox_mode = std::string(core::sandbox_mode_to_string(sandbox_mode));
     current_session_id = runtime.create_session(hdr);
   }
 
+  if (loaded_session && (args.model_explicit || args.provider_explicit ||
+                         args.base_url_explicit)) {
+    try {
+      const auto result =
+          runtime.set_model(model, to_core_thinking(args.thinking));
+      if (result.warning)
+        std::cerr << "warning: " << *result.warning << "\n";
+    } catch (const std::exception &error) {
+      std::cerr << "error: unable to apply explicit model selection: "
+                << error.what() << "\n";
+      return 1;
+    }
+  }
+
+  configure_hooks();
+
   if (args.rpc_mode)
-    return cli::run_rpc_mode(runtime, std::cin, std::cout, task_manager.get());
+    return cli::run_rpc_mode(runtime, std::cin, std::cout, task_manager.get(),
+                             auth_resolver);
 
   auto renderer = make_renderer(args);
 
@@ -1201,7 +1245,9 @@ int cmd_run(const cli::Args &args) {
               << "]\n";
 
   if (args.verbose) {
-    std::cerr << "[model: " << model.provider << "/" << model.id << "]\n";
+    const auto current_model = agent.state().model();
+    std::cerr << "[model: " << current_model.provider << "/" << current_model.id
+              << "]\n";
     std::cerr << "[tools: " << agent.state().tools().size() << "]\n";
   }
 
@@ -1210,7 +1256,8 @@ int cmd_run(const cli::Args &args) {
   // declared commands list — no Lua needed.  Argument completion (/cmd ...
   // with a space) is delegated to hooks->complete.
   cli::CompleteFn complete_fn =
-      [&hooks, &agent](std::string_view partial) -> std::vector<std::string> {
+      [&hooks, &agent,
+       &registry](std::string_view partial) -> std::vector<std::string> {
     std::vector<std::string> result;
     const bool is_slash = !partial.empty() && partial[0] == '/';
     const bool has_space = partial.contains(' ');
@@ -1221,6 +1268,7 @@ int cmd_run(const cli::Args &args) {
            {std::string_view("/exit"), std::string_view("/quit"),
             std::string_view("/tools"), std::string_view("/addons"),
             std::string_view("/reload-addons"), std::string_view("/usage"),
+            std::string_view("/model"), std::string_view("/models"),
             std::string_view("/name"), std::string_view("/fork"),
             std::string_view("/tree")}) {
         if (b.starts_with(partial))
@@ -1234,6 +1282,20 @@ int cmd_run(const cli::Args &args) {
         }
       }
       return result;
+    }
+
+    const auto space = partial.find(' ');
+    if (is_slash && has_space && space != std::string_view::npos) {
+      const auto command = partial.substr(0, space);
+      if (command == "/model") {
+        const auto prefix = partial.substr(space + 1);
+        for (const auto &candidate : registry->models()) {
+          const std::string canonical = candidate.provider + "/" + candidate.id;
+          if (std::string_view(canonical).starts_with(prefix))
+            result.push_back(canonical);
+        }
+        return result;
+      }
     }
 
     // Argument completion — delegate to hook
@@ -1282,8 +1344,9 @@ int cmd_run(const cli::Args &args) {
     return u;
   };
   auto build_ui_context = [&]() {
+    const auto current_model = agent.state().model();
     core::LuaUiContext context;
-    context.model = model.id;
+    context.model = current_model.id;
     context.tools = agent.state().tools().size();
     context.last = last_usage_for_prompt;
     context.session = session_usage_for_prompt;
@@ -1295,8 +1358,11 @@ int cmd_run(const cli::Args &args) {
     }
     return context;
   };
-  bool has_pricing =
-      model.cost.input_per_mtok != 0 || model.cost.output_per_mtok != 0;
+  auto has_current_pricing = [&]() {
+    const auto current_model = agent.state().model();
+    return current_model.cost.input_per_mtok != 0 ||
+           current_model.cost.output_per_mtok != 0;
+  };
 
   auto accumulate = [&](const core::TokenUsage &u) {
     last_turn = CostAccumulator{};
@@ -1350,9 +1416,9 @@ int cmd_run(const cli::Args &args) {
       for (const auto &m : msgs)
         if (std::holds_alternative<core::AssistantMessage>(m))
           ++turns;
-      auto custom =
-          hooks->prompt_line(turns, model.id, agent.state().tools().size(),
-                             last_usage_for_prompt, session_usage_for_prompt);
+      auto custom = hooks->prompt_line(
+          turns, agent.state().model().id, agent.state().tools().size(),
+          last_usage_for_prompt, session_usage_for_prompt);
       if (custom)
         prompt = "\n" + *custom;
     }
@@ -1389,8 +1455,78 @@ int cmd_run(const cli::Args &args) {
       }
       continue;
     }
+    if (line == "/model" || line.starts_with("/model ")) {
+      std::string spec = line.size() > 6 ? line.substr(6) : "";
+      spec.erase(0, spec.find_first_not_of(" \t"));
+      if (spec.empty()) {
+        const auto current_model = agent.state().model();
+        if (isatty(STDIN_FILENO) == 0) {
+          renderer->on_command_output("model: " + current_model.provider + "/" +
+                                      current_model.id +
+                                      "\nusage: /model <provider/model>");
+          continue;
+        }
+        const auto selected = cli::run_model_selector(
+            registry->search(""), current_model.provider, current_model.id,
+            [auth_resolver](const core::Model &candidate) {
+              switch (auth_resolver->availability(candidate.provider)) {
+              case pi::auth::AuthAvailability::configured:
+                return std::string("configured");
+              case pi::auth::AuthAvailability::not_required:
+                return std::string("not_required");
+              case pi::auth::AuthAvailability::missing:
+                return std::string("missing");
+              case pi::auth::AuthAvailability::expired_or_refresh_needed:
+                return std::string("expired_or_refresh_needed");
+              }
+              return std::string("unknown");
+            });
+        if (selected.cancelled || !selected.model)
+          continue;
+        spec = selected.model->provider + "/" + selected.model->id;
+      }
+
+      core::ModelSelection selection{.model = spec, .source = "cli"};
+      const auto resolution = registry->resolve(selection);
+      if (!resolution) {
+        renderer->on_command_output("model switch failed: " + resolution.error);
+        continue;
+      }
+      if (auth_resolver->availability(resolution.model->provider) ==
+          pi::auth::AuthAvailability::missing) {
+        renderer->on_command_output(
+            "model switch failed: missing authentication for provider '" +
+            resolution.model->provider + "'");
+        continue;
+      }
+      try {
+        const auto result = runtime.set_model(*resolution.model,
+                                              agent.state().thinking_level());
+        configure_hooks();
+        {
+          std::scoped_lock lock(effective_context_mutex);
+          effective_context.reset();
+        }
+        (void)update_terminal_ui();
+        std::string message =
+            "model: " + result.current.provider + "/" + result.current.id;
+        if (result.warning)
+          message += "\nwarning: " + *result.warning;
+        renderer->on_command_output(std::move(message));
+      } catch (const std::exception &error) {
+        renderer->on_command_output("model switch failed: " +
+                                    std::string(error.what()));
+      }
+      continue;
+    }
+    if (line == "/models" || line.starts_with("/models ")) {
+      std::string filter = line.size() > 7 ? line.substr(7) : "";
+      filter.erase(0, filter.find_first_not_of(" \t"));
+      renderer->on_command_output(format_model_catalog(filter, registry));
+      continue;
+    }
     if (line == "/usage") {
-      print_usage(last_turn, session, has_pricing);
+      print_usage(last_turn, session, has_current_pricing());
       continue;
     }
     if (line.starts_with("/name ") || line == "/name") {
@@ -1435,6 +1571,9 @@ int cmd_run(const cli::Args &args) {
       current_session_id = result.selected_session_id;
       current_session_name = loaded->header.name;
       runtime.activate_session(*loaded);
+      if (runtime.last_warning())
+        std::cerr << "warning: " << *runtime.last_warning() << "\n";
+      configure_hooks();
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();
@@ -1450,8 +1589,9 @@ int cmd_run(const cli::Args &args) {
       fresh_hdr.id = core::generate_session_id();
       fresh_hdr.created = std::chrono::system_clock::to_time_t(
           std::chrono::system_clock::now());
-      fresh_hdr.model = model.id;
-      fresh_hdr.provider = model.provider;
+      const auto current_model = agent.state().model();
+      fresh_hdr.model = current_model.id;
+      fresh_hdr.provider = current_model.provider;
       current_session_id = runtime.create_session(fresh_hdr);
       current_session_name.reset();
       {
@@ -1466,8 +1606,9 @@ int cmd_run(const cli::Args &args) {
       child_hdr.id = core::generate_session_id();
       child_hdr.created = std::chrono::system_clock::to_time_t(
           std::chrono::system_clock::now());
-      child_hdr.model = model.id;
-      child_hdr.provider = model.provider;
+      const auto current_model = agent.state().model();
+      child_hdr.model = current_model.id;
+      child_hdr.provider = current_model.provider;
       child_hdr.parent_id = current_session_id;
       child_hdr.parent_offset = agent.state().messages().size();
       current_session_id = runtime.fork_session(child_hdr);
@@ -1566,8 +1707,16 @@ int main(int argc, char *argv[]) noexcept {
   if (!args.otel_endpoint.empty())
     pi::core::init_otel(args.otel_endpoint);
 
+  std::shared_ptr<const pi::core::ModelRegistry> model_registry;
+  try {
+    model_registry = pi::build_model_registry(args);
+  } catch (const std::exception &error) {
+    std::cerr << "error: " << error.what() << "\n";
+    return 1;
+  }
+
   if (args.list_models) {
-    return pi::cmd_list_models(args);
+    return pi::cmd_list_models(args, model_registry);
   }
 
   if (!args.test_files.empty()) {
@@ -1595,5 +1744,5 @@ int main(int argc, char *argv[]) noexcept {
     return total_failed > 0 ? 1 : 0;
   }
 
-  return pi::cmd_run(args);
+  return pi::cmd_run(args, model_registry);
 }

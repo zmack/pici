@@ -43,6 +43,29 @@ public:
     model_ = std::move(m);
   }
 
+  void set_model_and_thinking(Model m, ThinkingLevel level) {
+    std::scoped_lock lock(mutex_);
+    model_ = std::move(m);
+    thinking_level_ = level;
+  }
+
+  void set_session_state(Model m, ThinkingLevel level,
+                         std::vector<Message> msgs, std::string id,
+                         std::optional<std::string> name) {
+    std::scoped_lock lock(mutex_);
+    model_ = std::move(m);
+    thinking_level_ = level;
+    messages_ = std::move(msgs);
+    session_id_ = std::move(id);
+    session_name_ = std::move(name);
+  }
+
+  void set_session_identity(std::string id, std::optional<std::string> name) {
+    std::scoped_lock lock(mutex_);
+    session_id_ = std::move(id);
+    session_name_ = std::move(name);
+  }
+
   ThinkingLevel thinking_level() const {
     std::scoped_lock lock(mutex_);
     return thinking_level_;

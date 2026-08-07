@@ -8,6 +8,8 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <source_location>
 #include <string>
 #include <string_view>
@@ -70,6 +72,26 @@ struct AcpFixture {
     m.id = "faux"; m.name = "faux"; m.api = "faux";
     m.provider = "faux"; m.context_window = 4096; m.max_tokens = 512;
     cfg.agent_opts.model = m;
+    core::ProviderConfig faux_provider;
+    faux_provider.id = "faux";
+    faux_provider.api = "faux";
+    faux_provider.base_url = "http://faux.test/v1";
+    faux_provider.auth = core::ProviderAuthPolicy::none;
+    core::ConfiguredModel faux_model;
+    faux_model.id = "faux";
+    faux_provider.models.push_back(faux_model);
+    core::ProviderConfig alternate_provider;
+    alternate_provider.id = "faux-b";
+    alternate_provider.api = "faux";
+    alternate_provider.base_url = "http://faux-b.test/v1";
+    alternate_provider.auth = core::ProviderAuthPolicy::none;
+    core::ConfiguredModel alternate_model;
+    alternate_model.id = "other";
+    alternate_provider.models.push_back(alternate_model);
+    cfg.model_registry = std::make_shared<const core::ModelRegistry>(
+        std::map<std::string, core::ProviderConfig>{{"faux", faux_provider},
+                                                     {"faux-b", alternate_provider}});
+    cfg.agent_opts.model_registry = cfg.model_registry;
     cfg.agent_opts.get_api_key = [](std::string_view) -> std::optional<std::string> {
       return std::nullopt;
     };
@@ -186,14 +208,19 @@ void test_run_session(AcpFixture &fx) {
   auto cli = fx.client();
   const std::string session_id = "test-session-42";
 
-  auto make_body = [&](std::string text) {
-    return nlohmann::json{
+  auto make_body = [&](std::string text, bool alternate = false) {
+    nlohmann::json body = {
       {"agent_name", "test-agent"}, {"mode", "sync"},
       {"session_id", session_id},
       {"input", {{{"role","user"},
                   {"parts",{{{"content_type","text/plain"},
                               {"content", std::move(text)}}}}}}}
-    }.dump();
+    };
+    if (alternate) {
+      body["provider"] = "faux-b";
+      body["model"] = "other";
+    }
+    return body.dump();
   };
 
   // First turn
@@ -201,12 +228,22 @@ void test_run_session(AcpFixture &fx) {
   CHECK(r1 != nullptr);
   CHECK(r1->status == 200);
 
-  // Second turn — session should be preserved
-  auto r2 = cli.Post("/runs", make_body("second message"), "application/json");
+  // Second turn explicitly switches provider/model.
+  auto r2 = cli.Post("/runs", make_body("second message", true), "application/json");
   CHECK(r2 != nullptr);
   CHECK(r2->status == 200);
   auto j2 = nlohmann::json::parse(r2->body);
   CHECK(j2.value("session_id", "") == session_id);
+  CHECK(j2.value("provider", "") == "faux-b");
+  CHECK(j2.value("model", "") == "other");
+
+  // Third turn without selection restores the journaled model.
+  auto r3 = cli.Post("/runs", make_body("third message"), "application/json");
+  CHECK(r3 != nullptr);
+  CHECK(r3->status == 200);
+  auto j3 = nlohmann::json::parse(r3->body);
+  CHECK(j3.value("provider", "") == "faux-b");
+  CHECK(j3.value("model", "") == "other");
 }
 
 

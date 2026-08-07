@@ -198,7 +198,7 @@ void test_agent_with_options() {
 
         CHECK(agent.state().system_prompt() == "You are a helpful assistant");
         CHECK(agent.state().model().id == "test-model");
-        CHECK(agent.state().thinking_level() == ThinkingLevel::medium);
+        CHECK(agent.state().thinking_level() == ThinkingLevel::off);
     });
 }
 
@@ -406,6 +406,79 @@ void test_agent_session_runtime() {
     });
 }
 
+void test_agent_model_switch_and_resume() {
+    tests::register_test("AgentSession: model switch persists and resumes", []() {
+        LLMClientRegistry::instance().register_client(
+            "agent-session-switch-test",
+            [] { return std::make_shared<ImmediateClient>(); });
+
+        ProviderConfig provider_a;
+        provider_a.id = "provider-a";
+        provider_a.api = "agent-session-switch-test";
+        provider_a.base_url = "http://a.test/v1";
+        provider_a.auth = ProviderAuthPolicy::none;
+        ConfiguredModel a_model;
+        a_model.id = "model-a";
+        provider_a.models.push_back(a_model);
+
+        ProviderConfig provider_b;
+        provider_b.id = "provider-b";
+        provider_b.api = "agent-session-switch-test";
+        provider_b.base_url = "http://b.test/v1";
+        provider_b.auth = ProviderAuthPolicy::none;
+        ConfiguredModel b_model;
+        b_model.id = "model-b";
+        provider_b.models.push_back(b_model);
+
+        auto registry = std::make_shared<const ModelRegistry>(
+            std::map<std::string, ProviderConfig>{{"provider-a", provider_a},
+                                                   {"provider-b", provider_b}});
+        const auto a = registry->resolve(
+            {.provider = "provider-a", .model = "model-a", .source = "test"});
+        const auto b = registry->resolve(
+            {.provider = "provider-b", .model = "model-b", .source = "test"});
+        CHECK(a);
+        CHECK(b);
+
+        const auto session_dir =
+            std::filesystem::temp_directory_path() /
+            ("pici-agent-switch-" + std::to_string(
+                                        std::chrono::steady_clock::now()
+                                            .time_since_epoch()
+                                            .count()));
+        auto store = std::make_shared<SessionStore>(session_dir);
+        Agent::Options opts;
+        opts.model = *a.model;
+        opts.model_registry = registry;
+        opts.thinking_level = ThinkingLevel::high;
+
+        AgentSession runtime({.agent_options = opts,
+                              .model_registry = registry,
+                              .session_store = store});
+        SessionHeader header{.id = "switch-session", .model = "model-a",
+                             .provider = "provider-a"};
+        runtime.create_session(header);
+        const auto switched = runtime.set_model(*b.model, ThinkingLevel::high);
+        CHECK_EQ(switched.previous.provider, "provider-a");
+        CHECK_EQ(switched.current.provider, "provider-b");
+        CHECK_EQ(runtime.agent().state().model().id, "model-b");
+
+        const auto saved = store->load("switch-session");
+        CHECK(saved.has_value());
+        CHECK_EQ(saved->header.provider, "provider-b");
+        CHECK_EQ(saved->header.model, "model-b");
+
+        AgentSession resumed({.agent_options = opts,
+                              .model_registry = registry,
+                              .session_store = store});
+        resumed.activate_session(*saved);
+        CHECK_EQ(resumed.agent().state().model().provider, "provider-b");
+        CHECK_EQ(resumed.agent().state().model().id, "model-b");
+
+        std::filesystem::remove_all(session_dir);
+    });
+}
+
 void test_agent_session_create_session_clears() {
     tests::register_test("AgentSession: create_session clears existing messages", []() {
         LLMClientRegistry::instance().register_client(
@@ -476,6 +549,7 @@ int main() {
     test_agent_prompt_stream();
     test_agent_run_lifecycle();
     test_agent_session_runtime();
+    test_agent_model_switch_and_resume();
     test_agent_session_create_session_clears();
 
     tests::print_summary();

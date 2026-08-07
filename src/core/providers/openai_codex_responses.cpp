@@ -685,16 +685,17 @@ std::shared_ptr<AssistantMessage> OpenAICodexResponsesClient::stream(
     return result;
   }
   std::map<std::string, std::string> headers = model.headers;
-  for (const auto &[key, value] : options.headers)
-    headers[key] = value;
-  headers["Accept"] = "text/event-stream";
-  headers["OpenAI-Beta"] = "responses=experimental";
-  headers["originator"] = "pi";
-  headers["User-Agent"] = user_agent();
+  merge_headers_case_insensitive(headers, options.headers);
+  std::map<std::string, std::string> required_headers{
+      {"Accept", "text/event-stream"},
+      {"OpenAI-Beta", "responses=experimental"},
+      {"originator", "pi"},
+      {"User-Agent", user_agent()}};
   if (options.session_id) {
-    headers["session-id"] = *options.session_id;
-    headers["x-client-request-id"] = *options.session_id;
+    required_headers["session-id"] = *options.session_id;
+    required_headers["x-client-request-id"] = *options.session_id;
   }
+  merge_headers_case_insensitive(headers, required_headers);
   auto auth = options.auth;
   if (!auth && options.api_key)
     auth = RequestAuth{.kind = AuthKind::api_key,

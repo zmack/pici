@@ -1,10 +1,16 @@
 #include "core/models.h"
+#include "core/llm_client.h"
 #include "core/message_types.h"
 
+#include <algorithm>
 #include <cctype>
+#include <map>
 #include <optional>
+#include <ranges>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace pi::core {
@@ -216,6 +222,419 @@ const std::vector<Model> kModels = { // NOLINT(bugprone-throwing-static-initiali
     .context_window=128000, .max_tokens=16384 },
 };
 // clang-format on
+
+namespace {
+
+int thinking_rank(ThinkingLevel level) {
+  switch (level) {
+  case ThinkingLevel::off:
+    return 0;
+  case ThinkingLevel::minimal:
+    return 1;
+  case ThinkingLevel::low:
+    return 2;
+  case ThinkingLevel::medium:
+    return 3;
+  case ThinkingLevel::high:
+    return 4;
+  case ThinkingLevel::xhigh:
+    return 5;
+  }
+  return 0;
+}
+
+ThinkingLevel thinking_from_rank(int rank) {
+  switch (rank) {
+  case 1:
+    return ThinkingLevel::minimal;
+  case 2:
+    return ThinkingLevel::low;
+  case 3:
+    return ThinkingLevel::medium;
+  case 4:
+    return ThinkingLevel::high;
+  case 5:
+    return ThinkingLevel::xhigh;
+  default:
+    return ThinkingLevel::off;
+  }
+}
+
+} // namespace
+
+ThinkingLevelResolution resolve_thinking_level(const Model &model,
+                                               ThinkingLevel requested) {
+  auto supports = [&](ThinkingLevel level) {
+    if (!model.reasoning)
+      return level == ThinkingLevel::off;
+    if (!model.thinking_level_map.empty()) {
+      const auto key = std::string(thinking_level_to_string(level));
+      auto it = model.thinking_level_map.find(key);
+      return it != model.thinking_level_map.end() && it->second.has_value();
+    }
+    return level != ThinkingLevel::xhigh;
+  };
+
+  ThinkingLevel resolved = requested;
+  if (!supports(resolved)) {
+    for (int rank = thinking_rank(requested); rank >= 0; --rank) {
+      const auto candidate = thinking_from_rank(rank);
+      if (supports(candidate)) {
+        resolved = candidate;
+        break;
+      }
+    }
+  }
+  if (!supports(resolved))
+    resolved = ThinkingLevel::off;
+
+  ThinkingLevelResolution result{.level = resolved};
+  if (resolved != requested) {
+    result.warning =
+        "thinking level '" + std::string(thinking_level_to_string(requested)) +
+        "' is unsupported by " + model.provider + "/" + model.id + "; using '" +
+        std::string(thinking_level_to_string(resolved)) + "'";
+  }
+  return result;
+}
+
+namespace {
+
+std::string lower_ascii(std::string_view value) {
+  std::string result(value);
+  for (char &c : result)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return result;
+}
+
+bool same_header_name(std::string_view left, std::string_view right) {
+  return lower_ascii(left) == lower_ascii(right);
+}
+
+void merge_headers(std::map<std::string, std::string> &target,
+                   const std::map<std::string, std::string> &source) {
+  for (const auto &[key, value] : source) {
+    for (auto it = target.begin(); it != target.end(); ++it) {
+      if (same_header_name(it->first, key)) {
+        target.erase(it);
+        break;
+      }
+    }
+    target[key] = value;
+  }
+}
+
+void apply_cost(Model::Cost &target, const ConfiguredCost &source) {
+  if (source.input_per_mtok)
+    target.input_per_mtok = *source.input_per_mtok;
+  if (source.output_per_mtok)
+    target.output_per_mtok = *source.output_per_mtok;
+  if (source.cache_read_per_mtok)
+    target.cache_read_per_mtok = *source.cache_read_per_mtok;
+  if (source.cache_write_per_mtok)
+    target.cache_write_per_mtok = *source.cache_write_per_mtok;
+}
+
+void apply_configured_model(Model &target, const ConfiguredModel &source,
+                            const ProviderDefinition &provider) {
+  if (source.name)
+    target.name = *source.name;
+  if (source.api)
+    target.api = *source.api;
+  if (source.base_url)
+    target.base_url = *source.base_url;
+  if (source.reasoning)
+    target.reasoning = *source.reasoning;
+  if (source.input_capabilities)
+    target.input_capabilities = *source.input_capabilities;
+  if (source.context_window)
+    target.context_window = *source.context_window;
+  if (source.max_tokens)
+    target.max_tokens = *source.max_tokens;
+  merge_headers(target.headers, source.headers);
+  apply_cost(target.cost, source.cost);
+  if (source.thinking_level_map)
+    target.thinking_level_map = *source.thinking_level_map;
+  if (target.provider.empty())
+    target.provider = provider.id;
+}
+
+Model make_custom_model(const ConfiguredModel &source,
+                        const ProviderDefinition &provider) {
+  Model model;
+  model.id = source.id;
+  model.name = source.name.value_or(source.id);
+  model.api = source.api.value_or(provider.api);
+  model.provider = provider.id;
+  model.base_url = source.base_url.value_or(provider.base_url);
+  model.reasoning = source.reasoning.value_or(false);
+  model.input_capabilities =
+      source.input_capabilities.value_or(std::vector<std::string>{"text"});
+  model.context_window = source.context_window.value_or(128000);
+  model.max_tokens = source.max_tokens.value_or(4096);
+  model.headers = provider.headers;
+  merge_headers(model.headers, source.headers);
+  apply_cost(model.cost, source.cost);
+  if (source.thinking_level_map)
+    model.thinking_level_map = *source.thinking_level_map;
+  return model;
+}
+
+} // namespace
+
+std::vector<ProviderDefinition> ModelRegistry::builtin_providers() {
+  return {
+      {"openai", "openai-completions", "https://api.openai.com/v1"},
+      {"openai-codex", "openai-codex-responses",
+       "https://chatgpt.com/backend-api", ProviderAuthPolicy::oauth},
+      {"deepseek", "openai-completions", "https://api.deepseek.com/v1"},
+      {"groq", "openai-completions", "https://api.groq.com/openai/v1"},
+      {"xai", "openai-completions", "https://api.x.ai/v1"},
+      {"cerebras", "openai-completions", "https://api.cerebras.ai/v1"},
+      {"openrouter", "openai-completions", "https://openrouter.ai/api/v1"},
+      {"fireworks", "openai-completions",
+       "https://api.fireworks.ai/inference/v1"},
+      {"google", "openai-completions",
+       "https://generativelanguage.googleapis.com/v1beta/openai"},
+      {"meta", "muse-messages", "https://api.meta.ai"},
+      {"meta-chat", "openai-completions", "https://api.meta.ai/v1"},
+  };
+}
+
+ModelRegistry::ModelRegistry(
+    const std::map<std::string, ProviderConfig> &configured) {
+  for (auto definition : builtin_providers())
+    providers_.emplace(lower_ascii(definition.id), std::move(definition));
+
+  for (const auto &model : all_models())
+    add_or_replace(model);
+
+  for (auto &[key, config] : configured) {
+    const auto canonical_key = lower_ascii(key);
+    auto provider_it = providers_.find(canonical_key);
+    if (provider_it == providers_.end()) {
+      if (!config.api || !config.base_url) {
+        throw std::runtime_error("providers." + key +
+                                 " requires api and base_url");
+      }
+      ProviderDefinition definition;
+      definition.id = lower_ascii(config.id.empty() ? key : config.id);
+      definition.api = *config.api;
+      definition.base_url = *config.base_url;
+      definition.auth = config.auth.value_or(ProviderAuthPolicy::required);
+      definition.api_key = config.api_key;
+      definition.headers = config.headers;
+      provider_it =
+          providers_.emplace(canonical_key, std::move(definition)).first;
+    } else {
+      auto &definition = provider_it->second;
+      if (config.api)
+        definition.api = *config.api;
+      if (config.base_url)
+        definition.base_url = *config.base_url;
+      if (config.auth)
+        definition.auth = *config.auth;
+      if (config.api_key.literal || config.api_key.env_var)
+        definition.api_key = config.api_key;
+      merge_headers(definition.headers, config.headers);
+    }
+
+    if (provider_it->second.auth == ProviderAuthPolicy::oauth &&
+        provider_it->second.id != "openai-codex") {
+      throw std::runtime_error("providers." + key +
+                               ": auth = oauth is not supported");
+    }
+
+    auto &definition = provider_it->second;
+    for (auto &model : models_) {
+      if (lower_ascii(model.provider) != canonical_key)
+        continue;
+      model.provider = definition.id;
+      if (config.api)
+        model.api = *config.api;
+      if (config.base_url)
+        model.base_url = *config.base_url;
+      merge_headers(model.headers, definition.headers);
+    }
+  }
+
+  for (const auto &[key, config] : configured) {
+    const auto *definition = provider(key);
+    if (definition == nullptr)
+      throw std::runtime_error("unknown configured provider: " + key);
+
+    for (const auto &[model_id, override] : config.model_overrides) {
+      auto *model = const_cast<Model *>(exact(definition->id, model_id));
+      if (model == nullptr)
+        throw std::runtime_error("providers." + key + ".model_overrides." +
+                                 model_id + ": unknown built-in model");
+      apply_configured_model(*model, override, *definition);
+    }
+
+    for (const auto &custom : config.models) {
+      if (custom.id.empty())
+        throw std::runtime_error("providers." + key +
+                                 ".models: model id must not be empty");
+      add_or_replace(make_custom_model(custom, *definition));
+    }
+  }
+}
+
+void ModelRegistry::add_or_replace(Model model) {
+  const auto key = std::make_pair(lower_ascii(model.provider), model.id);
+  auto it = indexes_.find(key);
+  if (it == indexes_.end()) {
+    indexes_[key] = models_.size();
+    models_.push_back(std::move(model));
+  } else {
+    models_[it->second] = std::move(model);
+  }
+}
+
+const ProviderDefinition *ModelRegistry::provider(std::string_view id) const {
+  auto it = providers_.find(lower_ascii(id));
+  return it == providers_.end() ? nullptr : &it->second;
+}
+
+const Model *ModelRegistry::exact(std::string_view provider_id,
+                                  std::string_view model_id) const {
+  auto it = indexes_.find(
+      std::make_pair(lower_ascii(provider_id), std::string(model_id)));
+  if (it == indexes_.end())
+    return nullptr;
+  return &models_[it->second];
+}
+
+ModelResolution ModelRegistry::resolve(const ModelSelection &selection) const {
+  const auto source = selection.source.empty() ? "selection" : selection.source;
+  if (selection.model.empty())
+    return {.error = std::string(source) + ": model id must not be empty"};
+
+  if (selection.provider && !selection.provider->empty()) {
+    const auto *definition = provider(*selection.provider);
+    std::string model_id = selection.model;
+    const auto slash = model_id.find('/');
+    if (definition != nullptr && slash != std::string::npos &&
+        lower_ascii(model_id.substr(0, slash)) == lower_ascii(definition->id)) {
+      model_id = model_id.substr(slash + 1);
+    }
+
+    if (definition == nullptr) {
+      if (!selection.base_url || selection.base_url->empty()) {
+        return {.error = std::string(source) + ": unknown provider '" +
+                         *selection.provider + "'"};
+      }
+      Model model;
+      model.id = model_id;
+      model.name = model_id;
+      model.api = "openai-completions";
+      model.provider = lower_ascii(*selection.provider);
+      model.base_url = *selection.base_url;
+      model.context_window = 128000;
+      model.max_tokens = 4096;
+      return {.model = std::move(model)};
+    }
+
+    Model model;
+    if (const auto *known = exact(definition->id, model_id)) {
+      model = *known;
+    } else {
+      model.id = model_id;
+      model.name = model_id;
+      model.api = definition->api;
+      model.provider = definition->id;
+      model.base_url = definition->base_url;
+      model.input_capabilities = {"text"};
+      model.context_window = 128000;
+      model.max_tokens = 4096;
+      model.headers = definition->headers;
+    }
+    if (selection.base_url)
+      model.base_url = *selection.base_url;
+    return {.model = std::move(model)};
+  }
+
+  const auto raw = selection.model;
+  if (const auto slash = raw.find('/'); slash != std::string::npos) {
+    const auto prefix = raw.substr(0, slash);
+    if (const auto *definition = provider(prefix)) {
+      if (const auto *known = exact(definition->id, raw.substr(slash + 1))) {
+        Model model = *known;
+        if (selection.base_url)
+          model.base_url = *selection.base_url;
+        return {.model = std::move(model)};
+      }
+    }
+  }
+
+  std::vector<const Model *> matches;
+  for (const auto &model : models_) {
+    if (model.id == raw)
+      matches.push_back(&model);
+  }
+  if (matches.size() == 1) {
+    Model model = *matches.front();
+    if (selection.base_url)
+      model.base_url = *selection.base_url;
+    return {.model = std::move(model)};
+  }
+  if (matches.size() > 1) {
+    std::ranges::sort(matches, [](const Model *left, const Model *right) {
+      return left->provider < right->provider;
+    });
+    std::string error = std::string(source) + ": ambiguous model '" + raw +
+                        "'; choose one of: ";
+    for (std::size_t i = 0; i < matches.size(); ++i) {
+      if (i != 0)
+        error += ", ";
+      error += matches[i]->provider + "/" + matches[i]->id;
+    }
+    return {.error = std::move(error)};
+  }
+
+  if (selection.base_url) {
+    Model model;
+    model.id = raw;
+    model.name = raw;
+    model.api = "openai-completions";
+    model.provider = "custom";
+    model.base_url = *selection.base_url;
+    model.input_capabilities = {"text"};
+    model.context_window = 128000;
+    model.max_tokens = 4096;
+    return {.model = std::move(model)};
+  }
+  return {.error = std::string(source) + ": unknown model '" + raw + "'"};
+}
+
+std::vector<const Model *>
+ModelRegistry::search(std::string_view filter) const {
+  std::vector<const Model *> result;
+  const auto needle = lower_ascii(filter);
+  for (const auto &model : models_) {
+    if (needle.empty() ||
+        lower_ascii(model.id + " " + model.provider + " " + model.name)
+            .contains(needle)) {
+      result.push_back(&model);
+    }
+  }
+  return result;
+}
+
+void ModelRegistry::validate_registered_apis() const {
+  for (const auto &[id, provider] : providers_) {
+    (void)id;
+    if (!LLMClientRegistry::instance().has_client(provider.api))
+      throw std::runtime_error("provider " + provider.id +
+                               " uses unregistered API '" + provider.api + "'");
+  }
+  for (const auto &model : models_) {
+    if (!LLMClientRegistry::instance().has_client(model.api)) {
+      throw std::runtime_error("model " + model.provider + "/" + model.id +
+                               " uses unregistered API '" + model.api + "'");
+    }
+  }
+}
 
 const std::vector<Model> &all_models() { return kModels; }
 

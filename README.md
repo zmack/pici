@@ -80,6 +80,33 @@ A C++23 implementation of the [pi-mono](https://github.com/badlogic/pi-mono) cor
 - **ToolResult** — abstract result from tool execution
 - Support for sequential and parallel tool execution modes
 
+## Providers and live model switching
+
+The effective catalog combines the built-in models with provider and custom
+model tables from `config.toml`. Provider credentials and headers are scoped by
+provider; authentication-owned headers cannot be overridden by model config.
+
+```toml
+[providers.local]
+api = "openai-completions"
+base_url = "http://127.0.0.1:8080/v1"
+auth = "none"
+
+[[providers.local.models]]
+id = "qwen3-coder"
+context_window = 131072
+max_tokens = 16384
+```
+
+Use `--list-models` or the interactive `/models [filter]` command to inspect
+the effective catalog. `/model <provider/model>` switches an idle session;
+`/model` opens the TTY selector and prints usage in non-interactive input.
+Switches are rejected during streaming or queued tool work and are journaled as
+provider/model metadata, so resume, fork, RPC `set_model`, and ACP per-run
+selection restore the correct next-turn model. Historical assistant messages
+remain tagged with the model that produced them and are transformed for the
+next provider.
+
 ## Bash sandbox
 
 The `bash` tool supports per-session process isolation on Linux through

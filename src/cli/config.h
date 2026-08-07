@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cli/args.h"
+#include "core/models.h"
 
 #include <filesystem>
 #include <map>
@@ -10,50 +11,11 @@
 
 namespace pi::cli {
 
-enum class ProviderAuthPolicy { required, optional, none, oauth };
-
-struct ApiKeyConfig {
-  std::optional<std::string> literal;
-  std::optional<std::string> env_var;
-};
-
-struct ConfiguredCost {
-  std::optional<double> input_per_mtok;
-  std::optional<double> output_per_mtok;
-  std::optional<double> cache_read_per_mtok;
-  std::optional<double> cache_write_per_mtok;
-};
-
-// Optional model fields are intentional. The same representation is used for
-// custom models and sparse model_overrides; the registry supplies defaults and
-// performs the merge against built-in metadata.
-struct ConfiguredModel {
-  // Required for entries in ProviderConfig::models. Empty for an override,
-  // where the surrounding map key is the model ID.
-  std::string id;
-  std::optional<std::string> name;
-  std::optional<std::string> api;
-  std::optional<std::string> base_url;
-  std::optional<bool> reasoning;
-  std::optional<std::vector<std::string>> input_capabilities;
-  std::optional<std::uint64_t> context_window;
-  std::optional<std::uint64_t> max_tokens;
-  std::map<std::string, std::string> headers;
-  ConfiguredCost cost;
-  std::optional<std::map<std::string, std::optional<std::string>>>
-      thinking_level_map;
-};
-
-struct ProviderConfig {
-  std::string id;
-  std::optional<std::string> api;
-  std::optional<std::string> base_url;
-  ApiKeyConfig api_key;
-  std::optional<ProviderAuthPolicy> auth;
-  std::map<std::string, std::string> headers;
-  std::vector<ConfiguredModel> models;
-  std::map<std::string, ConfiguredModel> model_overrides;
-};
+using ProviderAuthPolicy = core::ProviderAuthPolicy;
+using ApiKeyConfig = core::ApiKeyConfig;
+using ConfiguredCost = core::ConfiguredCost;
+using ConfiguredModel = core::ConfiguredModel;
+using ProviderConfig = core::ProviderConfig;
 
 struct Config {
   Args defaults;

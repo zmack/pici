@@ -29,6 +29,10 @@ void from_json(const nlohmann::json &j, RunCreateRequest &r) {
   r.input = j.value("input", std::vector<Message>{});
   if (j.contains("session_id") && j["session_id"].is_string())
     r.session_id = j["session_id"].get<std::string>();
+  if (j.contains("provider") && j["provider"].is_string())
+    r.provider = j["provider"].get<std::string>();
+  if (j.contains("model") && j["model"].is_string())
+    r.model = j["model"].get<std::string>();
   auto mode_str = j.value("mode", "stream");
   r.mode = mode_str == "sync" ? RunMode::sync : RunMode::stream;
 }
@@ -60,6 +64,10 @@ void to_json(nlohmann::json &j, const Run &r) {
     j["error"] = *r.error;
   if (r.session_id)
     j["session_id"] = *r.session_id;
+  if (r.provider)
+    j["provider"] = *r.provider;
+  if (r.model)
+    j["model"] = *r.model;
 }
 
 void to_json(nlohmann::json &j, const AgentManifest &m) {

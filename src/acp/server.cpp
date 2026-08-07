@@ -55,6 +55,7 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
 
   auto task_root = std::make_shared<core::AgentSession>(
       core::AgentSession::Config{.agent_options = config.agent_opts,
+                                 .model_registry = config.model_registry,
                                  .tools = config.tools,
                                  .session_store = sessions,
                                  .sandbox_policy = config.sandbox_policy});

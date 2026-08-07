@@ -151,12 +151,16 @@ Args parse_args(int argc, char **argv) {
       result.verbose = true;
     } else if (arg == "--model" || arg == "-m") {
       result.model = std::string(need("--model"));
+      result.model_explicit = true;
     } else if (arg == "--provider") {
       result.provider = std::string(need("--provider"));
+      result.provider_explicit = true;
     } else if (arg == "--base-url") {
       result.base_url = std::string(need("--base-url"));
+      result.base_url_explicit = true;
     } else if (arg == "--api-key") {
       result.api_key = std::string(need("--api-key"));
+      result.api_key_explicit = true;
     } else if (arg == "--system-prompt" || arg == "--system") {
       result.system_prompt = std::string(need("--system-prompt"));
     } else if (arg == "--append-system-prompt") {

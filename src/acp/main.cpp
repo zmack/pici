@@ -21,6 +21,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -116,18 +117,55 @@ int main(int argc, char *argv[]) noexcept {
       acp_threads = std::stoi(std::string(next()));
   }
 
-  // Resolve model (same logic as pi-cli)
-  auto model_opt = pi::core::find_model(args.model, args.provider);
-  pi::core::Model model = model_opt.value_or(pi::core::Model{});
-  if (model.id.empty()) {
-    model.id = args.model.empty() ? "default" : args.model;
-    model.name = model.id;
-    model.api = "openai-completions";
-    model.provider = args.provider.empty() ? "local" : args.provider;
-    model.base_url =
-        args.base_url.empty() ? "http://127.0.0.1:8080/v1" : args.base_url;
-    model.context_window = 128000;
-    model.max_tokens = 4096;
+  static const std::map<std::string, pi::cli::ProviderConfig> empty_config;
+  const auto &configured =
+      args.config_document ? args.config_document->providers : empty_config;
+  std::shared_ptr<const pi::core::ModelRegistry> registry;
+  try {
+    registry = std::make_shared<pi::core::ModelRegistry>(configured);
+    registry->validate_registered_apis();
+  } catch (const std::exception &error) {
+    std::cerr << "error: " << error.what() << "\n";
+    return 1;
+  }
+
+  pi::core::Model model;
+  if (!args.model.empty()) {
+    pi::core::ModelSelection selection{.model = args.model, .source = "acp"};
+    if (!args.provider.empty())
+      selection.provider = args.provider;
+    if (!args.base_url.empty())
+      selection.base_url = args.base_url;
+    const auto resolution = registry->resolve(selection);
+    if (!resolution) {
+      std::cerr << "error: " << resolution.error << "\n";
+      return 1;
+    }
+    model = resolution.model.value();
+  } else if (!args.provider.empty()) {
+    const auto *provider = registry->provider(args.provider);
+    if (provider == nullptr) {
+      std::cerr << "error: unknown provider '" << args.provider << "'\n";
+      return 1;
+    }
+    model = {.id = "default",
+             .name = "default",
+             .api = provider->api,
+             .provider = provider->id,
+             .base_url = provider->base_url,
+             .input_capabilities = {"text"},
+             .context_window = 128000,
+             .max_tokens = 4096};
+  } else {
+    model = {.id = "default",
+             .name = "default",
+             .api = "openai-completions",
+             .provider = "local",
+             .base_url = args.base_url.empty() ? "http://127.0.0.1:8080/v1"
+                                               : args.base_url,
+             .input_capabilities = {"text"},
+             .context_window = 128000,
+             .max_tokens = 4096};
   }
   if (!args.base_url.empty())
     model.base_url = args.base_url;
@@ -142,29 +180,35 @@ int main(int argc, char *argv[]) noexcept {
   cfg.agent_description = "pi-cpp coding agent running " + model.id;
   cfg.threads = acp_threads;
   cfg.sandbox_policy = sandbox_policy;
+  cfg.model_registry = registry;
   if (!args.session_dir.empty())
     cfg.session_dir = args.session_dir;
 
   cfg.agent_opts.model = model;
-  auto auth_resolver = std::make_shared<pi::auth::AuthResolver>();
+  cfg.agent_opts.model_registry = registry;
+  auto auth_resolver = std::make_shared<pi::auth::AuthResolver>(registry);
+  cfg.auth_resolver = auth_resolver;
+  if (!args.api_key.empty())
+    auth_resolver->set_runtime_api_key(model.provider, args.api_key);
   if (model.provider == "openai-codex") {
     try {
-      (void)auth_resolver->resolve(model.provider, args.api_key);
+      (void)auth_resolver->resolve(model.provider);
     } catch (const std::exception &error) {
       std::cerr << "error: " << error.what() << "\n";
       return 1;
     }
   }
   cfg.agent_opts.get_auth =
-      [&args, &model, auth_resolver](
-          std::string_view p) -> std::optional<pi::core::RequestAuth> {
-    return auth_resolver->resolve(p.empty() ? model.provider : p, args.api_key);
+      [auth_resolver](
+          std::string_view provider) -> std::optional<pi::core::RequestAuth> {
+    return auth_resolver->resolve(provider);
   };
   cfg.agent_opts.get_api_key =
-      [&args, &model](std::string_view p) -> std::optional<std::string> {
-    if (!args.api_key.empty())
-      return args.api_key;
-    return pi::core::get_env_api_key(p.empty() ? model.provider : p);
+      [auth_resolver](std::string_view provider) -> std::optional<std::string> {
+    auto auth = auth_resolver->resolve(provider);
+    if (!auth || !auth->bearer_token)
+      return std::nullopt;
+    return auth->bearer_token;
   };
 
   // Tools

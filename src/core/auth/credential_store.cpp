@@ -109,18 +109,21 @@ void ensure_secure_parent(const std::filesystem::path &path) {
   struct stat parent_stat{};
   const bool sticky = ::stat(parent.c_str(), &parent_stat) == 0 &&
                       (parent_stat.st_mode & S_ISVTX) != 0;
-  if (!sticky && ((perms & std::filesystem::perms::group_write) !=
-                      std::filesystem::perms::none ||
-                  (perms & std::filesystem::perms::others_write) !=
-                      std::filesystem::perms::none)) {
-    throw std::runtime_error("auth directory is group/world writable");
-  }
-  if (!sticky) {
+  if (!sticky && ((perms & (std::filesystem::perms::group_write |
+                            std::filesystem::perms::group_read |
+                            std::filesystem::perms::group_exec |
+                            std::filesystem::perms::others_write |
+                            std::filesystem::perms::others_read |
+                            std::filesystem::perms::others_exec)) !=
+                  std::filesystem::perms::none)) {
+    // A newly-created temporary/config parent can inherit a permissive umask.
+    // Tighten it before any credential data is written; leaving these bits in
+    // place would make the security check fail nondeterministically by host.
     std::filesystem::permissions(parent,
                                  std::filesystem::perms::owner_read |
                                      std::filesystem::perms::owner_write |
                                      std::filesystem::perms::owner_exec,
-                                 std::filesystem::perm_options::add, ec);
+                                 std::filesystem::perm_options::replace, ec);
     if (ec)
       throw std::runtime_error("failed to secure auth directory: " +
                                ec.message());

@@ -92,12 +92,16 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
     } else if (j.value("type", std::string{}) == "truncate" &&
                j.contains("through") && j["through"].is_number_unsigned()) {
       records.emplace_back(j["through"].get<std::size_t>());
-    } else if (j.value("type", std::string{}) == "meta" && j.contains("name") &&
-               j["name"].is_string()) {
-      header.name = j["name"].get<std::string>();
-    } else if (j.value("type", std::string{}) == "meta" &&
-               j.contains("sandboxMode") && j["sandboxMode"].is_string()) {
-      header.sandbox_mode = j["sandboxMode"].get<std::string>();
+    } else if (j.value("type", std::string{}) == "meta") {
+      if (j.contains("name") && j["name"].is_string())
+        header.name = j["name"].get<std::string>();
+      if (j.contains("sandboxMode") && j["sandboxMode"].is_string())
+        header.sandbox_mode = j["sandboxMode"].get<std::string>();
+      if (j.contains("provider") && j["provider"].is_string() &&
+          j.contains("model") && j["model"].is_string()) {
+        header.provider = j["provider"].get<std::string>();
+        header.model = j["model"].get<std::string>();
+      }
     }
   }
 
@@ -235,6 +239,20 @@ void SessionStore::set_name(const std::string &session_id,
   write_line_locked(session_id, j);
 }
 
+void SessionStore::set_model(const std::string &session_id,
+                             std::string provider, std::string model) {
+  auto now =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  nlohmann::json j = nlohmann::json::object();
+  j["type"] = "meta";
+  j["timestamp"] = static_cast<std::int64_t>(now);
+  j["provider"] = std::move(provider);
+  j["model"] = std::move(model);
+
+  std::scoped_lock lock(mutex_);
+  write_line_locked(session_id, j);
+}
+
 void SessionStore::set_sandbox_mode(const std::string &session_id,
                                     std::string mode) {
   auto now =
@@ -306,9 +324,41 @@ std::vector<SessionHeader> SessionStore::list() const {
       if (j.value("type", std::string{}) != "session")
         continue;
 
+      std::optional<std::pair<std::string, std::string>> fallback_model;
       auto stem = dir_entry.path().stem().string();
-      entries.emplace_back(dir_entry.last_write_time(),
-                           parse_header_line(j, stem));
+      auto header = parse_header_line(j, stem);
+      while (std::getline(f, line)) {
+        if (line.empty())
+          continue;
+        auto meta = nlohmann::json::parse(line, nullptr, false);
+        if (meta.is_discarded())
+          continue;
+        if (meta.value("type", std::string{}) != "meta") {
+          auto message = json::from_json(line);
+          if (message && std::holds_alternative<AssistantMessage>(*message)) {
+            const auto &assistant = std::get<AssistantMessage>(*message);
+            if (!assistant.provider.empty() && !assistant.model.empty()) {
+              fallback_model =
+                  std::make_pair(assistant.provider, assistant.model);
+            }
+          }
+          continue;
+        }
+        if (meta.contains("name") && meta["name"].is_string())
+          header.name = meta["name"].get<std::string>();
+        if (meta.contains("sandboxMode") && meta["sandboxMode"].is_string())
+          header.sandbox_mode = meta["sandboxMode"].get<std::string>();
+        if (meta.contains("provider") && meta["provider"].is_string() &&
+            meta.contains("model") && meta["model"].is_string()) {
+          header.provider = meta["provider"].get<std::string>();
+          header.model = meta["model"].get<std::string>();
+        }
+      }
+      if (header.provider.empty() && fallback_model)
+        header.provider = fallback_model->first;
+      if (header.model.empty() && fallback_model)
+        header.model = fallback_model->second;
+      entries.emplace_back(dir_entry.last_write_time(), std::move(header));
     } catch (...) {
       continue;
     }

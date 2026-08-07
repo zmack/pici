@@ -12,6 +12,34 @@
 # base_url = "http://127.0.0.1:8080/v1"  # --base-url  (local server)
 # api_key  = ""                     # --api-key  (prefer env vars instead)
 
+# Providers extend or override the built-in catalog. New providers need both
+# api and base_url. Keys are scoped to that provider and are never written to
+# session files or reused for another provider.
+#
+# [providers.openai]
+# api_key_env = "OPENAI_API_KEY"
+# auth = "required"                 # required|optional|none|oauth
+# headers = { X-Tenant = "engineering" }
+#
+# [providers.local]
+# api = "openai-completions"
+# base_url = "http://127.0.0.1:8080/v1"
+# auth = "none"
+# headers = { X-Route = "local" }
+#
+# [[providers.local.models]]
+# id = "qwen3-coder"
+# name = "Qwen 3 Coder (Local)"
+# context_window = 131072
+# max_tokens = 16384
+# reasoning = true
+# input_capabilities = ["text"]
+# headers = { X-Model-Route = "coder" }
+# thinking_level_map = { off = false, low = "low", medium = "medium", high = "high" }
+#
+# [providers.openai.model_overrides."gpt-4.1"]
+# context_window = 200000
+
 [agent]
 # system_prompt = "You are a helpful coding assistant."  # --system-prompt
 # thinking      = "off"   # --thinking: off|minimal|low|medium|high|xhigh

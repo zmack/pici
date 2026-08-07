@@ -18,6 +18,10 @@ struct Args {
   std::string provider; // explicit provider override
   std::string base_url; // explicit base URL (for local / custom endpoints)
   std::string api_key;  // explicit API key
+  bool model_explicit{false};
+  bool provider_explicit{false};
+  bool base_url_explicit{false};
+  bool api_key_explicit{false};
 
   // Authentication subcommand (CLI-only; never loaded from config).
   AuthAction auth_action{AuthAction::none};

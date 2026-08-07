@@ -52,6 +52,11 @@ void LLMClientRegistry::register_client(std::string api_id, Factory factory) {
   factories_[std::move(api_id)] = std::move(factory);
 }
 
+bool LLMClientRegistry::has_client(std::string_view api_id) const {
+  std::scoped_lock lock(mutex_);
+  return factories_.contains(std::string(api_id));
+}
+
 std::shared_ptr<LLMClient> LLMClientRegistry::get_client(const Model &model) {
   std::scoped_lock lock(mutex_);
   auto it = factories_.find(model.api);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/agent_task.h"
+#include "core/auth/auth_resolver.h"
 #include "core/session/agent_session.h"
 
 #include <atomic>
@@ -20,7 +21,8 @@ public:
   using Output = std::function<void(const nlohmann::json &)>;
 
   RpcMode(core::AgentSession &session, Output output,
-          core::AgentTaskManager *task_manager = nullptr);
+          core::AgentTaskManager *task_manager = nullptr,
+          std::shared_ptr<auth::AuthResolver> auth_resolver = {});
   ~RpcMode();
 
   RpcMode(const RpcMode &) = delete;
@@ -39,6 +41,7 @@ private:
 
   core::AgentSession &session_;
   core::AgentTaskManager *task_manager_{nullptr};
+  std::shared_ptr<auth::AuthResolver> auth_resolver_;
   Output output_;
   mutable std::mutex output_mutex_;
   std::atomic<bool> run_active_{false};
@@ -49,6 +52,7 @@ private:
 
 int run_rpc_mode(core::AgentSession &session, std::istream &input,
                  std::ostream &output,
-                 core::AgentTaskManager *task_manager = nullptr);
+                 core::AgentTaskManager *task_manager = nullptr,
+                 std::shared_ptr<auth::AuthResolver> auth_resolver = {});
 
 } // namespace pi::cli

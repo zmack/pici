@@ -329,7 +329,28 @@ void parse_provider(const std::string &provider_id, const toml::table &table,
     provider.auth = parse_auth_policy(*auth, path, config);
   parse_headers(table, path, provider.headers, config);
 
-  if (provider_id == "openai-codex" &&
+  static constexpr std::array<std::string_view, 11> builtin_provider_ids = {
+      "openai",     "openai-codex", "deepseek", "groq", "xai",      "cerebras",
+      "openrouter", "fireworks",    "google",   "meta", "meta-chat"};
+  const auto canonical_provider_id = lower_ascii(provider_id);
+  const bool builtin_provider =
+      std::ranges::find(builtin_provider_ids, canonical_provider_id) !=
+      builtin_provider_ids.end();
+  if (!builtin_provider && (!provider.api || !provider.base_url)) {
+    diagnostic(config, true, path,
+               "new providers require both api and base_url");
+  }
+  if (provider.auth == ProviderAuthPolicy::oauth &&
+      canonical_provider_id != "openai-codex") {
+    diagnostic(config, true, path + ".auth",
+               "oauth is only supported for openai-codex");
+  }
+  if (canonical_provider_id == "openai-codex" && provider.auth &&
+      *provider.auth != ProviderAuthPolicy::oauth) {
+    diagnostic(config, true, path + ".auth",
+               "openai-codex requires auth = oauth");
+  }
+  if (canonical_provider_id == "openai-codex" &&
       (provider.api_key.literal || provider.api_key.env_var))
     diagnostic(
         config, true, path,
@@ -364,6 +385,11 @@ void parse_provider(const std::string &provider_id, const toml::table &table,
         ConfiguredModel model;
         model.id = std::move(*id);
         parse_model_fields(*model_table, item_path, model, config);
+        if (!model.reasoning.value_or(false) && model.thinking_level_map &&
+            !model.thinking_level_map->empty()) {
+          diagnostic(config, true, item_path + ".thinking_level_map",
+                     "cannot be set when reasoning is false");
+        }
         provider.models.push_back(std::move(model));
       }
     }
@@ -500,6 +526,11 @@ Config load_config_document(const std::filesystem::path &path) {
   }
 
   parse_legacy_defaults(tbl, config.defaults);
+  if (config.defaults.provider == "openai-codex" &&
+      !config.defaults.api_key.empty()) {
+    diagnostic(config, true, "model.api_key",
+               "openai-codex accepts OAuth only; remove api_key");
+  }
 
   if (const auto *providers_node = tbl.get("providers")) {
     const auto *providers = providers_node->as_table();
@@ -518,7 +549,18 @@ Config load_config_document(const std::filesystem::path &path) {
           diagnostic(config, true, path_name, "provider id must not be empty");
           continue;
         }
-        parse_provider(provider_id, *provider, config);
+        const auto canonical = lower_ascii(provider_id);
+        const bool duplicate =
+            std::ranges::any_of(config.providers, [&](const auto &entry) {
+              return lower_ascii(entry.first) == canonical;
+            });
+        if (duplicate) {
+          diagnostic(
+              config, true, path_name,
+              "duplicate provider id (provider lookup is case-insensitive)");
+        } else {
+          parse_provider(provider_id, *provider, config);
+        }
       }
     }
   }
@@ -552,6 +594,10 @@ Args merge_args(const Args &config, const Args &cli) {
   out.provider = merge_str(config.provider, cli.provider);
   out.base_url = merge_str(config.base_url, cli.base_url);
   out.api_key = merge_str(config.api_key, cli.api_key);
+  out.model_explicit = cli.model_explicit;
+  out.provider_explicit = cli.provider_explicit;
+  out.base_url_explicit = cli.base_url_explicit;
+  out.api_key_explicit = cli.api_key_explicit;
 
   out.system_prompt = merge_str(config.system_prompt, cli.system_prompt);
   // append_system_prompt: accumulate both

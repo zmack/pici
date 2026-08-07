@@ -625,7 +625,8 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
 
   request_body = request_json.dump();
 
-  std::map<std::string, std::string> headers = options.headers;
+  std::map<std::string, std::string> headers = model.headers;
+  merge_headers_case_insensitive(headers, options.headers);
   headers["Content-Type"] = "application/json";
   headers["Accept"] =
       compat.uses_non_streaming ? "application/json" : "text/event-stream";

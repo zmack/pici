@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/agent.h"
+#include "core/models.h"
 #include "core/sandbox.h"
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
@@ -18,6 +19,7 @@ class AgentSession {
 public:
   struct Config {
     Agent::Options agent_options;
+    std::shared_ptr<const ModelRegistry> model_registry;
     std::vector<std::shared_ptr<const ToolDefinition>> tools;
     std::shared_ptr<SessionStore> session_store;
     SandboxPolicyPtr sandbox_policy;
@@ -50,6 +52,15 @@ public:
   SandboxMode sandbox_mode() const;
   void set_sandbox_mode(SandboxMode mode);
 
+  const std::shared_ptr<const ModelRegistry> &model_registry() const {
+    return model_registry_;
+  }
+  ModelResolution resolve_model(const ModelSelection &selection) const;
+  ModelSwitchResult set_model(Model model, ThinkingLevel thinking);
+  const std::optional<std::string> &last_warning() const {
+    return last_warning_;
+  }
+
   std::optional<SessionRecord>
   load_session(const std::string &session_id) const;
 
@@ -73,7 +84,9 @@ private:
   Agent agent_;
   std::shared_ptr<SessionStore> session_store_;
   SandboxPolicyPtr sandbox_policy_;
+  std::shared_ptr<const ModelRegistry> model_registry_;
   std::optional<std::string> active_session_id_;
+  std::optional<std::string> last_warning_;
 };
 
 } // namespace pi::core
