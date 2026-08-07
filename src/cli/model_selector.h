@@ -21,6 +21,6 @@ ModelSelectorResult
 run_model_selector(const std::vector<const core::Model *> &models,
                    std::string_view current_provider,
                    std::string_view current_model,
-                   ModelAvailability availability = {});
+                   const ModelAvailability &availability = {});
 
 } // namespace pi::cli
