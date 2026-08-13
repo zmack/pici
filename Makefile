@@ -21,9 +21,9 @@ TSAN_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Debug \
 help:
 	@printf '%s\n' \
 		'Targets:' \
-		'  make dev          Configure and build the dev CLI in $(BUILD_DIR)' \
-		'  make release      Configure and build the release CLI in $(RELEASE_BUILD_DIR)' \
-		'  make strip-release Strip symbols from $(RELEASE_BUILD_DIR)/pi-cli' \
+		'  make dev          Configure and build pi-cli + pi-acp in $(BUILD_DIR)' \
+		'  make release      Configure and build pi-cli + pi-acp in $(RELEASE_BUILD_DIR)' \
+		'  make strip-release Strip symbols from $(RELEASE_BUILD_DIR)/{pi-cli,pi-acp}' \
 		'  make lint         Run the CMake clang-tidy target' \
 		'  make format       Run the CMake clang-format target' \
 		'  make format-check Check formatting without editing files' \
@@ -41,14 +41,15 @@ configure:
 	$(CMAKE) -B $(BUILD_DIR) $(COMMON_CONFIGURE_FLAGS) $(DEV_CONFIGURE_FLAGS)
 
 dev: configure
-	$(CMAKE) --build $(BUILD_DIR) --target pi-cli $(BUILD_PARALLEL)
+	$(CMAKE) --build $(BUILD_DIR) --target pi-cli pi-acp $(BUILD_PARALLEL)
 
 release:
 	$(CMAKE) -B $(RELEASE_BUILD_DIR) $(COMMON_CONFIGURE_FLAGS) $(RELEASE_CONFIGURE_FLAGS)
-	$(CMAKE) --build $(RELEASE_BUILD_DIR) --target pi-cli $(BUILD_PARALLEL)
+	$(CMAKE) --build $(RELEASE_BUILD_DIR) --target pi-cli pi-acp $(BUILD_PARALLEL)
 
 strip-release: release
 	$(STRIP) --strip-all $(RELEASE_BUILD_DIR)/pi-cli
+	$(STRIP) --strip-all $(RELEASE_BUILD_DIR)/pi-acp
 
 lint: configure
 	$(CMAKE) --build $(BUILD_DIR) --target tidy $(BUILD_PARALLEL)
