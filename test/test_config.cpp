@@ -3,6 +3,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <cstdlib>
 #include <initializer_list>
 #include <iostream>
 #include <algorithm>
@@ -92,6 +93,16 @@ disabled = true
 
 [sandbox]
 mode = "disabled"
+
+[mailbox]
+enabled = true
+path = "~/custom-mailbox.sqlite3"
+scope = "global"
+heartbeat_interval_ms = 3000
+stale_after_ms = 11000
+poll_interval_ms = 400
+claim_lease_ms = 31000
+retention_days = 45
 )toml");
     auto cfg = load_config(p);
     CHECK_EQ(cfg.model,          std::string("gpt-4o"));
@@ -108,6 +119,13 @@ mode = "disabled"
     CHECK(cfg.verbose);
     CHECK(cfg.no_context_files);
     CHECK_EQ(cfg.sandbox_mode, std::string("disabled"));
+    CHECK(cfg.mailbox_enabled);
+    CHECK_EQ(cfg.mailbox_path, std::string("~/custom-mailbox.sqlite3"));
+    auto document = load_config_document(p);
+    CHECK(document.mailbox.enabled);
+    CHECK_EQ(document.mailbox.scope, std::string("global"));
+    CHECK_EQ(document.mailbox.heartbeat_interval_ms, std::int64_t{3000});
+    CHECK_EQ(document.mailbox.retention_days, std::int64_t{45});
   }
 
   // Provider and custom-model definitions remain separate from Args defaults.
@@ -270,6 +288,32 @@ api_key_env = "PICI_CODEX_KEY"
     auto out = merge_args(conf, cli);
     CHECK_EQ(out.tools.size(), std::size_t(1));
     CHECK_EQ(out.tools[0], std::string("grep")); // CLI wins
+  }
+
+  // Mailbox path precedence is CLI, then environment, then TOML.
+  {
+    auto p = write_toml("pici_mailbox_precedence.toml", R"toml(
+[mailbox]
+enabled = false
+path = "/toml/mailbox.sqlite3"
+)toml");
+    setenv("PICI_MAILBOX", "/env/mailbox.sqlite3", 1);
+    std::vector<std::string> values{"pi", "--config", p.string()};
+    std::vector<char *> argv;
+    for (auto &value : values)
+      argv.push_back(value.data());
+    auto environment = load_and_merge(static_cast<int>(argv.size()), argv.data());
+    CHECK_EQ(environment.mailbox_path, std::string("/env/mailbox.sqlite3"));
+    CHECK(environment.mailbox_enabled);
+    values.push_back("--mailbox");
+    values.push_back("/cli/mailbox.sqlite3");
+    argv.clear();
+    for (auto &value : values)
+      argv.push_back(value.data());
+    auto command_line = load_and_merge(static_cast<int>(argv.size()), argv.data());
+    CHECK_EQ(command_line.mailbox_path, std::string("/cli/mailbox.sqlite3"));
+    CHECK(command_line.mailbox_enabled);
+    unsetenv("PICI_MAILBOX");
   }
 
   // parse error throws

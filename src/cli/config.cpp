@@ -11,6 +11,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -121,6 +122,22 @@ std::optional<std::uint64_t> read_positive_integer(const toml::table &table,
     return std::nullopt;
   }
   return static_cast<std::uint64_t>(value->get());
+}
+
+std::optional<std::int64_t> read_positive_int64(const toml::table &table,
+                                                std::string_view key,
+                                                std::string_view path,
+                                                Config &config) {
+  const auto value = read_positive_integer(table, key, path, config);
+  if (!value)
+    return std::nullopt;
+  if (*value >
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    diagnostic(config, true, std::string(path) + "." + std::string(key),
+               "value is too large");
+    return std::nullopt;
+  }
+  return static_cast<std::int64_t>(*value);
 }
 
 std::optional<double> read_nonnegative_number(const toml::table &table,
@@ -434,6 +451,11 @@ std::filesystem::path default_config_path() {
   return base / "pici" / "config.toml";
 }
 
+std::filesystem::path
+default_mailbox_path(const std::filesystem::path &config_path) {
+  return config_path.parent_path() / "mailbox.sqlite3";
+}
+
 static void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
   auto str = [&](std::string_view section,
                  std::string_view key) -> std::string {
@@ -504,6 +526,9 @@ static void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
 
   // [sandbox]
   cfg.sandbox_mode = str("sandbox", "mode");
+
+  cfg.mailbox_path = str("mailbox", "path");
+  cfg.mailbox_enabled = boolean("mailbox", "enabled");
 }
 
 bool Config::has_errors() const {
@@ -526,6 +551,45 @@ Config load_config_document(const std::filesystem::path &path) {
   }
 
   parse_legacy_defaults(tbl, config.defaults);
+  config.mailbox.path = default_mailbox_path(path);
+  if (!config.defaults.mailbox_path.empty())
+    config.mailbox.path = expand_tilde(config.defaults.mailbox_path);
+  config.mailbox.enabled = config.defaults.mailbox_enabled;
+  if (const auto *mailbox_node = tbl.get("mailbox")) {
+    const auto *mailbox = mailbox_node->as_table();
+    if (mailbox == nullptr) {
+      diagnostic(config, true, "mailbox", "expected a table");
+    } else {
+      if (const auto value = read_string(*mailbox, "path", "mailbox", config))
+        config.mailbox.path = expand_tilde(*value);
+      if (const auto value =
+              read_boolean(*mailbox, "enabled", "mailbox", config))
+        config.mailbox.enabled = *value;
+      if (const auto value =
+              read_string(*mailbox, "scope", "mailbox", config)) {
+        if (*value != "workspace" && *value != "global")
+          diagnostic(config, true, "mailbox.scope",
+                     "expected workspace or global");
+        else
+          config.mailbox.scope = *value;
+      }
+      if (const auto value = read_positive_int64(
+              *mailbox, "heartbeat_interval_ms", "mailbox", config))
+        config.mailbox.heartbeat_interval_ms = *value;
+      if (const auto value = read_positive_int64(*mailbox, "stale_after_ms",
+                                                 "mailbox", config))
+        config.mailbox.stale_after_ms = *value;
+      if (const auto value = read_positive_int64(*mailbox, "poll_interval_ms",
+                                                 "mailbox", config))
+        config.mailbox.poll_interval_ms = *value;
+      if (const auto value = read_positive_int64(*mailbox, "claim_lease_ms",
+                                                 "mailbox", config))
+        config.mailbox.claim_lease_ms = *value;
+      if (const auto value = read_positive_int64(*mailbox, "retention_days",
+                                                 "mailbox", config))
+        config.mailbox.retention_days = *value;
+    }
+  }
   if (config.defaults.provider == "openai-codex" &&
       !config.defaults.api_key.empty()) {
     diagnostic(config, true, "model.api_key",
@@ -627,6 +691,11 @@ Args merge_args(const Args &config, const Args &cli) {
   // Session: CLI --session-dir wins over config
   out.session_dir = merge_str(config.session_dir, cli.session_dir);
   out.sandbox_mode = merge_str(config.sandbox_mode, cli.sandbox_mode);
+  out.mailbox_path = merge_str(config.mailbox_path, cli.mailbox_path);
+  out.mailbox_path_explicit = cli.mailbox_path_explicit;
+  out.mailbox_enabled = cli.mailbox_enabled_explicit ? cli.mailbox_enabled
+                                                     : config.mailbox_enabled;
+  out.mailbox_enabled_explicit = cli.mailbox_enabled_explicit;
   // session_continue and session_resume are CLI-only
   out.session_continue = cli.session_continue;
   out.session_resume = cli.session_resume;
@@ -656,6 +725,17 @@ Args merge_args(const Args &config, const Args &cli) {
 Args load_and_merge(int argc, char *argv[]) {
   // 1. Parse CLI first (we need --config path before loading the file)
   Args cli = parse_args(argc, argv);
+
+  if (!cli.mailbox_path_explicit) {
+    const char *mailbox =
+        std::getenv("PICI_MAILBOX"); // NOLINT(concurrency-mt-unsafe)
+    if (mailbox != nullptr && *mailbox != '\0') {
+      cli.mailbox_path = expand_tilde(mailbox);
+      cli.mailbox_path_explicit = true;
+      cli.mailbox_enabled = true;
+      cli.mailbox_enabled_explicit = true;
+    }
+  }
 
   // 2. Determine config path
   std::filesystem::path cfg_path;

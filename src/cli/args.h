@@ -70,6 +70,12 @@ struct Args {
   std::string sandbox_mode;          // --sandbox <auto|required|disabled>
   bool sandbox_mode_explicit{false}; // set by an explicit CLI option
 
+  // Mailbox command-line and environment overrides.
+  std::string mailbox_path;
+  bool mailbox_path_explicit{false};
+  bool mailbox_enabled{false};
+  bool mailbox_enabled_explicit{false};
+
   // Config file
   std::string config_path; // --config <path>; empty = use default location
 

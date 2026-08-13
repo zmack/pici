@@ -43,6 +43,7 @@ FetchContent_MakeAvailable(json_schema_validator)
 
 find_package(PkgConfig REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_package(SQLite3 REQUIRED)
 
 # ─── cmark (Markdown parser) ─────────────────────────────────────────────────
 FetchContent_Declare(
@@ -455,6 +456,8 @@ endif()
 
 # ─── libpi-core ───
 add_library(pi-core
+    src/core/mailbox/mailbox_types.cpp
+    src/core/mailbox/mailbox_store.cpp
     src/core/message_types.cpp
     src/core/event_types.cpp
     src/core/event_json.cpp
@@ -512,6 +515,7 @@ target_link_libraries(pi-core PUBLIC
     ts-lang-ruby
     ts-lang-lua
     ts-lang-javascript
+    SQLite::SQLite3
 )
 
 if(PI_CPP_OTEL_API)
@@ -595,6 +599,11 @@ if(PI_CPP_BUILD_TESTS)
     target_include_directories(test-config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json)
     add_test(NAME test-config COMMAND test-config)
+
+    add_executable(test-mailbox-store test/test_mailbox_store.cpp)
+    target_include_directories(test-mailbox-store PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-mailbox-store PRIVATE pi-core)
+    add_test(NAME test-mailbox-store COMMAND test-mailbox-store)
 
     add_executable(test-credential_store test/test_credential_store.cpp)
     target_link_libraries(test-credential_store PRIVATE pi-core)

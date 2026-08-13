@@ -235,6 +235,14 @@ Args parse_args(int argc, char **argv) {
     } else if (arg == "--no-sandbox") {
       result.sandbox_mode = "disabled";
       result.sandbox_mode_explicit = true;
+    } else if (arg == "--mailbox") {
+      result.mailbox_path = std::string(need("--mailbox"));
+      result.mailbox_path_explicit = true;
+      result.mailbox_enabled = true;
+      result.mailbox_enabled_explicit = true;
+    } else if (arg == "--no-mailbox") {
+      result.mailbox_enabled = false;
+      result.mailbox_enabled_explicit = true;
     } else if (arg == "--message" || arg == "-M") {
       auto v = need("--message");
       if (!v.empty())
