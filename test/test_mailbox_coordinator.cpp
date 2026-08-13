@@ -1,4 +1,7 @@
 #include "core/mailbox/mailbox_coordinator.h"
+#include "core/agent_task.h"
+#include "core/providers/faux.h"
+#include "core/session/agent_session.h"
 
 #include <chrono>
 #include <filesystem>
@@ -97,12 +100,61 @@ int main() {
               .front()
               .closed_at_ms.has_value());
 
+    coordinator.observe_task_event(AgentTaskSpawnedEvent{
+        .id = "agent_2", .task_path = "/root/child/nested", .parent_id = "agent_1",
+        .task_name = "nested"});
+    coordinator.observe_task_event(AgentTaskSpawnedEvent{
+        .id = "agent_3", .task_path = "/root/child/nested/deeper",
+        .parent_id = "agent_2", .task_name = "deeper"});
+
     coordinator.activate_root("session-b", "second");
     CHECK_EQ(coordinator.status().session_id.value(), std::string("session-b"));
     CHECK_EQ(coordinator.store()
                  .list_agents(AgentQuery{.include_closed = true, .now_ms = now})
                  .size(),
-                 std::size_t{3});
+                 std::size_t{5});
+    const auto old_agents = coordinator.store().list_agents(AgentQuery{
+        .session_id = "session-a", .include_closed = true, .now_ms = now});
+    CHECK_EQ(old_agents.size(), std::size_t{4});
+    CHECK(std::ranges::all_of(old_agents,
+                              [](const auto &agent) {
+                                return agent.closed_at_ms.has_value();
+                              }));
+    const auto current_agents = coordinator.store().list_agents(AgentQuery{
+        .session_id = "session-b", .include_closed = true, .now_ms = now});
+    CHECK_EQ(current_agents.size(), std::size_t{1});
+    CHECK(!current_agents.front().closed_at_ms.has_value());
+    coordinator.observe_task_event(AgentTaskStatusChangedEvent{
+        .id = "agent_2",
+        .previous = AgentTaskStatusKind::running,
+        .current = AgentTaskStatusKind::completed});
+    coordinator.observe_task_event(AgentTaskClosedEvent{.id = "agent_2"});
+    CHECK(coordinator.store()
+              .list_agents(AgentQuery{.agent_id = "agent_2",
+                                      .include_closed = true,
+                                      .now_ms = now})
+              .front()
+              .status == "closed");
+
+    Model task_model;
+    task_model.id = "task-model";
+    task_model.api = "faux";
+    task_model.provider = "faux";
+    LLMClientRegistry::instance().register_client(
+        "faux", [] { return std::make_shared<FauxClient>(std::vector<FauxClient::Script>{}); });
+    Agent::Options task_options;
+    task_options.model = task_model;
+    AgentSession task_root({.agent_options = task_options});
+    AgentTaskManager task_manager(
+        task_root, task_options, AgentTaskManager::Limits{},
+        [&](const AgentTaskEvent &event) { coordinator.observe_task_event(event); });
+    const auto task = task_manager.spawn(
+        {.task_name = "shutdown-child", .prompt = "stop"});
+    task_manager.shutdown();
+    const auto shutdown_agent = coordinator.store().list_agents(AgentQuery{
+        .agent_id = task.id, .include_closed = true, .now_ms = now});
+    CHECK_EQ(shutdown_agent.size(), std::size_t{1});
+    CHECK(shutdown_agent.front().closed_at_ms.has_value());
 
     coordinator.maintenance_tick();
     now += 100;

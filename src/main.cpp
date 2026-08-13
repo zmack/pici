@@ -77,19 +77,66 @@ struct HookRuntime {
   std::shared_ptr<core::LuaHooks> hooks;
 };
 
-struct MailboxShutdownGuard {
+struct MailboxTaskObserver {
+  std::mutex mutex;
+  std::weak_ptr<core::MailboxCoordinator> coordinator;
+
+  void observe(const core::AgentTaskEvent &event) {
+    std::shared_ptr<core::MailboxCoordinator> current;
+    {
+      std::scoped_lock lock(mutex);
+      current = coordinator.lock();
+    }
+    if (current)
+      current->observe_task_event(event);
+  }
+
+  void detach() {
+    std::scoped_lock lock(mutex);
+    coordinator.reset();
+  }
+};
+
+struct MailboxLifecycleGuard {
+  std::shared_ptr<core::AgentTaskManager> task_manager;
+  std::shared_ptr<MailboxTaskObserver> observer;
   std::shared_ptr<core::MailboxCoordinator> coordinator;
-  explicit MailboxShutdownGuard(std::shared_ptr<core::MailboxCoordinator> value)
-      : coordinator(std::move(value)) {}
-  MailboxShutdownGuard(const MailboxShutdownGuard &) = delete;
-  MailboxShutdownGuard &operator=(const MailboxShutdownGuard &) = delete;
-  MailboxShutdownGuard(MailboxShutdownGuard &&) = delete;
-  MailboxShutdownGuard &operator=(MailboxShutdownGuard &&) = delete;
-  ~MailboxShutdownGuard() {
+  ~MailboxLifecycleGuard() noexcept {
+    if (task_manager) {
+      try {
+        task_manager->shutdown();
+      } catch (...) {
+        static_cast<void>(0);
+      }
+    }
+    if (observer)
+      observer->detach();
     if (coordinator)
       coordinator->stop();
   }
 };
+
+struct RootRunningGuard {
+  std::shared_ptr<core::MailboxCoordinator> coordinator;
+  ~RootRunningGuard() noexcept {
+    if (coordinator) {
+      try {
+        coordinator->set_root_running(false);
+      } catch (...) {
+        static_cast<void>(0);
+      }
+    }
+  }
+};
+
+std::string local_hostname() {
+  std::array<char, 256> buffer{};
+  if (::gethostname(buffer.data(), buffer.size() - 1) == 0) {
+    buffer.back() = '\0';
+    return std::string(buffer.data());
+  }
+  return "local";
+}
 
 void print_tools(
     const std::vector<std::shared_ptr<const core::ToolDefinition>> &tools) {
@@ -989,22 +1036,27 @@ int cmd_run(const cli::Args &args,
     mailbox_options.root_agent_id = core::generate_session_id();
     mailbox_options.provider = model.provider;
     mailbox_options.model_id = model.id;
-    mailbox_options.hostname = "local";
+    mailbox_options.hostname = local_hostname();
     mailbox_options.heartbeat_interval =
         std::chrono::milliseconds(settings.heartbeat_interval_ms);
     mailbox_options.cleanup_interval = std::chrono::hours(1);
     mailbox =
         std::make_shared<core::MailboxCoordinator>(std::move(mailbox_options));
   }
+  auto mailbox_observer = std::make_shared<MailboxTaskObserver>();
+  mailbox_observer->coordinator = mailbox;
   auto task_callbacks = std::vector<core::AgentTaskEventCallback>{};
-  if (mailbox)
-    task_callbacks.emplace_back([mailbox](const core::AgentTaskEvent &event) {
-      mailbox->observe_task_event(event);
-    });
+  if (mailbox) {
+    task_callbacks.emplace_back(
+        [mailbox_observer](const core::AgentTaskEvent &event) {
+          mailbox_observer->observe(event);
+        });
+  }
   auto task_manager = std::make_shared<core::AgentTaskManager>(
       runtime, opts, core::AgentTaskManager::Limits{},
       core::fan_out_agent_task_callbacks(std::move(task_callbacks)));
-  MailboxShutdownGuard mailbox_shutdown{mailbox};
+  MailboxLifecycleGuard mailbox_lifecycle{task_manager, mailbox_observer,
+                                          mailbox};
   auto compat_counter = std::make_shared<std::atomic_uint64_t>(0);
 
   auto task_error_json = [](const core::AgentTaskError &error) {
@@ -1496,12 +1548,12 @@ int cmd_run(const cli::Args &args,
   // Run a turn and persist all new messages to the session file.
   auto run_and_persist = [&](const std::string &input) {
     core::TerminalTitleActivityGuard activity(title_controller);
-    if (mailbox)
+    if (mailbox) {
       mailbox->set_root_running(true);
+    }
+    RootRunningGuard running_guard{mailbox};
     auto result = run_turn(runtime, input, *renderer, args.verbose,
                            stream_diagnostics, hook_runtime);
-    if (mailbox)
-      mailbox->set_root_running(false);
     return result;
   };
 

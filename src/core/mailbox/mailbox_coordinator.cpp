@@ -77,6 +77,10 @@ void MailboxCoordinator::activate_root(
                        "mailbox session identity is required");
   std::optional<std::string> old_session;
   std::string old_root_agent_id;
+  std::unordered_set<std::string> old_subagent_ids;
+  std::string root_agent_id;
+  std::string provider;
+  std::string model;
   {
     std::scoped_lock lock(mutex_);
     if (stopped_)
@@ -84,56 +88,76 @@ void MailboxCoordinator::activate_root(
                          "mailbox coordinator is stopped");
     old_session = session_id_;
     old_root_agent_id = active_root_agent_id_;
-    session_id_ = session_id;
-    session_name_ = std::move(session_name);
-    root_active_ = true;
-    root_running_ = false;
-  }
-  const auto now = options_.store.clock();
-  std::optional<std::string> active_name;
-  std::string provider;
-  std::string model;
-  std::string root_agent_id;
-  {
-    std::scoped_lock lock(mutex_);
-    active_name = session_name_;
+    old_subagent_ids = subagent_ids_;
     provider = provider_;
     model = model_id_;
-    if (old_session)
-      active_root_agent_id_ = options_.store.id_generator();
-    root_agent_id = active_root_agent_id_;
+    if (root_registered_)
+      root_agent_id = options_.store.id_generator();
+    else
+      root_agent_id = active_root_agent_id_;
   }
-  if (old_session)
-    store_->close_agent(old_root_agent_id, now);
+  const auto now = options_.store.clock();
   store_->register_agent(AgentRecord{
-      .agent_id = std::move(root_agent_id),
+      .agent_id = root_agent_id,
       .process_id = options_.process_id,
       .kind = "root",
-      .session_id = std::move(session_id),
-      .session_name = std::move(active_name),
-      .provider = std::move(provider),
-      .model_id = std::move(model),
+      .session_id = session_id,
+      .session_name = session_name,
+      .provider = provider,
+      .model_id = model,
       .status = "starting",
       .started_at_ms = now,
   });
+  try {
+    for (const auto &subagent_id : old_subagent_ids)
+      store_->close_agent(subagent_id, now);
+    if (old_session)
+      store_->close_agent(old_root_agent_id, now);
+  } catch (...) {
+    try {
+      store_->close_agent(root_agent_id, now);
+    } catch (...) {
+      static_cast<void>(0);
+    }
+    throw;
+  }
+  {
+    std::scoped_lock lock(mutex_);
+    active_root_agent_id_ = std::move(root_agent_id);
+    session_id_ = std::move(session_id);
+    session_name_ = std::move(session_name);
+    root_active_ = true;
+    root_running_ = false;
+    root_registered_ = true;
+    subagent_ids_.clear();
+  }
 }
 
 void MailboxCoordinator::deactivate_root() {
   std::optional<std::string> active;
   std::string root_agent_id;
+  std::unordered_set<std::string> subagent_ids;
   {
     std::scoped_lock lock(mutex_);
     if (!root_active_)
       return;
     active = session_id_;
+    root_agent_id = active_root_agent_id_;
+    subagent_ids = subagent_ids_;
+  }
+  const auto now = options_.store.clock();
+  for (const auto &subagent_id : subagent_ids)
+    store_->close_agent(subagent_id, now);
+  if (active)
+    store_->close_agent(root_agent_id, now);
+  std::scoped_lock lock(mutex_);
+  if (root_active_ && active_root_agent_id_ == root_agent_id) {
     root_active_ = false;
     root_running_ = false;
     session_id_.reset();
     session_name_.reset();
-    root_agent_id = active_root_agent_id_;
+    subagent_ids_.clear();
   }
-  if (active)
-    store_->close_agent(root_agent_id, options_.store.clock());
 }
 
 void MailboxCoordinator::set_root_running(bool running) {
@@ -143,35 +167,37 @@ void MailboxCoordinator::set_root_running(bool running) {
     std::scoped_lock lock(mutex_);
     if (!root_active_ || root_running_ == running)
       return;
-    root_running_ = running;
     status = running ? "running" : "idle";
     root_agent_id = active_root_agent_id_;
   }
-  store_->update_agent(AgentUpdate{.agent_id = std::move(root_agent_id),
-                                   .status = std::move(status)});
+  store_->update_agent(
+      AgentUpdate{.agent_id = root_agent_id, .status = std::move(status)});
+  std::scoped_lock lock(mutex_);
+  if (root_active_ && active_root_agent_id_ == root_agent_id)
+    root_running_ = running;
 }
 
 void MailboxCoordinator::set_model(std::string provider, std::string model_id) {
-  {
-    std::scoped_lock lock(mutex_);
-    provider_ = std::move(provider);
-    model_id_ = std::move(model_id);
-  }
   std::optional<std::string> active;
   std::string root_agent_id;
-  std::string current_provider;
-  std::string current_model;
   {
     std::scoped_lock lock(mutex_);
     active = session_id_;
-    current_provider = provider_;
-    current_model = model_id_;
+    if (!active) {
+      provider_ = std::move(provider);
+      model_id_ = std::move(model_id);
+      return;
+    }
     root_agent_id = active_root_agent_id_;
   }
   if (active)
-    store_->update_agent(AgentUpdate{.agent_id = std::move(root_agent_id),
-                                     .provider = std::move(current_provider),
-                                     .model_id = std::move(current_model)});
+    store_->update_agent(AgentUpdate{
+        .agent_id = root_agent_id, .provider = provider, .model_id = model_id});
+  std::scoped_lock lock(mutex_);
+  if (root_active_ && active_root_agent_id_ == root_agent_id) {
+    provider_ = std::move(provider);
+    model_id_ = std::move(model_id);
+  }
 }
 
 void MailboxCoordinator::register_subagent(const AgentTaskSpawnedEvent &event) {
@@ -195,15 +221,30 @@ void MailboxCoordinator::register_subagent(const AgentTaskSpawnedEvent &event) {
       .agent_id = event.id,
       .process_id = options_.process_id,
       .kind = "subagent",
-      .owner_agent_id = std::move(root_agent_id),
+      .owner_agent_id = root_agent_id,
       .session_id = *session,
       .task_id = event.id,
       .task_path = event.task_path,
-      .provider = std::move(provider),
-      .model_id = std::move(model),
+      .provider = provider,
+      .model_id = model,
       .status = "pending",
       .started_at_ms = now,
   });
+  bool belongs_to_current_session = false;
+  {
+    std::scoped_lock lock(mutex_);
+    belongs_to_current_session = root_active_ && session_id_ == session &&
+                                 active_root_agent_id_ == root_agent_id;
+    if (belongs_to_current_session)
+      subagent_ids_.insert(event.id);
+  }
+  if (!belongs_to_current_session) {
+    try {
+      store_->close_agent(event.id, now);
+    } catch (...) {
+      static_cast<void>(0);
+    }
+  }
 }
 
 std::string MailboxCoordinator::task_status(AgentTaskStatusKind status) {
@@ -215,24 +256,26 @@ void MailboxCoordinator::observe_task_event(const AgentTaskEvent &event) {
     register_subagent(*spawned);
   } else if (const auto *changed =
                  std::get_if<AgentTaskStatusChangedEvent>(&event)) {
-    bool active = false;
+    bool owned = false;
     {
       std::scoped_lock lock(mutex_);
-      active = root_active_;
+      owned = root_active_ && subagent_ids_.contains(changed->id);
     }
-    if (active) {
+    if (owned) {
       const auto status = task_status(changed->current);
       store_->update_agent(
           AgentUpdate{.agent_id = changed->id, .status = status});
     }
   } else if (const auto *closed = std::get_if<AgentTaskClosedEvent>(&event)) {
-    bool active = false;
+    bool owned = false;
     {
       std::scoped_lock lock(mutex_);
-      active = root_active_;
+      owned = root_active_ && subagent_ids_.contains(closed->id);
     }
-    if (active) {
+    if (owned) {
       store_->close_agent(closed->id, options_.store.clock());
+      std::scoped_lock lock(mutex_);
+      subagent_ids_.erase(closed->id);
     }
   }
 }

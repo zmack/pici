@@ -11,6 +11,7 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace pi::core {
@@ -76,8 +77,10 @@ private:
   std::string active_root_agent_id_;
   std::string provider_;
   std::string model_id_;
+  std::unordered_set<std::string> subagent_ids_;
   bool root_active_{false};
   bool root_running_{false};
+  bool root_registered_{false};
   bool stopped_{false};
   std::jthread maintenance_;
   std::condition_variable_any maintenance_wakeup_;
