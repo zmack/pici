@@ -66,6 +66,15 @@ std::size_t estimate_context_tokens(const std::vector<Message> &messages) {
   return (bytes + 3) / 4;
 }
 
+std::vector<AgentMessageEnvelope>
+make_message_envelopes(std::vector<Message> messages) {
+  std::vector<AgentMessageEnvelope> envelopes;
+  envelopes.reserve(messages.size());
+  for (auto &message : messages)
+    envelopes.push_back({.message = std::move(message)});
+  return envelopes;
+}
+
 } // namespace
 
 Agent::Agent() : Agent(Options{}) {}
@@ -98,6 +107,11 @@ Agent::prompt(std::string text, std::vector<ImageContent> images) {
 
 EventStream<AgentEvent, std::vector<Message>>
 Agent::prompt(std::vector<Message> messages) {
+  return prompt(make_message_envelopes(std::move(messages)));
+}
+
+EventStream<AgentEvent, std::vector<Message>>
+Agent::prompt(std::vector<AgentMessageEnvelope> messages) {
   EventStream<AgentEvent, std::vector<Message>> stream(
       [](const AgentEvent &ev) {
         return std::holds_alternative<AgentEndEvent>(ev);
@@ -121,26 +135,27 @@ Agent::prompt(std::vector<Message> messages) {
   auto config = create_loop_config();
   begin_run_locked();
 
-  launch_worker_locked([this, messages, ctx, config, stream]() mutable {
-    run_with_lifecycle([this, messages = std::move(messages),
-                        ctx = std::move(ctx), config = std::move(config),
-                        stream](const std::stop_token &stop_tok) mutable {
-      auto event_stream = run_agent_loop(
-          messages, ctx, config,
-          [this](const AgentEvent &event) {
-            process_event(event);
-            // Also push to stream for the caller
-          },
-          stop_tok);
+  launch_worker_locked(
+      [this, messages = std::move(messages), ctx, config, stream]() mutable {
+        run_with_lifecycle([this, messages = std::move(messages),
+                            ctx = std::move(ctx), config = std::move(config),
+                            stream](const std::stop_token &stop_tok) mutable {
+          auto event_stream = run_agent_loop_envelopes(
+              std::move(messages), std::move(ctx), config,
+              [this](const AgentEvent &event) {
+                process_event(event);
+                // Also push to stream for the caller
+              },
+              stop_tok);
 
-      // Forward events to the stream
-      for (auto &event : event_stream) {
-        stream.push(std::move(event));
-      }
+          // Forward events to the stream
+          for (auto &event : event_stream) {
+            stream.push(std::move(event));
+          }
 
-      stream.wait();
-    });
-  });
+          stream.wait();
+        });
+      });
 
   return stream;
 }
@@ -272,9 +287,7 @@ Agent::restore_session(Model model, ThinkingLevel thinking,
         "session restoration is unavailable while tool execution is pending");
   {
     std::scoped_lock steering_lock(steering_mutex_);
-    if (!steering_queue_.empty())
-      throw std::runtime_error(
-          "session restoration requires an empty steering queue");
+    steering_queue_.clear();
   }
   {
     std::scoped_lock followup_lock(followup_mutex_);
@@ -301,9 +314,7 @@ void Agent::set_session_identity(std::string session_id,
     throw std::runtime_error("session changes require an idle agent");
   {
     std::scoped_lock steering_lock(steering_mutex_);
-    if (!steering_queue_.empty())
-      throw std::runtime_error(
-          "session changes require an empty steering queue");
+    steering_queue_.clear();
   }
   {
     std::scoped_lock followup_lock(followup_mutex_);
@@ -315,6 +326,10 @@ void Agent::set_session_identity(std::string session_id,
 }
 
 void Agent::steer(std::vector<Message> messages) {
+  steer_envelopes(make_message_envelopes(std::move(messages)));
+}
+
+void Agent::steer_envelopes(std::vector<AgentMessageEnvelope> messages) {
   std::scoped_lock lock(steering_mutex_);
   steering_queue_.insert(steering_queue_.end(),
                          std::make_move_iterator(messages.begin()),
@@ -469,6 +484,15 @@ AgentLoopConfig Agent::create_loop_config() {
   config.get_api_key = options_.get_api_key;
   config.should_stop_after_turn = options_.should_stop_after_turn;
   config.get_steering_messages = [this]() {
+    std::scoped_lock lock(steering_mutex_);
+    std::vector<Message> messages;
+    messages.reserve(steering_queue_.size());
+    for (auto &envelope : steering_queue_)
+      messages.push_back(std::move(envelope.message));
+    steering_queue_.clear();
+    return messages;
+  };
+  config.get_steering_envelopes = [this]() {
     std::scoped_lock lock(steering_mutex_);
     return std::move(steering_queue_);
   };

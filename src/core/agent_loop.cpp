@@ -909,7 +909,7 @@ using AgentEventPush = AgentEventStream::PushFn;
 // Shared worker body for run_agent_loop and run_agent_loop_continue.
 // `prompts` is empty for the continue path, in which case the
 // emit-and-seed-new_messages step below is simply a no-op.
-void run_agent_loop_worker_impl(std::vector<Message> prompts,
+void run_agent_loop_worker_impl(std::vector<AgentMessageEnvelope> prompts,
                                 AgentContext context,
                                 const AgentLoopConfig &config,
                                 StreamCallback emit, const AgentEventPush &push,
@@ -929,6 +929,19 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
     const auto reason = config.get_abort_reason ? config.get_abort_reason()
                                                 : TurnAbortReason::unknown;
     publish(TurnAbortedEvent(reason));
+  };
+
+  // Acceptance is deliberately after publication and local context append.
+  // Callbacks must remain lock-free with respect to agent and coordinator
+  // state; observer failures cannot affect the model loop.
+  auto accept = [&](AgentMessageEnvelope &envelope) {
+    if (stop_tok.stop_requested() || !envelope.on_accepted)
+      return;
+    try {
+      envelope.on_accepted();
+    } catch (...) {
+      static_cast<void>(0);
+    }
   };
 
 #ifdef PI_CPP_OTEL_ENABLED
@@ -970,6 +983,9 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
   };
 #endif
 
+  std::vector<Message> new_messages;
+  new_messages.reserve(prompts.size());
+
   publish(AgentStartEvent());
   publish(TurnStartEvent());
 #ifdef PI_CPP_OTEL_ENABLED
@@ -977,16 +993,23 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
 #endif
 
   // Emit prompt messages (no-op when continuing from existing context)
-  for (const auto &prompt : prompts) {
-    publish(MessageStartEvent(prompt));
-    publish(MessageEndEvent(prompt));
-    context.messages.push_back(prompt);
+  for (auto &prompt : prompts) {
+    if (stop_tok.stop_requested())
+      break;
+    publish(MessageStartEvent(prompt.message));
+    publish(MessageEndEvent(prompt.message));
+    context.messages.push_back(prompt.message);
+    new_messages.push_back(prompt.message);
+    accept(prompt);
   }
 
-  auto new_messages = std::move(prompts);
-  auto pending_messages = config.get_steering_messages
-                              ? config.get_steering_messages()
-                              : std::vector<Message>{};
+  auto pending_messages = config.get_steering_envelopes
+                              ? config.get_steering_envelopes()
+                              : std::vector<AgentMessageEnvelope>{};
+  if (!config.get_steering_envelopes && config.get_steering_messages) {
+    for (auto &message : config.get_steering_messages())
+      pending_messages.push_back({.message = std::move(message)});
+  }
   bool first_turn = true;
 
   // Outer loop: continues when follow-up messages arrive
@@ -1006,11 +1029,14 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
       has_more_tool_calls = false;
 
       if (!pending_messages.empty()) {
-        for (const auto &msg : pending_messages) {
-          publish(MessageStartEvent(msg));
-          publish(MessageEndEvent(msg));
-          context.messages.push_back(msg);
-          new_messages.push_back(msg);
+        for (auto &envelope : pending_messages) {
+          if (stop_tok.stop_requested())
+            break;
+          publish(MessageStartEvent(envelope.message));
+          publish(MessageEndEvent(envelope.message));
+          context.messages.push_back(envelope.message);
+          new_messages.push_back(envelope.message);
+          accept(envelope);
         }
         pending_messages.clear();
       }
@@ -1091,9 +1117,13 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
         }
       }
 
-      pending_messages = config.get_steering_messages
-                             ? config.get_steering_messages()
-                             : std::vector<Message>{};
+      pending_messages = config.get_steering_envelopes
+                             ? config.get_steering_envelopes()
+                             : std::vector<AgentMessageEnvelope>{};
+      if (!config.get_steering_envelopes && config.get_steering_messages) {
+        for (auto &message : config.get_steering_messages())
+          pending_messages.push_back({.message = std::move(message)});
+      }
     }
 
     // Check for follow-up messages
@@ -1101,7 +1131,9 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
                           ? config.get_follow_up_messages()
                           : std::vector<Message>{};
     if (!follow_ups.empty()) {
-      pending_messages = std::move(follow_ups);
+      pending_messages.clear();
+      for (auto &message : follow_ups)
+        pending_messages.push_back({.message = std::move(message)});
       continue;
     }
 
@@ -1117,9 +1149,10 @@ void run_agent_loop_worker_impl(std::vector<Message> prompts,
 #endif
 }
 
-void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
-                           AgentLoopConfig config, StreamCallback emit,
-                           AgentEventPush push, std::stop_token stop_tok) {
+void run_agent_loop_worker(std::vector<AgentMessageEnvelope> prompts,
+                           AgentContext context, AgentLoopConfig config,
+                           StreamCallback emit, AgentEventPush push,
+                           std::stop_token stop_tok) {
   auto publish_failure = [&](std::string error) {
     auto failure = std::make_shared<AssistantMessage>();
     failure->api = config.model.api;
@@ -1169,9 +1202,9 @@ void run_agent_loop_worker(std::vector<Message> prompts, AgentContext context,
 } // namespace
 
 EventStream<AgentEvent, std::vector<Message>>
-run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
-               const AgentLoopConfig &config, StreamCallback emit,
-               const std::stop_token &stop_tok) {
+run_agent_loop_envelopes(std::vector<AgentMessageEnvelope> prompts,
+                         AgentContext context, const AgentLoopConfig &config,
+                         StreamCallback emit, const std::stop_token &stop_tok) {
   EventStream<AgentEvent, std::vector<Message>> stream(
       // Done predicate: agent_end
       [](const AgentEvent &ev) {
@@ -1187,13 +1220,25 @@ run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
 
   stream.start_worker(
       // NOLINTNEXTLINE(bugprone-exception-escape)
-      [prompts = std::vector<Message>(prompts), context = std::move(context),
-       config, emit = std::move(emit), stop_tok](AgentEventPush push) mutable {
+      [prompts = std::move(prompts), context = std::move(context), config,
+       emit = std::move(emit), stop_tok](AgentEventPush push) mutable {
         run_agent_loop_worker(std::move(prompts), std::move(context), config,
                               std::move(emit), std::move(push), stop_tok);
       });
 
   return stream;
+}
+
+EventStream<AgentEvent, std::vector<Message>>
+run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
+               const AgentLoopConfig &config, StreamCallback emit,
+               const std::stop_token &stop_tok) {
+  std::vector<AgentMessageEnvelope> envelopes;
+  envelopes.reserve(prompts.size());
+  for (const auto &message : prompts)
+    envelopes.push_back({.message = message});
+  return run_agent_loop_envelopes(std::move(envelopes), std::move(context),
+                                  config, std::move(emit), stop_tok);
 }
 
 EventStream<AgentEvent, std::vector<Message>>

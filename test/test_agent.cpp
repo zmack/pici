@@ -234,6 +234,23 @@ void test_agent_steer() {
     });
 }
 
+void test_agent_session_switch_drops_envelope_callbacks() {
+    tests::register_test("Agent: session switch drops envelope callbacks", []() {
+        Agent agent;
+        int accepted = 0;
+        UserMessage message;
+        message.content.push_back(TextContent{.text = "queued"});
+        agent.steer_envelopes({AgentMessageEnvelope{
+            .message = Message{std::move(message)},
+            .on_accepted = [&accepted] { ++accepted; },
+        }});
+
+        agent.set_session_identity("new-session");
+
+        CHECK_EQ(accepted, 0);
+    });
+}
+
 void test_agent_follow_up() {
     tests::register_test("Agent: follow_up queue", []() {
         Agent agent;
@@ -544,6 +561,7 @@ int main() {
     test_agent_add_tool();
     test_agent_set_tools();
     test_agent_steer();
+    test_agent_session_switch_drops_envelope_callbacks();
     test_agent_follow_up();
     test_agent_reset();
     test_agent_prompt_stream();

@@ -131,11 +131,15 @@ public:
   EventStream<AgentEvent, std::vector<Message>>
   prompt(std::vector<Message> messages);
 
+  EventStream<AgentEvent, std::vector<Message>>
+  prompt(std::vector<AgentMessageEnvelope> messages);
+
   // Continue from current transcript
   EventStream<AgentEvent, std::vector<Message>> continue_();
 
   // Queue a message to be injected after the current turn
   void steer(std::vector<Message> messages);
+  void steer_envelopes(std::vector<AgentMessageEnvelope> messages);
   void clear_steering_queue();
 
   // Queue a message to run only after the agent would otherwise stop
@@ -173,7 +177,7 @@ private:
 
   // Queue management
   std::mutex steering_mutex_;
-  std::vector<Message> steering_queue_;
+  std::vector<AgentMessageEnvelope> steering_queue_;
 
   std::mutex followup_mutex_;
   std::vector<Message> followup_queue_;

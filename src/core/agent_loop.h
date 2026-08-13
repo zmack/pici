@@ -40,6 +40,13 @@ class LLMClient;
 // Returns true to continue, false to abort.
 using StreamCallback = std::function<void(const AgentEvent &)>;
 
+using MessageAcceptanceCallback = std::function<void()>;
+
+struct AgentMessageEnvelope {
+  Message message;
+  MessageAcceptanceCallback on_accepted;
+};
+
 struct BeforeToolCallContext {
   const Message &assistant_message;
   const ToolCall &tool_call;
@@ -126,6 +133,10 @@ struct AgentLoopConfig {
   // Returns steering messages (injected mid-run)
   std::function<std::vector<Message>()> get_steering_messages;
 
+  // Envelope-aware steering source. When present, this takes precedence over
+  // the legacy message-only source.
+  std::function<std::vector<AgentMessageEnvelope>()> get_steering_envelopes;
+
   // Returns follow-up messages (injected after agent would stop)
   std::function<std::vector<Message>()> get_follow_up_messages;
 
@@ -162,6 +173,12 @@ EventStream<AgentEvent, std::vector<Message>>
 run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
                         StreamCallback emit,
                         const std::stop_token &stop_tok = std::stop_token{});
+
+EventStream<AgentEvent, std::vector<Message>>
+run_agent_loop_envelopes(std::vector<AgentMessageEnvelope> prompts,
+                         AgentContext context, const AgentLoopConfig &config,
+                         StreamCallback emit,
+                         const std::stop_token &stop_tok = std::stop_token{});
 
 // Stream an assistant response from the LLM.
 // This is called by the loop on each turn.

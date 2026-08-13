@@ -1094,6 +1094,158 @@ void test_agent_loop_steering_after_turn_continues() {
     });
 }
 
+void test_agent_loop_message_envelopes() {
+    tests::register_test("Agent loop: message envelopes accept after append", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        std::vector<std::string> order;
+        int accepted = 0;
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [&order](const AgentContext& context,
+                     const StreamOptions&,
+                     AssistantEventCallback,
+                     std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                CHECK_EQ(context.messages.size(), std::size_t(2));
+                CHECK(std::holds_alternative<UserMessage>(context.messages[0]));
+                CHECK(std::holds_alternative<UserMessage>(context.messages[1]));
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->stop_reason = StopReason::stop;
+                msg->content.emplace_back(TextContent{.text = "done"});
+                order.push_back("llm");
+                return msg;
+            });
+
+        auto make_message = [](std::string text) {
+            UserMessage message;
+            message.content.emplace_back(TextContent{.text = std::move(text)});
+            return Message{std::move(message)};
+        };
+        std::vector<AgentMessageEnvelope> prompts;
+        prompts.push_back({
+            .message = make_message("one"),
+            .on_accepted = [&order, &accepted] {
+                CHECK_EQ(order.back(), std::string("end"));
+                ++accepted;
+                order.push_back("accepted");
+                throw std::runtime_error("observer failure");
+            }});
+        prompts.push_back({
+            .message = make_message("two"),
+            .on_accepted = [&order, &accepted] {
+                CHECK_EQ(order.back(), std::string("end"));
+                ++accepted;
+                order.push_back("accepted");
+            }});
+
+        AgentContext context;
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.convert_to_llm = [](const std::vector<Message>& messages) {
+            return messages;
+        };
+        config.get_steering_envelopes = [] {
+            return std::vector<AgentMessageEnvelope>{};
+        };
+        auto stream = run_agent_loop_envelopes(
+            std::move(prompts), context, config, [&order](const AgentEvent& event) {
+                if (const auto* end = std::get_if<MessageEndEvent>(&event)) {
+                    if (std::holds_alternative<UserMessage>(end->message))
+                        order.push_back("end");
+                }
+            });
+        std::vector<Message> result;
+        for (auto& event : stream) {
+            if (const auto* end = std::get_if<AgentEndEvent>(&event))
+                result = end->messages;
+        }
+
+        CHECK_EQ(accepted, 2);
+        CHECK_EQ(result.size(), std::size_t(3));
+        CHECK_EQ(order[0], std::string("end"));
+        CHECK_EQ(order[1], std::string("accepted"));
+        CHECK_EQ(order[2], std::string("end"));
+        CHECK_EQ(order[3], std::string("accepted"));
+        CHECK_EQ(order[4], std::string("llm"));
+    });
+}
+
+void test_agent_loop_message_envelopes_cancelled() {
+    tests::register_test("Agent loop: cancelled envelopes are not accepted", []() {
+        int accepted = 0;
+        AgentMessageEnvelope envelope;
+        UserMessage message;
+        message.content.emplace_back(TextContent{.text = "drop me"});
+        envelope.message = Message{std::move(message)};
+        envelope.on_accepted = [&accepted] { ++accepted; };
+
+        std::stop_source stop_source;
+        stop_source.request_stop();
+        AgentLoopConfig config;
+        config.model.id = "test-model";
+        auto stream = run_agent_loop_envelopes(
+            {std::move(envelope)}, {}, config, [](const AgentEvent&) {},
+            stop_source.get_token());
+        for (auto& event : stream)
+            (void)event;
+        CHECK_EQ(accepted, 0);
+    });
+}
+
+void test_agent_loop_steering_envelopes() {
+    tests::register_test("Agent loop: steering envelopes preserve order", []() {
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+        int getter_calls = 0;
+        int accepted = 0;
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [](const AgentContext& context,
+               const StreamOptions&,
+               AssistantEventCallback,
+               std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                CHECK_EQ(context.messages.size(), std::size_t(1));
+                const auto& user = std::get<UserMessage>(context.messages[0]);
+                CHECK_EQ(std::get<TextContent>(user.content[0]).text,
+                         std::string("steer"));
+                auto result = std::make_shared<AssistantMessage>();
+                result->api = "test";
+                result->provider = "test";
+                result->model = "test-model";
+                result->stop_reason = StopReason::stop;
+                return result;
+            });
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.convert_to_llm = [](const std::vector<Message>& messages) {
+            return messages;
+        };
+        config.get_steering_envelopes = [&getter_calls, &accepted] {
+            ++getter_calls;
+            if (getter_calls != 1)
+                return std::vector<AgentMessageEnvelope>{};
+            UserMessage message;
+            message.content.emplace_back(TextContent{.text = "steer"});
+            return std::vector<AgentMessageEnvelope>{
+                {.message = Message{std::move(message)},
+                 .on_accepted = [&accepted] { ++accepted; }}};
+        };
+        auto stream = run_agent_loop({}, {}, config, [](const AgentEvent&) {});
+        for (auto& event : stream)
+            (void)event;
+        CHECK_EQ(accepted, 1);
+        CHECK_EQ(getter_calls, 2);
+    });
+}
+
 void test_agent_loop_argument_validation_blocks_execution() {
     tests::register_test("Agent loop: argument validation blocks execution", []() {
         Model model;
@@ -2167,6 +2319,9 @@ int main() {
     test_agent_loop_before_tool_call_blocks_with_reason();
     test_agent_loop_after_tool_call_partial_override();
     test_agent_loop_steering_after_turn_continues();
+    test_agent_loop_message_envelopes();
+    test_agent_loop_message_envelopes_cancelled();
+    test_agent_loop_steering_envelopes();
     test_agent_loop_argument_validation_blocks_execution();
     test_agent_loop_prepare_arguments_before_validation();
     test_parallel_completion_vs_source_order();
