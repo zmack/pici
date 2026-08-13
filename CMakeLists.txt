@@ -548,6 +548,9 @@ add_executable(pi-cli
 )
 
 target_link_libraries(pi-cli PRIVATE pi-core pi-http tomlplusplus::tomlplusplus)
+target_compile_definitions(pi-cli PRIVATE
+    PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
 
 # ─── pi-acp (ACP server) ───
 add_executable(pi-acp
@@ -573,10 +576,13 @@ if(PI_CPP_BUILD_TESTS)
         add_executable(test-${test_name}
             test/test_${test_name}.cpp
         )
-
         target_link_libraries(test-${test_name} PRIVATE pi-core)
         add_test(NAME test-${test_name} COMMAND test-${test_name})
     endforeach()
+
+    target_compile_definitions(test-lua_tool PRIVATE
+        PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
 
     add_executable(test-markdown-display test/test_markdown_display.cpp)
     target_link_libraries(test-markdown-display PRIVATE pi-core)

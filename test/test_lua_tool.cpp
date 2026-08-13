@@ -2,11 +2,14 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <ranges>
 #include <source_location>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/lua_tool.h"
+#include <nlohmann/json.hpp>
 
 using namespace pi::core;
 
@@ -334,6 +337,7 @@ return {
     end
   end
 }
+
 )lua");
     auto hooks = load_lua_hooks(p);
     CHECK(hooks->before_tool_call != nullptr);
@@ -1261,6 +1265,133 @@ end)
   std::filesystem::remove_all(dir);
 }
 
+void test_mailbox_addon() {
+  tests::register_test("mailbox addon registers intention tools", []() {
+    const auto path =
+        std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
+    auto hooks = load_lua_hooks(path);
+    CHECK_EQ(hooks->registered_tools.size(), std::size_t(6));
+    const std::vector<std::string> expected = {
+        "agents_list", "agents_send", "agents_request",
+        "agents_reply", "agents_inbox", "agents_close"};
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+      CHECK_EQ(std::string(hooks->registered_tools[i]->name()), expected[i]);
+      const auto schema =
+          nlohmann::json::parse(hooks->registered_tools[i]->schema().serialize());
+      CHECK(schema.is_object());
+      CHECK(schema.value("additionalProperties", true) == false);
+    }
+  });
+
+  tests::register_test("mailbox addon validates and executes intentions", []() {
+    const auto path =
+        std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
+    auto hooks = load_lua_hooks(path);
+    std::vector<nlohmann::json> acked;
+    LuaHooks::AgentInfo info;
+    info.mailbox.self = [](const nlohmann::json &, std::stop_token) {
+      return nlohmann::json{{"agent_id", "root-a"},
+                            {"process_id", "process-a"}, {"kind", "root"}};
+    };
+    info.mailbox.list = [](const nlohmann::json &, std::stop_token) {
+      return nlohmann::json::array(
+          {{{"agent_id", "root-a"},
+            {"process_id", "process-a"},
+            {"kind", "root"}},
+           {{"agent_id", "child-a"},
+            {"process_id", "process-a"},
+            {"kind", "subagent"},
+            {"owner_agent_id", "root-a"}},
+           {{"agent_id", "remote-a"},
+            {"process_id", "process-b"},
+            {"kind", "subagent"},
+            {"owner_agent_id", "root-b"}}});
+    };
+    info.mailbox.send = [](const nlohmann::json &value, std::stop_token) {
+      CHECK(value.at("target").at("session_id") == "session-b");
+      return nlohmann::json{{"state", "queued"}, {"message_id", "m1"}};
+    };
+    info.mailbox.request = [](const nlohmann::json &, std::stop_token) {
+      return nlohmann::json{{"state", "pending"}, {"request_id", "r1"}};
+    };
+    info.mailbox.reply = [](const nlohmann::json &value, std::stop_token) {
+      CHECK(value.at("message_id") == "m2");
+      return nlohmann::json{{"state", "queued"}, {"message_id", "m3"}};
+    };
+    info.mailbox.inbox = [](const nlohmann::json &value, std::stop_token) {
+      CHECK(value.at("claim") == true);
+      return nlohmann::json::array(
+          {{{"message_id", "m2"},
+            {"sender_agent_id", "sender-a"},
+            {"sender_session_id", "session-s"},
+            {"recipient_session_id", "session-a"},
+            {"kind", "request"},
+            {"text", "question"},
+            {"created_at_ms", 42},
+            {"claim_token", "secret"}},
+           {{"message_id", "m4"},
+            {"sender_agent_id", "sender-b"},
+            {"sender_session_id", "session-t"},
+            {"recipient_session_id", "session-a"},
+            {"kind", "note"},
+            {"text", "late"},
+            {"created_at_ms", 43},
+            {"claim_token", "secret-2"}}});
+    };
+    info.mailbox.ack = [&acked](const nlohmann::json &value, std::stop_token) {
+      acked.push_back(value);
+      if (acked.size() > 1)
+        return nlohmann::json{{"error", {{"code", "busy"}, {"message", "lease busy"}}}};
+      return nlohmann::json{{"state", "acknowledged"}};
+    };
+    info.agents.close = [](const nlohmann::json &value) {
+      CHECK(value.at("target") == "child-a");
+      return nlohmann::json{{"closed", "child-a"}};
+    };
+    hooks->configure(info);
+
+    auto find = [&](std::string_view name) {
+      return *std::ranges::find_if(
+          hooks->registered_tools, [&](const auto &tool) {
+            return tool->name() == name;
+          });
+    };
+    auto sent = find("agents_send")->execute(
+        "1", R"({"session_id":"session-b","text":"hello"})");
+    CHECK(!sent->is_error());
+    CHECK(nlohmann::json::parse(sent->content()).at("message_id") == "m1");
+
+    auto bad_target = find("agents_send")->execute(
+        "2", R"({"agent_id":"a","session_id":"s","text":"x"})");
+    CHECK(bad_target->is_error());
+    CHECK(bad_target->content().find("invalid_message:") == 0);
+
+    auto pending = find("agents_request")->execute(
+        "3", R"({"agent_id":"child-a","text":"question","timeout_ms":0})");
+    CHECK(!pending->is_error());
+    CHECK(nlohmann::json::parse(pending->content()).at("request_id") == "r1");
+
+    auto inbox = find("agents_inbox")->execute("4", R"({})");
+    CHECK(!inbox->is_error());
+    const auto messages = nlohmann::json::parse(inbox->content());
+    CHECK_EQ(messages.size(), std::size_t(2));
+    CHECK(!messages[0].contains("claim_token"));
+    CHECK(!messages[1].contains("claim_token"));
+    CHECK_EQ(acked.size(), std::size_t(2));
+    CHECK(acked[0].at("claim_token") == "secret");
+
+    auto reply = find("agents_reply")->execute(
+        "5", R"({"message_id":"m2","text":"answer"})");
+    CHECK(!reply->is_error());
+    auto close = find("agents_close")->execute(
+        "6", R"({"agent_id":"child-a"})");
+    CHECK(!close->is_error());
+    auto remote_close = find("agents_close")->execute(
+        "7", R"({"agent_id":"remote-a"})");
+    CHECK(remote_close->is_error());
+  });
+}
+
 int main() {
   std::cout << "=== pi-cpp lua tool tests ===\n\n";
 
@@ -1273,6 +1404,7 @@ int main() {
   test_json_bridge();
   test_load_lua_tools_directory();
   test_lua_hooks();
+  test_mailbox_addon();
 
   tests::print_summary();
   return tests::failed == 0 ? 0 : 1;

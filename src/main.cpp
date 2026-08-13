@@ -78,6 +78,12 @@ struct HookRuntime {
   std::shared_ptr<core::LuaHooks> hooks;
 };
 
+std::filesystem::path bundled_mailbox_addon_path() {
+  // The project currently has no install target; keep the bundled addon next
+  // to its source tree until runtime resource packaging is introduced.
+  return std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
+}
+
 struct MailboxTaskObserver {
   std::mutex mutex;
   std::weak_ptr<core::MailboxCoordinator> coordinator;
@@ -857,7 +863,22 @@ int cmd_run(const cli::Args &args,
   std::vector<std::shared_ptr<core::LuaHooks>> hooks_list_saved;
   auto load_hooks = [&]() -> std::shared_ptr<core::LuaHooks> {
     std::vector<std::shared_ptr<core::LuaHooks>> hooks_list;
+    const auto bundled_mailbox = bundled_mailbox_addon_path();
+    auto same_path = [](const std::filesystem::path &left,
+                        const std::filesystem::path &right) {
+      std::error_code left_error;
+      std::error_code right_error;
+      const auto left_canonical =
+          std::filesystem::weakly_canonical(left, left_error);
+      const auto right_canonical =
+          std::filesystem::weakly_canonical(right, right_error);
+      if (!left_error && !right_error)
+        return left_canonical == right_canonical;
+      return left.lexically_normal() == right.lexically_normal();
+    };
+    bool mailbox_addon_explicit = false;
     for (const auto &path : args.hooks_files) {
+      mailbox_addon_explicit |= same_path(path, bundled_mailbox);
       try {
         hooks_list.push_back(core::load_lua_hooks(path));
         if (args.verbose)
@@ -873,6 +894,24 @@ int cmd_run(const cli::Args &args,
         hooks_list.push_back(dir_hooks);
         if (args.verbose)
           std::cerr << "[hooks-dir: " << args.hooks_dir << "]\n";
+      }
+    }
+    if (!args.hooks_dir.empty()) {
+      std::error_code mailbox_entry_error;
+      const auto mailbox_entry =
+          std::filesystem::path(args.hooks_dir) / "mailbox.lua";
+      mailbox_addon_explicit =
+          std::filesystem::exists(mailbox_entry, mailbox_entry_error) ||
+          mailbox_addon_explicit;
+    }
+    if (args.mailbox_enabled && !mailbox_addon_explicit) {
+      try {
+        hooks_list.push_back(core::load_lua_hooks(bundled_mailbox));
+        if (args.verbose)
+          std::cerr << "[hooks: " << bundled_mailbox << "]\n";
+      } catch (const std::exception &e) {
+        std::cerr << "warning: failed to load bundled mailbox addon: "
+                  << e.what() << "\n";
       }
     }
 
@@ -985,6 +1024,16 @@ int cmd_run(const cli::Args &args,
     }
   }
 
+  const auto base_tools = agent.state().tools();
+  auto apply_hook_tools = [&]() {
+    auto tools = base_tools;
+    if (hooks)
+      tools.insert(tools.end(), hooks->registered_tools.begin(),
+                   hooks->registered_tools.end());
+    agent.set_tools(std::move(tools));
+  };
+  apply_hook_tools();
+
   std::vector<std::string> tool_names;
   for (const auto &tool : agent.state().tools())
     tool_names.emplace_back(tool->name());
@@ -993,8 +1042,6 @@ int cmd_run(const cli::Args &args,
       std::filesystem::current_path());
   agent.state().set_system_prompt(system);
   opts.system_prompt = system;
-
-  const auto base_tools = agent.state().tools();
 
   // --list-tools / --list-addons (exit immediately after printing)
   if (args.list_tools) {
@@ -1005,14 +1052,6 @@ int cmd_run(const cli::Args &args,
     print_addons(hooks_list_saved);
     return 0;
   }
-
-  auto apply_hook_tools = [&]() {
-    auto tools = base_tools;
-    if (hooks)
-      tools.insert(tools.end(), hooks->registered_tools.begin(),
-                   hooks->registered_tools.end());
-    agent.set_tools(std::move(tools));
-  };
 
   std::shared_ptr<core::MailboxCoordinator> mailbox;
   if (args.mailbox_enabled) {
@@ -1350,8 +1389,6 @@ int cmd_run(const cli::Args &args,
 
     hooks->configure(info);
   };
-
-  apply_hook_tools();
 
   std::string current_session_id;
   std::optional<std::string> current_session_name;
