@@ -757,6 +757,7 @@ AgentTaskManager::steer_envelopes(const AgentTaskId &target,
   AgentTaskStatusKind previous_status = AgentTaskStatusKind::running;
   std::optional<AgentTaskResult> previous_result;
   std::vector<AgentMessageEnvelope> root_messages;
+  std::vector<AgentMessageEnvelope> running_messages;
   {
     std::scoped_lock lock(mutex_);
     task = find_task_locked(target);
@@ -767,7 +768,7 @@ AgentTaskManager::steer_envelopes(const AgentTaskId &target,
         throw AgentTaskError(AgentTaskErrorKind::shutting_down,
                              "agent task manager is shutting down");
       steer_running = true;
-      root_messages = messages;
+      root_messages = std::move(messages);
     } else {
       std::scoped_lock task_lock(task->mutex);
       if (task->status == AgentTaskStatusKind::closing ||
@@ -799,6 +800,8 @@ AgentTaskManager::steer_envelopes(const AgentTaskId &target,
                      .previous_status = previous_status,
                      .previous_result = std::move(previous_result)});
         touch_locked(task);
+      } else {
+        running_messages = std::move(messages);
       }
     }
   }
@@ -808,7 +811,7 @@ AgentTaskManager::steer_envelopes(const AgentTaskId &target,
     return snapshot(task);
   }
   if (steer_running) {
-    task->session->agent().steer_envelopes(std::move(messages));
+    task->session->agent().steer_envelopes(std::move(running_messages));
     emit(AgentTaskMessageQueuedEvent{.id = task->id, .triggers_turn = false});
   } else {
     task->changed.notify_all();
