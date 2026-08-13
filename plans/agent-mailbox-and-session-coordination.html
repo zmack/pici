@@ -1,0 +1,1652 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A visual implementation guide for pici's SQLite-backed, Lua-first agent mailbox and optional A2A interoperability edge.">
+  <title>pici agent mailbox — architecture walkthrough</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17211d;
+      --muted: #5d6b65;
+      --paper: #f6f3eb;
+      --panel: #fffdf7;
+      --line: #d7d4c9;
+      --green: #1f6a4c;
+      --green-soft: #dcebe3;
+      --violet: #6150a0;
+      --violet-soft: #e8e2f6;
+      --amber: #a85f11;
+      --amber-soft: #f8e6cf;
+      --red: #9b3d35;
+      --red-soft: #f6dfdc;
+      --blue: #2f6479;
+      --blue-soft: #dcebf0;
+      --shadow: 0 18px 48px rgba(38, 48, 42, 0.08);
+      --radius: 18px;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --serif: Iowan Old Style, Charter, "Bitstream Charter", Georgia, serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 2rem;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(23, 33, 29, 0.028) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 33, 29, 0.028) 1px, transparent 1px),
+        var(--paper);
+      background-size: 32px 32px;
+      font-family: var(--sans);
+      line-height: 1.62;
+    }
+
+    a { color: inherit; }
+
+    code, pre { font-family: var(--mono); }
+
+    code {
+      padding: 0.12rem 0.34rem;
+      border: 1px solid rgba(23, 33, 29, 0.1);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.6);
+      font-size: 0.9em;
+    }
+
+    pre {
+      overflow-x: auto;
+      margin: 1rem 0 0;
+      padding: 1.15rem 1.2rem;
+      border: 1px solid #293731;
+      border-radius: 14px;
+      color: #e9f2ec;
+      background: #17211d;
+      font-size: 0.82rem;
+      line-height: 1.62;
+      tab-size: 2;
+    }
+
+    pre code {
+      padding: 0;
+      border: 0;
+      color: inherit;
+      background: transparent;
+      font-size: inherit;
+    }
+
+    .page {
+      width: min(1440px, 100%);
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .masthead {
+      position: relative;
+      overflow: hidden;
+      min-height: 560px;
+      padding: clamp(2rem, 5vw, 5rem);
+      border: 1px solid rgba(23, 33, 29, 0.14);
+      border-radius: 28px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      isolation: isolate;
+    }
+
+    .masthead::before,
+    .masthead::after {
+      position: absolute;
+      z-index: -1;
+      border-radius: 999px;
+      content: "";
+      filter: blur(2px);
+    }
+
+    .masthead::before {
+      top: -160px;
+      right: -110px;
+      width: 540px;
+      height: 540px;
+      background: radial-gradient(circle at 35% 40%, var(--violet-soft), transparent 65%);
+    }
+
+    .masthead::after {
+      right: 18%;
+      bottom: -260px;
+      width: 620px;
+      height: 620px;
+      background: radial-gradient(circle, var(--green-soft), transparent 66%);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 0.55rem;
+      align-items: center;
+      margin: 0 0 1.35rem;
+      color: var(--green);
+      font-family: var(--mono);
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      width: 34px;
+      height: 2px;
+      background: currentColor;
+      content: "";
+    }
+
+    h1, h2, h3, h4 { line-height: 1.08; }
+
+    h1 {
+      max-width: 950px;
+      margin: 0;
+      font-family: var(--serif);
+      font-size: clamp(3.2rem, 7vw, 7.2rem);
+      font-weight: 500;
+      letter-spacing: -0.055em;
+    }
+
+    h1 em {
+      color: var(--violet);
+      font-weight: 500;
+      text-decoration: underline;
+      text-decoration-color: rgba(97, 80, 160, 0.22);
+      text-decoration-thickness: 0.12em;
+      text-underline-offset: 0.08em;
+    }
+
+    .lede {
+      max-width: 800px;
+      margin: 2rem 0 2.2rem;
+      color: #425049;
+      font-size: clamp(1.1rem, 2vw, 1.38rem);
+      line-height: 1.55;
+    }
+
+    .hero-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.7rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid rgba(23, 33, 29, 0.15);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.55);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 250px minmax(0, 1fr);
+      gap: clamp(2rem, 4vw, 5rem);
+      margin-top: 42px;
+      align-items: start;
+    }
+
+    .toc {
+      position: sticky;
+      top: 24px;
+      padding: 1.2rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 253, 247, 0.9);
+      box-shadow: 0 10px 30px rgba(38, 48, 42, 0.05);
+      backdrop-filter: blur(14px);
+    }
+
+    .toc-label {
+      margin: 0 0 0.7rem;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .toc a {
+      display: block;
+      margin: 0.15rem 0;
+      padding: 0.42rem 0.55rem;
+      border-radius: 8px;
+      color: #59665f;
+      font-size: 0.85rem;
+      text-decoration: none;
+      transition: 150ms ease;
+    }
+
+    .toc a:hover,
+    .toc a.active {
+      color: var(--green);
+      background: var(--green-soft);
+    }
+
+    main { min-width: 0; }
+
+    section {
+      margin: 0 0 6rem;
+    }
+
+    .section-number {
+      display: block;
+      margin-bottom: 0.5rem;
+      color: var(--violet);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      max-width: 920px;
+      margin: 0 0 1.2rem;
+      font-family: var(--serif);
+      font-size: clamp(2.25rem, 4.6vw, 4.5rem);
+      font-weight: 500;
+      letter-spacing: -0.045em;
+    }
+
+    h3 {
+      margin: 0 0 0.65rem;
+      font-size: 1.15rem;
+      letter-spacing: -0.015em;
+    }
+
+    .section-intro {
+      max-width: 820px;
+      margin: 0 0 2rem;
+      color: var(--muted);
+      font-size: 1.06rem;
+    }
+
+    .grid-2,
+    .grid-3,
+    .grid-4 {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .card {
+      padding: 1.35rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: 0 10px 25px rgba(38, 48, 42, 0.045);
+    }
+
+    .card p:last-child { margin-bottom: 0; }
+
+    .card-kicker {
+      display: block;
+      margin-bottom: 0.7rem;
+      color: var(--violet);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .callout {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 1rem;
+      margin: 1.5rem 0;
+      padding: 1.25rem;
+      border: 1px solid #e3c8a6;
+      border-radius: var(--radius);
+      background: var(--amber-soft);
+    }
+
+    .callout-mark {
+      display: grid;
+      width: 2.35rem;
+      height: 2.35rem;
+      place-items: center;
+      border-radius: 50%;
+      color: white;
+      background: var(--amber);
+      font-family: var(--serif);
+      font-size: 1.25rem;
+      font-weight: 700;
+    }
+
+    .callout h3 { margin-top: 0.1rem; }
+    .callout p { margin: 0; }
+
+    .architecture {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.8fr) 70px minmax(240px, 1.1fr) 70px minmax(180px, 0.8fr);
+      gap: 0.5rem;
+      align-items: center;
+      padding: clamp(1rem, 3vw, 2.2rem);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .architecture-stack {
+      display: grid;
+      gap: 0.7rem;
+    }
+
+    .architecture-box {
+      padding: 1rem;
+      border: 1px solid;
+      border-radius: 13px;
+      text-align: center;
+    }
+
+    .architecture-box strong {
+      display: block;
+      margin-bottom: 0.25rem;
+      font-size: 0.9rem;
+    }
+
+    .architecture-box span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.74rem;
+    }
+
+    .box-lua { border-color: #beb4df; background: var(--violet-soft); }
+    .box-core { border-color: #abcdbb; background: var(--green-soft); }
+    .box-db { border-color: #b4cfda; background: var(--blue-soft); }
+
+    .arrow {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 1.2rem;
+      text-align: center;
+    }
+
+    .arrow small {
+      display: block;
+      font-size: 0.58rem;
+      letter-spacing: 0.03em;
+    }
+
+    .comparison {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    th, td {
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      background: #f0eee7;
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .identity-pair {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 1.2rem;
+      align-items: stretch;
+    }
+
+    .identity-card {
+      padding: 1.5rem;
+      border-radius: 20px;
+      color: #f8fbf9;
+      background: #17211d;
+    }
+
+    .identity-card.violet { background: #43376d; }
+
+    .identity-card .label {
+      color: rgba(255,255,255,0.64);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      text-transform: uppercase;
+    }
+
+    .identity-card .value {
+      display: block;
+      margin: 0.45rem 0 1rem;
+      font-family: var(--mono);
+      font-size: 0.9rem;
+    }
+
+    .identity-card p {
+      margin: 0;
+      color: rgba(255,255,255,0.78);
+      font-size: 0.87rem;
+    }
+
+    .identity-link {
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      text-align: center;
+    }
+
+    .schema {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .table-card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .table-card header {
+      padding: 1rem 1.1rem;
+      color: white;
+      background: var(--green);
+    }
+
+    .table-card:nth-child(2) header { background: var(--violet); }
+    .table-card:nth-child(3) header { background: var(--blue); }
+
+    .table-card header strong {
+      display: block;
+      font-family: var(--mono);
+      font-size: 0.9rem;
+    }
+
+    .table-card header span {
+      color: rgba(255,255,255,0.72);
+      font-size: 0.74rem;
+    }
+
+    .field-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .field-list li {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.8rem;
+      padding: 0.58rem 0.85rem;
+      border-bottom: 1px solid #ece9df;
+      font-family: var(--mono);
+      font-size: 0.68rem;
+    }
+
+    .field-list li:last-child { border-bottom: 0; }
+    .field-list span:last-child { color: var(--muted); text-align: right; }
+
+    .timeline {
+      position: relative;
+      display: grid;
+      gap: 0;
+      margin-top: 2rem;
+      counter-reset: step;
+    }
+
+    .timeline::before {
+      position: absolute;
+      top: 1.5rem;
+      bottom: 1.5rem;
+      left: 1.25rem;
+      width: 2px;
+      background: var(--line);
+      content: "";
+    }
+
+    .timeline-step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 2.5rem 1fr;
+      gap: 1rem;
+      padding: 0 0 1.45rem;
+      counter-increment: step;
+    }
+
+    .timeline-step::before {
+      z-index: 1;
+      display: grid;
+      width: 2.5rem;
+      height: 2.5rem;
+      place-items: center;
+      border: 4px solid var(--paper);
+      border-radius: 50%;
+      color: white;
+      background: var(--green);
+      content: counter(step);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+    }
+
+    .timeline-copy {
+      padding-top: 0.3rem;
+    }
+
+    .timeline-copy p { margin: 0.25rem 0 0; color: var(--muted); }
+
+    .risk-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .risk {
+      padding: 1.3rem;
+      border-top: 4px solid var(--red);
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      border-left: 1px solid var(--line);
+      border-radius: 12px 12px var(--radius) var(--radius);
+      background: var(--panel);
+    }
+
+    .risk:nth-child(even) { border-top-color: var(--amber); }
+
+    .risk .risk-label {
+      color: var(--red);
+      font-family: var(--mono);
+      font-size: 0.67rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .risk:nth-child(even) .risk-label { color: var(--amber); }
+    .risk p { margin-bottom: 0; color: var(--muted); font-size: 0.9rem; }
+
+    details {
+      margin: 0.8rem 0;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--panel);
+    }
+
+    summary {
+      padding: 1rem 1.1rem;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    details > div {
+      padding: 0 1.1rem 1.1rem;
+      color: var(--muted);
+    }
+
+    .phase-list {
+      display: grid;
+      gap: 0.85rem;
+    }
+
+    .phase {
+      display: grid;
+      grid-template-columns: 95px 1fr auto;
+      gap: 1rem;
+      align-items: center;
+      padding: 1.05rem 1.2rem;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel);
+    }
+
+    .phase-number {
+      color: var(--violet);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .phase strong { display: block; }
+    .phase span { color: var(--muted); font-size: 0.85rem; }
+
+    .phase-tag {
+      padding: 0.3rem 0.55rem;
+      border-radius: 999px;
+      color: var(--green);
+      background: var(--green-soft);
+      font-family: var(--mono);
+      font-size: 0.64rem;
+    }
+
+    .decision-box {
+      padding: clamp(1.4rem, 3vw, 2.5rem);
+      border-radius: 24px;
+      color: #f2f7f4;
+      background: #17211d;
+    }
+
+    .decision-box h3 {
+      color: white;
+      font-family: var(--serif);
+      font-size: 2rem;
+      font-weight: 500;
+    }
+
+    .decision-box p { color: #bdc9c2; }
+
+    .decision-box ol {
+      margin: 1.4rem 0 0;
+      padding-left: 1.25rem;
+    }
+
+    .decision-box li { margin: 0.75rem 0; padding-left: 0.35rem; }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      margin: 2rem 0 0;
+      padding: 2rem 0 1rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    .print-note { font-family: var(--mono); }
+
+    @media (max-width: 1080px) {
+      .layout { grid-template-columns: 1fr; }
+      .toc { position: static; display: none; }
+      .architecture { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); padding: 0.25rem; }
+      .schema, .grid-3, .grid-4 { grid-template-columns: 1fr 1fr; }
+    }
+
+    @media (max-width: 720px) {
+      .page { padding: 12px; }
+      .masthead { min-height: auto; padding: 2rem 1.25rem 2.5rem; border-radius: 20px; }
+      h1 { font-size: clamp(2.8rem, 15vw, 4.7rem); }
+      section { margin-bottom: 4rem; }
+      .grid-2, .grid-3, .grid-4, .schema, .risk-grid { grid-template-columns: 1fr; }
+      .identity-pair { grid-template-columns: 1fr; }
+      .identity-link { padding: 0.2rem; }
+      .comparison { overflow-x: auto; }
+      table { min-width: 650px; }
+      .phase { grid-template-columns: 1fr; gap: 0.3rem; }
+      .phase-tag { justify-self: start; }
+      footer { flex-direction: column; }
+    }
+
+    @media print {
+      body { background: white; }
+      .page { width: 100%; padding: 0; }
+      .masthead, .card, .architecture, .table-card, .comparison, .risk, details, .phase {
+        box-shadow: none;
+        break-inside: avoid;
+      }
+      .masthead { min-height: auto; }
+      .layout { display: block; }
+      .toc { display: none; }
+      section { break-before: auto; }
+      pre { white-space: pre-wrap; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="masthead">
+      <p class="eyebrow">pici architecture brief · proposed</p>
+      <h1>A mailbox for <em>parallel agents</em></h1>
+      <p class="lede">
+        A Lua-first coordination layer that lets independent pici sessions find one another,
+        exchange durable messages, and steer active agents between turns—without turning
+        SQLite into the agent runtime or the transcript store. A2A remains an optional
+        interoperability edge over the same high-level coordination intentions.
+      </p>
+      <div class="hero-tags" aria-label="Key design traits">
+        <span class="pill">SQLite + WAL</span>
+        <span class="pill">workspace scoped</span>
+        <span class="pill">lease based</span>
+        <span class="pill">at-least-once delivery</span>
+        <span class="pill">Lua-defined tools</span>
+        <span class="pill">one worker per process</span>
+        <span class="pill">optional A2A edge</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="toc" aria-label="On this page">
+        <p class="toc-label">On this page</p>
+        <a href="#thesis">The thesis</a>
+        <a href="#boundary">The crucial boundary</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#identity">Identity &amp; presence</a>
+        <a href="#subagents">Subagent lifecycle</a>
+        <a href="#database">SQLite design</a>
+        <a href="#delivery">Message delivery</a>
+        <a href="#lua">Lua-first surface</a>
+        <a href="#exposure">What the agent sees</a>
+        <a href="#a2a">A2A interoperability</a>
+        <a href="#hairy">The hairy bits</a>
+        <a href="#rollout">Implementation order</a>
+        <a href="#decisions">Decisions to lock</a>
+      </nav>
+
+      <main>
+        <section id="thesis">
+          <span class="section-number">01 · Thesis</span>
+          <h2>Make sessions visible before making them autonomous.</h2>
+          <p class="section-intro">
+            The highest-leverage first step is not remote process control. It is a shared,
+            reliable directory of active pici sessions plus a narrow message channel. Once
+            those primitives exist, Lua can decide what coordination policy the model sees.
+          </p>
+
+          <div class="grid-3">
+            <article class="card">
+              <span class="card-kicker">Discover</span>
+              <h3>Who else is working?</h3>
+              <p>List live root sessions and subagents in the same workspace, including status, model, ownership, and liveness.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Address</span>
+              <h3>Where should this go?</h3>
+              <p>Target a durable session when restart tolerance matters, or a particular live activation when precision matters.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Coordinate</span>
+              <h3>What should happen next?</h3>
+              <p>Send an inbox note or a steering message that enters the recipient's context at its next safe turn boundary.</p>
+            </article>
+          </div>
+
+          <div class="callout">
+            <div class="callout-mark">!</div>
+            <div>
+              <h3>The database is a rendezvous point, not an agent scheduler.</h3>
+              <p>SQLite records presence and envelopes. The existing C++ runtime still owns execution, cancellation, tools, model calls, and session journals.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="boundary">
+          <span class="section-number">02 · Boundary</span>
+          <h2>There are already agents in pici—but only inside one process.</h2>
+          <p class="section-intro">
+            Today, <code>pici.agents</code> closes over one in-memory <code>AgentTaskManager</code>.
+            It is excellent for a root agent and its child tasks. It cannot discover another
+            <code>pi-cli</code> process. The mailbox should complement that API, not silently redefine it.
+          </p>
+
+          <div class="comparison">
+            <table>
+              <thead>
+                <tr>
+                  <th>Concern</th>
+                  <th>Existing local child agents</th>
+                  <th>Proposed cross-session mailbox</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>Native surface</td><td><code>pici.agents.*</code></td><td><code>pici.mailbox.*</code></td></tr>
+                <tr><td>Identity</td><td>Task ID and path, e.g. <code>/root/research</code></td><td>Durable session ID plus root/subagent endpoint ID</td></tr>
+                <tr><td>Visibility</td><td>One <code>AgentTaskManager</code></td><td>Independent processes in one workspace</td></tr>
+                <tr><td>Persistence</td><td>In memory</td><td>SQLite</td></tr>
+                <tr><td>Spawn / cancel</td><td>Supported</td><td>Deliberately absent in v1</td></tr>
+                <tr><td>Wait mechanism</td><td>Condition variable</td><td>Monotonic DB generation + bounded polling</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="architecture">
+          <span class="section-number">03 · Architecture</span>
+          <h2>Keep policy in Lua and correctness in C++.</h2>
+          <p class="section-intro">
+            Lua gets safe, JSON-shaped operations. C++ owns SQLite transactions, locks,
+            leases, lifecycle, and agent-loop integration. The model sees tools registered
+            by a shipped Lua addon—not database methods.
+          </p>
+
+          <div class="architecture" role="img" aria-label="Architecture from Lua tools through C++ coordinator to shared SQLite database and another pici process">
+            <div class="architecture-stack">
+              <div class="architecture-box box-lua">
+                <strong>Model-visible tools</strong>
+                <span>list · send · request · reply · inbox</span>
+              </div>
+              <div class="architecture-box box-lua">
+                <strong>pici.mailbox</strong>
+                <span>Lua-native primitives</span>
+              </div>
+            </div>
+            <div class="arrow">→<small>validated calls</small></div>
+            <div class="architecture-stack">
+              <div class="architecture-box box-core">
+                <strong>MailboxCoordinator</strong>
+                <span>one worker · N endpoints · steering</span>
+              </div>
+              <div class="architecture-box box-core">
+                <strong>MailboxStore</strong>
+                <span>schema · prepared statements · transactions</span>
+              </div>
+              <div class="architecture-box box-core">
+                <strong>AgentSession</strong>
+                <span>status · active session · Agent::steer</span>
+              </div>
+            </div>
+            <div class="arrow">↔<small>WAL + leases</small></div>
+            <div class="architecture-stack">
+              <div class="architecture-box box-db">
+                <strong>mailbox.sqlite3</strong>
+                <span>processes · agents · messages · events</span>
+              </div>
+              <div class="architecture-box box-db">
+                <strong>Other pici processes</strong>
+                <span>separate connection, same protocol</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid-2" style="margin-top: 1rem;">
+            <article class="card">
+              <span class="card-kicker">MailboxStore</span>
+              <h3>Pure persistence boundary</h3>
+              <p>No Lua, renderer, or model-loop knowledge. It exposes typed registration, listing, send, claim, acknowledgement, and generation APIs.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">MailboxCoordinator</span>
+              <h3>Runtime policy boundary</h3>
+              <p>Owns the local identity, RAII threads, heartbeat, inbox pump, workspace filtering, and conversion to safe user messages.</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="identity">
+          <span class="section-number">04 · Identity</span>
+          <h2>One conversation can have more than one live body.</h2>
+          <p class="section-intro">
+            A session ID names durable history. An agent ID names this particular activation
+            of that history. Conflating them makes restarts, crashes, and duplicate attachment
+            impossible to reason about.
+          </p>
+
+          <div class="identity-pair">
+            <article class="identity-card">
+              <span class="label">Durable identity</span>
+              <strong class="value">session_id = 01JSESSION…</strong>
+              <p>Survives process exit. Addresses a conversation and its JSONL journal. Messages may wait here while no process is alive.</p>
+            </article>
+            <div class="identity-link">one session<br>may have<br>many →</div>
+            <article class="identity-card violet">
+              <span class="label">Ephemeral identity</span>
+              <strong class="value">agent_id = agent_01J…</strong>
+              <p>Random for each activation. Owns a lease, PID metadata, current status, and exact-instance routing.</p>
+            </article>
+          </div>
+
+          <div class="timeline">
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Activate a durable session</strong><p>Create a fresh agent ID and register status <code>starting</code>.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Advertise presence</strong><p>Heartbeat every two seconds; refresh status, model, and a ten-second lease.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Switch sessions</strong><p>Close the old activation and create a new agent ID rather than moving one identity between transcripts.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Crash or exit</strong><p>Clean shutdown marks the row closed. A crash is detected when the lease expires.</p></div>
+            </div>
+          </div>
+
+          <div class="callout">
+            <div class="callout-mark">↯</div>
+            <div>
+              <h3>Duplicate attachment must be visible.</h3>
+              <p>If two processes open the same session, listing returns both. The first release should require an exact <code>agent_id</code> before sending automatic steering to a multiply attached session.</p>
+            </div>
+          </div>
+
+          <div class="card">
+            <span class="card-kicker">Process identity</span>
+            <h3>One lease covers every endpoint hosted by a process.</h3>
+            <p>A random <code>process_id</code> owns the heartbeat. Root agents and subagents have separate <code>agent_id</code> endpoint rows that reference it. If the process lease expires, every endpoint it owns becomes stale together.</p>
+          </div>
+        </section>
+
+        <section id="subagents">
+          <span class="section-number">05 · Subagents</span>
+          <h2>Completed is reusable. Closed is gone.</h2>
+          <p class="section-intro">
+            A child agent does not disappear when it finishes an answer. Its runner remains
+            resident inside <code>AgentTaskManager</code>, ready for follow-up work. The mailbox
+            mirrors that reality instead of treating completion as process death.
+          </p>
+
+          <pre><code>pending → running → completed / errored / interrupted
+                       │                │
+                       ├── follow-up ───┴──→ running again
+                       │
+                       └── explicit close → closing → shutdown → removed</code></pre>
+
+          <div class="grid-3" style="margin-top: 1rem;">
+            <article class="card">
+              <span class="card-kicker">Running</span>
+              <h3>Steer between turns</h3>
+              <p>The owning process routes the envelope through a new <code>AgentTaskManager::steer</code> path. Current response/tool work reaches a safe boundary first.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Completed</span>
+              <h3>Reactivate with follow-up</h3>
+              <p>A message or request queues another work item on the existing child, reserves execution, and transitions it back to running.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Closing</span>
+              <h3>Reject new delivery</h3>
+              <p>Once close begins, messages fail as unavailable. On <code>AgentTaskClosedEvent</code>, the endpoint is marked closed in SQLite.</p>
+            </article>
+          </div>
+
+          <div class="architecture" style="margin-top: 1rem;" role="img" aria-label="One pici process with one mailbox worker and several addressable agent endpoints">
+            <div class="architecture-stack">
+              <div class="architecture-box box-core">
+                <strong>One pici process</strong>
+                <span>one SQLite connection</span>
+              </div>
+              <div class="architecture-box box-core">
+                <strong>One maintenance worker</strong>
+                <span>heartbeat · inbox poll · dispatch</span>
+              </div>
+            </div>
+            <div class="arrow">→<small>owns</small></div>
+            <div class="architecture-stack">
+              <div class="architecture-box box-lua"><strong>root endpoint</strong><span>session 01J…</span></div>
+              <div class="architecture-box box-lua"><strong>/root/research</strong><span>completed · addressable</span></div>
+              <div class="architecture-box box-lua"><strong>/root/implementation</strong><span>running · addressable</span></div>
+            </div>
+            <div class="arrow">↔<small>routes via</small></div>
+            <div class="architecture-stack">
+              <div class="architecture-box box-db"><strong>AgentTaskManager</strong><span>owns runners and lifecycle</span></div>
+              <div class="architecture-box box-db"><strong>SQLite directory</strong><span>mirrors endpoints only</span></div>
+            </div>
+          </div>
+
+          <div class="callout">
+            <div class="callout-mark">×</div>
+            <div>
+              <h3>Closing remains local authority.</h3>
+              <p>The model-visible <code>agents_close</code> tool wraps existing <code>pici.agents.close</code>. It recursively closes a locally owned subagent and its descendants. It cannot close a root session or anything owned by another process.</p>
+            </div>
+          </div>
+
+          <div class="comparison">
+            <table>
+              <thead><tr><th>Event</th><th>Task-manager effect</th><th>Mailbox effect</th></tr></thead>
+              <tbody>
+                <tr><td>Work completes</td><td>Runner waits; task remains resident</td><td>Endpoint remains live and addressable</td></tr>
+                <tr><td>Follow-up arrives</td><td>Existing task runs again</td><td>Envelope is acknowledged after context acceptance</td></tr>
+                <tr><td>Explicit local close</td><td>Interrupt, join, recursively remove subtree</td><td>Endpoints marked closed</td></tr>
+                <tr><td>Process crashes</td><td>In-memory tasks vanish</td><td>One process lease expiry makes all owned endpoints stale</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="database">
+          <span class="section-number">06 · Persistence</span>
+          <h2>Four tables separate liveness from addressability.</h2>
+          <p class="section-intro">
+            The database sits beside the effective config as <code>mailbox.sqlite3</code>.
+            It uses WAL mode for independent readers and writers, explicit migrations through
+            <code>PRAGMA user_version</code>, prepared statements, and one mutex-guarded connection per process.
+          </p>
+
+          <div class="schema">
+            <article class="table-card">
+              <header><strong>processes</strong><span>one renewable lease per process</span></header>
+              <ul class="field-list">
+                <li><span>process_id</span><span>primary key</span></li>
+                <li><span>workspace_id</span><span>scope boundary</span></li>
+                <li><span>pid + hostname</span><span>diagnostics</span></li>
+                <li><span>capabilities</span><span>protocol metadata</span></li>
+                <li><span>last_seen_at</span><span>heartbeat</span></li>
+                <li><span>lease_expires_at</span><span>crash detection</span></li>
+              </ul>
+            </article>
+            <article class="table-card">
+              <header><strong>agents</strong><span>addressable root and subagent endpoints</span></header>
+              <ul class="field-list">
+                <li><span>agent_id</span><span>primary key</span></li>
+                <li><span>process_id</span><span>liveness owner</span></li>
+                <li><span>kind</span><span>root / subagent</span></li>
+                <li><span>owner_agent_id</span><span>root ownership</span></li>
+                <li><span>session_id</span><span>durable identity</span></li>
+                <li><span>task_id + path</span><span>subagents only</span></li>
+                <li><span>status</span><span>running / completed / closed</span></li>
+              </ul>
+            </article>
+            <article class="table-card">
+              <header><strong>messages</strong><span>durable envelopes and claims</span></header>
+              <ul class="field-list">
+                <li><span>message_id</span><span>stable idempotency key</span></li>
+                <li><span>sender identity</span><span>agent + session</span></li>
+                <li><span>recipient identity</span><span>session + optional agent</span></li>
+                <li><span>kind</span><span>steer / note / request / reply</span></li>
+                <li><span>claim_token</span><span>lease ownership</span></li>
+                <li><span>acknowledged_at</span><span>terminal state</span></li>
+              </ul>
+            </article>
+            <article class="table-card">
+              <header><strong>mailbox_events</strong><span>monotonic change generation</span></header>
+              <ul class="field-list">
+                <li><span>generation</span><span>autoincrement key</span></li>
+                <li><span>workspace_id</span><span>filtered waits</span></li>
+                <li><span>event_type</span><span>presence / message</span></li>
+                <li><span>subject_id</span><span>changed record</span></li>
+                <li><span>created_at</span><span>retention</span></li>
+              </ul>
+            </article>
+          </div>
+
+          <pre><code>PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA busy_timeout = 5000;</code></pre>
+
+          <details>
+            <summary>Why store a generation table when SQLite already has row IDs?</summary>
+            <div>
+              A waiter needs one monotonic cursor spanning both presence and message changes.
+              SQLite has no portable cross-process condition variable. The event generation
+              prevents a poller from missing a change that occurs between “inspect state” and
+              “begin waiting,” while bounded polling provides the wake-up mechanism.
+            </div>
+          </details>
+          <details>
+            <summary>Why not put transcripts in SQLite too?</summary>
+            <div>
+              That would multiply the migration and recovery surface. Session JSONL already
+              provides replayable history. The mailbox should prove cross-process coordination
+              before it becomes a general persistence rewrite.
+            </div>
+          </details>
+        </section>
+
+        <section id="delivery">
+          <span class="section-number">07 · Delivery</span>
+          <h2>“Delivered” must mean the agent loop accepted it.</h2>
+          <p class="section-intro">
+            The poller observing a row is not delivery. Calling <code>Agent::steer</code> is not
+            delivery either. A message is acknowledged only after the loop appends and publishes
+            it at a safe boundary, immediately before the next model turn.
+          </p>
+
+          <div class="timeline">
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Sender commits</strong><p>Insert the envelope and corresponding generation event in one transaction.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Receiver claims</strong><p>Set a random claim token and expiry. Other receivers skip the live claim.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Coordinator steers</strong><p>Queue an envelope-aware user message; do not mutate live model context from the polling thread.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Current safe unit finishes</strong><p>The active assistant response and tool batch reach <code>TurnEndEvent</code>.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Loop accepts and acknowledges</strong><p>Append the framed mailbox input, publish it, acknowledge with the claim token, then begin another model turn.</p></div>
+            </div>
+          </div>
+
+          <pre><code>[Mailbox message 01JMSG… from session 01JSESSION… / agent agent_01J…]
+Please inspect the auth resolver and send me the result.</code></pre>
+
+          <div class="grid-2" style="margin-top: 1rem;">
+            <article class="card">
+              <span class="card-kicker">steer</span>
+              <h3>Cooperative interruption</h3>
+              <p>If the target is running, enter its context at the next safe boundary. If it is idle, leave the message pending until an explicit run or inbox read.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">note</span>
+              <h3>Inbox only</h3>
+              <p>Durable information that is never automatically injected. The recipient or a Lua tool chooses when to read and acknowledge it.</p>
+            </article>
+          </div>
+
+          <div class="callout">
+            <div class="callout-mark">↩</div>
+            <div>
+              <h3>Request/reply is correlation layered over delivery.</h3>
+              <p>A request is a steering message with a stable ID and an expected response. A reply stores that request ID in <code>reply_to_message_id</code>. The sender waits only for that correlated reply—not for an arbitrary mailbox change.</p>
+            </div>
+          </div>
+
+          <pre><code>request 01JREQ… ──steer──▶ recipient session
+       ▲                         │
+       └──── reply_to=01JREQ… ───┘
+
+default wait: 30 seconds
+maximum wait: 60 seconds
+timeout result: { state = "pending", request_id = "01JREQ…" }
+late reply: retained in the sender's inbox</code></pre>
+
+          <p class="section-intro" style="margin-top: 1.5rem;">
+            A timed-out request is not cancelled. The waiting tool returns control to the model,
+            and any later response remains durable. This prevents a coordination call from
+            pinning an agent turn indefinitely.
+          </p>
+        </section>
+
+        <section id="lua">
+          <span class="section-number">08 · Lua first</span>
+          <h2>Expose primitives; let Lua define the product.</h2>
+          <p class="section-intro">
+            The native layer should be boring and stable. A shipped addon converts those
+            operations into concise tools the model understands, and can evolve naming,
+            descriptions, and policy without recompiling the runtime.
+          </p>
+
+          <div class="grid-2">
+            <article class="card">
+              <span class="card-kicker">Native Lua API</span>
+              <h3><code>pici.mailbox.*</code></h3>
+              <p><code>self</code>, <code>list</code>, <code>send</code>, <code>request</code>, <code>reply</code>, <code>inbox</code>, <code>ack</code>, <code>wait</code>, and <code>status</code>. JSON-compatible arguments; <code>nil, error</code> on expected failures.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Model-visible addon</span>
+              <h3>Coordination tools</h3>
+              <p>Five mailbox intentions—<code>agents_list</code>, <code>agents_send</code>, <code>agents_request</code>, <code>agents_reply</code>, and <code>agents_inbox</code>—plus local-only <code>agents_close</code>.</p>
+            </article>
+          </div>
+
+          <pre><code>local peers, err = pici.mailbox.list({
+  include_self = false,
+  include_stale = false,
+  limit = 100,
+})
+
+local receipt, err = pici.mailbox.send({
+  target = { session_id = "01JSESSION..." },
+  text = "Please review the mailbox schema.",
+  kind = "steer",
+})
+
+local reply, err = pici.mailbox.request({
+  target = { session_id = "01JSESSION..." },
+  text = "Find the cause and report back.",
+  timeout_ms = 30000,
+})</code></pre>
+
+          <div class="callout">
+            <div class="callout-mark">✓</div>
+            <div>
+              <h3>The tool schema is the first capability prompt.</h3>
+              <p>Start with excellent names, descriptions, target semantics, and errors. Only add a global system-prompt fragment if experiments show the model cannot discover the tools reliably.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="exposure">
+          <span class="section-number">09 · Agent exposure</span>
+          <h2>The agent gets intentions, not mailbox machinery.</h2>
+          <p class="section-intro">
+            The full native API is available to trusted Lua addons. The default agent toolset
+            deliberately omits claims, acknowledgements, generations, health checks, and raw
+            waiting. Those details are composed inside the bundled addon.
+          </p>
+
+          <div class="comparison">
+            <table>
+              <thead>
+                <tr>
+                  <th>Model-visible tool</th>
+                  <th>Purpose</th>
+                  <th>Native operations used internally</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td><code>agents_list</code></td><td>Discover concurrent root and subagent endpoints in this workspace.</td><td><code>self</code> + <code>list</code></td></tr>
+                <tr><td><code>agents_send</code></td><td>Send information without requiring an answer.</td><td><code>send</code></td></tr>
+                <tr><td><code>agents_request</code></td><td>Ask another session and wait briefly for its correlated reply.</td><td><code>request</code>, internally composed from <code>send</code> + <code>wait</code> + inbox correlation</td></tr>
+                <tr><td><code>agents_reply</code></td><td>Answer one inbound request.</td><td><code>reply</code></td></tr>
+                <tr><td><code>agents_inbox</code></td><td>Inspect pending notes, requests, and late replies.</td><td><code>inbox</code> + <code>ack</code></td></tr>
+                <tr><td><code>agents_close</code></td><td>Recursively close one locally owned subagent tree.</td><td>Existing <code>pici.agents.close</code>; never a remote mailbox mutation</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="grid-2" style="margin-top: 1rem;">
+            <article class="card">
+              <span class="card-kicker">Hidden from the model</span>
+              <h3>Delivery bookkeeping</h3>
+              <p><code>claim</code>, <code>ack</code>, claim tokens, event generations, leases, raw <code>wait</code>, and database status stay below the tool boundary.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Why this matters</span>
+              <h3>A smaller reasoning surface</h3>
+              <p>The model decides whether to discover, inform, delegate, respond, or inspect. It never has to reason about WAL locks or delivery receipts.</p>
+            </article>
+          </div>
+
+          <div class="decision-box" style="margin-top: 1rem;">
+            <h3>Out-of-box exposure path</h3>
+            <p>Mailbox participation remains an explicit capability, but once enabled it requires no manual addon installation.</p>
+            <pre><code>[mailbox]
+enabled = true</code></pre>
+            <ol>
+              <li>pici opens and migrates <code>mailbox.sqlite3</code>.</li>
+              <li>The current session registers presence and starts heartbeat/inbound delivery.</li>
+              <li>The runtime installs the native <code>pici.mailbox.*</code> bindings.</li>
+              <li>pici automatically loads its bundled <code>mailbox.lua</code> addon.</li>
+              <li>The addon registers the five curated mailbox tools in the model context.</li>
+              <li>The addon also registers local-only <code>agents_close</code>, backed by the existing recursive task-manager close path.</li>
+            </ol>
+          </div>
+
+          <div class="callout">
+            <div class="callout-mark">≠</div>
+            <div>
+              <h3>Enabled does not mean globally visible.</h3>
+              <p>Default discovery and sending remain scoped to the canonical workspace. Cross-workspace visibility requires an explicit configuration decision.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="a2a">
+          <span class="section-number">10 · A2A interoperability</span>
+          <h2>Mailbox is the local kernel. A2A is an edge transport.</h2>
+          <p class="section-intro">
+            A2A should not change what a mailbox row means. It adds a bridge for external,
+            independently implemented agents: Agent Cards for discovery, Tasks for durable
+            work, Parts for typed inputs, Artifacts for outputs, and HTTP/SSE for transport.
+          </p>
+
+          <div class="architecture" role="img" aria-label="Coordination router selecting local mailbox or remote A2A transport">
+            <div class="architecture-stack">
+              <div class="architecture-box box-lua">
+                <strong>Agent tools</strong>
+                <span>list · send · request · inbox</span>
+              </div>
+              <div class="architecture-box box-lua">
+                <strong>CoordinationRouter</strong>
+                <span>chooses by target transport</span>
+              </div>
+            </div>
+            <div class="arrow">→<small>local</small></div>
+            <div class="architecture-stack">
+              <div class="architecture-box box-core">
+                <strong>MailboxTransport</strong>
+                <span>SQLite · leases · endpoints</span>
+              </div>
+              <div class="architecture-box box-core">
+                <strong>A2ATransport</strong>
+                <span>Agent Card · Task · HTTP/SSE</span>
+              </div>
+            </div>
+            <div class="arrow">→<small>routes to</small></div>
+            <div class="architecture-stack">
+              <div class="architecture-box box-db">
+                <strong>Local pici agents</strong>
+                <span>root + resident subagents</span>
+              </div>
+              <div class="architecture-box box-db">
+                <strong>External A2A agents</strong>
+                <span>opaque remote systems</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="callout">
+            <div class="callout-mark">!</div>
+            <div>
+              <h3>The terminal-state mismatch drives the design.</h3>
+              <p>A completed pici subagent is reusable. A completed, failed, canceled, or rejected A2A Task is terminal and cannot accept another message. One subagent may therefore execute many successive A2A Tasks; each new external unit of work receives a new <code>taskId</code>, optionally linked by one <code>contextId</code>.</p>
+            </div>
+          </div>
+
+          <div class="comparison">
+            <table>
+              <thead>
+                <tr><th>pici/mailbox</th><th>A2A</th><th>Bridge rule</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Workspace endpoint</td><td>Agent Card</td><td>Publish only explicitly exported capabilities—not every session or child</td></tr>
+                <tr><td><code>process_id</code></td><td>No equivalent</td><td>Never transmit this local implementation detail</td></tr>
+                <tr><td><code>agent_id</code></td><td>Remote agent identity</td><td>Maintain an explicit mapping; do not reuse IDs</td></tr>
+                <tr><td>Mailbox <code>message_id</code></td><td>A2A <code>messageId</code></td><td>Preserve both; use the external ID for protocol idempotency</td></tr>
+                <tr><td>Request/reply</td><td>Send Message</td><td>A direct Message completes immediately; a returned Task becomes bridge state</td></tr>
+                <tr><td>Related work</td><td><code>contextId</code></td><td>Map explicitly; never expose the pici session ID verbatim</td></tr>
+                <tr><td>One delegated unit</td><td><code>taskId</code></td><td>Create a durable bridge task record</td></tr>
+                <tr><td>Text envelope</td><td>Typed Parts</td><td>Text maps directly; files and structured data require validation</td></tr>
+                <tr><td>Final deliverable</td><td>Artifact</td><td>Do not misuse status Messages as output storage</td></tr>
+                <tr><td>Local interrupt</td><td>Cancel Task</td><td>Only bridge-owned, currently cancelable work may be interrupted</td></tr>
+                <tr><td>Process heartbeat</td><td>No equivalent</td><td>Remote agents never enter the local <code>processes</code> table</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="grid-2" style="margin-top: 1rem;">
+            <article class="card">
+              <span class="card-kicker">Inbound A2A</span>
+              <h3><code>pi-acp</code> becomes the server edge</h3>
+              <p>Authenticate the caller, resolve an explicitly exported capability, create a bridge Task, route it to a local endpoint, and translate pici events into status updates and final Artifacts.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Outbound A2A</span>
+              <h3>A client behind the same agent intentions</h3>
+              <p>Fetch an approved Agent Card, invoke Send Message, return a direct Message immediately, or track the returned Task and surface late completion through the local inbox.</p>
+            </article>
+          </div>
+
+          <div class="timeline">
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Inbound request arrives</strong><p><code>pi-acp</code> validates authentication, Parts, extensions, sizes, and export policy.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Create bridge state</strong><p>Persist separate A2A message, context, and task IDs plus the selected local endpoint.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Route locally</strong><p>Send mailbox work to a root or subagent without publishing local IDs or workspace structure.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Translate progress</strong><p>Map local execution to A2A Task status events; keep terminal semantics owned by the bridge.</p></div>
+            </div>
+            <div class="timeline-step">
+              <div class="timeline-copy"><strong>Publish deliverables</strong><p>Return outputs as Artifacts and close the A2A Task, while the reusable local subagent remains resident.</p></div>
+            </div>
+          </div>
+
+          <div class="grid-3" style="margin-top: 1rem;">
+            <article class="card">
+              <span class="card-kicker">Bridge storage</span>
+              <h3>Separate adapter tables</h3>
+              <p><code>a2a_peers</code>, <code>a2a_task_links</code>, and <code>a2a_artifacts</code> may share the SQLite file initially, but use modular migrations and store interfaces.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Model surface</span>
+              <h3>One vocabulary, visible transport</h3>
+              <p><code>agents_list</code> returns <code>transport = mailbox | a2a</code>. Lua routes the existing send/request tools to <code>pici.mailbox</code> or trusted <code>pici.a2a</code> primitives.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Timeouts</span>
+              <h3>Pending does not mean canceled</h3>
+              <p>After 60 seconds, return the A2A <code>taskId</code>/<code>contextId</code>. Continue tracking so later completion arrives in the ordinary inbox.</p>
+            </article>
+          </div>
+
+          <div class="risk-grid" style="margin-top: 1rem;">
+            <article class="risk">
+              <span class="risk-label">Export policy</span>
+              <h3>No automatic public directory</h3>
+              <p>An Agent Card is generated only for explicitly configured capabilities. Session names, workspace paths, and transient subagent paths remain private.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Authentication</span>
+              <h3>Discovery is not trust</h3>
+              <p>Agent Cards describe capabilities. Authentication, tenant identity, authorization, and credential resolution remain separate from mailbox envelopes.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Content safety</span>
+              <h3>Parts are untrusted inputs</h3>
+              <p>Validate MIME type, size, file URLs, structured data, and extension URIs. Remote URLs require an explicit SSRF-safe fetch policy.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Cancellation</span>
+              <h3>Cancel one bridge task</h3>
+              <p>A2A Cancel Task may interrupt work owned by that bridge record. It never maps to generic <code>agents_close</code> or remote subtree destruction.</p>
+            </article>
+          </div>
+
+          <details open>
+            <summary>Recommended A2A delivery order</summary>
+            <div>
+              First implement outbound Agent Card parsing plus Send Message/Get Task. Then add
+              durable correlation and late-result inbox delivery. Next add inbound Agent Card,
+              Send Message, and Get Task to <code>pi-acp</code>. Add SSE streaming/subscription
+              and artifact chunking afterward. Cancellation comes next; authenticated push
+              notifications come last because they require retry and SSRF policy.
+            </div>
+          </details>
+
+          <p class="section-intro" style="margin-top: 1.5rem;">
+            Protocol reference: the
+            <a href="https://github.com/a2aproject/A2A/blob/main/docs/specification.md">official A2A specification</a>
+            and its
+            <a href="https://github.com/a2aproject/A2A/blob/main/specification/a2a.proto">normative data model</a>.
+          </p>
+        </section>
+
+        <section id="hairy">
+          <span class="section-number">11 · Implementation hazards</span>
+          <h2>The hard parts are all boundaries.</h2>
+          <p class="section-intro">
+            None of the individual APIs are especially exotic. Complexity appears where
+            process lifecycle, database state, agent-loop state, and Lua callbacks meet.
+          </p>
+
+          <div class="risk-grid">
+            <article class="risk">
+              <span class="risk-label">Crash window</span>
+              <h3>At-least-once means duplicates</h3>
+              <p>A receiver can crash after context injection but before DB acknowledgement. Preserve a stable message ID and make redelivery explicit rather than claiming exactly-once semantics.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Lock ordering</span>
+              <h3>Never call across layers while locked</h3>
+              <p>Do not hold the SQLite store mutex while calling <code>Agent::steer</code>, a Lua callback, or an event observer. Claim, release, call, then acknowledge.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Foreground ownership</span>
+              <h3>An idle CLI cannot wake itself casually</h3>
+              <p>Readline owns the foreground input path. The background inbox pump should not invoke <code>run_prompt</code> on an idle interactive session in v1.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Identity ambiguity</span>
+              <h3>A session may be multiply attached</h3>
+              <p>Do not let two processes race to consume an automatic steering message invisibly. Require an exact activation target until routing policy is proven.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Shutdown order</span>
+              <h3>The worker must die before its dependencies</h3>
+              <p>The coordinator owns one <code>std::jthread</code> for heartbeat and polling. Stop and join it before destroying sessions, task managers, callback targets, or the SQLite store.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Trust boundary</span>
+              <h3>Mailbox text is untrusted input</h3>
+              <p>Inject it as an explicitly framed user message—not into the system prompt. Keep default visibility within the canonical workspace and database permissions at <code>0600</code>.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Wait semantics</span>
+              <h3>Wait for the reply, not activity</h3>
+              <p><code>agents_request</code> must correlate on <code>reply_to_message_id</code>. A heartbeat or unrelated note cannot satisfy the request.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Tool availability</span>
+              <h3>Runtime and addon must agree</h3>
+              <p>Enabling mailbox support must atomically provide native bindings and load the bundled addon. Partial availability should produce a clear startup diagnostic.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Resident growth</span>
+              <h3>Completed children still consume slots</h3>
+              <p>Do not hide this with immediate auto-close. Give the parent <code>agents_close</code>, document the resident limit, and consider an opt-in idle TTL only after real usage data.</p>
+            </article>
+            <article class="risk">
+              <span class="risk-label">Authority</span>
+              <h3>Addressable does not mean killable</h3>
+              <p>A remote agent may send work to a subagent endpoint. Only the owning process may interrupt or recursively close that task tree.</p>
+            </article>
+          </div>
+
+          <details open>
+            <summary>The envelope-aware steering change</summary>
+            <div>
+              Today, the steering queue carries bare <code>Message</code> values. The mailbox
+              path needs a message plus delivery metadata and an acceptance action. Prefer a
+              typed envelope with an optional acknowledgement callback or token. The agent loop
+              invokes acceptance only after it has appended and published the input. The callback
+              must be best-effort and execute without agent locks held.
+            </div>
+          </details>
+          <details>
+            <summary>SQLite polling without a busy loop</summary>
+            <div>
+              Use the monotonic event generation as the cursor, sleep in stop-aware intervals,
+              and query only when the cursor may have advanced. A 250 ms default is responsive
+              enough for local coordination and configurable for users who value fewer wakeups.
+            </div>
+          </details>
+          <details>
+            <summary>Database corruption and schema skew</summary>
+            <div>
+              Never silently recreate or truncate the mailbox. A newer schema should fail closed
+              with a clear path and version diagnostic. Corruption recovery is an explicit
+              operator action; ordinary chat may continue with mailbox features disabled.
+            </div>
+          </details>
+        </section>
+
+        <section id="rollout">
+          <span class="section-number">12 · Rollout</span>
+          <h2>Prove the protocol in thin vertical slices.</h2>
+          <p class="section-intro">
+            The safest order gets two processes talking through Lua before attempting automatic
+            steering. That separates database correctness from agent-loop correctness.
+          </p>
+
+          <div class="phase-list">
+            <div class="phase">
+              <span class="phase-number">Phase 1</span>
+              <div><strong>Store and configuration</strong><span>Schema, migrations, registration, list, send, claim, ack, and focused C++ tests.</span></div>
+              <span class="phase-tag">foundation</span>
+            </div>
+            <div class="phase">
+              <span class="phase-number">Phase 2</span>
+              <div><strong>Presence coordinator</strong><span>One process worker, root/subagent endpoints, task-event mirroring, status, and stale detection.</span></div>
+              <span class="phase-tag">cross-process</span>
+            </div>
+            <div class="phase">
+              <span class="phase-number">Phase 3</span>
+              <div><strong>Native Lua primitives</strong><span><code>pici.mailbox.*</code> callbacks, validation, JSON conversion, and stop-aware waits.</span></div>
+              <span class="phase-tag">lua surface</span>
+            </div>
+            <div class="phase">
+              <span class="phase-number">Phase 4</span>
+              <div><strong>Shipped Lua tools</strong><span>Five mailbox intentions plus local-only recursive <code>agents_close</code>. Raw wait and acknowledgement remain internal.</span></div>
+              <span class="phase-tag">first value</span>
+            </div>
+            <div class="phase">
+              <span class="phase-number">Phase 5</span>
+              <div><strong>Between-turn steering</strong><span>Root steering, running-subagent steering, completed-subagent reactivation, correlation, and acceptance acknowledgement.</span></div>
+              <span class="phase-tag">agent awareness</span>
+            </div>
+            <div class="phase">
+              <span class="phase-number">Phase 6</span>
+              <div><strong>Hardening</strong><span>Expired claims, retention, integrity diagnostics, and real two-process validation.</span></div>
+              <span class="phase-tag">default ready</span>
+            </div>
+            <div class="phase">
+              <span class="phase-number">Phase 7</span>
+              <div><strong>Optional A2A adapter</strong><span>Outbound discovery/tasks, durable bridge correlation, inbound <code>pi-acp</code> surface, then streaming, artifacts, and cancellation.</span></div>
+              <span class="phase-tag">interoperability</span>
+            </div>
+          </div>
+        </section>
+
+        <section id="decisions">
+          <span class="section-number">13 · Before coding</span>
+          <h2>Lock the remaining product semantics early.</h2>
+          <div class="decision-box">
+            <h3>Recommended defaults</h3>
+            <p>These choices keep the first implementation narrow while leaving clear extension points.</p>
+            <ol>
+              <li>Require <code>[mailbox] enabled = true</code>, then load the bundled Lua addon automatically.</li>
+              <li>Require an <code>agent_id</code> when one session has multiple live activations.</li>
+              <li>Use the resolved context/workspace root as the isolation boundary.</li>
+              <li>Show a small unread count to the human, but do not auto-run an idle CLI.</li>
+              <li>Drain queued steering messages when an explicit agent run starts.</li>
+              <li>Bound <code>agents_request</code> waits to 60 seconds and retain late replies in the inbox.</li>
+              <li>Use exactly one maintenance worker per process; subagents inherit process liveness.</li>
+              <li>Keep completed subagents resident until local explicit close, ancestor close, or shutdown; no automatic TTL in v1.</li>
+              <li>Use system SQLite first and document it as a build dependency.</li>
+              <li>Keep A2A optional and downstream of mailbox correctness; never put remote agents in the local heartbeat directory.</li>
+              <li>Require explicit Agent Card export, authentication, and a new A2A <code>taskId</code> for each external unit of work.</li>
+            </ol>
+          </div>
+
+          <div class="grid-2" style="margin-top: 1rem;">
+            <article class="card">
+              <span class="card-kicker">Done means</span>
+              <h3>Two real processes coordinate</h3>
+              <p>They discover roots and subagents, exchange durable messages through Lua, recover an expired claim, and steer or reactivate the correct recipient.</p>
+            </article>
+            <article class="card">
+              <span class="card-kicker">Still unchanged</span>
+              <h3>Existing foundations survive</h3>
+              <p>Child-agent behavior, JSONL transcripts, terminal ownership, provider auth, and ordinary operation with mailbox disabled remain compatible; A2A stays an optional edge.</p>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <footer>
+      <span>pici · agent mailbox architecture walkthrough</span>
+      <span class="print-note">Source plan: agent-mailbox-and-session-coordination.md</span>
+    </footer>
+  </div>
+
+  <script>
+    (() => {
+      const links = [...document.querySelectorAll('.toc a')];
+      const sections = links
+        .map((link) => document.querySelector(link.getAttribute('href')))
+        .filter(Boolean);
+
+      if (!('IntersectionObserver' in window)) return;
+
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (!visible) return;
+        links.forEach((link) => {
+          link.classList.toggle('active', link.getAttribute('href') === `#${visible.target.id}`);
+        });
+      }, { rootMargin: '-15% 0px -70% 0px', threshold: 0 });
+
+      sections.forEach((section) => observer.observe(section));
+    })();
+  </script>
+</body>
+</html>
