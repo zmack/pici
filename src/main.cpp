@@ -47,6 +47,8 @@
 #include "core/env_api_keys.h"
 #include "core/event_types.h"
 #include "core/lua_tool.h"
+#include "core/mailbox/mailbox_coordinator.h"
+#include "core/mailbox/mailbox_types.h"
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/otel_init.h"
@@ -73,6 +75,20 @@ void print_version() { std::cout << "pi-cpp " PI_CPP_VERSION "\n"; }
 struct HookRuntime {
   std::mutex mutex;
   std::shared_ptr<core::LuaHooks> hooks;
+};
+
+struct MailboxShutdownGuard {
+  std::shared_ptr<core::MailboxCoordinator> coordinator;
+  explicit MailboxShutdownGuard(std::shared_ptr<core::MailboxCoordinator> value)
+      : coordinator(std::move(value)) {}
+  MailboxShutdownGuard(const MailboxShutdownGuard &) = delete;
+  MailboxShutdownGuard &operator=(const MailboxShutdownGuard &) = delete;
+  MailboxShutdownGuard(MailboxShutdownGuard &&) = delete;
+  MailboxShutdownGuard &operator=(MailboxShutdownGuard &&) = delete;
+  ~MailboxShutdownGuard() {
+    if (coordinator)
+      coordinator->stop();
+  }
 };
 
 void print_tools(
@@ -935,7 +951,60 @@ int cmd_run(const cli::Args &args,
     agent.set_tools(std::move(tools));
   };
 
-  auto task_manager = std::make_shared<core::AgentTaskManager>(runtime, opts);
+  std::shared_ptr<core::MailboxCoordinator> mailbox;
+  if (args.mailbox_enabled) {
+    std::filesystem::path workspace_path;
+    try {
+      workspace_path =
+          std::filesystem::weakly_canonical(std::filesystem::current_path());
+    } catch (...) {
+      workspace_path = std::filesystem::current_path();
+    }
+    const auto settings = args.config_document ? args.config_document->mailbox
+                                               : cli::MailboxSettings{};
+    std::filesystem::path mailbox_path =
+        args.mailbox_path.empty() ? settings.path
+                                  : std::filesystem::path(args.mailbox_path);
+    if (mailbox_path.empty())
+      mailbox_path = cli::default_mailbox_path(cli::default_config_path());
+    const auto now = [] {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::system_clock::now().time_since_epoch())
+          .count();
+    };
+    core::MailboxCoordinatorOptions mailbox_options;
+    mailbox_options.store.path = std::move(mailbox_path);
+    mailbox_options.store.workspace_id = workspace_path.string();
+    mailbox_options.store.workspace_path = workspace_path.string();
+    mailbox_options.store.scope = settings.scope == "global"
+                                      ? core::MailboxScope::global
+                                      : core::MailboxScope::workspace;
+    mailbox_options.store.claim_lease_ms = settings.claim_lease_ms;
+    mailbox_options.store.retention_days = settings.retention_days;
+    mailbox_options.store.clock = now;
+    mailbox_options.store.id_generator = [] {
+      return core::generate_session_id();
+    };
+    mailbox_options.process_id = core::generate_session_id();
+    mailbox_options.root_agent_id = core::generate_session_id();
+    mailbox_options.provider = model.provider;
+    mailbox_options.model_id = model.id;
+    mailbox_options.hostname = "local";
+    mailbox_options.heartbeat_interval =
+        std::chrono::milliseconds(settings.heartbeat_interval_ms);
+    mailbox_options.cleanup_interval = std::chrono::hours(1);
+    mailbox =
+        std::make_shared<core::MailboxCoordinator>(std::move(mailbox_options));
+  }
+  auto task_callbacks = std::vector<core::AgentTaskEventCallback>{};
+  if (mailbox)
+    task_callbacks.emplace_back([mailbox](const core::AgentTaskEvent &event) {
+      mailbox->observe_task_event(event);
+    });
+  auto task_manager = std::make_shared<core::AgentTaskManager>(
+      runtime, opts, core::AgentTaskManager::Limits{},
+      core::fan_out_agent_task_callbacks(std::move(task_callbacks)));
+  MailboxShutdownGuard mailbox_shutdown{mailbox};
   auto compat_counter = std::make_shared<std::atomic_uint64_t>(0);
 
   auto task_error_json = [](const core::AgentTaskError &error) {
@@ -1265,6 +1334,12 @@ int cmd_run(const cli::Args &args,
     }
   }
 
+  if (mailbox) {
+    mailbox->activate_root(current_session_id, current_session_name);
+    const auto current_model = agent.state().model();
+    mailbox->set_model(current_model.provider, current_model.id);
+  }
+
   configure_hooks();
 
   if (args.rpc_mode)
@@ -1421,8 +1496,13 @@ int cmd_run(const cli::Args &args,
   // Run a turn and persist all new messages to the session file.
   auto run_and_persist = [&](const std::string &input) {
     core::TerminalTitleActivityGuard activity(title_controller);
-    return run_turn(runtime, input, *renderer, args.verbose, stream_diagnostics,
-                    hook_runtime);
+    if (mailbox)
+      mailbox->set_root_running(true);
+    auto result = run_turn(runtime, input, *renderer, args.verbose,
+                           stream_diagnostics, hook_runtime);
+    if (mailbox)
+      mailbox->set_root_running(false);
+    return result;
   };
 
   auto update_terminal_ui = [&]() -> std::optional<std::string> {
@@ -1549,6 +1629,8 @@ int cmd_run(const cli::Args &args,
       try {
         const auto result = runtime.set_model(*resolution.model,
                                               agent.state().thinking_level());
+        if (mailbox)
+          mailbox->set_model(result.current.provider, result.current.id);
         configure_hooks();
         {
           std::scoped_lock lock(effective_context_mutex);
@@ -1618,6 +1700,8 @@ int cmd_run(const cli::Args &args,
       current_session_id = result.selected_session_id;
       current_session_name = loaded->header.name;
       runtime.activate_session(*loaded);
+      if (mailbox)
+        mailbox->activate_root(current_session_id, current_session_name);
       if (runtime.last_warning())
         std::cerr << "warning: " << *runtime.last_warning() << "\n";
       configure_hooks();
@@ -1641,6 +1725,8 @@ int cmd_run(const cli::Args &args,
       fresh_hdr.provider = current_model.provider;
       current_session_id = runtime.create_session(fresh_hdr);
       current_session_name.reset();
+      if (mailbox)
+        mailbox->activate_root(current_session_id, current_session_name);
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();
@@ -1660,6 +1746,8 @@ int cmd_run(const cli::Args &args,
       child_hdr.parent_offset = agent.state().messages().size();
       current_session_id = runtime.fork_session(child_hdr);
       current_session_name.reset();
+      if (mailbox)
+        mailbox->activate_root(current_session_id, current_session_name);
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();

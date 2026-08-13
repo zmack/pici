@@ -458,6 +458,7 @@ endif()
 add_library(pi-core
     src/core/mailbox/mailbox_types.cpp
     src/core/mailbox/mailbox_store.cpp
+    src/core/mailbox/mailbox_coordinator.cpp
     src/core/message_types.cpp
     src/core/event_types.cpp
     src/core/event_json.cpp
@@ -604,6 +605,11 @@ if(PI_CPP_BUILD_TESTS)
     target_include_directories(test-mailbox-store PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test-mailbox-store PRIVATE pi-core)
     add_test(NAME test-mailbox-store COMMAND test-mailbox-store)
+
+    add_executable(test-mailbox-coordinator test/test_mailbox_coordinator.cpp)
+    target_include_directories(test-mailbox-coordinator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-mailbox-coordinator PRIVATE pi-core)
+    add_test(NAME test-mailbox-coordinator COMMAND test-mailbox-coordinator)
 
     add_executable(test-credential_store test/test_credential_store.cpp)
     target_link_libraries(test-credential_store PRIVATE pi-core)
