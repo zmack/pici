@@ -62,6 +62,14 @@ public:
   void set_model(std::string provider, std::string model_id);
   void observe_task_event(const AgentTaskEvent &event);
 
+  AgentRecord self();
+  std::vector<AgentRecord> list_agents(AgentQuery query = {});
+  SendReceipt send(SendRequest request);
+  std::vector<MailboxMessage> inspect(InboxQuery query = {});
+  ClaimResult claim(ClaimRequest request);
+  void acknowledge(AcknowledgeRequest request);
+  WaitResult wait(WaitRequest request, std::stop_token stop_token = {});
+
   MailboxCoordinatorStatus status() const;
   MailboxStore &store();
   const MailboxStore &store() const;

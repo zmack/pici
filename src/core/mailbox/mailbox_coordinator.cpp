@@ -12,6 +12,7 @@
 #include <stop_token>
 #include <string>
 #include <unistd.h>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -278,6 +279,115 @@ void MailboxCoordinator::observe_task_event(const AgentTaskEvent &event) {
       subagent_ids_.erase(closed->id);
     }
   }
+}
+
+AgentRecord MailboxCoordinator::self() {
+  std::string agent_id;
+  {
+    std::scoped_lock lock(mutex_);
+    if (!root_active_)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox session is not active");
+    agent_id = active_root_agent_id_;
+  }
+  auto agents = list_agents(AgentQuery{.agent_id = std::move(agent_id),
+                                       .include_stale = true,
+                                       .include_closed = true});
+  if (agents.empty())
+    throw MailboxError(MailboxErrorCode::not_found,
+                       "mailbox agent is not registered");
+  return std::move(agents.front());
+}
+
+std::vector<AgentRecord> MailboxCoordinator::list_agents(AgentQuery query) {
+  query.workspace_id = options_.store.workspace_id;
+  if (query.now_ms == 0)
+    query.now_ms = options_.store.clock();
+  return store_->list_agents(query);
+}
+
+SendReceipt MailboxCoordinator::send(SendRequest request) {
+  std::string session;
+  std::string agent;
+  {
+    std::scoped_lock lock(mutex_);
+    if (!root_active_)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox session is not active");
+    if (!session_id_)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox session is not active");
+    session = *session_id_;
+    agent = active_root_agent_id_;
+  }
+  request.sender_agent_id = std::move(agent);
+  request.sender_session_id = std::move(session);
+  request.workspace_id = options_.store.workspace_id;
+  return store_->send(request);
+}
+
+std::vector<MailboxMessage> MailboxCoordinator::inspect(InboxQuery query) {
+  std::string session;
+  std::string agent;
+  {
+    std::scoped_lock lock(mutex_);
+    if (!root_active_)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox session is not active");
+    if (!session_id_)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox session is not active");
+    session = *session_id_;
+    agent = active_root_agent_id_;
+  }
+  query.session_id = std::move(session);
+  query.agent_id = std::move(agent);
+  query.workspace_id = options_.store.workspace_id;
+  if (query.now_ms == 0)
+    query.now_ms = options_.store.clock();
+  return store_->inspect(query);
+}
+
+ClaimResult MailboxCoordinator::claim(ClaimRequest request) {
+  std::string session;
+  std::string agent;
+  {
+    std::scoped_lock lock(mutex_);
+    if (!root_active_)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox session is not active");
+    if (!session_id_)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox session is not active");
+    session = *session_id_;
+    agent = active_root_agent_id_;
+  }
+  request.session_id = std::move(session);
+  request.agent_id = std::move(agent);
+  request.workspace_id = options_.store.workspace_id;
+  if (request.now_ms == 0)
+    request.now_ms = options_.store.clock();
+  return store_->claim(request);
+}
+
+void MailboxCoordinator::acknowledge(AcknowledgeRequest request) {
+  {
+    std::scoped_lock lock(mutex_);
+    if (!root_active_)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox session is not active");
+    request.agent_id = active_root_agent_id_;
+  }
+  request.workspace_id = options_.store.workspace_id;
+  if (request.now_ms == 0)
+    request.now_ms = options_.store.clock();
+  store_->acknowledge(request);
+}
+
+WaitResult MailboxCoordinator::wait(WaitRequest request,
+                                    std::stop_token stop_token) {
+  request.workspace_id = options_.store.workspace_id;
+  return store_->wait_for_change(request, std::move(stop_token));
 }
 
 void MailboxCoordinator::maintenance_loop(const std::stop_token &stop_token) {

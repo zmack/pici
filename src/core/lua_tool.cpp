@@ -657,6 +657,36 @@ public:
     lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_agents_close, 1);
     lua_setfield(L_, -2, "close");
     lua_setfield(L_, -2, "agents");
+
+    lua_newtable(L_);
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_self, 1);
+    lua_setfield(L_, -2, "self");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_list, 1);
+    lua_setfield(L_, -2, "list");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_send, 1);
+    lua_setfield(L_, -2, "send");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_request, 1);
+    lua_setfield(L_, -2, "request");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_reply, 1);
+    lua_setfield(L_, -2, "reply");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_inbox, 1);
+    lua_setfield(L_, -2, "inbox");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_ack, 1);
+    lua_setfield(L_, -2, "ack");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_wait, 1);
+    lua_setfield(L_, -2, "wait");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_status, 1);
+    lua_setfield(L_, -2, "status");
+    lua_setfield(L_, -2, "mailbox");
     lua_setglobal(L_, "pici");
 
     if (luaL_loadfile(L_, path.c_str()) != LUA_OK) {
@@ -1217,6 +1247,101 @@ public:
     return args;
   }
 
+  static std::stop_token mailbox_stop_token(lua_State *L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_stop_token");
+    auto *token = static_cast<std::stop_token *>(lua_touserdata(L, -1));
+    const auto result = token != nullptr ? *token : std::stop_token{};
+    lua_pop(L, 1);
+    return result;
+  }
+
+  static int push_mailbox_binding(lua_State *L,
+                                  const LuaHooks::MailboxBindings::Callback &fn,
+                                  const nlohmann::json &args) {
+    if (!fn) {
+      lua_pushnil(L);
+      lua_pushstring(L, "pici.mailbox is not available");
+      return 2;
+    }
+    try {
+      auto result = fn(args.is_object() ? args : nlohmann::json::object(),
+                       mailbox_stop_token(L));
+      if (result.contains("error")) {
+        lua_pushnil(L);
+        const auto &error = result["error"];
+        const auto message = error.is_object()
+                                 ? error.value("message", "mailbox error")
+                                 : error.get<std::string>();
+        lua_pushstring(L, message.c_str());
+        return 2;
+      }
+      json_to_lua(L, result);
+      return 1;
+    } catch (const std::exception &e) {
+      lua_pushnil(L);
+      lua_pushstring(L, e.what());
+      return 2;
+    }
+  }
+
+  static nlohmann::json mailbox_args(lua_State *L) {
+    return lua_istable(L, 1) ? lua_to_json(L, 1) : nlohmann::json::object();
+  }
+
+  static int lua_pici_mailbox_self(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_mailbox_binding(L, impl->mailbox_bindings_.self,
+                                mailbox_args(L));
+  }
+
+  static int lua_pici_mailbox_list(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_mailbox_binding(L, impl->mailbox_bindings_.list,
+                                mailbox_args(L));
+  }
+
+  static int lua_pici_mailbox_send(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_mailbox_binding(L, impl->mailbox_bindings_.send,
+                                mailbox_args(L));
+  }
+
+  static int lua_pici_mailbox_request(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_mailbox_binding(L, impl->mailbox_bindings_.request,
+                                mailbox_args(L));
+  }
+
+  static int lua_pici_mailbox_reply(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_mailbox_binding(L, impl->mailbox_bindings_.reply,
+                                mailbox_args(L));
+  }
+
+  static int lua_pici_mailbox_inbox(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_mailbox_binding(L, impl->mailbox_bindings_.inbox,
+                                mailbox_args(L));
+  }
+
+  static int lua_pici_mailbox_ack(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_mailbox_binding(L, impl->mailbox_bindings_.ack,
+                                mailbox_args(L));
+  }
+
+  static int lua_pici_mailbox_wait(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_mailbox_binding(L, impl->mailbox_bindings_.wait,
+                                mailbox_args(L));
+  }
+
+  static int lua_pici_mailbox_status(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_mailbox_binding(L, impl->mailbox_bindings_.status,
+                                mailbox_args(L));
+  }
+
   static int lua_pici_agents_spawn(lua_State *L) {
     auto *impl = impl_from(L);
     return push_agent_binding(L, impl->agent_bindings_.spawn, agent_args(L));
@@ -1358,6 +1483,7 @@ public:
     std::scoped_lock lk(mutex_);
     run_agent_fn_ = info.run_agent;
     agent_bindings_ = info.agents;
+    mailbox_bindings_ = info.mailbox;
     storage_path_ = info.storage_path;
     load_storage();
 
@@ -1670,6 +1796,7 @@ private:
   std::vector<LuaHooks::Command> commands_;
   LuaHooks::RunAgentFn run_agent_fn_;
   LuaHooks::AgentBindings agent_bindings_;
+  LuaHooks::MailboxBindings mailbox_bindings_;
   nlohmann::json storage_{nlohmann::json::object()};
   std::filesystem::path storage_path_;
   mutable std::mutex mutex_;

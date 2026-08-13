@@ -87,6 +87,10 @@ struct AgentRecord {
   std::string status;
   TimestampMs started_at_ms{0};
   std::optional<TimestampMs> closed_at_ms;
+  std::string workspace_id;
+  std::string workspace_path;
+  TimestampMs last_seen_at_ms{0};
+  TimestampMs lease_expires_at_ms{0};
 };
 
 struct AgentUpdate {
@@ -166,6 +170,7 @@ struct InboxQuery {
   std::string session_id;
   std::optional<std::string> workspace_id;
   std::optional<std::string> agent_id;
+  std::optional<std::string> message_id;
   std::vector<MailboxMessageKind> kinds;
   bool include_acknowledged{false};
   std::size_t limit{50};

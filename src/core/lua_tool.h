@@ -157,6 +157,20 @@ struct LuaHooks {
     std::function<nlohmann::json(const nlohmann::json &)> close;
   };
 
+  struct MailboxBindings {
+    using Callback = std::function<nlohmann::json(const nlohmann::json &,
+                                                  const std::stop_token &)>;
+    Callback self;
+    Callback list;
+    Callback send;
+    Callback request;
+    Callback reply;
+    Callback inbox;
+    Callback ack;
+    Callback wait;
+    Callback status;
+  };
+
   // Runtime info injected once after the parent agent is constructed.
   // Enables pici.model(), pici.tools(), pici.cwd(), pici.storage, and
   // pici.run_agent() in Lua.
@@ -170,6 +184,7 @@ struct LuaHooks {
     std::filesystem::path storage_path;
     RunAgentFn run_agent;
     AgentBindings agents;
+    MailboxBindings mailbox;
   };
 
   // Call once after the parent agent and tools are fully configured.

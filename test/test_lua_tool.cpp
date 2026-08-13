@@ -807,6 +807,56 @@ end }
     CHECK(composed == h);  // same pointer, no wrapping
   });
 
+  tests::register_test("LuaHooks: mailbox primitives convert JSON", [&]() {
+    auto p = write_hooks("mailbox_bindings.lua", R"lua(
+return {
+  on_command = function(cmd)
+    if cmd ~= "mailbox" then return {handled=false} end
+    local self, self_err = pici.mailbox.self()
+    local sent, send_err = pici.mailbox.send({
+      target = {session_id = "session-b"}, text = "hello", kind = "note"
+    })
+    if self_err or send_err then
+      return {handled=true, output=self_err or send_err}
+    end
+    return {handled=true, prompt=self.agent_id .. ":" .. sent.state}
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    LuaHooks::AgentInfo info;
+    info.mailbox.self = [](const nlohmann::json &, std::stop_token) {
+      return nlohmann::json{{"agent_id", "agent-a"}};
+    };
+    info.mailbox.send = [](const nlohmann::json &value, std::stop_token) {
+      CHECK(value.at("text") == "hello");
+      return nlohmann::json{{"state", "queued"}};
+    };
+    hooks->configure(info);
+    const auto result = hooks->on_command("mailbox", "", {}, {});
+    CHECK(result.handled);
+    CHECK_EQ(result.prompt.value(), "agent-a:queued");
+  });
+
+  tests::register_test("LuaHooks: mailbox unavailable is nil,error", [&]() {
+    auto p = write_hooks("mailbox_unavailable.lua", R"lua(
+return {
+  on_command = function(cmd)
+    if cmd ~= "mailbox" then return {handled=false} end
+    local value, err = pici.mailbox.self()
+    return {handled=true, output=tostring(value) .. ":" .. err}
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    LuaHooks::AgentInfo info;
+    hooks->configure(info);
+    const auto result = hooks->on_command("mailbox", "", {}, {});
+    CHECK(result.handled);
+    CHECK_EQ(result.output.value(),
+             "nil:pici.mailbox is not available");
+  });
+
   tests::register_test("pici.add_tool registers inline tool", [&]() {
     auto p = write_hooks("inline_tool.lua", R"lua(
 pici.add_tool({

@@ -665,7 +665,8 @@ std::vector<AgentRecord> MailboxStore::list_agents(const AgentQuery &query) {
   Statement statement(database_, R"sql(
     SELECT a.agent_id,a.process_id,a.kind,a.owner_agent_id,a.session_id,
       a.session_name,a.task_id,a.task_path,a.provider,a.model_id,a.status,
-      a.started_at_ms,a.closed_at_ms
+      a.started_at_ms,a.closed_at_ms,p.workspace_id,p.workspace_path,
+      p.last_seen_at_ms,p.lease_expires_at_ms
     FROM agents a JOIN processes p ON p.process_id=a.process_id
     WHERE p.workspace_id=? AND (? OR p.lease_expires_at_ms > ?)
       AND (? OR a.closed_at_ms IS NULL)
@@ -701,6 +702,10 @@ std::vector<AgentRecord> MailboxStore::list_agents(const AgentQuery &query) {
         .status = column_text(statement.get(), 10),
         .started_at_ms = sqlite3_column_int64(statement.get(), 11),
         .closed_at_ms = optional_column_integer(statement.get(), 12),
+        .workspace_id = column_text(statement.get(), 13),
+        .workspace_path = column_text(statement.get(), 14),
+        .last_seen_at_ms = sqlite3_column_int64(statement.get(), 15),
+        .lease_expires_at_ms = sqlite3_column_int64(statement.get(), 16),
     });
   }
   return result;
@@ -822,12 +827,14 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
       "SELECT " + std::string(kMessageColumns) +
           " FROM messages WHERE recipient_session_id=? AND workspace_id=? "
           "AND available_at_ms<=? AND (? OR acknowledged_at_ms IS NULL) "
-          "ORDER BY created_at_ms,message_id LIMIT ?");
+          "AND (? OR message_id=?) ORDER BY created_at_ms,message_id LIMIT ?");
   bind_text(statement.get(), 1, query.session_id);
   bind_text(statement.get(), 2, workspace);
   bind_integer(statement.get(), 3, now);
   bind_integer(statement.get(), 4, query.include_acknowledged ? 1 : 0);
-  bind_integer(statement.get(), 5, static_cast<std::int64_t>(query.limit));
+  bind_integer(statement.get(), 5, query.message_id ? 0 : 1);
+  bind_optional_text(statement.get(), 6, query.message_id);
+  bind_integer(statement.get(), 7, static_cast<std::int64_t>(query.limit));
   std::vector<MailboxMessage> result;
   while (true) {
     const int step = sqlite3_step(statement.get());
