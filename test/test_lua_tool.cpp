@@ -1301,6 +1301,7 @@ void test_mailbox_addon() {
            {{"agent_id", "child-a"},
             {"process_id", "process-a"},
             {"kind", "subagent"},
+            {"task_id", "child-task"},
             {"owner_agent_id", "root-a"}},
            {{"agent_id", "remote-a"},
             {"process_id", "process-b"},
@@ -1345,8 +1346,8 @@ void test_mailbox_addon() {
       return nlohmann::json{{"state", "acknowledged"}};
     };
     info.agents.close = [](const nlohmann::json &value) {
-      CHECK(value.at("target") == "child-a");
-      return nlohmann::json{{"closed", "child-a"}};
+      CHECK(value.at("target") == "child-task");
+      return nlohmann::json{{"closed", "child-task"}};
     };
     hooks->configure(info);
 

@@ -208,6 +208,9 @@ public:
   list(std::optional<std::string_view> task_path_prefix = {}) const;
 
   AgentTaskSnapshot send_message(const AgentTaskId &target, Message message);
+  AgentTaskSnapshot steer_envelopes(const AgentTaskId &target,
+                                    std::vector<AgentMessageEnvelope> messages);
+  void drop_mailbox_envelopes();
   AgentTaskSnapshot follow_up(const AgentTaskId &target,
                               const Message &message);
   AgentTaskSnapshot interrupt(const AgentTaskId &target,
@@ -224,7 +227,10 @@ public:
 private:
   struct Task;
   struct WorkItem {
-    std::string prompt;
+    std::vector<AgentMessageEnvelope> messages;
+    bool mailbox_delivery{false};
+    std::optional<AgentTaskStatusKind> previous_status;
+    std::optional<AgentTaskResult> previous_result;
   };
 
   AgentSession &root_;
@@ -247,7 +253,8 @@ private:
   void emit(const AgentTaskEvent &event) const;
   void run_task(const std::shared_ptr<Task> &task,
                 const std::stop_token &stop_token);
-  void execute_work(const std::shared_ptr<Task> &task, std::string prompt,
+  void execute_work(const std::shared_ptr<Task> &task,
+                    std::vector<AgentMessageEnvelope> messages,
                     AgentTaskResult &result, bool &aborted);
   std::vector<Message> inherit_context(const AgentContext &parent,
                                        const ContextInheritance &request) const;

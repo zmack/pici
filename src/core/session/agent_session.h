@@ -76,6 +76,8 @@ public:
   bool truncate_active_session(std::size_t through);
 
   RunResult run_prompt(std::string prompt, const EventCallback &callback = {});
+  RunResult run_messages(std::vector<AgentMessageEnvelope> messages,
+                         const EventCallback &callback = {});
 
 private:
   void activate_session_state(std::string session_id,

@@ -243,11 +243,27 @@ void test_agent_session_switch_drops_envelope_callbacks() {
         agent.steer_envelopes({AgentMessageEnvelope{
             .message = Message{std::move(message)},
             .on_accepted = [&accepted] { ++accepted; },
+            .source = AgentMessageSource::mailbox,
         }});
 
         agent.set_session_identity("new-session");
 
         CHECK_EQ(accepted, 0);
+    });
+    tests::register_test("Agent: ordinary steering blocks session switch", []() {
+        Agent agent;
+        UserMessage message;
+        message.content.push_back(TextContent{.text = "ordinary"});
+        agent.steer({Message{std::move(message)}});
+        bool threw = false;
+        try {
+            agent.set_session_identity("new-session");
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+        agent.clear_steering_queue();
+        agent.set_session_identity("new-session");
     });
 }
 

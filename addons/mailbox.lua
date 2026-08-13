@@ -255,7 +255,10 @@ tool("agents_close", "Close one locally owned subagent and its descendants. Root
       target_agent.owner_agent_id == nil then
     return invalid("agents_close may only close a locally owned subagent")
   end
-  return call(agents.close, agent_id)
+  if not target_agent.task_id or target_agent.task_id == "" then
+    return invalid("agent_id has no local task endpoint")
+  end
+  return call(agents.close, target_agent.task_id)
 end)
 
 return {}

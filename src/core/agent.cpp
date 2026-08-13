@@ -287,7 +287,12 @@ Agent::restore_session(Model model, ThinkingLevel thinking,
         "session restoration is unavailable while tool execution is pending");
   {
     std::scoped_lock steering_lock(steering_mutex_);
-    steering_queue_.clear();
+    std::erase_if(steering_queue_, [](const AgentMessageEnvelope &envelope) {
+      return envelope.source == AgentMessageSource::mailbox;
+    });
+    if (!steering_queue_.empty())
+      throw std::runtime_error(
+          "session restoration requires an empty steering queue");
   }
   {
     std::scoped_lock followup_lock(followup_mutex_);
@@ -314,7 +319,12 @@ void Agent::set_session_identity(std::string session_id,
     throw std::runtime_error("session changes require an idle agent");
   {
     std::scoped_lock steering_lock(steering_mutex_);
-    steering_queue_.clear();
+    std::erase_if(steering_queue_, [](const AgentMessageEnvelope &envelope) {
+      return envelope.source == AgentMessageSource::mailbox;
+    });
+    if (!steering_queue_.empty())
+      throw std::runtime_error(
+          "session changes require an empty steering queue");
   }
   {
     std::scoped_lock followup_lock(followup_mutex_);
@@ -339,6 +349,13 @@ void Agent::steer_envelopes(std::vector<AgentMessageEnvelope> messages) {
 void Agent::clear_steering_queue() {
   std::scoped_lock lock(steering_mutex_);
   steering_queue_.clear();
+}
+
+void Agent::clear_mailbox_steering_queue() {
+  std::scoped_lock lock(steering_mutex_);
+  std::erase_if(steering_queue_, [](const AgentMessageEnvelope &envelope) {
+    return envelope.source == AgentMessageSource::mailbox;
+  });
 }
 
 void Agent::follow_up(std::vector<Message> messages) {

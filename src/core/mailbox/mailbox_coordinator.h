@@ -5,12 +5,14 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -29,7 +31,16 @@ struct MailboxCoordinatorOptions {
   std::int64_t protocol_version{1};
   std::string capabilities_json{"[]"};
   std::chrono::milliseconds heartbeat_interval{2000};
+  std::chrono::milliseconds poll_interval{250};
   std::chrono::milliseconds cleanup_interval{30'000};
+};
+
+struct MailboxDeliveryTargets {
+  std::function<bool(std::vector<AgentMessageEnvelope>)> root;
+  std::function<bool(std::string, std::string,
+                     std::vector<AgentMessageEnvelope>)>
+      subagent;
+  std::function<void()> drop_queued;
 };
 
 struct MailboxCoordinatorStatus {
@@ -61,6 +72,10 @@ public:
   void set_root_running(bool running);
   void set_model(std::string provider, std::string model_id);
   void observe_task_event(const AgentTaskEvent &event);
+  void attach_delivery(std::shared_ptr<MailboxDeliveryTargets> targets);
+  void detach_delivery();
+  void pump_inbox();
+  void drop_queued_delivery();
 
   AgentRecord self();
   std::vector<AgentRecord> list_agents(AgentQuery query = {});
@@ -86,15 +101,32 @@ private:
   std::string provider_;
   std::string model_id_;
   std::unordered_set<std::string> subagent_ids_;
+  std::unordered_map<std::string, std::string> subagent_endpoint_by_task_;
+  std::unordered_map<std::string, std::string> subagent_task_by_endpoint_;
   bool root_active_{false};
   bool root_running_{false};
   bool root_registered_{false};
   bool stopped_{false};
+  TimestampMs next_heartbeat_ms_{0};
+  TimestampMs next_poll_ms_{0};
   std::jthread maintenance_;
   std::condition_variable_any maintenance_wakeup_;
+  std::shared_ptr<MailboxDeliveryTargets> delivery_targets_;
+
+  struct Lifetime {
+    std::mutex mutex;
+    std::condition_variable condition;
+    MailboxCoordinator *owner{nullptr};
+    bool active{true};
+    std::size_t in_flight{0};
+  };
+  std::shared_ptr<Lifetime> lifetime_;
 
   void maintenance_loop(const std::stop_token &stop_token);
   void maintenance_once(TimestampMs now, TimestampMs &last_cleanup);
+  void poll_inbox();
+  void acknowledge_delivery(std::string agent_id, std::string message_id,
+                            std::string claim_token);
   void register_subagent(const AgentTaskSpawnedEvent &event);
   static std::string task_status(AgentTaskStatusKind status);
 };

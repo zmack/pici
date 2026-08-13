@@ -141,6 +141,7 @@ public:
   void steer(std::vector<Message> messages);
   void steer_envelopes(std::vector<AgentMessageEnvelope> messages);
   void clear_steering_queue();
+  void clear_mailbox_steering_queue();
 
   // Queue a message to run only after the agent would otherwise stop
   void follow_up(std::vector<Message> messages);

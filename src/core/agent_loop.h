@@ -42,9 +42,15 @@ using StreamCallback = std::function<void(const AgentEvent &)>;
 
 using MessageAcceptanceCallback = std::function<void()>;
 
+enum class AgentMessageSource {
+  ordinary,
+  mailbox,
+};
+
 struct AgentMessageEnvelope {
   Message message;
   MessageAcceptanceCallback on_accepted;
+  AgentMessageSource source{AgentMessageSource::ordinary};
 };
 
 struct BeforeToolCallContext {

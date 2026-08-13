@@ -1,8 +1,12 @@
 #include "core/mailbox/mailbox_coordinator.h"
+#include "core/agent_loop.h"
 #include "core/agent_task.h"
 #include "core/mailbox/mailbox_store.h"
 #include "core/mailbox/mailbox_types.h"
+#include "core/message_types.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -12,12 +16,26 @@
 #include <stop_token>
 #include <string>
 #include <unistd.h>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace pi::core {
+
+namespace {
+
+Message mailbox_message_to_message(const MailboxMessage &message) {
+  UserMessage user;
+  user.content.emplace_back(TextContent{
+      .text = "[Mailbox message " + message.message_id + " from session " +
+              message.sender_session_id + " / agent " +
+              message.sender_agent_id + "]\n" + message.body.text});
+  return Message{std::move(user)};
+}
+
+} // namespace
 
 AgentTaskEventCallback
 fan_out_agent_task_callbacks(std::vector<AgentTaskEventCallback> callbacks) {
@@ -38,7 +56,8 @@ fan_out_agent_task_callbacks(std::vector<AgentTaskEventCallback> callbacks) {
 MailboxCoordinator::MailboxCoordinator(MailboxCoordinatorOptions options)
     : options_(std::move(options)), provider_(options_.provider),
       model_id_(options_.model_id),
-      active_root_agent_id_(options_.root_agent_id) {
+      active_root_agent_id_(options_.root_agent_id),
+      lifetime_(std::make_shared<Lifetime>()) {
   if (options_.process_id.empty() || options_.root_agent_id.empty())
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "mailbox coordinator identities are required");
@@ -47,6 +66,10 @@ MailboxCoordinator::MailboxCoordinator(MailboxCoordinatorOptions options)
                        "mailbox heartbeat interval must be positive");
   if (options_.cleanup_interval <= std::chrono::milliseconds::zero())
     options_.cleanup_interval = options_.heartbeat_interval;
+  if (options_.poll_interval <= std::chrono::milliseconds::zero())
+    options_.poll_interval = std::chrono::milliseconds(250);
+
+  lifetime_->owner = this;
 
   store_ = std::make_unique<MailboxStore>(options_.store);
   const auto now = options_.store.clock();
@@ -82,6 +105,7 @@ void MailboxCoordinator::activate_root(
   std::string root_agent_id;
   std::string provider;
   std::string model;
+  std::shared_ptr<MailboxDeliveryTargets> delivery;
   {
     std::scoped_lock lock(mutex_);
     if (stopped_)
@@ -92,10 +116,18 @@ void MailboxCoordinator::activate_root(
     old_subagent_ids = subagent_ids_;
     provider = provider_;
     model = model_id_;
+    delivery = delivery_targets_;
     if (root_registered_)
       root_agent_id = options_.store.id_generator();
     else
       root_agent_id = active_root_agent_id_;
+  }
+  if (old_session && delivery && delivery->drop_queued) {
+    try {
+      delivery->drop_queued();
+    } catch (...) {
+      static_cast<void>(0);
+    }
   }
   const auto now = options_.store.clock();
   store_->register_agent(AgentRecord{
@@ -131,6 +163,8 @@ void MailboxCoordinator::activate_root(
     root_running_ = false;
     root_registered_ = true;
     subagent_ids_.clear();
+    subagent_endpoint_by_task_.clear();
+    subagent_task_by_endpoint_.clear();
   }
 }
 
@@ -138,6 +172,7 @@ void MailboxCoordinator::deactivate_root() {
   std::optional<std::string> active;
   std::string root_agent_id;
   std::unordered_set<std::string> subagent_ids;
+  std::shared_ptr<MailboxDeliveryTargets> delivery;
   {
     std::scoped_lock lock(mutex_);
     if (!root_active_)
@@ -145,6 +180,14 @@ void MailboxCoordinator::deactivate_root() {
     active = session_id_;
     root_agent_id = active_root_agent_id_;
     subagent_ids = subagent_ids_;
+    delivery = delivery_targets_;
+  }
+  if (delivery && delivery->drop_queued) {
+    try {
+      delivery->drop_queued();
+    } catch (...) {
+      static_cast<void>(0);
+    }
   }
   const auto now = options_.store.clock();
   for (const auto &subagent_id : subagent_ids)
@@ -158,6 +201,8 @@ void MailboxCoordinator::deactivate_root() {
     session_id_.reset();
     session_name_.reset();
     subagent_ids_.clear();
+    subagent_endpoint_by_task_.clear();
+    subagent_task_by_endpoint_.clear();
   }
 }
 
@@ -217,9 +262,19 @@ void MailboxCoordinator::register_subagent(const AgentTaskSpawnedEvent &event) {
   }
   if (!session)
     return;
+  std::string endpoint;
+  {
+    std::scoped_lock lock(mutex_);
+    if (options_.store.id_generator)
+      endpoint = options_.store.id_generator();
+    else
+      endpoint = "endpoint";
+    static std::atomic_uint64_t endpoint_counter{1};
+    endpoint += ":subagent:" + std::to_string(endpoint_counter.fetch_add(1));
+  }
   const auto now = options_.store.clock();
   store_->register_agent(AgentRecord{
-      .agent_id = event.id,
+      .agent_id = endpoint,
       .process_id = options_.process_id,
       .kind = "subagent",
       .owner_agent_id = root_agent_id,
@@ -237,11 +292,15 @@ void MailboxCoordinator::register_subagent(const AgentTaskSpawnedEvent &event) {
     belongs_to_current_session = root_active_ && session_id_ == session &&
                                  active_root_agent_id_ == root_agent_id;
     if (belongs_to_current_session)
-      subagent_ids_.insert(event.id);
+      subagent_ids_.insert(endpoint);
+    if (belongs_to_current_session) {
+      subagent_endpoint_by_task_[event.id] = endpoint;
+      subagent_task_by_endpoint_[endpoint] = event.id;
+    }
   }
   if (!belongs_to_current_session) {
     try {
-      store_->close_agent(event.id, now);
+      store_->close_agent(endpoint, now);
     } catch (...) {
       static_cast<void>(0);
     }
@@ -257,26 +316,188 @@ void MailboxCoordinator::observe_task_event(const AgentTaskEvent &event) {
     register_subagent(*spawned);
   } else if (const auto *changed =
                  std::get_if<AgentTaskStatusChangedEvent>(&event)) {
+    std::string endpoint;
     bool owned = false;
     {
       std::scoped_lock lock(mutex_);
-      owned = root_active_ && subagent_ids_.contains(changed->id);
+      const auto it = subagent_endpoint_by_task_.find(changed->id);
+      owned = root_active_ && it != subagent_endpoint_by_task_.end();
+      if (owned)
+        endpoint = it->second;
     }
     if (owned) {
       const auto status = task_status(changed->current);
-      store_->update_agent(
-          AgentUpdate{.agent_id = changed->id, .status = status});
+      store_->update_agent(AgentUpdate{.agent_id = endpoint, .status = status});
     }
   } else if (const auto *closed = std::get_if<AgentTaskClosedEvent>(&event)) {
+    std::string endpoint;
     bool owned = false;
     {
       std::scoped_lock lock(mutex_);
-      owned = root_active_ && subagent_ids_.contains(closed->id);
+      const auto it = subagent_endpoint_by_task_.find(closed->id);
+      owned = root_active_ && it != subagent_endpoint_by_task_.end();
+      if (owned)
+        endpoint = it->second;
     }
     if (owned) {
-      store_->close_agent(closed->id, options_.store.clock());
+      store_->close_agent(endpoint, options_.store.clock());
       std::scoped_lock lock(mutex_);
-      subagent_ids_.erase(closed->id);
+      subagent_ids_.erase(endpoint);
+      subagent_endpoint_by_task_.erase(closed->id);
+      subagent_task_by_endpoint_.erase(endpoint);
+    }
+  }
+}
+
+void MailboxCoordinator::attach_delivery(
+    std::shared_ptr<MailboxDeliveryTargets> targets) {
+  std::scoped_lock lock(mutex_);
+  delivery_targets_ = std::move(targets);
+}
+
+void MailboxCoordinator::detach_delivery() {
+  std::scoped_lock lock(mutex_);
+  delivery_targets_.reset();
+}
+
+void MailboxCoordinator::drop_queued_delivery() {
+  std::shared_ptr<MailboxDeliveryTargets> delivery;
+  {
+    std::scoped_lock lock(mutex_);
+    delivery = delivery_targets_;
+  }
+  if (delivery && delivery->drop_queued)
+    delivery->drop_queued();
+}
+
+void MailboxCoordinator::acknowledge_delivery(std::string agent_id,
+                                              std::string message_id,
+                                              std::string claim_token) {
+  store_->acknowledge(
+      AcknowledgeRequest{.message_id = std::move(message_id),
+                         .agent_id = std::move(agent_id),
+                         .claim_token = std::move(claim_token),
+                         .workspace_id = options_.store.workspace_id,
+                         .now_ms = options_.store.clock()});
+}
+
+void MailboxCoordinator::pump_inbox() { poll_inbox(); }
+
+void MailboxCoordinator::poll_inbox() {
+  std::shared_ptr<MailboxDeliveryTargets> delivery;
+  std::string root_agent_id;
+  std::optional<std::string> session_id;
+  bool root_running = false;
+  std::unordered_set<std::string> subagent_ids;
+  std::unordered_map<std::string, std::string> subagent_tasks;
+  {
+    std::scoped_lock lock(mutex_);
+    delivery = delivery_targets_;
+    if (!root_active_ || !delivery)
+      return;
+    root_agent_id = active_root_agent_id_;
+    session_id = session_id_;
+    root_running = root_running_;
+    subagent_ids = subagent_ids_;
+    subagent_tasks = subagent_task_by_endpoint_;
+  }
+  if (!session_id)
+    return;
+
+  std::vector<AgentRecord> local_agents;
+  try {
+    local_agents = store_->list_agents(
+        AgentQuery{.workspace_id = options_.store.workspace_id,
+                   .include_stale = false,
+                   .include_closed = false,
+                   .limit = 1000,
+                   .now_ms = options_.store.clock()});
+  } catch (...) {
+    return;
+  }
+
+  for (const auto &agent : local_agents) {
+    if (agent.process_id != options_.process_id || agent.agent_id.empty())
+      continue;
+    const bool is_root = agent.agent_id == root_agent_id;
+    if (is_root) {
+      if (!root_running || !delivery->root)
+        continue;
+    } else if (!subagent_ids.contains(agent.agent_id) ||
+               !subagent_tasks.contains(agent.agent_id) ||
+               !delivery->subagent || agent.status == "closing" ||
+               agent.status == "closed" || agent.status == "shutdown") {
+      continue;
+    }
+
+    ClaimResult claimed;
+    try {
+      claimed = store_->claim(ClaimRequest{
+          .session_id = *session_id,
+          .agent_id = agent.agent_id,
+          .workspace_id = options_.store.workspace_id,
+          .kinds = {MailboxMessageKind::steer, MailboxMessageKind::request},
+          .limit = 16,
+          .now_ms = options_.store.clock(),
+          .lease_ms = options_.store.claim_lease_ms});
+    } catch (...) {
+      continue;
+    }
+
+    for (auto &claimed_message : claimed.messages) {
+      const auto message_id = claimed_message.message_id;
+      const auto claim_token = claimed_message.claim_token.value_or("");
+      const auto endpoint = agent.agent_id;
+      const auto task_id = subagent_tasks.contains(endpoint)
+                               ? subagent_tasks.at(endpoint)
+                               : std::string{};
+      AgentMessageEnvelope envelope{
+          .message = mailbox_message_to_message(claimed_message),
+          .on_accepted =
+              [weak = std::weak_ptr<Lifetime>(lifetime_), endpoint, message_id,
+               claim_token] noexcept {
+                auto state = weak.lock();
+                if (!state)
+                  return;
+                MailboxCoordinator *owner = nullptr;
+                {
+                  std::scoped_lock lock(state->mutex);
+                  if (!state->active || state->owner == nullptr)
+                    return;
+                  owner = state->owner;
+                  ++state->in_flight;
+                }
+                try {
+                  owner->acknowledge_delivery(endpoint, message_id,
+                                              claim_token);
+                } catch (...) {
+                  // Lease expiry provides redelivery when acknowledgement
+                  // fails.
+                  static_cast<void>(0);
+                }
+                {
+                  std::scoped_lock lock(state->mutex);
+                  if (state->in_flight > 0)
+                    --state->in_flight;
+                  if (state->in_flight == 0)
+                    state->condition.notify_all();
+                }
+              },
+          .source = AgentMessageSource::mailbox};
+      bool routed = false;
+      try {
+        if (is_root)
+          routed = delivery->root(
+              std::vector<AgentMessageEnvelope>{std::move(envelope)});
+        else
+          routed = delivery->subagent(
+              endpoint, task_id,
+              std::vector<AgentMessageEnvelope>{std::move(envelope)});
+      } catch (...) {
+        routed = false;
+      }
+      if (!routed)
+        continue;
     }
   }
 }
@@ -396,16 +617,22 @@ void MailboxCoordinator::maintenance_loop(const std::stop_token &stop_token) {
     const auto now = options_.store.clock();
     maintenance_once(now, last_cleanup);
     std::unique_lock lock(mutex_);
-    maintenance_wakeup_.wait_for(lock, stop_token, options_.heartbeat_interval,
-                                 [] { return false; });
+    maintenance_wakeup_.wait_for(
+        lock, stop_token,
+        std::min(options_.heartbeat_interval, options_.poll_interval),
+        [] { return false; });
   }
 }
 
 void MailboxCoordinator::maintenance_once(TimestampMs now,
                                           TimestampMs &last_cleanup) {
   try {
-    store_->heartbeat_process(options_.process_id, now,
-                              now + (options_.heartbeat_interval.count() * 3));
+    if (next_heartbeat_ms_ == 0 || now >= next_heartbeat_ms_) {
+      store_->heartbeat_process(options_.process_id, now,
+                                now +
+                                    (options_.heartbeat_interval.count() * 3));
+      next_heartbeat_ms_ = now + options_.heartbeat_interval.count();
+    }
     if (now - last_cleanup >= options_.cleanup_interval.count()) {
       store_->cleanup(CleanupRequest{
           .workspace_id = options_.store.workspace_id,
@@ -416,6 +643,10 @@ void MailboxCoordinator::maintenance_once(TimestampMs now,
               static_cast<std::int64_t>(7) * 24 * 60 * 60 * 1000,
       });
       last_cleanup = now;
+    }
+    if (next_poll_ms_ == 0 || now >= next_poll_ms_) {
+      next_poll_ms_ = now + options_.poll_interval.count();
+      poll_inbox();
     }
   } catch (...) {
     // A transient busy/permission failure must not kill process presence.
@@ -461,6 +692,16 @@ void MailboxCoordinator::stop() noexcept {
     if (stopped_)
       return;
     stopped_ = true;
+  }
+  {
+    std::scoped_lock lock(lifetime_->mutex);
+    lifetime_->active = false;
+    lifetime_->owner = nullptr;
+  }
+  {
+    std::unique_lock lock(lifetime_->mutex);
+    lifetime_->condition.wait(lock,
+                              [this] { return lifetime_->in_flight == 0; });
   }
   maintenance_.request_stop();
   maintenance_wakeup_.notify_all();

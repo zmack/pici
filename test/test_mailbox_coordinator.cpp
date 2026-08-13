@@ -90,11 +90,15 @@ int main() {
         .session_id = "session-a", .include_closed = true, .now_ms = now});
     CHECK_EQ(children.size(), std::size_t{2});
     CHECK(std::ranges::any_of(children, [](const auto &child) {
-      return child.agent_id == "agent_1" && child.status == "completed";
+      return child.task_id == "agent_1" && child.status == "completed";
     }));
+    const auto first_child = std::ranges::find_if(
+        children, [](const auto &child) { return child.task_id == "agent_1"; });
+    CHECK(first_child != children.end());
+    const auto first_endpoint = first_child->agent_id;
     coordinator.observe_task_event(AgentTaskClosedEvent{.id = "agent_1"});
     CHECK(coordinator.store()
-              .list_agents(AgentQuery{.agent_id = "agent_1",
+              .list_agents(AgentQuery{.agent_id = first_endpoint,
                                       .include_closed = true,
                                       .now_ms = now})
               .front()
@@ -124,13 +128,143 @@ int main() {
         .session_id = "session-b", .include_closed = true, .now_ms = now});
     CHECK_EQ(current_agents.size(), std::size_t{1});
     CHECK(!current_agents.front().closed_at_ms.has_value());
+
+    std::vector<AgentMessageEnvelope> delivered;
+    bool accept_delivery = true;
+    auto delivery = std::make_shared<MailboxDeliveryTargets>();
+    delivery->root = [&](std::vector<AgentMessageEnvelope> messages) {
+      if (!accept_delivery)
+        return false;
+      for (auto &message : messages)
+        delivered.push_back(std::move(message));
+      return true;
+    };
+    coordinator.attach_delivery(delivery);
+    coordinator.store().send(SendRequest{
+        .message_id = "steer-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxMessageKind::steer,
+        .body = MailboxBody{.text = "inspect this"},
+        .created_at_ms = now});
+    coordinator.pump_inbox();
+    CHECK(delivered.empty());
+    coordinator.set_root_running(true);
+    coordinator.pump_inbox();
+    CHECK_EQ(delivered.size(), std::size_t{1});
+    CHECK(std::holds_alternative<UserMessage>(delivered.front().message));
+    CHECK(std::get<TextContent>(
+              std::get<UserMessage>(delivered.front().message).content.front())
+              .text.find("steer-1") != std::string::npos);
+    delivered.front().on_accepted();
+    CHECK(coordinator.store()
+              .inspect(InboxQuery{.session_id = "session-b",
+                                  .workspace_id = "workspace",
+                                  .now_ms = now})
+              .empty());
+
+    coordinator.store().send(SendRequest{
+        .message_id = "note-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxMessageKind::note,
+        .body = MailboxBody{.text = "do not steer"},
+        .created_at_ms = now});
+    coordinator.store().send(SendRequest{
+        .message_id = "reply-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxMessageKind::reply,
+        .body = MailboxBody{.text = "do not steer"},
+        .created_at_ms = now});
+    coordinator.pump_inbox();
+    CHECK_EQ(delivered.size(), std::size_t{1});
+    CHECK_EQ(coordinator.store()
+                 .inspect(InboxQuery{.session_id = "session-b",
+                                     .workspace_id = "workspace",
+                                     .now_ms = now})
+                 .size(),
+             std::size_t{2});
+
+    coordinator.store().send(SendRequest{
+        .message_id = "steer-2",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxMessageKind::steer,
+        .body = MailboxBody{.text = "retry me"},
+        .created_at_ms = now});
+    accept_delivery = false;
+    coordinator.pump_inbox();
+    CHECK_EQ(delivered.size(), std::size_t{1});
+    now += 101;
+    accept_delivery = true;
+    coordinator.pump_inbox();
+    CHECK_EQ(delivered.size(), std::size_t{2});
+    delivered.back().on_accepted();
+
+    std::vector<AgentMessageEnvelope> subagent_delivered;
+    delivery->subagent =
+        [&](std::string, std::string task_id,
+            std::vector<AgentMessageEnvelope> messages) {
+          CHECK_EQ(task_id, std::string("agent_4"));
+          for (auto &message : messages)
+            subagent_delivered.push_back(std::move(message));
+          return true;
+        };
+    coordinator.observe_task_event(AgentTaskSpawnedEvent{
+        .id = "agent_4", .task_path = "/root/child-4",
+        .parent_id = "root", .task_name = "child-4"});
+    coordinator.observe_task_event(AgentTaskStatusChangedEvent{
+        .id = "agent_4",
+        .previous = AgentTaskStatusKind::pending_init,
+        .current = AgentTaskStatusKind::completed});
+    const auto child_agents = coordinator.store().list_agents(AgentQuery{
+        .session_id = "session-b", .include_closed = false, .limit = 100,
+        .now_ms = now});
+    const auto endpoint = std::ranges::find_if(
+        child_agents, [](const auto &agent) { return agent.task_id == "agent_4"; });
+    CHECK(endpoint != child_agents.end());
+    coordinator.store().send(SendRequest{
+        .message_id = "sub-steer-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.agent_id = endpoint->agent_id},
+        .workspace_id = "workspace",
+        .kind = MailboxMessageKind::steer,
+        .body = MailboxBody{.text = "reactivate child"},
+        .created_at_ms = now});
+    coordinator.pump_inbox();
+    CHECK_EQ(subagent_delivered.size(), std::size_t{1});
+    subagent_delivered.front().on_accepted();
+    CHECK(coordinator.store()
+              .inspect(InboxQuery{.session_id = "session-b",
+                                  .workspace_id = "workspace",
+                                  .agent_id = endpoint->agent_id,
+                                  .message_id = "sub-steer-1",
+                                  .now_ms = now})
+              .empty());
+
     coordinator.observe_task_event(AgentTaskStatusChangedEvent{
         .id = "agent_2",
         .previous = AgentTaskStatusKind::running,
         .current = AgentTaskStatusKind::completed});
     coordinator.observe_task_event(AgentTaskClosedEvent{.id = "agent_2"});
+    const auto old_agents_after = coordinator.store().list_agents(AgentQuery{
+        .session_id = "session-a", .include_closed = true, .now_ms = now});
+    const auto second_child = std::ranges::find_if(
+        old_agents_after,
+        [](const auto &agent) { return agent.task_id == "agent_2"; });
+    CHECK(second_child != old_agents_after.end());
     CHECK(coordinator.store()
-              .list_agents(AgentQuery{.agent_id = "agent_2",
+              .list_agents(AgentQuery{.agent_id = second_child->agent_id,
                                       .include_closed = true,
                                       .now_ms = now})
               .front()
@@ -151,13 +285,57 @@ int main() {
     const auto task = task_manager.spawn(
         {.task_name = "shutdown-child", .prompt = "stop"});
     task_manager.shutdown();
+    const auto shutdown_agents = coordinator.store().list_agents(AgentQuery{
+        .session_id = "session-b", .include_closed = true, .now_ms = now});
+    const auto shutdown_endpoint = std::ranges::find_if(
+        shutdown_agents,
+        [&](const auto &agent) { return agent.task_id == task.id; });
+    CHECK(shutdown_endpoint != shutdown_agents.end());
     const auto shutdown_agent = coordinator.store().list_agents(AgentQuery{
-        .agent_id = task.id, .include_closed = true, .now_ms = now});
+        .agent_id = shutdown_endpoint->agent_id, .include_closed = true,
+        .now_ms = now});
     CHECK_EQ(shutdown_agent.size(), std::size_t{1});
     CHECK(shutdown_agent.front().closed_at_ms.has_value());
 
+    auto second_options = options();
+    second_options.process_id = "process-2";
+    second_options.root_agent_id = "root-agent-2";
+    MailboxCoordinator second_coordinator(std::move(second_options));
+    second_coordinator.activate_root("session-c", "third");
+    const AgentTaskSpawnedEvent same_task{
+        .id = "agent_same", .task_path = "/root/same", .parent_id = "root",
+        .task_name = "same"};
+    coordinator.observe_task_event(same_task);
+    second_coordinator.observe_task_event(same_task);
+    const auto same_agents = coordinator.store().list_agents(AgentQuery{
+        .workspace_id = "workspace", .include_closed = false, .limit = 100,
+        .now_ms = now});
+    std::vector<std::string> same_endpoints;
+    for (const auto &agent : same_agents)
+      if (agent.task_id == "agent_same")
+        same_endpoints.push_back(agent.agent_id);
+    CHECK_EQ(same_endpoints.size(), std::size_t{2});
+    CHECK(same_endpoints[0] != same_endpoints[1]);
+    second_coordinator.stop();
+
     coordinator.maintenance_tick();
+    const auto delivered_after_tick = delivered.size();
+    const auto root_endpoint = coordinator.self().agent_id;
     now += 100;
+    coordinator.store().send(SendRequest{
+        .message_id = "cadence-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.agent_id = root_endpoint},
+        .workspace_id = "workspace",
+        .kind = MailboxMessageKind::steer,
+        .body = MailboxBody{.text = "cadence"},
+        .created_at_ms = now});
+    coordinator.maintenance_tick();
+    CHECK_EQ(delivered.size(), delivered_after_tick);
+    now += 150;
+    coordinator.maintenance_tick();
+    CHECK(delivered.size() > delivered_after_tick);
     coordinator.set_root_running(false);
     coordinator.stop();
     CHECK(!coordinator.status().root_active);

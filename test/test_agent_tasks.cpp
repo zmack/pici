@@ -127,6 +127,20 @@ int main() {
   CHECK(second.result.has_value());
   CHECK(second.result->text == "follow-up result");
 
+  int accepted = 0;
+  UserMessage mailbox_message;
+  mailbox_message.content.emplace_back(TextContent{.text = "mailbox"});
+  AgentMessageEnvelope mailbox_envelope{
+      .message = Message{std::move(mailbox_message)},
+      .on_accepted = [&accepted] { ++accepted; },
+      .source = AgentMessageSource::mailbox};
+  auto reactivated =
+      manager.steer_envelopes(child.id, {std::move(mailbox_envelope)});
+  auto third = wait_terminal(manager, reactivated);
+  CHECK(third.status == AgentTaskStatusKind::completed);
+  CHECK(third.result && third.result->text == "third result");
+  CHECK(accepted == 1);
+
   const auto all = manager.list();
   CHECK(all.size() == 2);
   CHECK(all.front().task_path == "/root");

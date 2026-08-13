@@ -1,6 +1,7 @@
 #include "core/session/agent_session.h"
 
 #include "core/agent.h"
+#include "core/agent_loop.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/models.h"
@@ -223,6 +224,15 @@ bool AgentSession::truncate_active_session(std::size_t through) {
 
 AgentSession::RunResult
 AgentSession::run_prompt(std::string prompt, const EventCallback &callback) {
+  UserMessage message;
+  message.content.emplace_back(TextContent{.text = std::move(prompt)});
+  return run_messages(
+      {AgentMessageEnvelope{.message = Message{std::move(message)}}}, callback);
+}
+
+AgentSession::RunResult
+AgentSession::run_messages(std::vector<AgentMessageEnvelope> messages,
+                           const EventCallback &callback) {
   RunResult result;
   bool started = false;
   std::optional<std::string> persistence_error;
@@ -246,7 +256,7 @@ AgentSession::run_prompt(std::string prompt, const EventCallback &callback) {
   };
 
   try {
-    auto stream = agent_.prompt(std::move(prompt));
+    auto stream = agent_.prompt(std::move(messages));
     started = true;
     for (const auto &event : stream)
       handle_event(event);

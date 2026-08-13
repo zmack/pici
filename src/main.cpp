@@ -108,11 +108,13 @@ struct MailboxLifecycleGuard {
   std::shared_ptr<core::AgentTaskManager> task_manager;
   std::shared_ptr<MailboxTaskObserver> observer;
   std::shared_ptr<core::MailboxCoordinator> coordinator;
+  std::shared_ptr<core::MailboxDeliveryTargets> delivery;
   MailboxLifecycleGuard(std::shared_ptr<core::AgentTaskManager> manager,
                         std::shared_ptr<MailboxTaskObserver> value,
-                        std::shared_ptr<core::MailboxCoordinator> native)
+                        std::shared_ptr<core::MailboxCoordinator> native,
+                        std::shared_ptr<core::MailboxDeliveryTargets> target)
       : task_manager(std::move(manager)), observer(std::move(value)),
-        coordinator(std::move(native)) {}
+        coordinator(std::move(native)), delivery(std::move(target)) {}
   MailboxLifecycleGuard(const MailboxLifecycleGuard &) = delete;
   MailboxLifecycleGuard &operator=(const MailboxLifecycleGuard &) = delete;
   MailboxLifecycleGuard(MailboxLifecycleGuard &&) = delete;
@@ -125,6 +127,9 @@ struct MailboxLifecycleGuard {
         static_cast<void>(0);
       }
     }
+    if (coordinator)
+      coordinator->detach_delivery();
+    delivery.reset();
     if (observer)
       observer->detach();
     if (coordinator)
@@ -1094,6 +1099,8 @@ int cmd_run(const cli::Args &args,
     mailbox_options.hostname = local_hostname();
     mailbox_options.heartbeat_interval =
         std::chrono::milliseconds(settings.heartbeat_interval_ms);
+    mailbox_options.poll_interval =
+        std::chrono::milliseconds(settings.poll_interval_ms);
     mailbox_options.cleanup_interval = std::chrono::hours(1);
     mailbox =
         std::make_shared<core::MailboxCoordinator>(std::move(mailbox_options));
@@ -1110,8 +1117,32 @@ int cmd_run(const cli::Args &args,
   auto task_manager = std::make_shared<core::AgentTaskManager>(
       runtime, opts, core::AgentTaskManager::Limits{},
       core::fan_out_agent_task_callbacks(std::move(task_callbacks)));
+  auto mailbox_delivery = std::make_shared<core::MailboxDeliveryTargets>();
+  mailbox_delivery->root =
+      [&runtime](std::vector<core::AgentMessageEnvelope> messages) {
+        runtime.agent().steer_envelopes(std::move(messages));
+        return true;
+      };
+  mailbox_delivery->subagent =
+      [task_manager](const std::string &, const std::string &task_id,
+                     std::vector<core::AgentMessageEnvelope> messages) {
+        try {
+          task_manager->steer_envelopes(task_id, std::move(messages));
+          return true;
+        } catch (const core::AgentTaskError &) {
+          return false;
+        } catch (...) {
+          return false;
+        }
+      };
+  mailbox_delivery->drop_queued = [&runtime, task_manager] {
+    runtime.agent().clear_mailbox_steering_queue();
+    task_manager->drop_mailbox_envelopes();
+  };
+  if (mailbox)
+    mailbox->attach_delivery(mailbox_delivery);
   MailboxLifecycleGuard mailbox_lifecycle{task_manager, mailbox_observer,
-                                          mailbox};
+                                          mailbox, mailbox_delivery};
   auto compat_counter = std::make_shared<std::atomic_uint64_t>(0);
 
   auto task_error_json = [](const core::AgentTaskError &error) {
@@ -1605,6 +1636,7 @@ int cmd_run(const cli::Args &args,
     core::TerminalTitleActivityGuard activity(title_controller);
     if (mailbox) {
       mailbox->set_root_running(true);
+      mailbox->pump_inbox();
     }
     RootRunningGuard running_guard{mailbox};
     auto result = run_turn(runtime, input, *renderer, args.verbose,
@@ -1806,6 +1838,8 @@ int cmd_run(const cli::Args &args,
       }
       current_session_id = result.selected_session_id;
       current_session_name = loaded->header.name;
+      if (mailbox)
+        mailbox->drop_queued_delivery();
       runtime.activate_session(*loaded);
       if (mailbox)
         mailbox->activate_root(current_session_id, current_session_name);
@@ -1830,6 +1864,8 @@ int cmd_run(const cli::Args &args,
       const auto current_model = agent.state().model();
       fresh_hdr.model = current_model.id;
       fresh_hdr.provider = current_model.provider;
+      if (mailbox)
+        mailbox->drop_queued_delivery();
       current_session_id = runtime.create_session(fresh_hdr);
       current_session_name.reset();
       if (mailbox)
@@ -1851,6 +1887,8 @@ int cmd_run(const cli::Args &args,
       child_hdr.provider = current_model.provider;
       child_hdr.parent_id = current_session_id;
       child_hdr.parent_offset = agent.state().messages().size();
+      if (mailbox)
+        mailbox->drop_queued_delivery();
       current_session_id = runtime.fork_session(child_hdr);
       current_session_name.reset();
       if (mailbox)

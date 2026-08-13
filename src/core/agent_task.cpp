@@ -1,4 +1,5 @@
 #include "core/agent_task.h"
+#include "core/agent_loop.h"
 
 #include "core/agent.h"
 #include "core/agent_state.h"
@@ -63,6 +64,10 @@ bool is_child_safe_tool(const std::shared_ptr<const ToolDefinition> &tool) {
 
 std::size_t message_bytes(const Message &message) {
   return json::to_json(message).size();
+}
+
+AgentMessageEnvelope message_envelope(Message message) {
+  return AgentMessageEnvelope{.message = std::move(message)};
 }
 
 std::vector<Message> normalize_context(std::vector<Message> messages,
@@ -432,7 +437,11 @@ AgentTaskManager::make_task(const SpawnAgentRequest &request,
   });
   task->session = task->owned_session.get();
   task->session->agent().state().set_messages(std::move(context));
-  task->work.push_back({request.prompt});
+  UserMessage message;
+  message.content.emplace_back(TextContent{.text = request.prompt});
+  task->work.push_back(
+      WorkItem{.messages = std::vector<AgentMessageEnvelope>{
+                   message_envelope(Message{std::move(message)})}});
   task->execution_reserved = true;
   return task;
 }
@@ -525,8 +534,8 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
 }
 
 void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
-                                    std::string prompt, AgentTaskResult &result,
-                                    bool &aborted) {
+                                    std::vector<AgentMessageEnvelope> messages,
+                                    AgentTaskResult &result, bool &aborted) {
   std::size_t output_bytes = 0;
   bool saw_text_delta = false;
   std::optional<AssistantMessage> final_message;
@@ -558,7 +567,7 @@ void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
     }
   };
 
-  const auto run = task->session->run_prompt(std::move(prompt), callback);
+  const auto run = task->session->run_messages(std::move(messages), callback);
   if (!saw_text_delta && final_message)
     result.text = final_message->content.empty()
                       ? std::string{}
@@ -634,7 +643,7 @@ void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
 
     AgentTaskResult result;
     bool aborted = false;
-    execute_work(task, std::move(work.prompt), result, aborted);
+    execute_work(task, std::move(work.messages), result, aborted);
 
     AgentTaskStatusKind previous{AgentTaskStatusKind::pending_init};
     AgentTaskStatusKind current{AgentTaskStatusKind::pending_init};
@@ -732,6 +741,124 @@ AgentTaskSnapshot AgentTaskManager::send_message(const AgentTaskId &target,
   return snapshot(task);
 }
 
+AgentTaskSnapshot
+AgentTaskManager::steer_envelopes(const AgentTaskId &target,
+                                  std::vector<AgentMessageEnvelope> messages) {
+  if (messages.empty())
+    throw AgentTaskError(AgentTaskErrorKind::invalid_context,
+                         "steering envelope list must not be empty");
+  for (const auto &envelope : messages)
+    if (message_bytes(envelope.message) > limits_.max_message_bytes)
+      throw AgentTaskError(AgentTaskErrorKind::residency_limit,
+                           "task message exceeds size limit");
+
+  std::shared_ptr<Task> task;
+  bool steer_running = false;
+  AgentTaskStatusKind previous_status = AgentTaskStatusKind::running;
+  std::optional<AgentTaskResult> previous_result;
+  std::vector<AgentMessageEnvelope> root_messages;
+  {
+    std::scoped_lock lock(mutex_);
+    task = find_task_locked(target);
+    if (!task)
+      throw AgentTaskError(AgentTaskErrorKind::not_found, "task not found");
+    if (task->id == "root") {
+      if (shutting_down_)
+        throw AgentTaskError(AgentTaskErrorKind::shutting_down,
+                             "agent task manager is shutting down");
+      steer_running = true;
+      root_messages = messages;
+    } else {
+      std::scoped_lock task_lock(task->mutex);
+      if (task->status == AgentTaskStatusKind::closing ||
+          task->status == AgentTaskStatusKind::shutdown ||
+          task->close_requested)
+        throw AgentTaskError(AgentTaskErrorKind::invalid_state,
+                             "task is closed");
+      if (task->work.size() + task->mailbox.size() >= limits_.max_mailbox_items)
+        throw AgentTaskError(AgentTaskErrorKind::residency_limit,
+                             "task work queue limit reached");
+
+      steer_running = task->status == AgentTaskStatusKind::running ||
+                      task->execution_reserved ||
+                      task->status == AgentTaskStatusKind::pending_init;
+      if (!steer_running) {
+        if (active_executions_ >= limits_.max_active_executions)
+          throw AgentTaskError(AgentTaskErrorKind::execution_limit,
+                               "active child execution limit reached");
+        previous_status = task->status;
+        previous_result = std::move(task->result);
+        task->status = AgentTaskStatusKind::pending_init;
+        task->execution_reserved = true;
+        ++active_executions_;
+      }
+      if (!steer_running) {
+        task->work.push_back(
+            WorkItem{.messages = std::move(messages),
+                     .mailbox_delivery = true,
+                     .previous_status = previous_status,
+                     .previous_result = std::move(previous_result)});
+        touch_locked(task);
+      }
+    }
+  }
+
+  if (task->id == "root") {
+    root_.agent().steer_envelopes(std::move(root_messages));
+    return snapshot(task);
+  }
+  if (steer_running) {
+    task->session->agent().steer_envelopes(std::move(messages));
+    emit(AgentTaskMessageQueuedEvent{.id = task->id, .triggers_turn = false});
+  } else {
+    task->changed.notify_all();
+    emit(AgentTaskStatusChangedEvent{.id = task->id,
+                                     .previous = previous_status,
+                                     .current =
+                                         AgentTaskStatusKind::pending_init});
+    emit(AgentTaskMessageQueuedEvent{.id = task->id, .triggers_turn = true});
+  }
+  return snapshot(task);
+}
+
+void AgentTaskManager::drop_mailbox_envelopes() {
+  std::vector<std::shared_ptr<Task>> tasks;
+  {
+    std::scoped_lock lock(mutex_);
+    for (const auto &[id, task] : tasks_)
+      tasks.push_back(task);
+  }
+  for (const auto &task : tasks) {
+    bool rolled_back = false;
+    {
+      std::scoped_lock lock(task->mutex);
+      for (auto it = task->work.begin(); it != task->work.end();) {
+        if (!it->mailbox_delivery) {
+          ++it;
+          continue;
+        }
+        if (task->execution_reserved &&
+            task->status == AgentTaskStatusKind::pending_init &&
+            it->previous_status) {
+          task->status = *it->previous_status;
+          task->result = std::move(it->previous_result);
+          task->execution_reserved = false;
+          rolled_back = true;
+        }
+        it = task->work.erase(it);
+      }
+      task->changed.notify_all();
+    }
+    if (rolled_back) {
+      std::scoped_lock lock(mutex_);
+      if (active_executions_ > 0)
+        --active_executions_;
+      touch_locked(task);
+    }
+    task->session->agent().clear_mailbox_steering_queue();
+  }
+}
+
 AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
                                               const Message &message) {
   const auto text = message_text(message);
@@ -778,7 +905,12 @@ AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
     if (!prompt.empty())
       prompt += "\n\n";
     prompt += text;
-    task->work.push_back({std::move(prompt)});
+    UserMessage follow_up_message;
+    follow_up_message.content.emplace_back(
+        TextContent{.text = std::move(prompt)});
+    task->work.push_back(
+        WorkItem{.messages = std::vector<AgentMessageEnvelope>{
+                     message_envelope(Message{std::move(follow_up_message)})}});
     touch_locked(task);
   }
   task->changed.notify_all();
