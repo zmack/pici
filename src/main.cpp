@@ -1139,6 +1139,9 @@ int cmd_run(const cli::Args &args,
     runtime.agent().clear_mailbox_steering_queue();
     task_manager->drop_mailbox_envelopes();
   };
+  mailbox_delivery->drop_root_queued = [&runtime] {
+    runtime.agent().clear_mailbox_steering_queue();
+  };
   if (mailbox)
     mailbox->attach_delivery(mailbox_delivery);
   MailboxLifecycleGuard mailbox_lifecycle{task_manager, mailbox_observer,

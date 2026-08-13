@@ -41,6 +41,7 @@ struct MailboxDeliveryTargets {
                      std::vector<AgentMessageEnvelope>)>
       subagent;
   std::function<void()> drop_queued;
+  std::function<void()> drop_root_queued;
 };
 
 struct MailboxCoordinatorStatus {

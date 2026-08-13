@@ -10,6 +10,7 @@
 #include <source_location>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <unistd.h>
@@ -130,15 +131,19 @@ int main() {
     CHECK(!current_agents.front().closed_at_ms.has_value());
 
     std::vector<AgentMessageEnvelope> delivered;
+    std::vector<AgentMessageEnvelope> root_queue;
     bool accept_delivery = true;
     auto delivery = std::make_shared<MailboxDeliveryTargets>();
     delivery->root = [&](std::vector<AgentMessageEnvelope> messages) {
       if (!accept_delivery)
         return false;
-      for (auto &message : messages)
+      for (auto &message : messages) {
+        root_queue.push_back(message);
         delivered.push_back(std::move(message));
+      }
       return true;
     };
+    delivery->drop_root_queued = [&root_queue] { root_queue.clear(); };
     coordinator.attach_delivery(delivery);
     coordinator.store().send(SendRequest{
         .message_id = "steer-1",
@@ -157,8 +162,11 @@ int main() {
     CHECK(std::holds_alternative<UserMessage>(delivered.front().message));
     CHECK(std::get<TextContent>(
               std::get<UserMessage>(delivered.front().message).content.front())
-              .text.find("steer-1") != std::string::npos);
+              .text ==
+          "[Mailbox message steer-1 from session sender-session / agent "
+          "sender-agent]\ninspect this");
     delivered.front().on_accepted();
+    root_queue.clear();
     CHECK(coordinator.store()
               .inspect(InboxQuery{.session_id = "session-b",
                                   .workspace_id = "workspace",
@@ -219,6 +227,16 @@ int main() {
             subagent_delivered.push_back(std::move(message));
           return true;
         };
+    coordinator.set_root_running(false);
+    coordinator.store().send(SendRequest{
+        .message_id = "root-only-session",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxMessageKind::steer,
+        .body = MailboxBody{.text = "root only"},
+        .created_at_ms = now});
     coordinator.observe_task_event(AgentTaskSpawnedEvent{
         .id = "agent_4", .task_path = "/root/child-4",
         .parent_id = "root", .task_name = "child-4"});
@@ -226,6 +244,12 @@ int main() {
         .id = "agent_4",
         .previous = AgentTaskStatusKind::pending_init,
         .current = AgentTaskStatusKind::completed});
+    coordinator.pump_inbox();
+    CHECK(subagent_delivered.empty());
+    coordinator.set_root_running(true);
+    coordinator.pump_inbox();
+    CHECK_EQ(delivered.size(), std::size_t{3});
+    delivered.back().on_accepted();
     const auto child_agents = coordinator.store().list_agents(AgentQuery{
         .session_id = "session-b", .include_closed = false, .limit = 100,
         .now_ms = now});
@@ -336,7 +360,30 @@ int main() {
     now += 150;
     coordinator.maintenance_tick();
     CHECK(delivered.size() > delivered_after_tick);
+    CHECK(!root_queue.empty());
     coordinator.set_root_running(false);
+    CHECK(root_queue.empty());
+    now += 101;
+    coordinator.set_root_running(true);
+    coordinator.pump_inbox();
+    CHECK(std::get<TextContent>(std::get<UserMessage>(delivered.back().message)
+                                    .content.front())
+              .text.find("cadence-1") != std::string::npos);
+    delivered.back().on_accepted();
+    coordinator.store().send(SendRequest{
+        .message_id = "stop-race",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.agent_id = root_endpoint},
+        .workspace_id = "workspace",
+        .kind = MailboxMessageKind::steer,
+        .body = MailboxBody{.text = "stop"},
+        .created_at_ms = now});
+    coordinator.pump_inbox();
+    auto stop_race = delivered.back();
+    std::thread acceptance([&stop_race] { stop_race.on_accepted(); });
+    coordinator.stop();
+    acceptance.join();
     coordinator.stop();
     CHECK(!coordinator.status().root_active);
   } catch (const std::exception &error) {

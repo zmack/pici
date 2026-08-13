@@ -828,10 +828,11 @@ void AgentTaskManager::drop_mailbox_envelopes() {
     for (const auto &[id, task] : tasks_)
       tasks.push_back(task);
   }
+  std::vector<std::shared_ptr<Task>> changed_tasks;
   for (const auto &task : tasks) {
-    bool rolled_back = false;
     {
-      std::scoped_lock lock(task->mutex);
+      std::scoped_lock lock(mutex_, task->mutex);
+      bool changed = false;
       for (auto it = task->work.begin(); it != task->work.end();) {
         if (!it->mailbox_delivery) {
           ++it;
@@ -843,20 +844,23 @@ void AgentTaskManager::drop_mailbox_envelopes() {
           task->status = *it->previous_status;
           task->result = std::move(it->previous_result);
           task->execution_reserved = false;
-          rolled_back = true;
+          if (active_executions_ > 0)
+            --active_executions_;
         }
+        changed = true;
         it = task->work.erase(it);
       }
-      task->changed.notify_all();
-    }
-    if (rolled_back) {
-      std::scoped_lock lock(mutex_);
-      if (active_executions_ > 0)
-        --active_executions_;
-      touch_locked(task);
+      if (changed) {
+        task->generation = ++generation_;
+        changed_tasks.push_back(task);
+      }
     }
     task->session->agent().clear_mailbox_steering_queue();
   }
+  for (const auto &task : changed_tasks)
+    task->changed.notify_all();
+  if (!changed_tasks.empty())
+    changed_.notify_all();
 }
 
 AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,

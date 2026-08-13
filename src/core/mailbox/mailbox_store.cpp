@@ -860,7 +860,7 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
   exec(database_, "BEGIN IMMEDIATE");
   try {
     Statement agent(database_,
-                    "SELECT 1 FROM agents a JOIN processes p ON "
+                    "SELECT a.kind FROM agents a JOIN processes p ON "
                     "p.process_id=a.process_id WHERE a.agent_id=? "
                     "AND a.session_id=? AND p.workspace_id=? AND "
                     "a.closed_at_ms IS NULL AND p.lease_expires_at_ms>?");
@@ -873,6 +873,7 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
     if (agent_step != SQLITE_ROW)
       throw MailboxError(MailboxErrorCode::not_found,
                          "claiming mailbox agent is not live");
+    const auto claimant_kind = column_text(agent.get(), 0);
     Statement query(
         database_,
         "SELECT " + std::string(kMessageColumns) +
@@ -891,8 +892,9 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
         break;
       check_sqlite(database_, step, "find claimable mailbox messages");
       auto message = read_message(query.get());
-      if ((!message.recipient_agent_id ||
-           *message.recipient_agent_id == request.agent_id) &&
+      if (((message.recipient_agent_id &&
+            *message.recipient_agent_id == request.agent_id) ||
+           (!message.recipient_agent_id && claimant_kind == "root")) &&
           contains_kind(request.kinds, message.kind))
         candidates.push_back(std::move(message));
       if (candidates.size() >= request.limit)

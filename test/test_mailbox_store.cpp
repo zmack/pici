@@ -324,6 +324,30 @@ int main() {
     CHECK(cleanup.agents_removed >= 2);
     CHECK(cleanup.processes_removed >= 1);
 
+    reopened.register_process(process("process-root-claim", "workspace-a",
+                                      now));
+    reopened.register_agent(
+        agent("root-claim", "process-root-claim", "shared-session", now));
+    const auto root_only = reopened.send(SendRequest{
+        .message_id = "root-only-claim",
+        .sender_agent_id = "agent-a",
+        .sender_session_id = "session-a",
+        .target = MailboxTarget{.session_id = "shared-session"},
+        .workspace_id = "workspace-a",
+        .body = MailboxBody{.text = "root only"},
+        .created_at_ms = now});
+    reopened.register_agent(agent("child-claim", "process-root-claim",
+                                  "shared-session", now,
+                                  std::string("root-claim")));
+    CHECK(reopened.claim(ClaimRequest{.session_id = "shared-session",
+                                     .agent_id = "child-claim",
+                                     .now_ms = now})
+              .messages.empty());
+    const auto root_claim = reopened.claim(ClaimRequest{
+        .session_id = "shared-session", .agent_id = "root-claim", .now_ms = now});
+    CHECK_EQ(root_claim.messages.size(), std::size_t{1});
+    CHECK_EQ(root_claim.messages.front().message_id, root_only.message_id);
+
     const auto newer_path = root / "newer.sqlite3";
     sqlite3 *database = nullptr;
     CHECK_EQ(sqlite3_open(newer_path.c_str(), &database), SQLITE_OK);

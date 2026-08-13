@@ -209,12 +209,21 @@ void MailboxCoordinator::deactivate_root() {
 void MailboxCoordinator::set_root_running(bool running) {
   std::string status;
   std::string root_agent_id;
+  std::shared_ptr<MailboxDeliveryTargets> delivery;
   {
     std::scoped_lock lock(mutex_);
     if (!root_active_ || root_running_ == running)
       return;
     status = running ? "running" : "idle";
     root_agent_id = active_root_agent_id_;
+    delivery = delivery_targets_;
+  }
+  if (!running && delivery && delivery->drop_root_queued) {
+    try {
+      delivery->drop_root_queued();
+    } catch (...) {
+      static_cast<void>(0);
+    }
   }
   store_->update_agent(
       AgentUpdate{.agent_id = root_agent_id, .status = std::move(status)});

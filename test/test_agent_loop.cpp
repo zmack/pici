@@ -1198,6 +1198,91 @@ void test_agent_loop_message_envelopes_cancelled() {
     });
 }
 
+void test_mailbox_envelope_waits_for_turn_boundary() {
+    tests::register_test("Agent loop: mailbox envelope waits for turn boundary", []() {
+        Model model{.id = "test-model", .api = "test", .provider = "test"};
+        auto release = std::make_shared<std::promise<void>>();
+        auto released = std::make_shared<std::shared_future<void>>(
+            release->get_future().share());
+        auto active = std::make_shared<std::promise<void>>();
+        auto injected = std::make_shared<std::atomic<bool>>(false);
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        std::vector<std::string> order;
+        int accepted = 0;
+        auto client = std::make_shared<TestLLMClient>(
+            [=, &order](const AgentContext& context, const StreamOptions&,
+                        AssistantEventCallback, std::stop_token)
+                -> std::shared_ptr<AssistantMessage> {
+                const auto call = calls->fetch_add(1) + 1;
+                if (call == 1) {
+                    active->set_value();
+                    released->wait();
+                } else {
+                    bool found = false;
+                    for (const auto& message : context.messages) {
+                        if (const auto* user = std::get_if<UserMessage>(&message)) {
+                            for (const auto& content : user->content) {
+                                if (const auto* text = std::get_if<TextContent>(&content))
+                                    found = found || text->text.find("mailbox-id") !=
+                                                       std::string::npos;
+                            }
+                        }
+                    }
+                    CHECK(found);
+                }
+                auto result = std::make_shared<AssistantMessage>();
+                result->api = "test";
+                result->provider = "test";
+                result->model = "test-model";
+                result->stop_reason = StopReason::stop;
+                result->content.emplace_back(TextContent{.text = "done"});
+                return result;
+            });
+        AgentContext context;
+        UserMessage prompt;
+        prompt.content.emplace_back(TextContent{.text = "prompt"});
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = client;
+        config.convert_to_llm = [](const std::vector<Message>& messages) {
+            return messages;
+        };
+        config.get_steering_envelopes = [injected, &accepted] {
+            if (!injected->exchange(false))
+                return std::vector<AgentMessageEnvelope>{};
+            UserMessage message;
+            message.content.emplace_back(TextContent{.text = "mailbox-id"});
+            return std::vector<AgentMessageEnvelope>{AgentMessageEnvelope{
+                .message = Message{std::move(message)},
+                .on_accepted = [&accepted] { ++accepted; }}};
+        };
+        auto stream = run_agent_loop_envelopes(
+            {AgentMessageEnvelope{.message = Message{std::move(prompt)}}},
+            context, config, [&order](const AgentEvent& event) {
+                if (const auto* end = std::get_if<MessageEndEvent>(&event)) {
+                    if (std::holds_alternative<UserMessage>(end->message))
+                        order.push_back(order.empty() ? "prompt_end"
+                                                       : "mailbox_end");
+                } else if (std::holds_alternative<TurnEndEvent>(event)) {
+                    order.push_back("turn_end");
+                }
+            });
+        active->get_future().wait();
+        injected->store(true);
+        release->set_value();
+        for (auto& event : stream)
+            (void)event;
+        CHECK_EQ(accepted, 1);
+        const auto first_turn_end =
+            std::ranges::find(order, "turn_end");
+        const auto mailbox_end =
+            std::ranges::find(order, "mailbox_end");
+        CHECK(first_turn_end != order.end());
+        CHECK(mailbox_end != order.end());
+        CHECK(mailbox_end > first_turn_end);
+    });
+}
+
 void test_agent_loop_steering_envelopes() {
     tests::register_test("Agent loop: steering envelopes preserve order", []() {
         Model model;
@@ -2321,6 +2406,7 @@ int main() {
     test_agent_loop_steering_after_turn_continues();
     test_agent_loop_message_envelopes();
     test_agent_loop_message_envelopes_cancelled();
+    test_mailbox_envelope_waits_for_turn_boundary();
     test_agent_loop_steering_envelopes();
     test_agent_loop_argument_validation_blocks_execution();
     test_agent_loop_prepare_arguments_before_validation();
