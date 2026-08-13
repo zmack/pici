@@ -1,5 +1,6 @@
 #include "core/markdown.h"
 #include "core/syntax_highlight.h"
+#include "core/terminal.h"
 #include <utility>
 
 extern "C" {
@@ -366,9 +367,11 @@ std::string render_table(const std::vector<std::string_view> &block) {
 
   std::vector<std::size_t> widths(nc, 1);
   for (std::size_t c = 0; c < nc; ++c) {
-    widths[c] = std::max(widths[c], header[c].size());
+    widths[c] = std::max(widths[c],
+                         static_cast<std::size_t>(display_columns(header[c])));
     for (const auto &row : rows)
-      widths[c] = std::max(widths[c], row[c].size());
+      widths[c] = std::max(widths[c],
+                           static_cast<std::size_t>(display_columns(row[c])));
   }
 
   static constexpr const char *kH = "\xe2\x94\x80";  // ─
@@ -395,7 +398,7 @@ std::string render_table(const std::vector<std::string_view> &block) {
   };
 
   auto padded = [&](std::string_view text, std::size_t w, Align a) {
-    const std::size_t len = text.size();
+    const std::size_t len = static_cast<std::size_t>(display_columns(text));
     const std::size_t pad = w > len ? w - len : 0;
     std::string s;
     if (a == Align::right) {
