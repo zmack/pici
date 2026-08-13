@@ -857,6 +857,28 @@ return {
              "nil:pici.mailbox is not available");
   });
 
+  tests::register_test("LuaHooks: mailbox errors retain stable code", [&]() {
+    auto p = write_hooks("mailbox_error.lua", R"lua(
+return {
+  on_command = function(cmd)
+    if cmd ~= "mailbox" then return {handled=false} end
+    local value, err = pici.mailbox.status()
+    return {handled=true, output=tostring(value) .. ":" .. err}
+  end
+}
+)lua");
+    auto hooks = load_lua_hooks(p);
+    LuaHooks::AgentInfo info;
+    info.mailbox.status = [](const nlohmann::json &, std::stop_token) {
+      return nlohmann::json{
+          {"error", {{"code", "invalid_message"}, {"message", "bad input"}}}};
+    };
+    hooks->configure(info);
+    const auto result = hooks->on_command("mailbox", "", {}, {});
+    CHECK(result.handled);
+    CHECK_EQ(result.output.value(), "nil:invalid_message: bad input");
+  });
+
   tests::register_test("pici.add_tool registers inline tool", [&]() {
     auto p = write_hooks("inline_tool.lua", R"lua(
 pici.add_tool({

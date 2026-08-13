@@ -1272,7 +1272,11 @@ public:
         const auto message = error.is_object()
                                  ? error.value("message", "mailbox error")
                                  : error.get<std::string>();
-        lua_pushstring(L, message.c_str());
+        const auto code = error.is_object()
+                              ? error.value("code", "mailbox_error")
+                              : std::string("mailbox_error");
+        const auto stable_error = code + ": " + message;
+        lua_pushstring(L, stable_error.c_str());
         return 2;
       }
       json_to_lua(L, result);

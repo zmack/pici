@@ -456,6 +456,7 @@ endif()
 
 # ─── libpi-core ───
 add_library(pi-core
+    src/core/mailbox/mailbox_bindings.cpp
     src/core/mailbox/mailbox_types.cpp
     src/core/mailbox/mailbox_store.cpp
     src/core/mailbox/mailbox_coordinator.cpp
@@ -610,6 +611,11 @@ if(PI_CPP_BUILD_TESTS)
     target_include_directories(test-mailbox-coordinator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test-mailbox-coordinator PRIVATE pi-core)
     add_test(NAME test-mailbox-coordinator COMMAND test-mailbox-coordinator)
+
+    add_executable(test-mailbox-bindings test/test_mailbox_bindings.cpp)
+    target_include_directories(test-mailbox-bindings PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-mailbox-bindings PRIVATE pi-core)
+    add_test(NAME test-mailbox-bindings COMMAND test-mailbox-bindings)
 
     add_executable(test-credential_store test/test_credential_store.cpp)
     target_link_libraries(test-credential_store PRIVATE pi-core)
