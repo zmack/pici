@@ -91,11 +91,14 @@ struct AgentRecord {
 
 struct AgentUpdate {
   std::string agent_id;
+  std::optional<std::string> workspace_id;
   std::optional<std::string> session_name;
   std::optional<std::string> provider;
   std::optional<std::string> model_id;
   std::optional<std::string> status;
-  std::optional<TimestampMs> closed_at_ms;
+  // An empty outer optional leaves the column unchanged. An engaged inner
+  // optional sets the column, including an explicit null to reopen an agent.
+  std::optional<std::optional<TimestampMs>> closed_at_ms;
 };
 
 struct AgentQuery {
@@ -161,6 +164,7 @@ struct MailboxMessage {
 
 struct InboxQuery {
   std::string session_id;
+  std::optional<std::string> workspace_id;
   std::optional<std::string> agent_id;
   std::vector<MailboxMessageKind> kinds;
   bool include_acknowledged{false};
@@ -171,6 +175,7 @@ struct InboxQuery {
 struct ClaimRequest {
   std::string session_id;
   std::string agent_id;
+  std::optional<std::string> workspace_id;
   std::vector<MailboxMessageKind> kinds;
   std::size_t limit{50};
   TimestampMs now_ms{0};
@@ -185,6 +190,7 @@ struct AcknowledgeRequest {
   std::string message_id;
   std::string agent_id;
   std::string claim_token;
+  std::optional<std::string> workspace_id;
   TimestampMs now_ms{0};
 };
 
@@ -215,6 +221,7 @@ struct MailboxStatus {
 };
 
 struct CleanupRequest {
+  std::optional<std::string> workspace_id;
   TimestampMs now_ms{0};
   std::int64_t acknowledged_retention_ms{0};
   std::int64_t stale_retention_ms{0};

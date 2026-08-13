@@ -726,7 +726,7 @@ Args load_and_merge(int argc, char *argv[]) {
   // 1. Parse CLI first (we need --config path before loading the file)
   Args cli = parse_args(argc, argv);
 
-  if (!cli.mailbox_path_explicit) {
+  if (!cli.mailbox_path_explicit && !cli.mailbox_enabled_explicit) {
     const char *mailbox =
         std::getenv("PICI_MAILBOX"); // NOLINT(concurrency-mt-unsafe)
     if (mailbox != nullptr && *mailbox != '\0') {

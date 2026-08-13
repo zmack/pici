@@ -235,6 +235,21 @@ constexpr std::string_view kMessageColumns =
     "claim_expires_at_ms, delivered_at_ms, acknowledged_at_ms, failed_at_ms, "
     "failure";
 
+void insert_event(sqlite3 *database, std::string_view workspace_id,
+                  std::string_view event_type, std::string_view subject_id,
+                  TimestampMs created_at_ms) {
+  Statement event(
+      database,
+      "INSERT INTO "
+      "mailbox_events(workspace_id,event_type,subject_id,created_at_ms) "
+      "VALUES (?, ?, ?, ?)");
+  bind_text(event.get(), 1, workspace_id);
+  bind_text(event.get(), 2, event_type);
+  bind_text(event.get(), 3, subject_id);
+  bind_integer(event.get(), 4, created_at_ms);
+  check_sqlite(database, sqlite3_step(event.get()), "record mailbox event");
+}
+
 } // namespace
 
 MailboxStore::MailboxStore(MailboxStoreOptions options)
@@ -410,7 +425,9 @@ void MailboxStore::check_workspace(std::string_view workspace_id) const {
 void MailboxStore::register_process(const ProcessRecord &process) {
   std::scoped_lock lock(mutex_);
   check_workspace(process.workspace_id);
-  Statement statement(database_, R"sql(
+  exec(database_, "BEGIN IMMEDIATE");
+  try {
+    Statement statement(database_, R"sql(
     INSERT INTO processes(process_id, workspace_id, workspace_path, pid,
       hostname, protocol_version, capabilities_json, started_at_ms,
       last_seen_at_ms, lease_expires_at_ms, closed_at_ms)
@@ -423,42 +440,44 @@ void MailboxStore::register_process(const ProcessRecord &process) {
       last_seen_at_ms=excluded.last_seen_at_ms,
       lease_expires_at_ms=excluded.lease_expires_at_ms,
       closed_at_ms=excluded.closed_at_ms
-  )sql");
-  bind_text(statement.get(), 1, process.process_id);
-  bind_text(statement.get(), 2, process.workspace_id);
-  bind_text(statement.get(), 3, process.workspace_path);
-  bind_integer(statement.get(), 4, process.pid);
-  bind_text(statement.get(), 5, process.hostname);
-  bind_integer(statement.get(), 6, process.protocol_version);
-  bind_text(statement.get(), 7, process.capabilities_json);
-  bind_integer(statement.get(), 8, process.started_at_ms);
-  bind_integer(statement.get(), 9, process.last_seen_at_ms);
-  bind_integer(statement.get(), 10, process.lease_expires_at_ms);
-  bind_optional_integer(statement.get(), 11, process.closed_at_ms);
-  check_sqlite(database_, sqlite3_step(statement.get()), "register process");
-  Statement event(
-      database_,
-      "INSERT INTO "
-      "mailbox_events(workspace_id,event_type,subject_id,created_at_ms) "
-      "VALUES (?, 'process', ?, ?)");
-  bind_text(event.get(), 1, options_.workspace_id);
-  bind_text(event.get(), 2, process.process_id);
-  bind_integer(event.get(), 3, process.started_at_ms);
-  check_sqlite(database_, sqlite3_step(event.get()), "record process");
+    )sql");
+    bind_text(statement.get(), 1, process.process_id);
+    bind_text(statement.get(), 2, process.workspace_id);
+    bind_text(statement.get(), 3, process.workspace_path);
+    bind_integer(statement.get(), 4, process.pid);
+    bind_text(statement.get(), 5, process.hostname);
+    bind_integer(statement.get(), 6, process.protocol_version);
+    bind_text(statement.get(), 7, process.capabilities_json);
+    bind_integer(statement.get(), 8, process.started_at_ms);
+    bind_integer(statement.get(), 9, process.last_seen_at_ms);
+    bind_integer(statement.get(), 10, process.lease_expires_at_ms);
+    bind_optional_integer(statement.get(), 11, process.closed_at_ms);
+    check_sqlite(database_, sqlite3_step(statement.get()), "register process");
+    insert_event(database_, process.workspace_id, "process_registered",
+                 process.process_id, process.started_at_ms);
+    exec(database_, "COMMIT");
+  } catch (...) {
+    exec(database_, "ROLLBACK");
+    throw;
+  }
 }
 
 void MailboxStore::heartbeat_process(std::string_view process_id,
                                      TimestampMs now,
                                      TimestampMs lease_expires_at) {
   std::scoped_lock lock(mutex_);
+  const auto *const workspace_sql =
+      options_.scope == MailboxScope::global ? "" : " AND workspace_id=?";
   Statement statement(
       database_,
       "UPDATE processes SET last_seen_at_ms=?, lease_expires_at_ms=?, "
-      "closed_at_ms=NULL WHERE process_id=? AND workspace_id=?");
+      "closed_at_ms=NULL WHERE process_id=?" +
+          std::string(workspace_sql));
   bind_integer(statement.get(), 1, now);
   bind_integer(statement.get(), 2, lease_expires_at);
   bind_text(statement.get(), 3, process_id);
-  bind_text(statement.get(), 4, options_.workspace_id);
+  if (options_.scope == MailboxScope::workspace)
+    bind_text(statement.get(), 4, options_.workspace_id);
   check_sqlite(database_, sqlite3_step(statement.get()), "heartbeat process");
   if (sqlite3_changes(database_) == 0)
     throw MailboxError(MailboxErrorCode::not_found,
@@ -469,32 +488,51 @@ void MailboxStore::close_process(std::string_view process_id, TimestampMs now) {
   std::scoped_lock lock(mutex_);
   exec(database_, "BEGIN IMMEDIATE");
   try {
+    Statement workspace(
+        database_, "SELECT workspace_id FROM processes WHERE "
+                   "process_id=?" +
+                       std::string(options_.scope == MailboxScope::workspace
+                                       ? " AND workspace_id=?"
+                                       : ""));
+    bind_text(workspace.get(), 1, process_id);
+    if (options_.scope == MailboxScope::workspace)
+      bind_text(workspace.get(), 2, options_.workspace_id);
+    const int workspace_step = sqlite3_step(workspace.get());
+    check_sqlite(database_, workspace_step, "find mailbox process");
+    if (workspace_step != SQLITE_ROW)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox process not found");
+    const auto process_workspace = column_text(workspace.get(), 0);
     Statement agents(database_,
                      "UPDATE agents SET closed_at_ms=? WHERE process_id=? AND "
                      "closed_at_ms IS NULL");
     bind_integer(agents.get(), 1, now);
     bind_text(agents.get(), 2, process_id);
     check_sqlite(database_, sqlite3_step(agents.get()), "close process agents");
-    Statement process(
-        database_, "UPDATE processes SET closed_at_ms=?, lease_expires_at_ms=? "
-                   "WHERE process_id=? AND workspace_id=?");
+    Statement process(database_, "UPDATE processes SET closed_at_ms=?, "
+                                 "lease_expires_at_ms=? WHERE process_id=?");
     bind_integer(process.get(), 1, now);
     bind_integer(process.get(), 2, now);
     bind_text(process.get(), 3, process_id);
-    bind_text(process.get(), 4, options_.workspace_id);
     check_sqlite(database_, sqlite3_step(process.get()), "close process");
     if (sqlite3_changes(database_) == 0)
       throw MailboxError(MailboxErrorCode::not_found,
                          "mailbox process not found");
-    Statement event(
-        database_,
-        "INSERT INTO "
-        "mailbox_events(workspace_id,event_type,subject_id,created_at_ms) "
-        "VALUES (?, 'process_closed', ?, ?)");
-    bind_text(event.get(), 1, options_.workspace_id);
-    bind_text(event.get(), 2, process_id);
-    bind_integer(event.get(), 3, now);
-    check_sqlite(database_, sqlite3_step(event.get()), "record process close");
+    insert_event(database_, process_workspace, "process_closed", process_id,
+                 now);
+    Statement closed_agents(database_,
+                            "SELECT agent_id FROM agents WHERE process_id=? "
+                            "AND closed_at_ms=?");
+    bind_text(closed_agents.get(), 1, process_id);
+    bind_integer(closed_agents.get(), 2, now);
+    while (true) {
+      const int step = sqlite3_step(closed_agents.get());
+      if (step == SQLITE_DONE)
+        break;
+      check_sqlite(database_, step, "list closed process agents");
+      insert_event(database_, process_workspace, "agent_closed",
+                   column_text(closed_agents.get(), 0), now);
+    }
     exec(database_, "COMMIT");
   } catch (...) {
     exec(database_, "ROLLBACK");
@@ -504,58 +542,119 @@ void MailboxStore::close_process(std::string_view process_id, TimestampMs now) {
 
 void MailboxStore::register_agent(const AgentRecord &agent) {
   std::scoped_lock lock(mutex_);
-  Statement statement(database_, R"sql(
-    INSERT INTO agents(agent_id,process_id,kind,owner_agent_id,session_id,
-      session_name,task_id,task_path,provider,model_id,status,started_at_ms,closed_at_ms)
-    SELECT ?, process_id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM processes
-      WHERE process_id=? AND workspace_id=? AND lease_expires_at_ms > ?
-  )sql");
-  bind_text(statement.get(), 1, agent.agent_id);
-  bind_text(statement.get(), 2, agent.kind);
-  bind_optional_text(statement.get(), 3, agent.owner_agent_id);
-  bind_text(statement.get(), 4, agent.session_id);
-  bind_optional_text(statement.get(), 5, agent.session_name);
-  bind_optional_text(statement.get(), 6, agent.task_id);
-  bind_optional_text(statement.get(), 7, agent.task_path);
-  bind_text(statement.get(), 8, agent.provider);
-  bind_text(statement.get(), 9, agent.model_id);
-  bind_text(statement.get(), 10, agent.status);
-  bind_integer(statement.get(), 11, agent.started_at_ms);
-  bind_optional_integer(statement.get(), 12, agent.closed_at_ms);
-  bind_text(statement.get(), 13, agent.process_id);
-  bind_text(statement.get(), 14, options_.workspace_id);
-  bind_integer(statement.get(), 15, agent.started_at_ms);
-  check_sqlite(database_, sqlite3_step(statement.get()), "register agent");
-  if (sqlite3_changes(database_) == 0)
-    throw MailboxError(MailboxErrorCode::not_found,
-                       "owning mailbox process is not live");
+  exec(database_, "BEGIN IMMEDIATE");
+  try {
+    Statement process(database_,
+                      "SELECT workspace_id FROM processes WHERE "
+                      "process_id=?" +
+                          std::string(options_.scope == MailboxScope::workspace
+                                          ? " AND workspace_id=?"
+                                          : "") +
+                          " AND lease_expires_at_ms > ?");
+    bind_text(process.get(), 1, agent.process_id);
+    int process_index = 2;
+    if (options_.scope == MailboxScope::workspace)
+      bind_text(process.get(), process_index++, options_.workspace_id);
+    bind_integer(process.get(), process_index, agent.started_at_ms);
+    const int process_step = sqlite3_step(process.get());
+    check_sqlite(database_, process_step, "find owning mailbox process");
+    if (process_step != SQLITE_ROW)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "owning mailbox process is not live");
+    const auto workspace = column_text(process.get(), 0);
+    Statement statement(database_, R"sql(
+      INSERT INTO agents(agent_id,process_id,kind,owner_agent_id,session_id,
+        session_name,task_id,task_path,provider,model_id,status,started_at_ms,closed_at_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    )sql");
+    bind_text(statement.get(), 1, agent.agent_id);
+    bind_text(statement.get(), 2, agent.process_id);
+    bind_text(statement.get(), 3, agent.kind);
+    bind_optional_text(statement.get(), 4, agent.owner_agent_id);
+    bind_text(statement.get(), 5, agent.session_id);
+    bind_optional_text(statement.get(), 6, agent.session_name);
+    bind_optional_text(statement.get(), 7, agent.task_id);
+    bind_optional_text(statement.get(), 8, agent.task_path);
+    bind_text(statement.get(), 9, agent.provider);
+    bind_text(statement.get(), 10, agent.model_id);
+    bind_text(statement.get(), 11, agent.status);
+    bind_integer(statement.get(), 12, agent.started_at_ms);
+    bind_optional_integer(statement.get(), 13, agent.closed_at_ms);
+    const int result = sqlite3_step(statement.get());
+    if (result == SQLITE_CONSTRAINT)
+      throw MailboxError(MailboxErrorCode::invalid_message,
+                         "mailbox agent ID already exists or owner is invalid");
+    check_sqlite(database_, result, "register agent");
+    insert_event(database_, workspace, "agent_registered", agent.agent_id,
+                 agent.started_at_ms);
+    exec(database_, "COMMIT");
+  } catch (...) {
+    exec(database_, "ROLLBACK");
+    throw;
+  }
 }
 
 void MailboxStore::update_agent(const AgentUpdate &update) {
   std::scoped_lock lock(mutex_);
-  Statement statement(database_, R"sql(
-    UPDATE agents SET session_name=COALESCE(?,session_name),
-      provider=COALESCE(?,provider), model_id=COALESCE(?,model_id),
-      status=COALESCE(?,status), closed_at_ms=?
-    WHERE agent_id=? AND process_id IN
-      (SELECT process_id FROM processes WHERE workspace_id=?)
-  )sql");
-  bind_optional_text(statement.get(), 1, update.session_name);
-  bind_optional_text(statement.get(), 2, update.provider);
-  bind_optional_text(statement.get(), 3, update.model_id);
-  bind_optional_text(statement.get(), 4, update.status);
-  bind_optional_integer(statement.get(), 5, update.closed_at_ms);
-  bind_text(statement.get(), 6, update.agent_id);
-  bind_text(statement.get(), 7, options_.workspace_id);
-  check_sqlite(database_, sqlite3_step(statement.get()), "update agent");
-  if (sqlite3_changes(database_) == 0)
-    throw MailboxError(MailboxErrorCode::not_found, "mailbox agent not found");
+  if (update.workspace_id)
+    check_workspace(*update.workspace_id);
+  exec(database_, "BEGIN IMMEDIATE");
+  try {
+    const bool constrain_workspace =
+        options_.scope == MailboxScope::workspace || update.workspace_id;
+    Statement owner(
+        database_,
+        "SELECT p.workspace_id FROM agents a JOIN "
+        "processes p ON p.process_id=a.process_id WHERE "
+        "a.agent_id=?" +
+            std::string(constrain_workspace ? " AND p.workspace_id=?" : ""));
+    bind_text(owner.get(), 1, update.agent_id);
+    if (constrain_workspace)
+      bind_text(owner.get(), 2,
+                update.workspace_id.value_or(options_.workspace_id));
+    const int owner_step = sqlite3_step(owner.get());
+    check_sqlite(database_, owner_step, "find mailbox agent");
+    if (owner_step != SQLITE_ROW)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox agent not found");
+    const auto workspace = column_text(owner.get(), 0);
+
+    std::string sql =
+        "UPDATE agents SET session_name=COALESCE(?,session_name), "
+        "provider=COALESCE(?,provider), model_id=COALESCE(?,model_id), "
+        "status=COALESCE(?,status)";
+    if (update.closed_at_ms)
+      sql += ", closed_at_ms=?";
+    sql += " WHERE agent_id=?";
+    Statement statement(database_, sql);
+    int index = 1;
+    bind_optional_text(statement.get(), index++, update.session_name);
+    bind_optional_text(statement.get(), index++, update.provider);
+    bind_optional_text(statement.get(), index++, update.model_id);
+    bind_optional_text(statement.get(), index++, update.status);
+    if (update.closed_at_ms)
+      bind_optional_integer(statement.get(), index++, *update.closed_at_ms);
+    bind_text(statement.get(), index, update.agent_id);
+    check_sqlite(database_, sqlite3_step(statement.get()), "update agent");
+    if (sqlite3_changes(database_) == 0)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox agent not found");
+    const auto *const event_type = update.status && *update.status == "closed"
+                                       ? "agent_closed"
+                                       : "agent_updated";
+    insert_event(database_, workspace, event_type, update.agent_id,
+                 options_.clock());
+    exec(database_, "COMMIT");
+  } catch (...) {
+    exec(database_, "ROLLBACK");
+    throw;
+  }
 }
 
 void MailboxStore::close_agent(std::string_view agent_id, TimestampMs now) {
   update_agent(AgentUpdate{.agent_id = std::string(agent_id),
                            .status = std::string("closed"),
-                           .closed_at_ms = now});
+                           .closed_at_ms = std::optional<TimestampMs>{now}});
 }
 
 std::vector<AgentRecord> MailboxStore::list_agents(const AgentQuery &query) {
@@ -620,95 +719,103 @@ SendReceipt MailboxStore::send(const SendRequest &request) {
       request.created_at_ms == 0 ? options_.clock() : request.created_at_ms;
   const auto available =
       request.available_at_ms == 0 ? now : request.available_at_ms;
-  std::string recipient_session;
-  std::optional<std::string> recipient_agent;
-  if (request.target.agent_id) {
-    Statement target(database_, R"sql(
+  exec(database_, "BEGIN IMMEDIATE");
+  try {
+    std::string recipient_session;
+    std::optional<std::string> recipient_agent;
+    if (request.target.agent_id) {
+      Statement target(database_, R"sql(
       SELECT a.session_id FROM agents a JOIN processes p ON p.process_id=a.process_id
       WHERE a.agent_id=? AND p.workspace_id=? AND a.closed_at_ms IS NULL
         AND p.lease_expires_at_ms > ?
     )sql");
-    bind_text(target.get(), 1, *request.target.agent_id);
-    bind_text(target.get(), 2, options_.workspace_id);
-    bind_integer(target.get(), 3, now);
-    if (sqlite3_step(target.get()) != SQLITE_ROW)
-      throw MailboxError(MailboxErrorCode::not_found,
-                         "recipient agent is not live");
-    recipient_session = column_text(target.get(), 0);
-    recipient_agent = request.target.agent_id;
-  } else {
-    recipient_session = *request.target.session_id;
-    Statement target(database_, R"sql(
+      bind_text(target.get(), 1, *request.target.agent_id);
+      bind_text(target.get(), 2, request.workspace_id);
+      bind_integer(target.get(), 3, now);
+      const int target_step = sqlite3_step(target.get());
+      check_sqlite(database_, target_step, "find recipient agent");
+      if (target_step != SQLITE_ROW)
+        throw MailboxError(MailboxErrorCode::not_found,
+                           "recipient agent is not live");
+      recipient_session = column_text(target.get(), 0);
+      recipient_agent = request.target.agent_id;
+    } else {
+      recipient_session = *request.target.session_id;
+      Statement target(database_, R"sql(
       SELECT a.agent_id FROM agents a JOIN processes p ON p.process_id=a.process_id
       WHERE a.session_id=? AND p.workspace_id=? AND a.closed_at_ms IS NULL
         AND p.lease_expires_at_ms > ? ORDER BY a.agent_id
     )sql");
-    bind_text(target.get(), 1, recipient_session);
-    bind_text(target.get(), 2, options_.workspace_id);
-    bind_integer(target.get(), 3, now);
-    std::vector<std::string> live;
-    while (sqlite3_step(target.get()) == SQLITE_ROW)
-      live.push_back(column_text(target.get(), 0));
-    if (live.size() > 1)
-      throw MailboxError(
-          MailboxErrorCode::ambiguous_target,
-          "session has multiple live activations; specify agent_id");
-    if (live.size() == 1)
-      recipient_agent = live.front();
-    if (live.empty()) {
-      Statement known(
-          database_,
-          "SELECT 1 FROM agents WHERE session_id=? AND process_id IN "
-          "(SELECT process_id FROM processes WHERE workspace_id=?) LIMIT 1");
-      bind_text(known.get(), 1, recipient_session);
-      bind_text(known.get(), 2, options_.workspace_id);
-      if (sqlite3_step(known.get()) != SQLITE_ROW)
-        throw MailboxError(MailboxErrorCode::not_found,
-                           "recipient session is unknown");
+      bind_text(target.get(), 1, recipient_session);
+      bind_text(target.get(), 2, request.workspace_id);
+      bind_integer(target.get(), 3, now);
+      std::vector<std::string> live;
+      while (true) {
+        const int step = sqlite3_step(target.get());
+        if (step == SQLITE_DONE)
+          break;
+        check_sqlite(database_, step, "find recipient session");
+        live.push_back(column_text(target.get(), 0));
+      }
+      if (live.size() > 1)
+        throw MailboxError(
+            MailboxErrorCode::ambiguous_target,
+            "session has multiple live activations; specify agent_id");
+      if (live.empty()) {
+        Statement known(
+            database_,
+            "SELECT 1 FROM agents WHERE session_id=? AND process_id IN "
+            "(SELECT process_id FROM processes WHERE workspace_id=?) LIMIT 1");
+        bind_text(known.get(), 1, recipient_session);
+        bind_text(known.get(), 2, request.workspace_id);
+        const int known_step = sqlite3_step(known.get());
+        check_sqlite(database_, known_step, "find known recipient session");
+        if (known_step != SQLITE_ROW)
+          throw MailboxError(MailboxErrorCode::not_found,
+                             "recipient session is unknown");
+      }
     }
-  }
-  const std::string message_id =
-      request.message_id.value_or(options_.id_generator());
-  const std::string body = body_json(request.body).dump();
-  Statement statement(database_, R"sql(
+    const std::string message_id =
+        request.message_id.value_or(options_.id_generator());
+    const std::string body = body_json(request.body).dump();
+    Statement statement(database_, R"sql(
     INSERT INTO messages(message_id,sender_agent_id,sender_session_id,
       recipient_session_id,recipient_agent_id,workspace_id,kind,body_json,
       reply_to_message_id,created_at_ms,available_at_ms)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)
   )sql");
-  bind_text(statement.get(), 1, message_id);
-  bind_text(statement.get(), 2, request.sender_agent_id);
-  bind_text(statement.get(), 3, request.sender_session_id);
-  bind_text(statement.get(), 4, recipient_session);
-  bind_optional_text(statement.get(), 5, recipient_agent);
-  bind_text(statement.get(), 6, options_.workspace_id);
-  bind_text(statement.get(), 7, mailbox_message_kind_to_string(request.kind));
-  bind_text(statement.get(), 8, body);
-  bind_optional_text(statement.get(), 9, request.reply_to_message_id);
-  bind_integer(statement.get(), 10, now);
-  bind_integer(statement.get(), 11, available);
-  const int result = sqlite3_step(statement.get());
-  if (result == SQLITE_CONSTRAINT)
-    throw MailboxError(MailboxErrorCode::invalid_message,
-                       "mailbox message ID already exists");
-  check_sqlite(database_, result, "send mailbox message");
-  Statement event(
-      database_,
-      "INSERT INTO "
-      "mailbox_events(workspace_id,event_type,subject_id,created_at_ms) "
-      "VALUES (?, 'message', ?, ?)");
-  bind_text(event.get(), 1, options_.workspace_id);
-  bind_text(event.get(), 2, message_id);
-  bind_integer(event.get(), 3, now);
-  check_sqlite(database_, sqlite3_step(event.get()), "record mailbox message");
-  return SendReceipt{.message_id = message_id,
-                     .recipient_session_id = recipient_session,
-                     .recipient_agent_id = recipient_agent,
-                     .created_at_ms = now};
+    bind_text(statement.get(), 1, message_id);
+    bind_text(statement.get(), 2, request.sender_agent_id);
+    bind_text(statement.get(), 3, request.sender_session_id);
+    bind_text(statement.get(), 4, recipient_session);
+    bind_optional_text(statement.get(), 5, recipient_agent);
+    bind_text(statement.get(), 6, request.workspace_id);
+    bind_text(statement.get(), 7, mailbox_message_kind_to_string(request.kind));
+    bind_text(statement.get(), 8, body);
+    bind_optional_text(statement.get(), 9, request.reply_to_message_id);
+    bind_integer(statement.get(), 10, now);
+    bind_integer(statement.get(), 11, available);
+    const int result = sqlite3_step(statement.get());
+    if (result == SQLITE_CONSTRAINT)
+      throw MailboxError(MailboxErrorCode::invalid_message,
+                         "mailbox message ID already exists");
+    check_sqlite(database_, result, "send mailbox message");
+    insert_event(database_, request.workspace_id, "message", message_id, now);
+    exec(database_, "COMMIT");
+    return SendReceipt{.message_id = message_id,
+                       .recipient_session_id = recipient_session,
+                       .recipient_agent_id = recipient_agent,
+                       .created_at_ms = now};
+  } catch (...) {
+    exec(database_, "ROLLBACK");
+    throw;
+  }
 }
 
 std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
   std::scoped_lock lock(mutex_);
+  const auto workspace = query.workspace_id.value_or(options_.workspace_id);
+  check_workspace(workspace);
   const auto now = query.now_ms == 0 ? options_.clock() : query.now_ms;
   Statement statement(
       database_,
@@ -717,7 +824,7 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
           "AND available_at_ms<=? AND (? OR acknowledged_at_ms IS NULL) "
           "ORDER BY created_at_ms,message_id LIMIT ?");
   bind_text(statement.get(), 1, query.session_id);
-  bind_text(statement.get(), 2, options_.workspace_id);
+  bind_text(statement.get(), 2, workspace);
   bind_integer(statement.get(), 3, now);
   bind_integer(statement.get(), 4, query.include_acknowledged ? 1 : 0);
   bind_integer(statement.get(), 5, static_cast<std::int64_t>(query.limit));
@@ -738,11 +845,27 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
 
 ClaimResult MailboxStore::claim(const ClaimRequest &request) {
   std::scoped_lock lock(mutex_);
+  const auto workspace = request.workspace_id.value_or(options_.workspace_id);
+  check_workspace(workspace);
   const auto now = request.now_ms == 0 ? options_.clock() : request.now_ms;
   const auto lease =
       request.lease_ms <= 0 ? options_.claim_lease_ms : request.lease_ms;
   exec(database_, "BEGIN IMMEDIATE");
   try {
+    Statement agent(database_,
+                    "SELECT 1 FROM agents a JOIN processes p ON "
+                    "p.process_id=a.process_id WHERE a.agent_id=? "
+                    "AND a.session_id=? AND p.workspace_id=? AND "
+                    "a.closed_at_ms IS NULL AND p.lease_expires_at_ms>?");
+    bind_text(agent.get(), 1, request.agent_id);
+    bind_text(agent.get(), 2, request.session_id);
+    bind_text(agent.get(), 3, workspace);
+    bind_integer(agent.get(), 4, now);
+    const int agent_step = sqlite3_step(agent.get());
+    check_sqlite(database_, agent_step, "validate claiming mailbox agent");
+    if (agent_step != SQLITE_ROW)
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "claiming mailbox agent is not live");
     Statement query(
         database_,
         "SELECT " + std::string(kMessageColumns) +
@@ -751,11 +874,15 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
             "AND (claim_expires_at_ms IS NULL OR claim_expires_at_ms<=?) "
             "ORDER BY created_at_ms,message_id");
     bind_text(query.get(), 1, request.session_id);
-    bind_text(query.get(), 2, options_.workspace_id);
+    bind_text(query.get(), 2, workspace);
     bind_integer(query.get(), 3, now);
     bind_integer(query.get(), 4, now);
     std::vector<MailboxMessage> candidates;
-    while (sqlite3_step(query.get()) == SQLITE_ROW) {
+    while (true) {
+      const int step = sqlite3_step(query.get());
+      if (step == SQLITE_DONE)
+        break;
+      check_sqlite(database_, step, "find claimable mailbox messages");
       auto message = read_message(query.get());
       if ((!message.recipient_agent_id ||
            *message.recipient_agent_id == request.agent_id) &&
@@ -771,12 +898,13 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
                        "UPDATE messages SET claim_agent_id=?,claim_token=?,"
                        "claim_expires_at_ms=? WHERE message_id=? AND "
                        "acknowledged_at_ms IS NULL AND (claim_expires_at_ms IS "
-                       "NULL OR claim_expires_at_ms<=?)");
+                       "NULL OR claim_expires_at_ms<=?) AND workspace_id=?");
       bind_text(update.get(), 1, request.agent_id);
       bind_text(update.get(), 2, token);
       bind_integer(update.get(), 3, now + lease);
       bind_text(update.get(), 4, message.message_id);
       bind_integer(update.get(), 5, now);
+      bind_text(update.get(), 6, workspace);
       check_sqlite(database_, sqlite3_step(update.get()),
                    "claim mailbox message");
       if (sqlite3_changes(database_) == 0)
@@ -784,6 +912,8 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
       message.claim_agent_id = request.agent_id;
       message.claim_token = token;
       message.claim_expires_at_ms = now + lease;
+      insert_event(database_, workspace, "message_claimed", message.message_id,
+                   now);
       result.messages.push_back(std::move(message));
     }
     exec(database_, "COMMIT");
@@ -796,31 +926,52 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
 
 void MailboxStore::acknowledge(const AcknowledgeRequest &request) {
   std::scoped_lock lock(mutex_);
-  Statement statement(
-      database_,
-      "UPDATE messages SET acknowledged_at_ms=? WHERE message_id=? "
-      "AND claim_agent_id=? AND claim_token=? AND acknowledged_at_ms IS NULL");
-  const auto now = request.now_ms == 0 ? options_.clock() : request.now_ms;
-  bind_integer(statement.get(), 1, now);
-  bind_text(statement.get(), 2, request.message_id);
-  bind_text(statement.get(), 3, request.agent_id);
-  bind_text(statement.get(), 4, request.claim_token);
-  check_sqlite(database_, sqlite3_step(statement.get()),
-               "acknowledge mailbox message");
-  if (sqlite3_changes(database_) != 0)
-    return;
-  Statement already(
-      database_,
-      "SELECT acknowledged_at_ms FROM messages WHERE message_id=? AND "
-      "claim_agent_id=? AND claim_token=?");
-  bind_text(already.get(), 1, request.message_id);
-  bind_text(already.get(), 2, request.agent_id);
-  bind_text(already.get(), 3, request.claim_token);
-  if (sqlite3_step(already.get()) == SQLITE_ROW &&
-      sqlite3_column_type(already.get(), 0) != SQLITE_NULL)
-    return;
-  throw MailboxError(MailboxErrorCode::invalid_claim,
-                     "mailbox claim token is invalid or expired");
+  const auto workspace = request.workspace_id.value_or(options_.workspace_id);
+  check_workspace(workspace);
+  exec(database_, "BEGIN IMMEDIATE");
+  try {
+    Statement statement(
+        database_,
+        "UPDATE messages SET acknowledged_at_ms=? WHERE message_id=? "
+        "AND claim_agent_id=? AND claim_token=? AND workspace_id=? "
+        "AND acknowledged_at_ms IS NULL AND (claim_expires_at_ms IS NULL OR "
+        "claim_expires_at_ms>?)");
+    const auto now = request.now_ms == 0 ? options_.clock() : request.now_ms;
+    bind_integer(statement.get(), 1, now);
+    bind_text(statement.get(), 2, request.message_id);
+    bind_text(statement.get(), 3, request.agent_id);
+    bind_text(statement.get(), 4, request.claim_token);
+    bind_text(statement.get(), 5, workspace);
+    bind_integer(statement.get(), 6, now);
+    check_sqlite(database_, sqlite3_step(statement.get()),
+                 "acknowledge mailbox message");
+    if (sqlite3_changes(database_) != 0) {
+      insert_event(database_, workspace, "message_acknowledged",
+                   request.message_id, now);
+      exec(database_, "COMMIT");
+      return;
+    }
+    Statement already(
+        database_,
+        "SELECT acknowledged_at_ms FROM messages WHERE message_id=? AND "
+        "claim_agent_id=? AND claim_token=? AND workspace_id=?");
+    bind_text(already.get(), 1, request.message_id);
+    bind_text(already.get(), 2, request.agent_id);
+    bind_text(already.get(), 3, request.claim_token);
+    bind_text(already.get(), 4, workspace);
+    const int already_step = sqlite3_step(already.get());
+    check_sqlite(database_, already_step, "check acknowledged mailbox message");
+    if (already_step == SQLITE_ROW &&
+        sqlite3_column_type(already.get(), 0) != SQLITE_NULL) {
+      exec(database_, "COMMIT");
+      return;
+    }
+    throw MailboxError(MailboxErrorCode::invalid_claim,
+                       "mailbox claim token is invalid or expired");
+  } catch (...) {
+    exec(database_, "ROLLBACK");
+    throw;
+  }
 }
 
 WaitResult MailboxStore::wait_for_change(
@@ -837,16 +988,32 @@ WaitResult MailboxStore::wait_for_change(
       std::scoped_lock lock(mutex_);
       check_workspace(request.workspace_id);
       Statement statement(
-          database_, "SELECT COALESCE(MAX(generation),0) FROM mailbox_events "
-                     "WHERE workspace_id=?");
+          database_,
+          "SELECT generation,event_type FROM mailbox_events "
+          "WHERE workspace_id=? AND generation>? ORDER BY generation");
       bind_text(statement.get(), 1, request.workspace_id);
-      check_sqlite(database_, sqlite3_step(statement.get()),
-                   "read mailbox generation");
-      const auto generation = sqlite3_column_int64(statement.get(), 0);
+      bind_integer(statement.get(), 2, request.after_generation);
+      std::int64_t generation = request.after_generation;
+      bool presence_changed = false;
+      bool messages_changed = false;
+      while (true) {
+        const int step = sqlite3_step(statement.get());
+        if (step == SQLITE_DONE)
+          break;
+        check_sqlite(database_, step, "read mailbox events");
+        generation = sqlite3_column_int64(statement.get(), 0);
+        const auto event_type = column_text(statement.get(), 1);
+        presence_changed = presence_changed ||
+                           event_type.starts_with("process_") ||
+                           event_type.starts_with("agent_");
+        messages_changed = messages_changed ||
+                           event_type.starts_with("message") ||
+                           event_type == "cleanup";
+      }
       if (generation > request.after_generation)
         return WaitResult{.generation = generation,
-                          .presence_changed = true,
-                          .messages_changed = true};
+                          .presence_changed = presence_changed,
+                          .messages_changed = messages_changed};
     }
     const auto elapsed = options_.clock() - start;
     if (stop_token.stop_requested() || elapsed >= timeout)
@@ -889,34 +1056,81 @@ MailboxStatus MailboxStore::status(const StatusRequest &request) {
 
 CleanupResult MailboxStore::cleanup(const CleanupRequest &request) {
   std::scoped_lock lock(mutex_);
+  const auto workspace = request.workspace_id.value_or(options_.workspace_id);
+  check_workspace(workspace);
   const auto now = request.now_ms == 0 ? options_.clock() : request.now_ms;
   const auto message_cutoff = now - request.acknowledged_retention_ms;
   const auto stale_cutoff = now - request.stale_retention_ms;
   CleanupResult result;
-  Statement messages(database_, "DELETE FROM messages WHERE acknowledged_at_ms "
-                                "IS NOT NULL AND acknowledged_at_ms<?");
-  bind_integer(messages.get(), 1, message_cutoff);
-  check_sqlite(database_, sqlite3_step(messages.get()), "cleanup messages");
-  result.messages_removed =
-      static_cast<std::size_t>(sqlite3_changes(database_));
-  Statement agents(
-      database_,
-      "DELETE FROM agents WHERE closed_at_ms IS NOT NULL AND closed_at_ms<?");
-  bind_integer(agents.get(), 1, stale_cutoff);
-  check_sqlite(database_, sqlite3_step(agents.get()), "cleanup agents");
-  result.agents_removed = static_cast<std::size_t>(sqlite3_changes(database_));
-  Statement processes(database_, "DELETE FROM processes WHERE closed_at_ms IS "
-                                 "NOT NULL AND closed_at_ms<?");
-  bind_integer(processes.get(), 1, stale_cutoff);
-  check_sqlite(database_, sqlite3_step(processes.get()), "cleanup processes");
-  result.processes_removed =
-      static_cast<std::size_t>(sqlite3_changes(database_));
-  Statement events(database_,
-                   "DELETE FROM mailbox_events WHERE created_at_ms<?");
-  bind_integer(events.get(), 1, message_cutoff);
-  check_sqlite(database_, sqlite3_step(events.get()), "cleanup events");
-  result.events_removed = static_cast<std::size_t>(sqlite3_changes(database_));
-  return result;
+  exec(database_, "BEGIN IMMEDIATE");
+  try {
+    Statement messages(database_,
+                       "DELETE FROM messages WHERE acknowledged_at_ms "
+                       "IS NOT NULL AND acknowledged_at_ms<? AND "
+                       "workspace_id=?");
+    bind_integer(messages.get(), 1, message_cutoff);
+    bind_text(messages.get(), 2, workspace);
+    check_sqlite(database_, sqlite3_step(messages.get()), "cleanup messages");
+    result.messages_removed =
+        static_cast<std::size_t>(sqlite3_changes(database_));
+    while (true) {
+      Statement agent(database_,
+                      "SELECT a.agent_id FROM agents a JOIN processes p "
+                      "ON p.process_id=a.process_id WHERE "
+                      "p.workspace_id=? AND a.closed_at_ms IS NOT NULL "
+                      "AND a.closed_at_ms<? AND NOT EXISTS (SELECT 1 "
+                      "FROM agents child WHERE child.owner_agent_id="
+                      "a.agent_id) LIMIT 1");
+      bind_text(agent.get(), 1, workspace);
+      bind_integer(agent.get(), 2, stale_cutoff);
+      const int agent_step = sqlite3_step(agent.get());
+      check_sqlite(database_, agent_step, "find cleanup agent");
+      if (agent_step == SQLITE_DONE)
+        break;
+      const auto agent_id = column_text(agent.get(), 0);
+      Statement remove(database_, "DELETE FROM agents WHERE agent_id=?");
+      bind_text(remove.get(), 1, agent_id);
+      check_sqlite(database_, sqlite3_step(remove.get()), "cleanup agent");
+      result.agents_removed +=
+          static_cast<std::size_t>(sqlite3_changes(database_));
+    }
+    while (true) {
+      Statement process(database_,
+                        "SELECT p.process_id FROM processes p WHERE "
+                        "p.workspace_id=? AND p.closed_at_ms IS NOT NULL "
+                        "AND p.closed_at_ms<? AND NOT EXISTS (SELECT 1 "
+                        "FROM agents a WHERE a.process_id=p.process_id) "
+                        "LIMIT 1");
+      bind_text(process.get(), 1, workspace);
+      bind_integer(process.get(), 2, stale_cutoff);
+      const int process_step = sqlite3_step(process.get());
+      check_sqlite(database_, process_step, "find cleanup process");
+      if (process_step == SQLITE_DONE)
+        break;
+      const auto process_id = column_text(process.get(), 0);
+      Statement remove(database_, "DELETE FROM processes WHERE process_id=?");
+      bind_text(remove.get(), 1, process_id);
+      check_sqlite(database_, sqlite3_step(remove.get()), "cleanup process");
+      result.processes_removed +=
+          static_cast<std::size_t>(sqlite3_changes(database_));
+    }
+    Statement events(database_,
+                     "DELETE FROM mailbox_events WHERE created_at_ms<? "
+                     "AND workspace_id=?");
+    bind_integer(events.get(), 1, message_cutoff);
+    bind_text(events.get(), 2, workspace);
+    check_sqlite(database_, sqlite3_step(events.get()), "cleanup events");
+    result.events_removed =
+        static_cast<std::size_t>(sqlite3_changes(database_));
+    if (result.messages_removed != 0 || result.agents_removed != 0 ||
+        result.processes_removed != 0 || result.events_removed != 0)
+      insert_event(database_, workspace, "cleanup", workspace, now);
+    exec(database_, "COMMIT");
+    return result;
+  } catch (...) {
+    exec(database_, "ROLLBACK");
+    throw;
+  }
 }
 
 } // namespace pi::core

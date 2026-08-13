@@ -313,6 +313,12 @@ path = "/toml/mailbox.sqlite3"
     auto command_line = load_and_merge(static_cast<int>(argv.size()), argv.data());
     CHECK_EQ(command_line.mailbox_path, std::string("/cli/mailbox.sqlite3"));
     CHECK(command_line.mailbox_enabled);
+    values = {"pi", "--no-mailbox"};
+    argv.clear();
+    for (auto &value : values)
+      argv.push_back(value.data());
+    auto disabled = load_and_merge(static_cast<int>(argv.size()), argv.data());
+    CHECK(!disabled.mailbox_enabled);
     unsetenv("PICI_MAILBOX");
   }
 
