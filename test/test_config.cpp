@@ -303,6 +303,7 @@ path = "/toml/mailbox.sqlite3"
     for (auto &value : values)
       argv.push_back(value.data());
     auto environment = load_and_merge(static_cast<int>(argv.size()), argv.data());
+    CHECK_EQ(environment.config_path, p.string());
     CHECK_EQ(environment.mailbox_path, std::string("/env/mailbox.sqlite3"));
     CHECK(environment.mailbox_enabled);
     values.push_back("--mailbox");

@@ -77,7 +77,7 @@ struct Args {
   bool mailbox_enabled_explicit{false};
 
   // Config file
-  std::string config_path; // --config <path>; empty = use default location
+  std::string config_path; // Resolved config path selected by CLI/env/defaults.
 
   // Observability
   std::string otel_endpoint; // --otel-endpoint <url>; empty = no OTel export

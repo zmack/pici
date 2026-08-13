@@ -31,6 +31,7 @@ struct MailboxCoordinatorOptions {
   std::int64_t protocol_version{1};
   std::string capabilities_json{"[]"};
   std::chrono::milliseconds heartbeat_interval{2000};
+  std::chrono::milliseconds stale_after{10'000};
   std::chrono::milliseconds poll_interval{250};
   std::chrono::milliseconds cleanup_interval{30'000};
 };
@@ -110,6 +111,8 @@ private:
   bool stopped_{false};
   TimestampMs next_heartbeat_ms_{0};
   TimestampMs next_poll_ms_{0};
+  TimestampMs last_cleanup_ms_{0};
+  mutable std::mutex maintenance_mutex_;
   std::jthread maintenance_;
   std::condition_variable_any maintenance_wakeup_;
   std::shared_ptr<MailboxDeliveryTargets> delivery_targets_;

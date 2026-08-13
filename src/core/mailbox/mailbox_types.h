@@ -27,6 +27,7 @@ enum class MailboxErrorCode {
   invalid_message,
   invalid_claim,
   incompatible_schema,
+  corrupt,
   internal,
 };
 

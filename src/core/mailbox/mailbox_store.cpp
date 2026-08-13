@@ -4,15 +4,18 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <random>
+#include <ranges>
 #include <sstream>
 #include <stdexcept>
 #include <stop_token>
@@ -24,6 +27,8 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 #include <nlohmann/json.hpp>
 
 namespace pi::core {
@@ -33,11 +38,87 @@ namespace {
 using json = nlohmann::json; // NOLINT(misc-include-cleaner)
 constexpr std::int64_t kSchemaVersion = 1;
 constexpr std::size_t kMaxTextBytes = static_cast<std::size_t>(64) * 1024;
+constexpr std::size_t kMaxIdentifierBytes = 256;
+constexpr std::size_t kMaxMetadataBytes = static_cast<std::size_t>(4) * 1024;
+
+bool valid_identifier(std::string_view value) {
+  if (value.empty() || value.size() > kMaxIdentifierBytes)
+    return false;
+  return std::ranges::all_of(value, [](unsigned char character) {
+    return character >= 0x20 && character != 0x7f;
+  });
+}
+
+void validate_identifier(std::string_view value, std::string_view field) {
+  if (!valid_identifier(value))
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       std::string(field) + " is invalid");
+}
+
+void validate_bounded_text(std::string_view value, std::string_view field) {
+  if (value.size() > kMaxIdentifierBytes ||
+      !std::ranges::all_of(value, [](unsigned char character) {
+        return character >= 0x20 && character != 0x7f;
+      }))
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       std::string(field) + " is invalid");
+}
+
+void validate_body(const MailboxBody &body) {
+  if (body.text.empty() || body.text.size() > kMaxTextBytes)
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox text exceeds 64 KiB or is empty");
+  std::size_t metadata_bytes = 0;
+  for (const auto &[key, value] : body.metadata) {
+    validate_identifier(key, "metadata key");
+    if (key.size() > kMaxMetadataBytes - metadata_bytes ||
+        value.size() > kMaxMetadataBytes - metadata_bytes - key.size())
+      throw MailboxError(MailboxErrorCode::invalid_message,
+                         "mailbox metadata exceeds 4 KiB");
+    metadata_bytes += key.size() + value.size();
+    if (metadata_bytes > kMaxMetadataBytes)
+      throw MailboxError(MailboxErrorCode::invalid_message,
+                         "mailbox metadata exceeds 4 KiB");
+  }
+}
+
+void validate_optional_identifier(const std::optional<std::string> &value,
+                                  std::string_view field) {
+  if (value)
+    validate_identifier(*value, field);
+}
+
+bool valid_agent_kind(std::string_view kind) {
+  return kind == "root" || kind == "subagent";
+}
+
+bool valid_agent_status(std::string_view status) {
+  return status == "starting" || status == "pending" || status == "idle" ||
+         status == "running" || status == "completed" || status == "errored" ||
+         status == "interrupted" || status == "closing" || status == "closed" ||
+         status == "shutdown";
+}
 
 TimestampMs system_now() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
+}
+
+TimestampMs subtract_duration(TimestampMs value, std::int64_t duration) {
+  if (duration <= 0)
+    return value;
+  if (value < std::numeric_limits<TimestampMs>::min() + duration)
+    return std::numeric_limits<TimestampMs>::min();
+  return value - duration;
+}
+
+MailboxErrorCode sqlite_error_code(int result) {
+  if (result == SQLITE_BUSY || result == SQLITE_LOCKED)
+    return MailboxErrorCode::busy;
+  if (result == SQLITE_CORRUPT || result == SQLITE_NOTADB)
+    return MailboxErrorCode::corrupt;
+  return MailboxErrorCode::internal;
 }
 
 std::string random_id() {
@@ -56,11 +137,9 @@ std::string sqlite_message(sqlite3 *database, int result) {
 
 [[noreturn]] void throw_sqlite(sqlite3 *database, int result,
                                std::string_view operation) {
-  const auto code = result == SQLITE_BUSY || result == SQLITE_LOCKED
-                        ? MailboxErrorCode::busy
-                        : MailboxErrorCode::internal;
-  throw MailboxError(code, std::string(operation) + ": " +
-                               sqlite_message(database, result));
+  throw MailboxError(sqlite_error_code(result),
+                     std::string(operation) + ": " +
+                         sqlite_message(database, result));
 }
 
 void check_sqlite(sqlite3 *database, int result, std::string_view operation) {
@@ -77,10 +156,7 @@ void exec(sqlite3 *database, std::string_view sql) {
     const std::string message =
         error != nullptr ? error : sqlite3_errmsg(database);
     sqlite3_free(error);
-    const auto code = result == SQLITE_BUSY || result == SQLITE_LOCKED
-                          ? MailboxErrorCode::busy
-                          : MailboxErrorCode::internal;
-    throw MailboxError(code, message);
+    throw MailboxError(sqlite_error_code(result), message);
   }
 }
 
@@ -170,6 +246,7 @@ std::optional<TimestampMs> optional_column_integer(sqlite3_stmt *statement,
 }
 
 json body_json(const MailboxBody &body) {
+  validate_body(body);
   json metadata = json::object();
   for (const auto &[key, value] : body.metadata)
     metadata[key] = value;
@@ -179,18 +256,19 @@ json body_json(const MailboxBody &body) {
 MailboxBody parse_body(std::string_view serialized) {
   try {
     const auto body = json::parse(serialized);
-    if (!body.is_object() || body.value("version", 0) != 1 ||
-        !body.contains("text") || !body["text"].is_string())
+    if (!body.is_object() || !body.contains("version") ||
+        !body["version"].is_number_integer() || body["version"] != 1 ||
+        !body.contains("text") || !body["text"].is_string() ||
+        !body.contains("metadata") || !body["metadata"].is_object())
       throw std::runtime_error("invalid body envelope");
     MailboxBody result{.text = body["text"].get<std::string>()};
-    if (const auto metadata = body.find("metadata");
-        metadata != body.end() && metadata->is_object()) {
-      for (auto item = metadata->begin(); item != metadata->end(); ++item) {
-        if (item.value().is_string())
-          result.metadata.emplace_back(item.key(),
-                                       item.value().get<std::string>());
-      }
+    for (auto item = body["metadata"].begin(); item != body["metadata"].end();
+         ++item) {
+      if (!item.value().is_string())
+        throw std::runtime_error("invalid metadata value");
+      result.metadata.emplace_back(item.key(), item.value().get<std::string>());
     }
+    validate_body(result);
     return result;
   } catch (const std::exception &error) {
     throw MailboxError(MailboxErrorCode::invalid_message,
@@ -275,28 +353,55 @@ MailboxStore::~MailboxStore() {
 
 void MailboxStore::open() {
   const auto parent = options_.path.parent_path();
+  constexpr auto unsafe_permissions =
+      std::filesystem::perms::group_all | std::filesystem::perms::others_all;
   std::error_code error;
+  const bool parent_existed =
+      !parent.empty() && std::filesystem::exists(parent, error);
+  if (error)
+    throw MailboxError(MailboxErrorCode::permission_denied,
+                       "failed to inspect mailbox directory: " +
+                           error.message());
   if (!parent.empty()) {
     std::filesystem::create_directories(parent, error);
     if (error)
       throw MailboxError(MailboxErrorCode::permission_denied,
                          "failed to create mailbox directory: " +
                              error.message());
-    std::filesystem::permissions(parent,
-                                 std::filesystem::perms::owner_read |
-                                     std::filesystem::perms::owner_write |
-                                     std::filesystem::perms::owner_exec,
-                                 std::filesystem::perm_options::replace, error);
+    struct stat parent_stat{};
+    if (::lstat(parent.c_str(), &parent_stat) != 0 ||
+        !S_ISDIR(parent_stat.st_mode) || parent_stat.st_uid != ::geteuid())
+      throw MailboxError(MailboxErrorCode::permission_denied,
+                         "mailbox directory must be an owned directory");
+    if (parent_existed &&
+        (static_cast<std::filesystem::perms>(parent_stat.st_mode) &
+         unsafe_permissions) != std::filesystem::perms::none)
+      throw MailboxError(MailboxErrorCode::permission_denied,
+                         "mailbox directory is accessible by other users");
+    if (!parent_existed)
+      std::filesystem::permissions(parent,
+                                   std::filesystem::perms::owner_read |
+                                       std::filesystem::perms::owner_write |
+                                       std::filesystem::perms::owner_exec,
+                                   std::filesystem::perm_options::replace,
+                                   error);
     if (error)
       throw MailboxError(MailboxErrorCode::permission_denied,
                          "failed to secure mailbox directory: " +
                              error.message());
   }
   struct stat path_stat{};
-  if (::lstat(options_.path.c_str(), &path_stat) == 0 &&
-      S_ISLNK(path_stat.st_mode))
+  const bool file_existed = ::lstat(options_.path.c_str(), &path_stat) == 0;
+  if (file_existed &&
+      (S_ISLNK(path_stat.st_mode) || !S_ISREG(path_stat.st_mode) ||
+       path_stat.st_uid != ::geteuid() ||
+       (static_cast<std::filesystem::perms>(path_stat.st_mode) &
+        unsafe_permissions) != std::filesystem::perms::none))
     throw MailboxError(MailboxErrorCode::permission_denied,
-                       "mailbox path must not be a symbolic link");
+                       "mailbox path must be a private regular file");
+  if (!file_existed && errno != ENOENT)
+    throw MailboxError(MailboxErrorCode::permission_denied,
+                       "failed to inspect mailbox path");
   const int result =
       sqlite3_open_v2(options_.path.c_str(), &database_,
                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
@@ -307,12 +412,16 @@ void MailboxStore::open() {
     if (database_ != nullptr)
       sqlite3_close(database_);
     database_ = nullptr;
-    throw MailboxError(MailboxErrorCode::internal, message);
+    const auto code = result == SQLITE_CANTOPEN
+                          ? MailboxErrorCode::permission_denied
+                          : sqlite_error_code(result);
+    throw MailboxError(code, message);
   }
-  std::filesystem::permissions(options_.path,
-                               std::filesystem::perms::owner_read |
-                                   std::filesystem::perms::owner_write,
-                               std::filesystem::perm_options::replace, error);
+  if (!file_existed)
+    std::filesystem::permissions(options_.path,
+                                 std::filesystem::perms::owner_read |
+                                     std::filesystem::perms::owner_write,
+                                 std::filesystem::perm_options::replace, error);
   if (error)
     throw MailboxError(MailboxErrorCode::permission_denied,
                        "failed to secure mailbox database: " + error.message());
@@ -328,6 +437,12 @@ void MailboxStore::configure_connection() {
 
 void MailboxStore::migrate() {
   std::scoped_lock lock(mutex_);
+  Statement integrity(database_, "PRAGMA integrity_check");
+  const int integrity_step = sqlite3_step(integrity.get());
+  check_sqlite(database_, integrity_step, "check mailbox integrity");
+  if (integrity_step != SQLITE_ROW || column_text(integrity.get(), 0) != "ok")
+    throw MailboxError(MailboxErrorCode::corrupt,
+                       "mailbox database integrity check failed");
   Statement version(database_, "PRAGMA user_version");
   const int result = sqlite3_step(version.get());
   check_sqlite(database_, result, "read mailbox schema version");
@@ -424,6 +539,9 @@ void MailboxStore::check_workspace(std::string_view workspace_id) const {
 
 void MailboxStore::register_process(const ProcessRecord &process) {
   std::scoped_lock lock(mutex_);
+  validate_identifier(process.process_id, "process ID");
+  validate_identifier(process.workspace_id, "workspace ID");
+  validate_bounded_text(process.hostname, "hostname");
   check_workspace(process.workspace_id);
   exec(database_, "BEGIN IMMEDIATE");
   try {
@@ -466,6 +584,7 @@ void MailboxStore::heartbeat_process(std::string_view process_id,
                                      TimestampMs now,
                                      TimestampMs lease_expires_at) {
   std::scoped_lock lock(mutex_);
+  validate_identifier(process_id, "process ID");
   const auto *const workspace_sql =
       options_.scope == MailboxScope::global ? "" : " AND workspace_id=?";
   Statement statement(
@@ -486,6 +605,7 @@ void MailboxStore::heartbeat_process(std::string_view process_id,
 
 void MailboxStore::close_process(std::string_view process_id, TimestampMs now) {
   std::scoped_lock lock(mutex_);
+  validate_identifier(process_id, "process ID");
   exec(database_, "BEGIN IMMEDIATE");
   try {
     Statement workspace(
@@ -542,6 +662,21 @@ void MailboxStore::close_process(std::string_view process_id, TimestampMs now) {
 
 void MailboxStore::register_agent(const AgentRecord &agent) {
   std::scoped_lock lock(mutex_);
+  validate_identifier(agent.agent_id, "agent ID");
+  validate_identifier(agent.process_id, "process ID");
+  validate_identifier(agent.session_id, "session ID");
+  validate_identifier(agent.kind, "agent kind");
+  validate_identifier(agent.status, "agent status");
+  if (!valid_agent_kind(agent.kind) || !valid_agent_status(agent.status))
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox agent kind or status is invalid");
+  validate_optional_identifier(agent.owner_agent_id, "owner agent ID");
+  validate_optional_identifier(agent.session_name, "session name");
+  validate_optional_identifier(agent.task_path, "task path");
+  validate_identifier(agent.provider, "provider");
+  validate_identifier(agent.model_id, "model ID");
+  if (agent.task_id)
+    validate_identifier(*agent.task_id, "task ID");
   exec(database_, "BEGIN IMMEDIATE");
   try {
     Statement process(database_,
@@ -596,8 +731,15 @@ void MailboxStore::register_agent(const AgentRecord &agent) {
 
 void MailboxStore::update_agent(const AgentUpdate &update) {
   std::scoped_lock lock(mutex_);
+  validate_identifier(update.agent_id, "agent ID");
   if (update.workspace_id)
     check_workspace(*update.workspace_id);
+  validate_optional_identifier(update.session_name, "session name");
+  validate_optional_identifier(update.provider, "provider");
+  validate_optional_identifier(update.model_id, "model ID");
+  if (update.status && !valid_agent_status(*update.status))
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox agent status is invalid");
   exec(database_, "BEGIN IMMEDIATE");
   try {
     const bool constrain_workspace =
@@ -652,6 +794,7 @@ void MailboxStore::update_agent(const AgentUpdate &update) {
 }
 
 void MailboxStore::close_agent(std::string_view agent_id, TimestampMs now) {
+  validate_identifier(agent_id, "agent ID");
   update_agent(AgentUpdate{.agent_id = std::string(agent_id),
                            .status = std::string("closed"),
                            .closed_at_ms = std::optional<TimestampMs>{now}});
@@ -661,6 +804,11 @@ std::vector<AgentRecord> MailboxStore::list_agents(const AgentQuery &query) {
   std::scoped_lock lock(mutex_);
   const auto workspace = query.workspace_id.value_or(options_.workspace_id);
   check_workspace(workspace);
+  validate_optional_identifier(query.session_id, "session ID");
+  validate_optional_identifier(query.agent_id, "agent ID");
+  if (query.limit == 0 || query.limit > 1000)
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox agent limit is out of range");
   const auto now = query.now_ms == 0 ? options_.clock() : query.now_ms;
   Statement statement(database_, R"sql(
     SELECT a.agent_id,a.process_id,a.kind,a.owner_agent_id,a.session_id,
@@ -713,11 +861,20 @@ std::vector<AgentRecord> MailboxStore::list_agents(const AgentQuery &query) {
 
 SendReceipt MailboxStore::send(const SendRequest &request) {
   std::scoped_lock lock(mutex_);
+  validate_identifier(request.sender_agent_id, "sender agent ID");
+  validate_identifier(request.sender_session_id, "sender session ID");
+  if (request.message_id)
+    validate_identifier(*request.message_id, "message ID");
+  if (request.reply_to_message_id)
+    validate_identifier(*request.reply_to_message_id, "reply ID");
+  if (request.target.agent_id)
+    validate_identifier(*request.target.agent_id, "target agent ID");
+  if (request.target.session_id)
+    validate_identifier(*request.target.session_id, "target session ID");
+  validate_body(request.body);
   check_workspace(request.workspace_id);
-  if (request.sender_agent_id.empty() || request.sender_session_id.empty() ||
-      request.body.text.empty() || request.body.text.size() > kMaxTextBytes ||
-      request.target.session_id.has_value() ==
-          request.target.agent_id.has_value())
+  if (request.target.session_id.has_value() ==
+      request.target.agent_id.has_value())
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "invalid mailbox send request");
   const auto now =
@@ -821,6 +978,13 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
   std::scoped_lock lock(mutex_);
   const auto workspace = query.workspace_id.value_or(options_.workspace_id);
   check_workspace(workspace);
+  validate_identifier(query.session_id, "session ID");
+  validate_optional_identifier(query.workspace_id, "workspace ID");
+  validate_optional_identifier(query.agent_id, "agent ID");
+  validate_optional_identifier(query.message_id, "message ID");
+  if (query.limit == 0 || query.limit > 1000)
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox inbox limit is out of range");
   const auto now = query.now_ms == 0 ? options_.clock() : query.now_ms;
   Statement statement(
       database_,
@@ -854,6 +1018,13 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
   std::scoped_lock lock(mutex_);
   const auto workspace = request.workspace_id.value_or(options_.workspace_id);
   check_workspace(workspace);
+  validate_identifier(request.session_id, "session ID");
+  validate_identifier(request.agent_id, "agent ID");
+  validate_optional_identifier(request.workspace_id, "workspace ID");
+  if (request.limit == 0 || request.limit > 1000 || request.lease_ms <= 0 ||
+      request.lease_ms > 60'000)
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox claim limits are out of range");
   const auto now = request.now_ms == 0 ? options_.clock() : request.now_ms;
   const auto lease =
       request.lease_ms <= 0 ? options_.claim_lease_ms : request.lease_ms;
@@ -937,6 +1108,10 @@ void MailboxStore::acknowledge(const AcknowledgeRequest &request) {
   std::scoped_lock lock(mutex_);
   const auto workspace = request.workspace_id.value_or(options_.workspace_id);
   check_workspace(workspace);
+  validate_identifier(request.message_id, "message ID");
+  validate_identifier(request.agent_id, "agent ID");
+  validate_identifier(request.claim_token, "claim token");
+  validate_optional_identifier(request.workspace_id, "workspace ID");
   exec(database_, "BEGIN IMMEDIATE");
   try {
     Statement statement(
@@ -987,8 +1162,12 @@ WaitResult MailboxStore::wait_for_change(
     const WaitRequest &request,
     std::stop_token
         stop_token) { // NOLINT(performance-unnecessary-value-param,misc-include-cleaner)
-  std::int64_t timeout =
-      std::clamp<std::int64_t>(request.timeout_ms, 0, 60'000);
+  validate_identifier(request.workspace_id, "workspace ID");
+  if (request.timeout_ms < 0 || request.timeout_ms > 60'000 ||
+      request.poll_interval_ms < 1 || request.poll_interval_ms > 5'000)
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox wait limits are out of range");
+  const auto timeout = request.timeout_ms;
   const auto interval =
       std::clamp<std::int64_t>(request.poll_interval_ms, 1, 5'000);
   const auto start = options_.clock();
@@ -1067,9 +1246,14 @@ CleanupResult MailboxStore::cleanup(const CleanupRequest &request) {
   std::scoped_lock lock(mutex_);
   const auto workspace = request.workspace_id.value_or(options_.workspace_id);
   check_workspace(workspace);
+  validate_optional_identifier(request.workspace_id, "workspace ID");
+  if (request.acknowledged_retention_ms < 0 || request.stale_retention_ms < 0)
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox retention values must not be negative");
   const auto now = request.now_ms == 0 ? options_.clock() : request.now_ms;
-  const auto message_cutoff = now - request.acknowledged_retention_ms;
-  const auto stale_cutoff = now - request.stale_retention_ms;
+  const auto message_cutoff =
+      subtract_duration(now, request.acknowledged_retention_ms);
+  const auto stale_cutoff = subtract_duration(now, request.stale_retention_ms);
   CleanupResult result;
   exec(database_, "BEGIN IMMEDIATE");
   try {

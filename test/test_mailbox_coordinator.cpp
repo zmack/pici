@@ -44,6 +44,9 @@ int main() {
                     ("pici-coordinator-" + std::to_string(::getpid()) +
                      "-" + std::to_string(suffix));
   std::filesystem::create_directories(root);
+  std::filesystem::permissions(
+      root, std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
   TimestampMs now = 1'000;
   const auto options = [&] {
     MailboxCoordinatorOptions result;
@@ -58,6 +61,7 @@ int main() {
     result.provider = "test";
     result.model_id = "model-a";
     result.heartbeat_interval = std::chrono::hours(1);
+    result.stale_after = std::chrono::hours(2);
     result.cleanup_interval = std::chrono::hours(2);
     return result;
   };
@@ -76,6 +80,10 @@ int main() {
     coordinator.activate_root("session-a", "first");
     CHECK(coordinator.status().root_active);
     CHECK_EQ(coordinator.status().session_id.value(), std::string("session-a"));
+    CHECK_EQ(coordinator.self().lease_expires_at_ms,
+             now + std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::hours(2))
+                       .count());
     coordinator.set_root_running(true);
     coordinator.set_model("test", "model-b");
     CHECK(coordinator.status().root_running);

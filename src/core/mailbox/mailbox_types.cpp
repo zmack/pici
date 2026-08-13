@@ -23,6 +23,8 @@ std::string_view mailbox_error_code_to_string(MailboxErrorCode code) {
     return "invalid_claim";
   case MailboxErrorCode::incompatible_schema:
     return "incompatible_schema";
+  case MailboxErrorCode::corrupt:
+    return "corrupt";
   case MailboxErrorCode::internal:
     return "internal";
   }

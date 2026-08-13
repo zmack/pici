@@ -55,6 +55,7 @@ make_coordinator(const std::filesystem::path &path, std::string process_id,
   options.provider = "test-provider";
   options.model_id = "test-model";
   options.heartbeat_interval = std::chrono::hours(1);
+  options.stale_after = std::chrono::hours(2);
   options.cleanup_interval = std::chrono::hours(2);
   return std::make_shared<MailboxCoordinator>(std::move(options));
 }
@@ -71,6 +72,9 @@ int main() {
                     ("pici-mailbox-bindings-" + std::to_string(::getpid()) +
                      "-" + std::to_string(suffix));
   std::filesystem::create_directories(root);
+  std::filesystem::permissions(
+      root, std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
   TimestampMs now = 1'000;
 
   try {

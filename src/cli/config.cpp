@@ -763,6 +763,9 @@ Args load_and_merge(int argc, char *argv[]) {
 
   // 4. Merge: CLI wins over config
   auto merged = merge_args(config, cli);
+  // Keep the actual selected path available to runtime features whose
+  // defaults are colocated with the config file (not only the default path).
+  merged.config_path = cfg_path.string();
   merged.config_document = std::move(config_document);
   if (merged.config_document != nullptr) {
     for (const auto &diagnostic : merged.config_document->diagnostics)

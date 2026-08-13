@@ -18,6 +18,7 @@
 #include <sstream>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <unordered_map>
@@ -82,6 +83,12 @@ std::filesystem::path bundled_mailbox_addon_path() {
   // The project currently has no install target; keep the bundled addon next
   // to its source tree until runtime resource packaging is introduced.
   return std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
+}
+
+bool is_mailbox_tool(std::string_view name) {
+  return name == "agents_list" || name == "agents_send" ||
+         name == "agents_request" || name == "agents_reply" ||
+         name == "agents_inbox" || name == "agents_close";
 }
 
 struct MailboxTaskObserver {
@@ -163,6 +170,17 @@ std::string local_hostname() {
     return {buffer.data()};
   }
   return "local";
+}
+
+std::string workspace_identity(const std::filesystem::path &workspace_path) {
+  std::uint64_t hash = 1469598103934665603ULL;
+  for (const auto character : workspace_path.string()) {
+    hash ^= static_cast<unsigned char>(character);
+    hash *= 1099511628211ULL;
+  }
+  std::ostringstream result;
+  result << "workspace-" << std::hex << hash;
+  return result.str();
 }
 
 void print_tools(
@@ -866,6 +884,7 @@ int cmd_run(const cli::Args &args,
 
   // Load and compose Lua hooks
   std::vector<std::shared_ptr<core::LuaHooks>> hooks_list_saved;
+  bool auto_mailbox_addon_loaded = false;
   auto load_hooks = [&]() -> std::shared_ptr<core::LuaHooks> {
     std::vector<std::shared_ptr<core::LuaHooks>> hooks_list;
     const auto bundled_mailbox = bundled_mailbox_addon_path();
@@ -912,6 +931,7 @@ int cmd_run(const cli::Args &args,
     if (args.mailbox_enabled && !mailbox_addon_explicit) {
       try {
         hooks_list.push_back(core::load_lua_hooks(bundled_mailbox));
+        auto_mailbox_addon_loaded = true;
         if (args.verbose)
           std::cerr << "[hooks: " << bundled_mailbox << "]\n";
       } catch (const std::exception &e) {
@@ -1073,7 +1093,10 @@ int cmd_run(const cli::Args &args,
         args.mailbox_path.empty() ? settings.path
                                   : std::filesystem::path(args.mailbox_path);
     if (mailbox_path.empty())
-      mailbox_path = cli::default_mailbox_path(cli::default_config_path());
+      mailbox_path = cli::default_mailbox_path(
+          args.config_path.empty() ? cli::default_config_path()
+                                   : std::filesystem::path(args.config_path));
+    const auto resolved_mailbox_path = mailbox_path;
     const auto now = [] {
       return std::chrono::duration_cast<std::chrono::milliseconds>(
                  std::chrono::system_clock::now().time_since_epoch())
@@ -1081,7 +1104,7 @@ int cmd_run(const cli::Args &args,
     };
     core::MailboxCoordinatorOptions mailbox_options;
     mailbox_options.store.path = std::move(mailbox_path);
-    mailbox_options.store.workspace_id = workspace_path.string();
+    mailbox_options.store.workspace_id = workspace_identity(workspace_path);
     mailbox_options.store.workspace_path = workspace_path.string();
     mailbox_options.store.scope = settings.scope == "global"
                                       ? core::MailboxScope::global
@@ -1099,11 +1122,41 @@ int cmd_run(const cli::Args &args,
     mailbox_options.hostname = local_hostname();
     mailbox_options.heartbeat_interval =
         std::chrono::milliseconds(settings.heartbeat_interval_ms);
+    mailbox_options.stale_after =
+        std::chrono::milliseconds(settings.stale_after_ms);
     mailbox_options.poll_interval =
         std::chrono::milliseconds(settings.poll_interval_ms);
     mailbox_options.cleanup_interval = std::chrono::hours(1);
-    mailbox =
-        std::make_shared<core::MailboxCoordinator>(std::move(mailbox_options));
+    try {
+      mailbox = std::make_shared<core::MailboxCoordinator>(mailbox_options);
+      if (args.verbose)
+        std::cerr << "mailbox enabled: path=" << resolved_mailbox_path
+                  << " workspace_id=" << mailbox_options.store.workspace_id
+                  << " workspace_path=" << workspace_path
+                  << " process_id=" << mailbox_options.process_id
+                  << " agent_id=" << mailbox_options.root_agent_id
+                  << " lease_ms=" << settings.stale_after_ms
+                  << " poll_ms=" << settings.poll_interval_ms << " schema=1\n";
+    } catch (const core::MailboxError &error) {
+      std::cerr << "mailbox disabled: "
+                << core::mailbox_error_code_to_string(error.code()) << ": "
+                << error.what() << "\n";
+      mailbox.reset();
+    } catch (const std::exception &error) {
+      std::cerr << "mailbox disabled: " << error.what() << "\n";
+      mailbox.reset();
+    }
+    if (!mailbox && auto_mailbox_addon_loaded) {
+      std::erase_if(hooks->registered_tools, [](const auto &tool) {
+        return tool && is_mailbox_tool(tool->name());
+      });
+      auto_mailbox_addon_loaded = false;
+      {
+        std::scoped_lock lock(hook_runtime->mutex);
+        hook_runtime->hooks = hooks;
+      }
+      apply_hook_tools();
+    }
   }
   auto mailbox_observer = std::make_shared<MailboxTaskObserver>();
   mailbox_observer->coordinator = mailbox;

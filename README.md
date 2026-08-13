@@ -509,6 +509,46 @@ int main() {
 }
 ```
 
+## Agent mailbox
+
+Mailbox coordination is opt-in. Enable it in the selected TOML file or with
+`--mailbox PATH` (which also enables it):
+
+```toml
+[mailbox]
+enabled = true
+path = "~/.config/pici/mailbox.sqlite3"
+scope = "workspace" # or "global"
+heartbeat_interval_ms = 5000
+stale_after_ms = 15000 # must exceed heartbeat_interval_ms
+poll_interval_ms = 250
+claim_lease_ms = 30000
+retention_days = 30
+```
+
+`stale_after_ms` must be greater than `heartbeat_interval_ms`; it controls the
+presence lease used by independent processes. The database is private to the current user and stores a deterministic short
+workspace identity (derived from the canonical workspace path), the original
+workspace path, session identity, presence, and durable messages. The bundled
+`addons/mailbox.lua`
+registers the intention-level `agents_list`, `agents_send`, `agents_request`,
+`agents_reply`, `agents_inbox`, and `agents_close` tools when mailbox is
+enabled. A request waits synchronously for at most 60 seconds; a timeout leaves
+the request durable and a late reply remains visible in the inbox.
+
+Steering is delivered between model turns. An idle root is not started by an
+incoming message; the next explicit run drains it. Subagents remain present
+until they complete or are explicitly closed, and only locally owned
+subagents may be closed through the model-facing tool. Delivery is at-least-
+once: message IDs are stable and a crash or expired lease can cause redelivery.
+
+The mailbox path is sensitive local state; do not put it on a shared or
+world-readable directory. Mailbox startup failures print a diagnostic and
+disable mailbox only, allowing ordinary chat to continue. The source-tree
+bundled addon path is used by development builds; packaging/install support
+for relocating that addon is a follow-up. Remote A2A transport and process
+control are intentionally out of scope for v1.
+
 ## Key Design Decisions
 
 1. **nlohmann/json** — all JSON parsing/serialization via nlohmann/json; JSON Schema validation via pboettch/json-schema-validator

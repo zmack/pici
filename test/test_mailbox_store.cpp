@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <source_location>
 #include <stop_token>
@@ -78,6 +79,9 @@ int main() {
                     ("pici-mailbox-" + std::to_string(::getpid()) + "-" +
                      std::to_string(suffix));
   std::filesystem::create_directories(root);
+  std::filesystem::permissions(
+      root, std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
   const auto path = root / "mailbox.sqlite3";
   TimestampMs now = 1'000;
   std::size_t next_id = 0;
@@ -348,6 +352,69 @@ int main() {
     CHECK_EQ(root_claim.messages.size(), std::size_t{1});
     CHECK_EQ(root_claim.messages.front().message_id, root_only.message_id);
 
+    const auto insecure_dir = root / "insecure";
+    std::filesystem::create_directories(insecure_dir);
+    std::filesystem::permissions(
+        insecure_dir, std::filesystem::perms::owner_all |
+                         std::filesystem::perms::group_read,
+        std::filesystem::perm_options::replace);
+    CHECK(error_code([&] {
+            MailboxStore insecure(MailboxStoreOptions{
+                .path = insecure_dir / "mailbox.sqlite3",
+                .workspace_id = "workspace-a",
+                .workspace_path = "/tmp/workspace",
+                .clock = [&] { return now; },
+                .id_generator = [&] { return "insecure"; }});
+          }) == MailboxErrorCode::permission_denied);
+
+    const auto symlink_target = root / "symlink-target.sqlite3";
+    sqlite3 *symlink_database = nullptr;
+    CHECK_EQ(sqlite3_open(symlink_target.c_str(), &symlink_database), SQLITE_OK);
+    sqlite3_close(symlink_database);
+    std::filesystem::permissions(
+        symlink_target, std::filesystem::perms::owner_read |
+                            std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+    const auto symlink_path = root / "symlink.sqlite3";
+    std::filesystem::create_symlink(symlink_target, symlink_path);
+    CHECK(error_code([&] {
+            MailboxStore symlink(MailboxStoreOptions{
+                .path = symlink_path,
+                .workspace_id = "workspace-a",
+                .workspace_path = "/tmp/workspace",
+                .clock = [&] { return now; },
+                .id_generator = [&] { return "symlink"; }});
+          }) == MailboxErrorCode::permission_denied);
+
+    const auto nonregular_path = root / "nonregular.sqlite3";
+    std::filesystem::create_directory(nonregular_path);
+    CHECK(error_code([&] {
+            MailboxStore nonregular(MailboxStoreOptions{
+                .path = nonregular_path,
+                .workspace_id = "workspace-a",
+                .workspace_path = "/tmp/workspace",
+                .clock = [&] { return now; },
+                .id_generator = [&] { return "nonregular"; }});
+          }) == MailboxErrorCode::permission_denied);
+
+    const auto corrupt_path = root / "corrupt.sqlite3";
+    {
+      std::ofstream corrupt(corrupt_path);
+      corrupt << "not a sqlite database";
+    }
+    std::filesystem::permissions(
+        corrupt_path, std::filesystem::perms::owner_read |
+                          std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+    CHECK(error_code([&] {
+            MailboxStore corrupt_store(MailboxStoreOptions{
+                .path = corrupt_path,
+                .workspace_id = "workspace-a",
+                .workspace_path = "/tmp/workspace",
+                .clock = [&] { return now; },
+                .id_generator = [&] { return "corrupt"; }});
+          }) == MailboxErrorCode::corrupt);
+
     const auto newer_path = root / "newer.sqlite3";
     sqlite3 *database = nullptr;
     CHECK_EQ(sqlite3_open(newer_path.c_str(), &database), SQLITE_OK);
@@ -355,6 +422,10 @@ int main() {
                            nullptr),
              SQLITE_OK);
     sqlite3_close(database);
+    std::filesystem::permissions(
+        newer_path, std::filesystem::perms::owner_read |
+                        std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
     const auto newer_options = MailboxStoreOptions{
         .path = newer_path,
         .workspace_id = "workspace-a",

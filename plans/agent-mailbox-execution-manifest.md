@@ -241,6 +241,14 @@ Phase gate:
 
 Do not make mailbox enabled by default and do not begin A2A work.
 
+Phase 6 implementation status: complete in the `Harden mailbox operations`
+commit. The store validates identities and envelopes, rejects insecure or
+corrupt databases, reports stable busy/schema/corruption/permission errors,
+and uses persistent cleanup scheduling. Startup diagnostics, selected-config
+path handling, mailbox documentation, and POSIX security/reopen fixtures are
+included. Packaging the source-tree bundled addon remains a follow-up; A2A is
+still out of scope.
+
 ## Commit and review protocol
 
 Each phase is one reviewable commit after its phase gate passes. A phase may be

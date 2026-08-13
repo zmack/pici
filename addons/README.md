@@ -2,6 +2,20 @@
 
 Lua plugins loaded via `--hooks-file`, `--hooks-dir`, or `config.toml [addons]`.
 
+## mailbox.lua — agent coordination
+
+When `[mailbox].enabled = true`, pici loads this bundled addon once and exposes
+`agents_list`, `agents_send`, `agents_request`, `agents_reply`, `agents_inbox`,
+and `agents_close`. It uses native mailbox primitives and does not expose
+SQLite or claim tokens to the model. Requests are bounded synchronous waits;
+messages can interrupt a running agent only at a turn boundary. The root is
+not auto-started while idle, and subagents remain available until completion
+or explicit local close. Delivery is at-least-once and message IDs should be
+treated as deduplication keys.
+
+The bundled source-tree path is a development-build limitation; installed
+addon packaging is a follow-up. A2A/remote transport is not part of v1.
+
 ## costline.lua — show last cost in the status line
 
 Displays token cost / usage of the last turn above the REPL prompt.

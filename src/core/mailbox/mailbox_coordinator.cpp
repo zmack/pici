@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -33,6 +34,15 @@ Message mailbox_message_to_message(const MailboxMessage &message) {
               message.sender_session_id + " / agent " +
               message.sender_agent_id + "]\n" + message.body.text});
   return Message{std::move(user)};
+}
+
+TimestampMs retention_milliseconds(std::int64_t days) {
+  constexpr auto day_ms = static_cast<std::int64_t>(24) * 60 * 60 * 1000;
+  if (days <= 0)
+    return 0;
+  if (days > std::numeric_limits<TimestampMs>::max() / day_ms)
+    return std::numeric_limits<TimestampMs>::max();
+  return days * day_ms;
 }
 
 } // namespace
@@ -64,6 +74,9 @@ MailboxCoordinator::MailboxCoordinator(MailboxCoordinatorOptions options)
   if (options_.heartbeat_interval <= std::chrono::milliseconds::zero())
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "mailbox heartbeat interval must be positive");
+  if (options_.stale_after <= options_.heartbeat_interval)
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox stale_after must exceed heartbeat interval");
   if (options_.cleanup_interval <= std::chrono::milliseconds::zero())
     options_.cleanup_interval = options_.heartbeat_interval;
   if (options_.poll_interval <= std::chrono::milliseconds::zero())
@@ -73,6 +86,7 @@ MailboxCoordinator::MailboxCoordinator(MailboxCoordinatorOptions options)
 
   store_ = std::make_unique<MailboxStore>(options_.store);
   const auto now = options_.store.clock();
+  last_cleanup_ms_ = now;
   store_->register_process(ProcessRecord{
       .process_id = options_.process_id,
       .workspace_id = options_.store.workspace_id,
@@ -83,7 +97,7 @@ MailboxCoordinator::MailboxCoordinator(MailboxCoordinatorOptions options)
       .capabilities_json = options_.capabilities_json,
       .started_at_ms = now,
       .last_seen_at_ms = now,
-      .lease_expires_at_ms = now + (options_.heartbeat_interval.count() * 3),
+      .lease_expires_at_ms = now + options_.stale_after.count(),
   });
   maintenance_ = std::jthread([this](const std::stop_token &stop_token) {
     maintenance_loop(stop_token);
@@ -460,11 +474,16 @@ void MailboxCoordinator::poll_inbox() {
       const auto task_id = subagent_tasks.contains(endpoint)
                                ? subagent_tasks.at(endpoint)
                                : std::string{};
+      const auto endpoint_ref = std::make_shared<const std::string>(endpoint);
+      const auto message_id_ref =
+          std::make_shared<const std::string>(message_id);
+      const auto claim_token_ref =
+          std::make_shared<const std::string>(claim_token);
       AgentMessageEnvelope envelope{
           .message = mailbox_message_to_message(claimed_message),
           .on_accepted =
-              [weak = std::weak_ptr<Lifetime>(lifetime_), endpoint, message_id,
-               claim_token] noexcept {
+              [weak = std::weak_ptr<Lifetime>(lifetime_), endpoint_ref,
+               message_id_ref, claim_token_ref] noexcept {
                 auto state = weak.lock();
                 if (!state)
                   return;
@@ -477,8 +496,8 @@ void MailboxCoordinator::poll_inbox() {
                   ++state->in_flight;
                 }
                 try {
-                  owner->acknowledge_delivery(endpoint, message_id,
-                                              claim_token);
+                  owner->acknowledge_delivery(*endpoint_ref, *message_id_ref,
+                                              *claim_token_ref);
                 } catch (...) {
                   // Lease expiry provides redelivery when acknowledgement
                   // fails.
@@ -621,10 +640,9 @@ WaitResult MailboxCoordinator::wait(WaitRequest request,
 }
 
 void MailboxCoordinator::maintenance_loop(const std::stop_token &stop_token) {
-  auto last_cleanup = options_.store.clock();
   while (!stop_token.stop_requested()) {
     const auto now = options_.store.clock();
-    maintenance_once(now, last_cleanup);
+    maintenance_once(now, last_cleanup_ms_);
     std::unique_lock lock(mutex_);
     maintenance_wakeup_.wait_for(
         lock, stop_token,
@@ -635,11 +653,11 @@ void MailboxCoordinator::maintenance_loop(const std::stop_token &stop_token) {
 
 void MailboxCoordinator::maintenance_once(TimestampMs now,
                                           TimestampMs &last_cleanup) {
+  std::scoped_lock maintenance_lock(maintenance_mutex_);
   try {
     if (next_heartbeat_ms_ == 0 || now >= next_heartbeat_ms_) {
       store_->heartbeat_process(options_.process_id, now,
-                                now +
-                                    (options_.heartbeat_interval.count() * 3));
+                                now + options_.stale_after.count());
       next_heartbeat_ms_ = now + options_.heartbeat_interval.count();
     }
     if (now - last_cleanup >= options_.cleanup_interval.count()) {
@@ -647,7 +665,7 @@ void MailboxCoordinator::maintenance_once(TimestampMs now,
           .workspace_id = options_.store.workspace_id,
           .now_ms = now,
           .acknowledged_retention_ms =
-              options_.store.retention_days * 24 * 60 * 60 * 1000,
+              retention_milliseconds(options_.store.retention_days),
           .stale_retention_ms =
               static_cast<std::int64_t>(7) * 24 * 60 * 60 * 1000,
       });
@@ -664,8 +682,7 @@ void MailboxCoordinator::maintenance_once(TimestampMs now,
 }
 
 void MailboxCoordinator::maintenance_tick() {
-  auto last_cleanup = options_.store.clock();
-  maintenance_once(options_.store.clock(), last_cleanup);
+  maintenance_once(options_.store.clock(), last_cleanup_ms_);
 }
 
 MailboxCoordinatorStatus MailboxCoordinator::status() const {
