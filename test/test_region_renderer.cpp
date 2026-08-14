@@ -51,6 +51,28 @@ void test_tail_anchor_and_scroll() {
          "scroll offset moves toward transcript head");
 }
 
+void test_thinking_is_inserted_at_the_current_turn_boundary() {
+  pi::core::RegionState state;
+  state.blocks = {pi::core::RegionTextBlock{"previous answer"},
+                  pi::core::RegionTextBlock{"current answer"}};
+  state.thinking = "current reasoning";
+  state.thinking_block_index = 1;
+  const auto frame = pi::core::build_region_frame(state, 80, 10);
+  std::size_t previous = frame.lines.size();
+  std::size_t reasoning = frame.lines.size();
+  std::size_t current = frame.lines.size();
+  for (std::size_t index = 0; index < frame.lines.size(); ++index) {
+    if (frame.lines[index].find("previous answer") != std::string::npos)
+      previous = index;
+    if (frame.lines[index].find("current reasoning") != std::string::npos)
+      reasoning = index;
+    if (frame.lines[index].find("current answer") != std::string::npos)
+      current = index;
+  }
+  expect(previous < reasoning, "previous transcript precedes current thinking");
+  expect(reasoning < current, "current answer follows its thinking block");
+}
+
 void test_sgr_reopens_after_wrap() {
   pi::core::RegionState state;
   state.blocks = {pi::core::RegionTextBlock{"\033[31mabcdef\033[0m"}};
@@ -83,6 +105,25 @@ void test_diff_only_changes_rows() {
          "diff skips unchanged first row");
   expect(diff.find("\033[3;1H") == std::string::npos,
          "diff skips unchanged last row");
+}
+
+void test_diff_scrolls_tail_without_repainting_every_row() {
+  const std::vector<std::string> old_rows = {"one", "two", "three"};
+  const std::vector<std::string> new_rows = {"two", "three", "four"};
+  const auto diff = pi::core::diff_region_rows(old_rows, new_rows);
+  expect(diff.starts_with("\033[1;1H\033[1S"),
+         "tail growth scrolls the content region");
+  expect(diff.find("\033[1;1H\033[2K") == std::string::npos &&
+             diff.find("\033[2;1H\033[2K") == std::string::npos,
+         "tail growth preserves shifted rows");
+  expect(diff.find("\033[3;1H\033[2Kfour") != std::string::npos,
+         "tail growth paints only the new bottom row");
+
+  const auto reverse = pi::core::diff_region_rows(new_rows, old_rows);
+  expect(reverse.starts_with("\033[1;1H\033[1T"),
+         "scrolling toward history shifts the content region down");
+  expect(reverse.find("\033[1;1H\033[2Kone") != std::string::npos,
+         "history scrolling paints only the new top row");
 }
 
 void test_degenerate_sizing() {
@@ -306,13 +347,11 @@ void test_region_factory_lifecycle() {
          "region leaves alternate screen");
   expect(output.find("\033[23;1H\033[?25h") != std::string::npos,
          "turn end leaves cursor on the status row before readline");
-  std::size_t clear_count = 0;
-  for (std::size_t pos = output.find("\033[H\033[J"); pos != std::string::npos;
-       pos = output.find("\033[H\033[J", pos + 1)) {
-    ++clear_count;
-  }
-  expect(clear_count == 2,
-         "turn-start clear is preserved for a short second turn");
+  expect(output.find("\033[H\033[J") == std::string::npos,
+         "new turns do not clear the alternate screen");
+  expect(output.find("ab") != std::string::npos &&
+             output.find("short") != std::string::npos,
+         "completed transcript remains available across turns");
 }
 
 void test_idle_paint_saves_cursor_and_scrolls() {
@@ -396,8 +435,10 @@ void test_error_survives_fast_turn_end() {
 int main() {
   test_ordered_transcript_blocks();
   test_tail_anchor_and_scroll();
+  test_thinking_is_inserted_at_the_current_turn_boundary();
   test_sgr_reopens_after_wrap();
   test_diff_only_changes_rows();
+  test_diff_scrolls_tail_without_repainting_every_row();
   test_degenerate_sizing();
   test_tool_regions_preserve_call_order();
   test_tool_updates_are_isolated();

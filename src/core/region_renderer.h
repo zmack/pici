@@ -32,6 +32,7 @@ struct RegionState {
   std::vector<RegionBlock> blocks;
   std::unordered_map<std::string, std::size_t> tool_index;
   std::string thinking;
+  std::size_t thinking_block_index{0};
   bool in_thinking{false};
   int scroll_offset_rows{0};
 };

@@ -50,6 +50,11 @@ out; do not change `make_auto_renderer`'s default in this work.
   Short/failed writes invalidate the cache so the next frame repaints fully;
   paint exceptions are contained and renderer teardown joins the paint thread
   before leaving the alternate screen.
+- Completed transcript blocks persist across turns. A new turn resets only
+  transient state (active-tool lookup, thinking, status, usage, and scroll),
+  hides the readline cursor, and diffs against the existing frame; it does not
+  erase the alternate screen. Tail-following and history navigation use
+  DECSTBM-scoped scroll operations before painting newly exposed rows.
 - Deterministic unit coverage exercises scrolling, SGR continuation rows,
   status/command output, idle save/restore painting, diffing, and teardown.
   No markdown performance cache was added because no profiling evidence
@@ -324,7 +329,7 @@ public:
                               // FIRST, then restore terminal — see shutdown
                               // note below. Do not reorder.
 
-  void on_turn_start() override;          // lock; reset blocks/tool_index/scroll; dirty=true
+  void on_turn_start() override;          // lock; retain blocks, reset transient state/scroll; dirty=true
   void on_text_delta(std::string_view d) override;   // lock; append/extend trailing TextBlock; dirty=true
   void on_thinking_start() override;
   void on_thinking_delta(std::string_view d) override;

@@ -219,12 +219,14 @@ std::vector<std::string> all_region_lines(const RegionState &state, int width,
   if (width <= 0)
     return lines;
 
-  if (!state.thinking.empty()) {
+  const auto append_thinking = [&] {
+    if (state.thinking.empty())
+      return;
     auto thinking = render_visible_markdown("[thinking]\n" + state.thinking);
     auto thinking_lines = split_region_lines(thinking, width);
     lines.insert(lines.end(), std::make_move_iterator(thinking_lines.begin()),
                  std::make_move_iterator(thinking_lines.end()));
-  }
+  };
 
   std::size_t tool_count = 0;
   for (const auto &block : state.blocks) {
@@ -232,7 +234,13 @@ std::vector<std::string> all_region_lines(const RegionState &state, int width,
       ++tool_count;
   }
   std::size_t seen_tools = 0;
-  for (const auto &block : state.blocks) {
+  const auto thinking_index =
+      std::min(state.thinking_block_index, state.blocks.size());
+  for (std::size_t block_index = 0; block_index < state.blocks.size();
+       ++block_index) {
+    if (block_index == thinking_index)
+      append_thinking();
+    const auto &block = state.blocks[block_index];
     if (const auto *text = std::get_if<RegionTextBlock>(&block)) {
       auto rendered = render_visible_markdown(text->raw);
       auto text_lines = split_region_lines(rendered, width);
@@ -249,6 +257,8 @@ std::vector<std::string> all_region_lines(const RegionState &state, int width,
     lines.insert(lines.end(), std::make_move_iterator(rendered.begin()),
                  std::make_move_iterator(rendered.end()));
   }
+  if (thinking_index == state.blocks.size())
+    append_thinking();
   if (lines.empty())
     lines.emplace_back("\033[0m");
   return lines;
@@ -307,21 +317,28 @@ public:
 
   void on_turn_start() override {
     std::scoped_lock lock(mutex_);
-    const auto custom_status = custom_status_line_;
-    state_ = {};
-    state_.custom_status_line = custom_status;
+    state_.tool_index.clear();
+    state_.thinking.clear();
+    state_.thinking_block_index = state_.blocks.size();
+    state_.in_thinking = false;
+    state_.scroll_offset_rows = 0;
+    state_.status_text.clear();
+    state_.has_error = false;
+    state_.last_usage = {};
+    state_.start_new_text_block = true;
+    state_.hide_cursor_on_frame = true;
     state_.revision = ++revision_;
     state_.dirty = true;
-    state_.clear_on_frame = true;
     turn_active_ = true;
     cv_.notify_one();
   }
 
   void on_text_delta(std::string_view delta) override {
     std::scoped_lock lock(mutex_);
-    if (state_.blocks.empty() ||
+    if (state_.start_new_text_block || state_.blocks.empty() ||
         !std::holds_alternative<RegionTextBlock>(state_.blocks.back()))
       state_.blocks.emplace_back(RegionTextBlock{});
+    state_.start_new_text_block = false;
     std::get<RegionTextBlock>(state_.blocks.back())
         .raw.append(delta.data(), delta.size());
     state_.revision = ++revision_;
@@ -548,7 +565,8 @@ public:
 private:
   struct State : RegionState {
     bool dirty{true};
-    bool clear_on_frame{true};
+    bool start_new_text_block{true};
+    bool hide_cursor_on_frame{true};
     std::uint64_t revision{0};
     std::string status_text;
     bool has_error{false};
@@ -659,11 +677,8 @@ private:
     std::string output;
     if (layout_changed)
       output += scroll_region_sequence(height);
-    if (snapshot.clear_on_frame) {
-      output = "\033[?25l\033[H\033[J";
-      output += scroll_region_sequence(height);
-      last_frame_lines_.clear();
-    }
+    if (snapshot.hide_cursor_on_frame)
+      output += "\033[?25l";
     output += diff_region_rows(last_frame_lines_, rows);
     output += status_sequence(snapshot, width, height, scroll_offset,
                               frame.max_scroll_rows);
@@ -672,10 +687,10 @@ private:
       return;
     }
     last_frame_lines_ = std::move(rows);
-    if (snapshot.clear_on_frame) {
+    if (snapshot.hide_cursor_on_frame) {
       std::scoped_lock lock(mutex_);
       if (state_.revision == snapshot.revision)
-        state_.clear_on_frame = false;
+        state_.hide_cursor_on_frame = false;
     }
   }
 
@@ -768,8 +783,34 @@ RegionFrame build_region_frame(const RegionState &state, int width,
 std::string diff_region_rows(const std::vector<std::string> &old_rows,
                              const std::vector<std::string> &new_rows) {
   std::string output;
+  std::vector<std::string> shifted_rows = old_rows;
+  bool shifted = false;
+  if (old_rows.size() == new_rows.size() && old_rows.size() > 1) {
+    for (std::size_t shift = 1; shift < old_rows.size(); ++shift) {
+      if (std::equal(old_rows.begin() + static_cast<std::ptrdiff_t>(shift),
+                     old_rows.end(), new_rows.begin())) {
+        output = "\033[1;1H\033[" + std::to_string(shift) + "S";
+        shifted_rows.erase(shifted_rows.begin(),
+                           shifted_rows.begin() +
+                               static_cast<std::ptrdiff_t>(shift));
+        shifted_rows.resize(new_rows.size());
+        shifted = true;
+        break;
+      }
+    }
+    for (std::size_t shift = 1; !shifted && shift < old_rows.size(); ++shift) {
+      if (std::equal(old_rows.begin(),
+                     old_rows.end() - static_cast<std::ptrdiff_t>(shift),
+                     new_rows.begin() + static_cast<std::ptrdiff_t>(shift))) {
+        output = "\033[1;1H\033[" + std::to_string(shift) + "T";
+        shifted_rows.insert(shifted_rows.begin(), shift, std::string{});
+        shifted_rows.resize(new_rows.size());
+        break;
+      }
+    }
+  }
   for (std::size_t i = 0; i < new_rows.size(); ++i) {
-    if (i < old_rows.size() && old_rows[i] == new_rows[i])
+    if (i < shifted_rows.size() && shifted_rows[i] == new_rows[i])
       continue;
     output += "\033[" + std::to_string(i + 1) + ";1H\033[2K";
     output += new_rows[i];
