@@ -1,13 +1,11 @@
 #include "core/stream_renderer.h"
 
 #include <algorithm>
-#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <ios>
 #include <mutex>
-#include <signal.h> // NOLINT(modernize-deprecated-headers)
 #include <type_traits>
 #include <unistd.h>
 
@@ -295,7 +293,9 @@ public:
 
 class ViewportRenderer final : public Renderer {
 public:
-  explicit ViewportRenderer(int fd) : fd_(fd) { enter(); }
+  explicit ViewportRenderer(int fd) : fd_(fd), alt_screen_(fd) {
+    set_scroll_region();
+  }
   ViewportRenderer(const ViewportRenderer &) = delete;
   ViewportRenderer &operator=(const ViewportRenderer &) = delete;
   ViewportRenderer(ViewportRenderer &&) = delete;
@@ -306,8 +306,6 @@ public:
       leave();
     } catch (...) { // NOLINT(bugprone-empty-catch)
     }
-    if (current_ == this)
-      current_ = nullptr;
   }
 
   void on_turn_start() override {
@@ -435,44 +433,11 @@ public:
   }
 
 private:
-  void enter() {
-    if (in_alt_)
-      return;
-    in_alt_ = true;
-    current_ = this;
-    if (!atexit_registered_) {
-      std::atexit(atexit_fn);
-      atexit_registered_ = true;
-    }
-    struct sigaction sa {};      // NOLINT(misc-include-cleaner)
-    sa.sa_handler = sig_handler; // NOLINT(misc-include-cleaner)
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
-    sigaction(SIGHUP, &sa, nullptr); // NOLINT(misc-include-cleaner)
-    write_seq("\033[?1049h"          // enter alternate screen
-              "\033[H\033[2J");      // home + clear
-    set_scroll_region();
-  }
-
-  // Restore the terminal to the main screen — async-signal-safe.
-  // Only writes escape codes; does not call malloc or cmark.
-  void restore_terminal() {
-    if (!in_alt_)
-      return;
-    in_alt_ = false;
-    static constexpr std::string_view kRestore =
-        "\033[r"       // reset scroll region
-        "\033[?25h"    // show cursor (must precede ?1049l)
-        "\033[?1049l"; // exit alternate screen
-    ::write(fd_, kRestore.data(), kRestore.size());
-  }
-
   void leave() {
-    if (!in_alt_)
+    if (left_)
       return;
-    restore_terminal(); // sets in_alt_ = false, writes escapes
+    left_ = true;
+    alt_screen_.leave();
     // Print last response to main-screen scrollback (may allocate — not
     // signal-safe, but leave() is only called from atexit or destructor).
     if (!raw_buffer_.empty()) {
@@ -710,41 +675,6 @@ private:
 
   void write_seq(const char *s) const { ::write(fd_, s, std::strlen(s)); }
 
-  // atexit: full leave() — safe to allocate here.
-  static void atexit_fn() {
-    if (current_ != nullptr)
-      current_->leave();
-  }
-
-  // Signal handler: restore_terminal() only — async-signal-safe (no malloc).
-  // Calling cmark/render_visible_markdown from a signal handler is UB because
-  // cmark calls malloc, which is not async-signal-safe and can deadlock.
-  static void sig_handler(int sig) {
-    if (sig == SIGINT && sigint_pending_ == 0) {
-      note_sigint();
-      return;
-    }
-    if (current_ != nullptr)
-      current_->restore_terminal();
-    struct sigaction sa {};
-    sa.sa_handler = SIG_DFL;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(sig, &sa, nullptr);
-    raise(sig);
-  }
-
-public:
-  static void note_sigint() noexcept { sigint_pending_ = 1; }
-
-  static bool take_sigint() {
-    if (sigint_pending_ == 0)
-      return false;
-    sigint_pending_ = 0;
-    return true;
-  }
-
-private:
   // Cached rendered ANSI for the finalized (complete-block) prefix of content.
   // Populated when BlockBoundaryScanner finds a new stable boundary.  On the
   // hot path (streaming mid-block), only the tail is re-rendered.
@@ -757,8 +687,8 @@ private:
   };
 
   int fd_;
-  bool in_alt_{false};
-  static bool atexit_registered_;
+  AltScreenSession alt_screen_;
+  bool left_{false};
   std::string raw_buffer_;
   std::string thinking_buffer_;
   bool in_thinking_{false};
@@ -771,20 +701,9 @@ private:
   int max_scroll_rows_{0};
   BlockBoundaryScanner scanner_;
   FinCache fin_cache_;
-
-  static ViewportRenderer *current_;
-  static volatile std::sig_atomic_t sigint_pending_;
 };
 
-ViewportRenderer *ViewportRenderer::current_ = nullptr;
-volatile std::sig_atomic_t ViewportRenderer::sigint_pending_ = 0;
-bool ViewportRenderer::atexit_registered_ = false;
-
 } // namespace
-
-void notify_sigint() noexcept { ViewportRenderer::note_sigint(); }
-
-bool consume_sigint() { return ViewportRenderer::take_sigint(); }
 
 void dispatch_event(const AgentEvent &ev, Renderer &r) {
   std::visit(

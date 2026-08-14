@@ -4,10 +4,13 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <ranges> // NOLINT(misc-include-cleaner)
+#include <signal.h> // NOLINT(modernize-deprecated-headers)
 #include <string>
 #include <string_view>
 #include <sys/ioctl.h>
@@ -16,6 +19,13 @@
 #include <vector>
 
 namespace pi::core {
+
+namespace {
+
+volatile std::sig_atomic_t g_sigint_pending =
+    0; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+} // namespace
 
 int term_width(int fd) {
   struct winsize ws {}; // NOLINT(misc-include-cleaner)
@@ -31,6 +41,99 @@ int term_height(int fd) {
   if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
     return static_cast<int>(ws.ws_row);
   return 24;
+}
+
+AltScreenSession *AltScreenSession::current_ = nullptr;
+bool AltScreenSession::atexit_registered_ = false;
+
+AltScreenSession::AltScreenSession(int fd) : fd_(fd) { enter(); }
+
+AltScreenSession::~AltScreenSession() noexcept { leave(); }
+
+void AltScreenSession::enter() {
+  if (in_alt_)
+    return;
+
+  in_alt_ = true;
+  current_ = this;
+  if (!atexit_registered_) {
+    std::atexit(atexit_fn);
+    atexit_registered_ = true;
+  }
+
+  struct sigaction sa{};       // NOLINT(misc-include-cleaner)
+  sa.sa_handler = sig_handler; // NOLINT(misc-include-cleaner)
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sigaction(SIGINT, &sa, previous_actions_.data());
+  sigaction(SIGTERM, &sa, previous_actions_.data() + 1);
+  sigaction(SIGHUP, &sa,
+            previous_actions_.data() + 2); // NOLINT(misc-include-cleaner)
+  signals_installed_ = true;
+
+  static constexpr std::string_view kEnter =
+      "\033[?1049h"    // enter alternate screen
+      "\033[H\033[2J"; // home + clear
+  ::write(fd_, kEnter.data(), kEnter.size());
+}
+
+void AltScreenSession::restore_terminal() noexcept {
+  if (!in_alt_)
+    return;
+
+  in_alt_ = false;
+  static constexpr std::string_view kRestore =
+      "\033[r"       // reset scroll region
+      "\033[?25h"    // show cursor (must precede ?1049l)
+      "\033[?1049l"; // exit alternate screen
+  ::write(fd_, kRestore.data(), kRestore.size());
+}
+
+void AltScreenSession::restore_signal_handlers() noexcept {
+  if (!signals_installed_)
+    return;
+
+  sigaction(SIGINT, previous_actions_.data(), nullptr);
+  sigaction(SIGTERM, previous_actions_.data() + 1, nullptr);
+  sigaction(SIGHUP, previous_actions_.data() + 2, nullptr);
+  signals_installed_ = false;
+}
+
+void AltScreenSession::leave() noexcept {
+  restore_terminal();
+  restore_signal_handlers();
+  if (current_ == this)
+    current_ = nullptr;
+}
+
+void AltScreenSession::atexit_fn() {
+  if (current_ != nullptr)
+    current_->leave();
+}
+
+void AltScreenSession::sig_handler(int sig) {
+  if (sig == SIGINT && g_sigint_pending == 0) {
+    notify_sigint();
+    return;
+  }
+
+  if (current_ != nullptr)
+    current_->restore_terminal();
+  struct sigaction sa{};   // NOLINT(misc-include-cleaner)
+  sa.sa_handler = SIG_DFL; // NOLINT(misc-include-cleaner)
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sigaction(sig, &sa, nullptr);
+  raise(sig);
+}
+
+void notify_sigint() noexcept { g_sigint_pending = 1; }
+
+bool consume_sigint() {
+  if (g_sigint_pending == 0)
+    return false;
+  g_sigint_pending = 0;
+  return true;
 }
 
 namespace {

@@ -3,10 +3,12 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <signal.h> // NOLINT(modernize-deprecated-headers)
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -16,6 +18,46 @@ namespace pi::core {
 
 int term_width(int fd);
 int term_height(int fd);
+
+// Owns the alternate-screen session and the process-wide signal hooks used by
+// full-screen renderers. There is deliberately one pending SIGINT flag for
+// the whole process, regardless of which renderer owns the session.
+class AltScreenSession {
+public:
+  explicit AltScreenSession(int fd);
+  ~AltScreenSession() noexcept;
+
+  AltScreenSession(const AltScreenSession &) = delete;
+  AltScreenSession &operator=(const AltScreenSession &) = delete;
+  AltScreenSession(AltScreenSession &&) = delete;
+  AltScreenSession &operator=(AltScreenSession &&) = delete;
+
+  // Leave the alternate screen and restore the signal handlers. Safe to call
+  // repeatedly; the destructor performs the same cleanup as a final guard.
+  void leave() noexcept;
+
+private:
+  void enter();
+  void restore_terminal() noexcept;
+  void restore_signal_handlers() noexcept;
+  static void atexit_fn();
+  static void sig_handler(int sig);
+
+  int fd_;
+  bool in_alt_{false};
+  bool signals_installed_{false};
+  std::array<struct sigaction, 3> previous_actions_{};
+
+  static AltScreenSession *current_;
+  static bool atexit_registered_;
+};
+
+// Records a Ctrl-C notification. Safe to call from a signal handler.
+void notify_sigint() noexcept;
+
+// Returns and clears the first Ctrl-C notification raised by the interactive
+// renderer. The signal handler itself only flips a sig_atomic_t flag.
+bool consume_sigint();
 
 // Return the display-column width of one terminal line, ignoring ANSI/VT
 // escape sequences.

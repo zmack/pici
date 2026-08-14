@@ -9,6 +9,7 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+#include <unistd.h>
 
 #include "core/terminal.h"
 
@@ -678,6 +679,36 @@ void test_terminal_title_controller() {
   });
 }
 
+void test_alt_screen_session() {
+  tests::register_test("AltScreenSession: restores alternate screen", [] {
+    int fds[2]{};
+    if (::pipe(fds) != 0) {
+      tests::check_eq_impl(false, "pipe(fds) == 0");
+      return;
+    }
+
+    {
+      AltScreenSession session(fds[1]);
+      session.leave();
+    }
+
+    std::array<char, 128> buffer{};
+    const ssize_t count = ::read(fds[0], buffer.data(), buffer.size());
+    const std::string output(buffer.data(),
+                             count > 0 ? static_cast<std::size_t>(count) : 0);
+    CHECK_EQ(output, "\033[?1049h\033[H\033[2J"
+                    "\033[r\033[?25h\033[?1049l");
+    ::close(fds[0]);
+    ::close(fds[1]);
+  });
+
+  tests::register_test("SIGINT notification: consume is one-shot", [] {
+    notify_sigint();
+    CHECK_EQ(consume_sigint(), true);
+    CHECK_EQ(consume_sigint(), false);
+  });
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -693,6 +724,7 @@ int main() {
   test_block_boundary_scanner();
   test_terminal_title_helpers();
   test_terminal_title_controller();
+  test_alt_screen_session();
 
   tests::print_summary();
   return tests::failed > 0 ? 1 : 0;
