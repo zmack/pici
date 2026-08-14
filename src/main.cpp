@@ -528,6 +528,13 @@ public:
     base_.on_thinking_end();
   }
 
+  void on_tool_update(std::string_view call_id, std::string_view name,
+                      std::string_view partial_result) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("tool_update", partial_result.size());
+    base_.on_tool_update(call_id, name, partial_result);
+  }
+
   void on_tool_start(std::string_view call_id, std::string_view name,
                      std::string_view args_json) override {
     if (diagnostics_)
@@ -543,6 +550,8 @@ public:
     }
     pending_tool_args_[std::string(call_id)] = parsed_args;
 
+    std::string display;
+    bool has_custom_display = false;
     std::shared_ptr<core::LuaHooks> hooks;
     if (hook_runtime_) {
       std::scoped_lock lock(hook_runtime_->mutex);
@@ -554,17 +563,20 @@ public:
       ctx.call_id = std::string(call_id);
       ctx.args = parsed_args;
       if (auto custom = hooks->format_tool_call(ctx)) {
-        std::string sanitized = core::sanitize_tool_output(*custom);
-        std::cout << sanitized;
-        if (!sanitized.empty() && sanitized.back() != '\n')
-          std::cout << "\n";
-        std::cout << std::flush;
-        return;
+        has_custom_display = true;
+        display = core::sanitize_tool_output(*custom);
+        if (!display.empty() && display.back() != '\n')
+          display += '\n';
       }
     }
-    std::cout << "\n[tool: " << name << "(" << "\033[38;5;214m" << args_json
-              << "\033[0m" << ")]\n"
-              << std::flush;
+    if (!has_custom_display) {
+      display = "\n[tool: ";
+      display += name;
+      display += "(\033[38;5;214m";
+      display += args_json;
+      display += "\033[0m)]\n";
+    }
+    emit_tool_output(call_id, display);
   }
   void on_tool_end(std::string_view call_id, std::string_view name,
                    const core::ToolResult &result, bool is_error) override {
@@ -576,13 +588,16 @@ public:
       std::scoped_lock lock(hook_runtime_->mutex);
       hooks = hook_runtime_->hooks;
     }
+    nlohmann::json args = nlohmann::json::object();
+    auto it = pending_tool_args_.find(std::string(call_id));
+    if (it != pending_tool_args_.end()) {
+      args = it->second;
+      pending_tool_args_.erase(it);
+    }
+
+    std::string display;
+    bool has_custom_display = false;
     if (hooks && hooks->format_tool_result) {
-      nlohmann::json args = nlohmann::json::object();
-      auto it = pending_tool_args_.find(std::string(call_id));
-      if (it != pending_tool_args_.end()) {
-        args = it->second;
-        pending_tool_args_.erase(it);
-      }
       core::LuaHooks::FormatToolResultContext ctx;
       ctx.tool_name = std::string(name);
       ctx.call_id = std::string(call_id);
@@ -590,22 +605,20 @@ public:
       ctx.content = result.content();
       ctx.is_error = is_error;
       if (auto custom = hooks->format_tool_result(ctx)) {
-        std::string sanitized = core::sanitize_tool_output(*custom);
-        std::cout << sanitized;
-        if (!sanitized.empty() && sanitized.back() != '\n')
-          std::cout << "\n";
-        std::cout << std::flush;
-        return;
-      } else {
-        // Erase on fallback as well if not already
-        pending_tool_args_.erase(std::string(call_id));
+        has_custom_display = true;
+        display = core::sanitize_tool_output(*custom);
+        if (!display.empty() && display.back() != '\n')
+          display += '\n';
       }
-    } else {
-      pending_tool_args_.erase(std::string(call_id));
     }
-    std::cout << "\033[38;5;245m" << "  [" << name << "] "
-              << format_tool_result(result.content()) << "\033[0m\n"
-              << std::flush;
+    if (!has_custom_display) {
+      display = "\033[38;5;245m  [";
+      display += name;
+      display += "] ";
+      display += format_tool_result(result.content());
+      display += "\033[0m\n";
+    }
+    emit_tool_output(call_id, display);
   }
 
   void on_message_end(const core::TokenUsage &u) override {
@@ -646,6 +659,13 @@ public:
 
   bool owns_status_line() const override { return base_.owns_status_line(); }
 
+  bool owns_tool_output() const override { return base_.owns_tool_output(); }
+
+  void on_tool_output_text(std::string_view call_id,
+                           std::string_view text) override {
+    base_.on_tool_output_text(call_id, text);
+  }
+
   void set_status_line(const std::optional<std::string> &text) override {
     base_.set_status_line(text);
   }
@@ -653,6 +673,14 @@ public:
   const core::TokenUsage &last_usage() const { return last_usage_; }
 
 private:
+  void emit_tool_output(std::string_view call_id, std::string_view text) {
+    if (owns_tool_output()) {
+      base_.on_tool_output_text(call_id, text);
+      return;
+    }
+    std::cout << text << std::flush;
+  }
+
   core::Renderer &base_;
   bool verbose_;
   std::shared_ptr<core::StreamDiagnostics> diagnostics_;

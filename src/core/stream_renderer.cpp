@@ -46,13 +46,6 @@ int count_trailing_newlines(std::string_view s) {
   return n;
 }
 
-std::string render_visible_markdown(std::string_view input) {
-  auto rendered = strip_final_newline(render_markdown_ansi(input));
-  rendered.append(static_cast<std::size_t>(count_trailing_newlines(input)),
-                  '\n');
-  return rendered;
-}
-
 std::string format_tokens(std::uint64_t n) {
   std::ostringstream ss;
   if (n >= 1'000'000) {
@@ -629,50 +622,6 @@ private:
     ::write(fd_, bar.data(), bar.size());
   }
 
-  // Split rendered ANSI string into wrapped physical rows of `width` columns.
-  // ANSI/VT escapes (CSI, OSC, etc.) pass through without counting toward
-  // width. Wide characters (CJK, emoji) count as 2 columns.
-  static std::vector<std::string> split_lines(std::string_view s, int width) {
-    std::vector<std::string> out;
-    std::string cur;
-    int col = 0;
-    for (std::size_t i = 0; i < s.size();) {
-      if (s[i] == '\n') {
-        out.push_back(std::move(cur));
-        cur.clear();
-        col = 0;
-        ++i;
-        continue;
-      }
-      if (s[i] == '\033') {
-        const auto nxt = skip_ansi_sequence(s, i);
-        if (nxt > i) {
-          cur.append(s.substr(i, nxt - i));
-          i = nxt;
-          continue;
-        }
-      }
-      const int cw = codepoint_width(s, i);
-      const auto nxt = advance_utf8(s, i);
-      if (col + cw > width && col > 0) {
-        out.push_back(std::move(cur));
-        cur.clear();
-        col = 0;
-      }
-      cur.append(s.substr(i, nxt - i));
-      col += cw;
-      if (col >= width) {
-        out.push_back(std::move(cur));
-        cur.clear();
-        col = 0;
-      }
-      i = nxt;
-    }
-    if (!cur.empty())
-      out.push_back(std::move(cur));
-    return out;
-  }
-
   void write_seq(const char *s) const { ::write(fd_, s, std::strlen(s)); }
 
   // Cached rendered ANSI for the finalized (complete-block) prefix of content.
@@ -704,6 +653,13 @@ private:
 };
 
 } // namespace
+
+std::string render_visible_markdown(std::string_view input) {
+  auto rendered = strip_final_newline(render_markdown_ansi(input));
+  rendered.append(static_cast<std::size_t>(count_trailing_newlines(input)),
+                  '\n');
+  return rendered;
+}
 
 void dispatch_event(const AgentEvent &ev, Renderer &r) {
   std::visit(
@@ -757,6 +713,9 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
 
         } else if constexpr (std::is_same_v<T, ToolExecutionStartEvent>) {
           r.on_tool_start(e.tool_call_id, e.tool_name, e.args);
+
+        } else if constexpr (std::is_same_v<T, ToolExecutionUpdateEvent>) {
+          r.on_tool_update(e.tool_call_id, e.tool_name, e.partial_result);
 
         } else if constexpr (std::is_same_v<T, ToolExecutionEndEvent>) {
           if (e.result)

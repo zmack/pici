@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "core/terminal.h"
+#include "core/stream_renderer.h"
 
 using namespace pi::core;
 
@@ -251,6 +252,49 @@ void test_terminal_ui_helpers() {
     CHECK_EQ(truncate_ansi_line("\033[31mabcdef\033[0m", 3),
              "\033[31mabc\033[0m");
     CHECK_EQ(truncate_ansi_line("hello\nworld", 80), "hello");
+  });
+}
+
+void test_split_lines() {
+  tests::register_test("split_lines: wraps visible columns and preserves ANSI", [] {
+    const auto lines = split_lines("\033[31mabcdef\033[0m", 3);
+    CHECK_EQ(lines.size(), 3u);
+    CHECK_EQ(lines[0], "\033[31mabc");
+    CHECK_EQ(lines[1], "def");
+    CHECK_EQ(lines[2], "\033[0m");
+  });
+
+  tests::register_test("split_lines: keeps explicit empty rows", [] {
+    const auto lines = split_lines("one\n\ntwo", 80);
+    CHECK_EQ(lines.size(), 3u);
+    CHECK_EQ(lines[0], "one");
+    CHECK_EQ(lines[1], "");
+    CHECK_EQ(lines[2], "two");
+  });
+}
+
+void test_dispatch_tool_update() {
+  tests::register_test("dispatch_event: forwards tool updates", [] {
+    class RecordingRenderer final : public Renderer {
+    public:
+      void on_text_delta(std::string_view) override {}
+      void on_tool_update(std::string_view call_id, std::string_view tool_name,
+                          std::string_view partial_result) override {
+        seen_call_id = call_id;
+        seen_tool_name = tool_name;
+        seen_result = partial_result;
+      }
+
+      std::string seen_call_id;
+      std::string seen_tool_name;
+      std::string seen_result;
+    } renderer;
+
+    dispatch_event(ToolExecutionUpdateEvent{"call-1", "bash", "{}", "out"},
+                   renderer);
+    CHECK_EQ(renderer.seen_call_id, "call-1");
+    CHECK_EQ(renderer.seen_tool_name, "bash");
+    CHECK_EQ(renderer.seen_result, "out");
   });
 }
 
@@ -719,6 +763,8 @@ int main() {
   test_advance_utf8();
   test_codepoint_width();
   test_terminal_ui_helpers();
+  test_split_lines();
+  test_dispatch_tool_update();
   test_cursor_rows();
   test_rows_for_line();
   test_block_boundary_scanner();

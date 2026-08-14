@@ -16,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace pi::core {
@@ -787,6 +788,47 @@ int cursor_rows_for_rendered(std::string_view rendered, int width) {
     }
   }
   return rows;
+}
+
+std::vector<std::string> split_lines(std::string_view s, int width) {
+  std::vector<std::string> out;
+  std::string cur;
+  int col = 0;
+  for (std::size_t i = 0; i < s.size();) {
+    if (s[i] == '\n') {
+      out.push_back(std::move(cur));
+      cur.clear();
+      col = 0;
+      ++i;
+      continue;
+    }
+    if (s[i] == '\033') {
+      const auto next = skip_ansi_sequence(s, i);
+      if (next > i) {
+        cur.append(s.substr(i, next - i));
+        i = next;
+        continue;
+      }
+    }
+    const int cw = codepoint_width(s, i);
+    const auto next = advance_utf8(s, i);
+    if (col + cw > width && col > 0) {
+      out.push_back(std::move(cur));
+      cur.clear();
+      col = 0;
+    }
+    cur.append(s.substr(i, next - i));
+    col += cw;
+    if (col >= width) {
+      out.push_back(std::move(cur));
+      cur.clear();
+      col = 0;
+    }
+    i = next;
+  }
+  if (!cur.empty())
+    out.push_back(std::move(cur));
+  return out;
 }
 
 void BlockBoundaryScanner::advance(std::string_view s) {

@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace pi::core {
 
@@ -173,6 +174,10 @@ int rows_for_line(std::string_view line, int width);
 // Total visual rows from the start of `rendered` to the end at `width` cols.
 // Counts every physical row, including those caused by terminal wrapping.
 int cursor_rows_for_rendered(std::string_view rendered, int width);
+
+// Split an ANSI-rendered string into physical terminal rows, wrapping at the
+// requested display width without counting escape sequences toward that width.
+std::vector<std::string> split_lines(std::string_view s, int width);
 
 // Truncate a tool result's content to the built-in 5-line / first-2-last-2
 // display format. Used by VerboseRenderer and exposed to Lua as

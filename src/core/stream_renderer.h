@@ -61,6 +61,9 @@ public:
   virtual void on_tool_start(std::string_view call_id,
                              std::string_view tool_name,
                              std::string_view args_json) {}
+  virtual void on_tool_update(std::string_view call_id,
+                              std::string_view tool_name,
+                              std::string_view partial_result) {}
   virtual void on_tool_end(std::string_view call_id, std::string_view tool_name,
                            const ToolResult &result, bool is_error) {}
 
@@ -86,6 +89,11 @@ public:
   // renderers may own this row and paint it inside their compositor.
   virtual bool owns_status_line() const { return false; }
   virtual void set_status_line(const std::optional<std::string> &text) {}
+
+  // True if this renderer draws its own tool call/result presentation.
+  virtual bool owns_tool_output() const { return false; }
+  virtual void on_tool_output_text(std::string_view call_id,
+                                   std::string_view text) {}
 };
 
 //
@@ -97,6 +105,9 @@ public:
 //     dispatch_event(ev, *renderer);
 //
 void dispatch_event(const AgentEvent &ev, Renderer &renderer);
+
+// Render markdown while preserving the visible trailing newlines from input.
+std::string render_visible_markdown(std::string_view input);
 
 // Writes raw text deltas as they arrive (suitable for non-TTY / pipes).
 std::unique_ptr<Renderer> make_raw_renderer(int fd = 1);

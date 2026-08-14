@@ -27,7 +27,7 @@ out; do not change `make_auto_renderer`'s default in this work.
 ## Execution milestones/status
 
 - [x] M1 (P0): extract shared `AltScreenSession` and signal handling.
-- [ ] M2 (P1-P3): extend the renderer interface, route tool ownership, and
+- [x] M2 (P1-P3): extend the renderer interface, route tool ownership, and
   expose shared terminal/markdown helpers.
 - [ ] M3: scaffold `RegionRenderer` and implement transcript paint/diff loop.
 - [ ] M4: add tool regions and support concurrent updates.
