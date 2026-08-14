@@ -1170,6 +1170,17 @@ int cmd_run(const cli::Args &args,
   auto task_manager = std::make_shared<core::AgentTaskManager>(
       runtime, opts, core::AgentTaskManager::Limits{},
       core::fan_out_agent_task_callbacks(std::move(task_callbacks)));
+  if (mailbox) {
+    task_manager->set_endpoint_registration(
+        [mailbox](const core::AgentTaskId &task_id,
+                  const std::string &task_path,
+                  const std::optional<core::AgentTaskId> &parent_id) {
+          return mailbox->register_subagent(task_id, task_path, parent_id);
+        },
+        [mailbox](const core::AgentTaskId &task_id) {
+          mailbox->unregister_subagent(task_id);
+        });
+  }
   auto mailbox_delivery = std::make_shared<core::MailboxDeliveryTargets>();
   mailbox_delivery->root =
       [&runtime](std::vector<core::AgentMessageEnvelope> messages) {
@@ -1321,7 +1332,8 @@ int cmd_run(const cli::Args &args,
       return result;
     };
 
-    info.mailbox = core::make_mailbox_bindings(mailbox);
+    info.mailbox = core::make_mailbox_bindings(
+        mailbox, [mailbox] { return mailbox->active_root_identity(); });
 
     auto make_message = [](const nlohmann::json &value) {
       core::UserMessage message;
@@ -1529,7 +1541,9 @@ int cmd_run(const cli::Args &args,
   }
 
   if (mailbox) {
-    mailbox->activate_root(current_session_id, current_session_name);
+    const auto identity =
+        mailbox->activate_root(current_session_id, current_session_name);
+    agent.set_runtime_identity(identity);
     const auto current_model = agent.state().model();
     mailbox->set_model(current_model.provider, current_model.id);
   }
@@ -1898,7 +1912,8 @@ int cmd_run(const cli::Args &args,
         mailbox->drop_queued_delivery();
       runtime.activate_session(*loaded);
       if (mailbox)
-        mailbox->activate_root(current_session_id, current_session_name);
+        agent.set_runtime_identity(
+            mailbox->activate_root(current_session_id, current_session_name));
       if (runtime.last_warning())
         std::cerr << "warning: " << *runtime.last_warning() << "\n";
       configure_hooks();
@@ -1925,7 +1940,8 @@ int cmd_run(const cli::Args &args,
       current_session_id = runtime.create_session(fresh_hdr);
       current_session_name.reset();
       if (mailbox)
-        mailbox->activate_root(current_session_id, current_session_name);
+        agent.set_runtime_identity(
+            mailbox->activate_root(current_session_id, current_session_name));
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();
@@ -1948,7 +1964,8 @@ int cmd_run(const cli::Args &args,
       current_session_id = runtime.fork_session(child_hdr);
       current_session_name.reset();
       if (mailbox)
-        mailbox->activate_root(current_session_id, current_session_name);
+        agent.set_runtime_identity(
+            mailbox->activate_root(current_session_id, current_session_name));
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();

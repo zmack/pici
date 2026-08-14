@@ -2,6 +2,7 @@
 #include "core/agent_loop.h"
 
 #include "core/agent.h"
+#include "core/agent_runtime_identity.h"
 #include "core/agent_state.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
@@ -226,6 +227,7 @@ struct AgentTaskManager::Task {
   std::condition_variable_any changed;
   AgentTaskStatusKind status{AgentTaskStatusKind::pending_init};
   std::optional<AgentTaskResult> result;
+  std::optional<AgentRuntimeIdentity> runtime_identity;
   std::deque<AgentTaskManager::WorkItem> work;
   std::deque<Message> mailbox;
   std::optional<AgentInterruptReason> pending_interrupt;
@@ -265,6 +267,18 @@ AgentTaskManager::~AgentTaskManager() noexcept {
   } catch (...) {
     std::terminate();
   }
+}
+
+void AgentTaskManager::set_endpoint_registration(
+    RegisterEndpointCallback register_endpoint,
+    UnregisterEndpointCallback unregister_endpoint) {
+  std::scoped_lock lock(mutex_);
+  if (!tasks_.empty() && tasks_.size() > 1)
+    throw AgentTaskError(
+        AgentTaskErrorKind::invalid_state,
+        "endpoint registration must be configured before spawning children");
+  register_endpoint_ = std::move(register_endpoint);
+  unregister_endpoint_ = std::move(unregister_endpoint);
 }
 
 std::shared_ptr<AgentTaskManager::Task>
@@ -381,10 +395,10 @@ AgentTaskManager::inherit_context(const AgentContext &parent,
   return normalize_context(std::move(messages), limits_.max_context_bytes);
 }
 
-std::shared_ptr<AgentTaskManager::Task>
-AgentTaskManager::make_task(const SpawnAgentRequest &request,
-                            const std::shared_ptr<Task> &parent,
-                            std::vector<Message> context) {
+std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
+    const SpawnAgentRequest &request, const std::shared_ptr<Task> &parent,
+    std::vector<Message> context, AgentTaskId task_id, std::string task_path,
+    std::optional<AgentRuntimeIdentity> identity) {
   const auto parent_context = parent->session->agent().context_snapshot();
   auto options = child_options_;
   options.system_prompt =
@@ -423,10 +437,11 @@ AgentTaskManager::make_task(const SpawnAgentRequest &request,
   options.transform_context = nullptr;
   options.get_steering_messages = nullptr;
   options.get_follow_up_messages = nullptr;
+  options.runtime_identity = identity;
 
   auto task = std::make_shared<Task>();
-  task->id = "agent_" + std::to_string(next_id_++);
-  task->task_path = parent->task_path + "/" + request.task_name;
+  task->id = std::move(task_id);
+  task->task_path = std::move(task_path);
   task->parent_id = parent->id;
   task->task_name = request.task_name;
   task->depth = parent->depth + 1;
@@ -436,6 +451,7 @@ AgentTaskManager::make_task(const SpawnAgentRequest &request,
       .session_store = nullptr,
   });
   task->session = task->owned_session.get();
+  task->runtime_identity = std::move(identity);
   task->session->agent().state().set_messages(std::move(context));
   UserMessage message;
   message.content.emplace_back(TextContent{.text = request.prompt});
@@ -456,14 +472,19 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
                          "spawn prompt must not be empty");
 
   AgentTaskSnapshot result;
-  std::shared_ptr<Task> task;
+  std::shared_ptr<Task> parent;
+  AgentTaskId task_id;
+  std::string task_path;
+  std::vector<Message> context;
+  RegisterEndpointCallback register_endpoint;
+  UnregisterEndpointCallback unregister_endpoint;
   {
     std::scoped_lock lock(mutex_);
     if (shutting_down_)
       throw AgentTaskError(AgentTaskErrorKind::shutting_down,
                            "agent task manager is shutting down");
-    auto parent = find_task_locked(
-        request.parent_id.empty() ? "root" : request.parent_id);
+    parent = find_task_locked(request.parent_id.empty() ? "root"
+                                                        : request.parent_id);
     if (!parent)
       throw AgentTaskError(AgentTaskErrorKind::not_found,
                            "parent task not found");
@@ -473,7 +494,13 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
           parent->status == AgentTaskStatusKind::shutdown)
         throw AgentTaskError(AgentTaskErrorKind::invalid_state,
                              "parent task is closed");
-      if (parent->children.size() >= limits_.max_direct_children)
+      const auto pending_children_it = pending_children_.find(parent->id);
+      const auto pending_children =
+          pending_children_it == pending_children_.end()
+              ? std::size_t{0}
+              : pending_children_it->second;
+      if (parent->children.size() + pending_children >=
+          limits_.max_direct_children)
         throw AgentTaskError(AgentTaskErrorKind::residency_limit,
                              "parent child limit reached");
       for (const auto &child_id : parent->children) {
@@ -486,50 +513,151 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
         throw AgentTaskError(AgentTaskErrorKind::depth_limit,
                              "agent nesting depth limit reached");
     }
-    if (tasks_.size() - 1 >= limits_.max_resident_tasks)
+    if (tasks_.size() - 1 + pending_spawns_ >= limits_.max_resident_tasks)
       throw AgentTaskError(AgentTaskErrorKind::residency_limit,
                            "resident child task limit reached");
     if (active_executions_ >= limits_.max_active_executions)
       throw AgentTaskError(AgentTaskErrorKind::execution_limit,
                            "active child execution limit reached");
 
-    auto parent_context = parent->session->agent().context_snapshot();
-    auto context = inherit_context(parent_context, request.context);
-    task = make_task(request, parent, std::move(context));
-    if (tasks_.contains(task->id) ||
-        std::ranges::any_of(tasks_, [&task](const auto &entry) {
-          return entry.second->task_path == task->task_path;
+    task_id = "agent_" + std::to_string(next_id_++);
+    task_path = parent->task_path + "/" + request.task_name;
+    if (tasks_.contains(task_id) || pending_task_paths_.contains(task_path) ||
+        std::ranges::any_of(tasks_, [&task_path](const auto &entry) {
+          return entry.second->task_path == task_path;
         }))
       throw AgentTaskError(AgentTaskErrorKind::duplicate_name,
                            "task identity already exists");
+    auto parent_context = parent->session->agent().context_snapshot();
+    context = inherit_context(parent_context, request.context);
+    register_endpoint = register_endpoint_;
+    unregister_endpoint = unregister_endpoint_;
+    pending_task_paths_.insert(task_path);
+    ++pending_children_[parent->id];
+    ++pending_spawns_;
     ++active_executions_;
-    tasks_.emplace(task->id, task);
-    parent->children.insert(task->id);
-    touch_locked(task);
-    result = snapshot(task);
   }
 
-  try {
-    task->runner =
-        std::jthread([this, task](const std::stop_token &stop_token) {
-          run_task(task, stop_token);
-        });
-  } catch (...) {
+  std::optional<AgentRuntimeIdentity> identity;
+  bool endpoint_registered = false;
+  std::shared_ptr<Task> task;
+  auto release_reservation = [&](bool release_execution, bool release_path,
+                                 bool release_child) {
     std::scoped_lock lock(mutex_);
-    if (auto parent = find_task_locked(task->parent_id.value_or("")))
-      parent->children.erase(task->id);
-    tasks_.erase(task->id);
-    if (active_executions_ > 0)
+    if (release_path)
+      pending_task_paths_.erase(task_path);
+    if (release_child) {
+      if (auto pending = pending_children_.find(parent->id);
+          pending != pending_children_.end()) {
+        if (pending->second > 0)
+          --pending->second;
+        if (pending->second == 0)
+          pending_children_.erase(pending);
+      }
+    }
+    if (release_execution && active_executions_ > 0)
       --active_executions_;
+    if (pending_spawns_ > 0)
+      --pending_spawns_;
     changed_.notify_all();
-    throw AgentTaskError(AgentTaskErrorKind::internal,
-                         "failed to start child task runner");
+  };
+  try {
+    if (register_endpoint) {
+      identity = register_endpoint(task_id, task_path, parent->id);
+      endpoint_registered = true;
+    }
+    task = make_task(request, parent, std::move(context), task_id, task_path,
+                     std::move(identity));
+  } catch (...) {
+    if (unregister_endpoint && endpoint_registered) {
+      try {
+        unregister_endpoint(task_id);
+      } catch (...) {
+        static_cast<void>(0);
+      }
+    }
+    release_reservation(true, true, true);
+    throw;
   }
 
-  emit(AgentTaskSpawnedEvent{.id = task->id,
-                             .task_path = task->task_path,
-                             .parent_id = task->parent_id,
-                             .task_name = task->task_name});
+  bool registration_cancelled = false;
+  bool registration_shutdown = false;
+  bool runner_failed = false;
+  std::exception_ptr runner_error;
+  bool published = false;
+  {
+    std::scoped_lock lock(mutex_);
+    const bool parent_gone = !tasks_.contains(parent->id);
+    bool parent_closing = false;
+    if (!parent_gone) {
+      std::scoped_lock parent_lock(parent->mutex);
+      parent_closing = parent->close_requested ||
+                       parent->status == AgentTaskStatusKind::closing ||
+                       parent->status == AgentTaskStatusKind::shutdown;
+    }
+    if (shutting_down_ || parent_gone || parent_closing) {
+      registration_shutdown = shutting_down_;
+      registration_cancelled = true;
+    } else {
+      try {
+        task->runner =
+            std::jthread([this, task](const std::stop_token &stop_token) {
+              run_task(task, stop_token);
+            });
+        pending_task_paths_.erase(task_path);
+        if (auto pending = pending_children_.find(parent->id);
+            pending != pending_children_.end()) {
+          if (pending->second > 0)
+            --pending->second;
+          if (pending->second == 0)
+            pending_children_.erase(pending);
+        }
+        tasks_.emplace(task->id, task);
+        parent->children.insert(task->id);
+        task->execution_reserved = true;
+        touch_locked(task);
+        result = snapshot(task);
+        published = true;
+      } catch (...) {
+        tasks_.erase(task->id);
+        parent->children.erase(task->id);
+        runner_failed = true;
+        runner_error = std::current_exception();
+      }
+    }
+  }
+
+  if (registration_cancelled || runner_failed) {
+    if (runner_failed && task->runner.joinable()) {
+      task->runner.request_stop();
+      task->session->agent().interrupt(TurnAbortReason::shutdown);
+      task->runner.join();
+    }
+    if (unregister_endpoint && endpoint_registered) {
+      try {
+        unregister_endpoint(task_id);
+      } catch (...) {
+        static_cast<void>(0);
+      }
+    }
+    release_reservation(true, true, true);
+    if (runner_failed)
+      throw AgentTaskError(AgentTaskErrorKind::internal,
+                           "failed to start child task runner");
+    throw AgentTaskError(
+        registration_shutdown ? AgentTaskErrorKind::shutting_down
+                              : AgentTaskErrorKind::invalid_state,
+        registration_shutdown ? "agent task manager is shutting down"
+                              : "parent task is closed");
+  }
+
+  if (published) {
+    emit(AgentTaskSpawnedEvent{.id = task->id,
+                               .task_path = task->task_path,
+                               .parent_id = task->parent_id,
+                               .task_name = task->task_name});
+    release_reservation(false, false, false);
+  }
   return result;
 }
 
@@ -977,14 +1105,19 @@ AgentTaskManager::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
 
   AgentTaskSnapshot target_snapshot;
   std::vector<AgentTaskEvent> closed_events;
+  std::vector<AgentTaskId> unregister_ids;
+  UnregisterEndpointCallback unregister_endpoint;
   {
     std::scoped_lock lock(mutex_);
+    unregister_endpoint = unregister_endpoint_;
     for (const auto &task : tasks) {
       std::scoped_lock task_lock(task->mutex);
       if (task->execution_reserved && active_executions_ > 0)
         --active_executions_;
       task->execution_reserved = false;
       task->status = AgentTaskStatusKind::shutdown;
+      if (task->runtime_identity)
+        unregister_ids.push_back(task->id);
       touch_locked(task);
       if (task->id == tasks.front()->id) {
         target_snapshot.id = task->id;
@@ -1010,6 +1143,15 @@ AgentTaskManager::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
       tasks_.erase(task->id);
   }
   changed_.notify_all();
+  if (unregister_endpoint) {
+    for (const auto &task_id : unregister_ids) {
+      try {
+        unregister_endpoint(task_id);
+      } catch (...) {
+        static_cast<void>(0);
+      }
+    }
+  }
   for (const auto &event : closed_events)
     emit(event);
   return target_snapshot;
@@ -1080,11 +1222,14 @@ AgentWaitResult AgentTaskManager::wait(const AgentWaitRequest &request,
 void AgentTaskManager::shutdown() {
   std::vector<std::shared_ptr<Task>> children;
   {
-    std::scoped_lock lock(mutex_);
-    if (shutting_down_)
+    std::unique_lock lock(mutex_);
+    if (shutting_down_) {
+      changed_.wait(lock, [this] { return pending_spawns_ == 0; });
       return;
+    }
     shutting_down_ = true;
     shutdown_source_.request_stop();
+    changed_.wait(lock, [this] { return pending_spawns_ == 0; });
     for (const auto &[id, task] : tasks_)
       if (id != "root")
         children.push_back(task);
@@ -1092,6 +1237,11 @@ void AgentTaskManager::shutdown() {
   if (!children.empty())
     static_cast<void>(close_tasks(std::move(children)));
   changed_.notify_all();
+}
+
+bool AgentTaskManager::is_shutting_down() const {
+  std::scoped_lock lock(mutex_);
+  return shutting_down_;
 }
 
 std::size_t AgentTaskManager::active_executions() const {

@@ -276,11 +276,6 @@ MailboxBody parse_body(std::string_view serialized) {
   }
 }
 
-bool contains_kind(const std::vector<MailboxMessageKind> &kinds,
-                   MailboxMessageKind kind) {
-  return kinds.empty() || std::ranges::find(kinds, kind) != kinds.end();
-}
-
 MailboxMessage read_message(sqlite3_stmt *statement) {
   MailboxMessage message{
       .message_id = column_text(statement, 0),
@@ -906,7 +901,7 @@ SendReceipt MailboxStore::send(const SendRequest &request) {
       Statement target(database_, R"sql(
       SELECT a.agent_id FROM agents a JOIN processes p ON p.process_id=a.process_id
       WHERE a.session_id=? AND p.workspace_id=? AND a.closed_at_ms IS NULL
-        AND p.lease_expires_at_ms > ? ORDER BY a.agent_id
+        AND p.lease_expires_at_ms > ? AND a.kind='root' ORDER BY a.agent_id
     )sql");
       bind_text(target.get(), 1, recipient_session);
       bind_text(target.get(), 2, request.workspace_id);
@@ -927,7 +922,8 @@ SendReceipt MailboxStore::send(const SendRequest &request) {
         Statement known(
             database_,
             "SELECT 1 FROM agents WHERE session_id=? AND process_id IN "
-            "(SELECT process_id FROM processes WHERE workspace_id=?) LIMIT 1");
+            "(SELECT process_id FROM processes WHERE workspace_id=?) "
+            "AND kind='root' LIMIT 1");
         bind_text(known.get(), 1, recipient_session);
         bind_text(known.get(), 2, request.workspace_id);
         const int known_step = sqlite3_step(known.get());
@@ -982,23 +978,50 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
   validate_optional_identifier(query.workspace_id, "workspace ID");
   validate_optional_identifier(query.agent_id, "agent ID");
   validate_optional_identifier(query.message_id, "message ID");
+  if ((query.agent_id && query.agent_kind != "root" &&
+       query.agent_kind != "subagent") ||
+      (!query.agent_id && !query.agent_kind.empty()))
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox inbox actor kind is invalid");
   if (query.limit == 0 || query.limit > 1000)
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "mailbox inbox limit is out of range");
   const auto now = query.now_ms == 0 ? options_.clock() : query.now_ms;
-  Statement statement(
-      database_,
+  std::string sql =
       "SELECT " + std::string(kMessageColumns) +
-          " FROM messages WHERE recipient_session_id=? AND workspace_id=? "
-          "AND available_at_ms<=? AND (? OR acknowledged_at_ms IS NULL) "
-          "AND (? OR message_id=?) ORDER BY created_at_ms,message_id LIMIT ?");
+      " FROM messages WHERE recipient_session_id=? AND workspace_id=? "
+      "AND available_at_ms<=? AND (? OR acknowledged_at_ms IS NULL) "
+      "AND (? OR message_id=?)";
+  if (query.agent_id)
+    sql += " AND (recipient_agent_id=? OR (recipient_agent_id IS NULL AND "
+           "?='root'))";
+  if (!query.kinds.empty()) {
+    sql += " AND kind IN (";
+    for (std::size_t index = 0; index < query.kinds.size(); ++index) {
+      if (index != 0)
+        sql += ',';
+      sql += '?';
+    }
+    sql += ')';
+  }
+  sql += " ORDER BY created_at_ms,message_id LIMIT ?";
+  Statement statement(database_, sql);
   bind_text(statement.get(), 1, query.session_id);
   bind_text(statement.get(), 2, workspace);
   bind_integer(statement.get(), 3, now);
   bind_integer(statement.get(), 4, query.include_acknowledged ? 1 : 0);
   bind_integer(statement.get(), 5, query.message_id ? 0 : 1);
   bind_optional_text(statement.get(), 6, query.message_id);
-  bind_integer(statement.get(), 7, static_cast<std::int64_t>(query.limit));
+  int bind_index = 7;
+  if (query.agent_id) {
+    bind_text(statement.get(), bind_index++, *query.agent_id);
+    bind_text(statement.get(), bind_index++, query.agent_kind);
+  }
+  for (const auto kind : query.kinds)
+    bind_text(statement.get(), bind_index++,
+              mailbox_message_kind_to_string(kind));
+  bind_integer(statement.get(), bind_index,
+               static_cast<std::int64_t>(query.limit));
   std::vector<MailboxMessage> result;
   while (true) {
     const int step = sqlite3_step(statement.get());
@@ -1006,10 +1029,7 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
       break;
     check_sqlite(database_, step, "inspect mailbox");
     auto message = read_message(statement.get());
-    if ((!query.agent_id || !message.recipient_agent_id ||
-         *query.agent_id == *message.recipient_agent_id) &&
-        contains_kind(query.kinds, message.kind))
-      result.push_back(std::move(message));
+    result.push_back(std::move(message));
   }
   return result;
 }
@@ -1045,17 +1065,36 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
       throw MailboxError(MailboxErrorCode::not_found,
                          "claiming mailbox agent is not live");
     const auto claimant_kind = column_text(agent.get(), 0);
-    Statement query(
-        database_,
+    std::string query_sql =
         "SELECT " + std::string(kMessageColumns) +
-            " FROM messages WHERE recipient_session_id=? AND workspace_id=? "
-            "AND available_at_ms<=? AND acknowledged_at_ms IS NULL "
-            "AND (claim_expires_at_ms IS NULL OR claim_expires_at_ms<=?) "
-            "ORDER BY created_at_ms,message_id");
+        " FROM messages WHERE recipient_session_id=? AND workspace_id=? "
+        "AND available_at_ms<=? AND acknowledged_at_ms IS NULL "
+        "AND (claim_expires_at_ms IS NULL OR claim_expires_at_ms<=?) "
+        "AND (recipient_agent_id=? OR (recipient_agent_id IS NULL AND "
+        "?='root'))";
+    if (!request.kinds.empty()) {
+      query_sql += " AND kind IN (";
+      for (std::size_t index = 0; index < request.kinds.size(); ++index) {
+        if (index != 0)
+          query_sql += ',';
+        query_sql += '?';
+      }
+      query_sql += ')';
+    }
+    query_sql += " ORDER BY created_at_ms,message_id LIMIT ?";
+    Statement query(database_, query_sql);
     bind_text(query.get(), 1, request.session_id);
     bind_text(query.get(), 2, workspace);
     bind_integer(query.get(), 3, now);
     bind_integer(query.get(), 4, now);
+    int bind_index = 5;
+    bind_text(query.get(), bind_index++, request.agent_id);
+    bind_text(query.get(), bind_index++, claimant_kind);
+    for (const auto kind : request.kinds)
+      bind_text(query.get(), bind_index++,
+                mailbox_message_kind_to_string(kind));
+    bind_integer(query.get(), bind_index,
+                 static_cast<std::int64_t>(request.limit));
     std::vector<MailboxMessage> candidates;
     while (true) {
       const int step = sqlite3_step(query.get());
@@ -1063,13 +1102,7 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
         break;
       check_sqlite(database_, step, "find claimable mailbox messages");
       auto message = read_message(query.get());
-      if (((message.recipient_agent_id &&
-            *message.recipient_agent_id == request.agent_id) ||
-           (!message.recipient_agent_id && claimant_kind == "root")) &&
-          contains_kind(request.kinds, message.kind))
-        candidates.push_back(std::move(message));
-      if (candidates.size() >= request.limit)
-        break;
+      candidates.push_back(std::move(message));
     }
     ClaimResult result;
     for (auto &message : candidates) {

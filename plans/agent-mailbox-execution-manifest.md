@@ -1,5 +1,10 @@
 # Agent mailbox v1 execution manifest
 
+> Follow-up: mailbox caller identity, child tool authority, and autonomous
+> idle-root turns are specified in
+> `mailbox-agent-identity-and-autonomous-turns.md`. That plan intentionally
+> supersedes this v1 manifest's exclusions for the next implementation phase.
+
 This manifest turns `agent-mailbox-and-session-coordination.md` into gated
 implementation work. The architecture plan remains the source for semantics;
 this file freezes choices that an implementation agent must not reinvent.

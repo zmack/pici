@@ -171,6 +171,9 @@ struct InboxQuery {
   std::string session_id;
   std::optional<std::string> workspace_id;
   std::optional<std::string> agent_id;
+  // Required with agent_id for caller-scoped inspection.  An empty value is
+  // retained only for privileged store diagnostics.
+  std::string agent_kind;
   std::optional<std::string> message_id;
   std::vector<MailboxMessageKind> kinds;
   bool include_acknowledged{false};

@@ -83,7 +83,11 @@ Agent::Agent(const Options &options)
     : state_(
           options.system_prompt, options.model,
           resolve_thinking_level(options.model, options.thinking_level).level),
-      options_(options) {}
+      options_(options) {
+  state_.set_runtime_identity(options_.runtime_identity);
+  if (options_.runtime_identity && !options_.session_id)
+    options_.session_id = options_.runtime_identity->session_id;
+}
 
 Agent::~Agent() {
   abort();
@@ -466,6 +470,7 @@ AgentContext Agent::context_snapshot() const {
   ctx.messages = state_.messages();
   ctx.model = state_.model();
   ctx.tools = state_.tools();
+  ctx.runtime_identity = state_.runtime_identity();
   return ctx;
 }
 

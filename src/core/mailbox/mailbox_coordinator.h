@@ -11,6 +11,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -68,23 +69,35 @@ public:
   MailboxCoordinator(MailboxCoordinator &&) = delete;
   MailboxCoordinator &operator=(MailboxCoordinator &&) = delete;
 
-  void activate_root(std::string session_id,
-                     std::optional<std::string> session_name = {});
+  AgentRuntimeIdentity
+  activate_root(std::string session_id,
+                std::optional<std::string> session_name = {});
   void deactivate_root();
   void set_root_running(bool running);
   void set_model(std::string provider, std::string model_id);
   void observe_task_event(const AgentTaskEvent &event);
+  AgentRuntimeIdentity register_subagent(std::string task_id,
+                                         std::string task_path,
+                                         std::optional<std::string> parent_id);
+  void unregister_subagent(std::string_view task_id);
   void attach_delivery(std::shared_ptr<MailboxDeliveryTargets> targets);
   void detach_delivery();
   void pump_inbox();
   void drop_queued_delivery();
 
-  AgentRecord self();
+  AgentRecord self(const AgentRuntimeIdentity &actor);
+  std::optional<AgentRuntimeIdentity> active_root_identity() const;
   std::vector<AgentRecord> list_agents(AgentQuery query = {});
-  SendReceipt send(SendRequest request);
-  std::vector<MailboxMessage> inspect(InboxQuery query = {});
-  ClaimResult claim(ClaimRequest request);
-  void acknowledge(AcknowledgeRequest request);
+  std::vector<AgentRecord> list_agents(const AgentRuntimeIdentity &actor,
+                                       AgentQuery query = {});
+  SendReceipt send(const AgentRuntimeIdentity &actor, SendRequest request);
+  SendReceipt reply(const AgentRuntimeIdentity &actor, std::string message_id,
+                    MailboxBody body);
+  std::vector<MailboxMessage> inspect(const AgentRuntimeIdentity &actor,
+                                      InboxQuery query = {});
+  ClaimResult claim(const AgentRuntimeIdentity &actor, ClaimRequest request);
+  void acknowledge(const AgentRuntimeIdentity &actor,
+                   AcknowledgeRequest request);
   WaitResult wait(WaitRequest request, std::stop_token stop_token = {});
 
   MailboxCoordinatorStatus status() const;
@@ -131,7 +144,7 @@ private:
   void poll_inbox();
   void acknowledge_delivery(std::string agent_id, std::string message_id,
                             std::string claim_token);
-  void register_subagent(const AgentTaskSpawnedEvent &event);
+  void require_actor(const AgentRuntimeIdentity &actor) const;
   static std::string task_status(AgentTaskStatusKind status);
 };
 

@@ -192,6 +192,10 @@ public:
   };
 
   using EventCallback = std::function<void(const AgentTaskEvent &)>;
+  using RegisterEndpointCallback = std::function<AgentRuntimeIdentity(
+      const AgentTaskId &, const std::string &,
+      const std::optional<AgentTaskId> &)>;
+  using UnregisterEndpointCallback = std::function<void(const AgentTaskId &)>;
 
   AgentTaskManager(AgentSession &root, Agent::Options child_options);
   AgentTaskManager(AgentSession &root, Agent::Options child_options,
@@ -202,6 +206,12 @@ public:
   AgentTaskManager &operator=(const AgentTaskManager &) = delete;
 
   AgentTaskSnapshot spawn(const SpawnAgentRequest &request);
+
+  // Endpoint registration is called without the task-manager mutex and must
+  // complete before a child session or runner is made visible.
+  void
+  set_endpoint_registration(RegisterEndpointCallback register_endpoint,
+                            UnregisterEndpointCallback unregister_endpoint);
 
   std::optional<AgentTaskSnapshot> get(const AgentTaskId &target) const;
   std::vector<AgentTaskSnapshot>
@@ -221,6 +231,7 @@ public:
                        std::stop_token stop_token = {}) const;
 
   void shutdown();
+  bool is_shutting_down() const;
   std::size_t active_executions() const;
   std::size_t resident_tasks() const;
 
@@ -237,13 +248,18 @@ private:
   Agent::Options child_options_;
   Limits limits_;
   EventCallback on_event_;
+  RegisterEndpointCallback register_endpoint_;
+  UnregisterEndpointCallback unregister_endpoint_;
 
   mutable std::mutex mutex_;
   mutable std::condition_variable_any changed_;
   std::unordered_map<AgentTaskId, std::shared_ptr<Task>> tasks_;
+  std::set<std::string> pending_task_paths_;
+  std::unordered_map<AgentTaskId, std::size_t> pending_children_;
   std::uint64_t generation_{0};
   std::uint64_t next_id_{1};
   std::size_t active_executions_{0};
+  std::size_t pending_spawns_{0};
   bool shutting_down_{false};
   std::stop_source shutdown_source_;
 
@@ -263,7 +279,9 @@ private:
                 const std::vector<std::string> &requested);
   std::shared_ptr<Task> make_task(const SpawnAgentRequest &request,
                                   const std::shared_ptr<Task> &parent,
-                                  std::vector<Message> context);
+                                  std::vector<Message> context,
+                                  AgentTaskId task_id, std::string task_path,
+                                  std::optional<AgentRuntimeIdentity> identity);
   AgentTaskSnapshot close_tasks(std::vector<std::shared_ptr<Task>> tasks);
   static bool valid_task_name(std::string_view name);
 };

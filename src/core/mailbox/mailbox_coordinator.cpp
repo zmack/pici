@@ -1,5 +1,6 @@
 #include "core/mailbox/mailbox_coordinator.h"
 #include "core/agent_loop.h"
+#include "core/agent_runtime_identity.h"
 #include "core/agent_task.h"
 #include "core/mailbox/mailbox_store.h"
 #include "core/mailbox/mailbox_types.h"
@@ -108,8 +109,9 @@ MailboxCoordinator::MailboxCoordinator(MailboxCoordinatorOptions options)
 
 MailboxCoordinator::~MailboxCoordinator() noexcept { stop(); }
 
-void MailboxCoordinator::activate_root(
-    std::string session_id, std::optional<std::string> session_name) {
+AgentRuntimeIdentity
+MailboxCoordinator::activate_root(std::string session_id,
+                                  std::optional<std::string> session_name) {
   if (session_id.empty())
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "mailbox session identity is required");
@@ -120,6 +122,7 @@ void MailboxCoordinator::activate_root(
   std::string provider;
   std::string model;
   std::shared_ptr<MailboxDeliveryTargets> delivery;
+  AgentRuntimeIdentity registered_identity;
   {
     std::scoped_lock lock(mutex_);
     if (stopped_)
@@ -179,7 +182,12 @@ void MailboxCoordinator::activate_root(
     subagent_ids_.clear();
     subagent_endpoint_by_task_.clear();
     subagent_task_by_endpoint_.clear();
+    registered_identity =
+        AgentRuntimeIdentity{.agent_id = active_root_agent_id_,
+                             .session_id = *session_id_,
+                             .kind = "root"};
   }
+  return registered_identity;
 }
 
 void MailboxCoordinator::deactivate_root() {
@@ -269,22 +277,37 @@ void MailboxCoordinator::set_model(std::string provider, std::string model_id) {
   }
 }
 
-void MailboxCoordinator::register_subagent(const AgentTaskSpawnedEvent &event) {
+AgentRuntimeIdentity
+MailboxCoordinator::register_subagent(std::string task_id,
+                                      std::string task_path,
+                                      std::optional<std::string> parent_id) {
   std::optional<std::string> session;
   std::string provider;
   std::string model;
   std::string root_agent_id;
+  std::string owner_agent_id;
   {
     std::scoped_lock lock(mutex_);
     if (!root_active_)
-      return;
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox root session is not active");
     session = session_id_;
     provider = provider_;
     model = model_id_;
     root_agent_id = active_root_agent_id_;
+    owner_agent_id = root_agent_id;
+    if (parent_id && *parent_id != "root") {
+      if (const auto it = subagent_endpoint_by_task_.find(*parent_id);
+          it != subagent_endpoint_by_task_.end())
+        owner_agent_id = it->second;
+      else
+        throw MailboxError(MailboxErrorCode::not_found,
+                           "mailbox parent task is not registered");
+    }
   }
   if (!session)
-    return;
+    throw MailboxError(MailboxErrorCode::not_found,
+                       "mailbox root session is not active");
   std::string endpoint;
   {
     std::scoped_lock lock(mutex_);
@@ -300,10 +323,10 @@ void MailboxCoordinator::register_subagent(const AgentTaskSpawnedEvent &event) {
       .agent_id = endpoint,
       .process_id = options_.process_id,
       .kind = "subagent",
-      .owner_agent_id = root_agent_id,
+      .owner_agent_id = owner_agent_id,
       .session_id = *session,
-      .task_id = event.id,
-      .task_path = event.task_path,
+      .task_id = task_id,
+      .task_path = task_path,
       .provider = provider,
       .model_id = model,
       .status = "pending",
@@ -317,8 +340,8 @@ void MailboxCoordinator::register_subagent(const AgentTaskSpawnedEvent &event) {
     if (belongs_to_current_session)
       subagent_ids_.insert(endpoint);
     if (belongs_to_current_session) {
-      subagent_endpoint_by_task_[event.id] = endpoint;
-      subagent_task_by_endpoint_[endpoint] = event.id;
+      subagent_endpoint_by_task_[task_id] = endpoint;
+      subagent_task_by_endpoint_[endpoint] = task_id;
     }
   }
   if (!belongs_to_current_session) {
@@ -328,6 +351,31 @@ void MailboxCoordinator::register_subagent(const AgentTaskSpawnedEvent &event) {
       static_cast<void>(0);
     }
   }
+  if (!belongs_to_current_session)
+    throw MailboxError(MailboxErrorCode::not_found,
+                       "mailbox root session changed during registration");
+  return AgentRuntimeIdentity{.agent_id = endpoint,
+                              .session_id = *session,
+                              .kind = "subagent",
+                              .task_id = std::move(task_id),
+                              .task_path = std::move(task_path),
+                              .owner_agent_id = std::move(owner_agent_id)};
+}
+
+void MailboxCoordinator::unregister_subagent(std::string_view task_id) {
+  std::string endpoint;
+  {
+    std::scoped_lock lock(mutex_);
+    const auto it = subagent_endpoint_by_task_.find(std::string(task_id));
+    if (it == subagent_endpoint_by_task_.end())
+      return;
+    endpoint = it->second;
+  }
+  store_->close_agent(endpoint, options_.store.clock());
+  std::scoped_lock lock(mutex_);
+  subagent_ids_.erase(endpoint);
+  subagent_endpoint_by_task_.erase(std::string(task_id));
+  subagent_task_by_endpoint_.erase(endpoint);
 }
 
 std::string MailboxCoordinator::task_status(AgentTaskStatusKind status) {
@@ -336,7 +384,8 @@ std::string MailboxCoordinator::task_status(AgentTaskStatusKind status) {
 
 void MailboxCoordinator::observe_task_event(const AgentTaskEvent &event) {
   if (const auto *spawned = std::get_if<AgentTaskSpawnedEvent>(&event)) {
-    register_subagent(*spawned);
+    // Registration is synchronous during spawn; this event is observational.
+    static_cast<void>(spawned);
   } else if (const auto *changed =
                  std::get_if<AgentTaskStatusChangedEvent>(&event)) {
     std::string endpoint;
@@ -530,22 +579,59 @@ void MailboxCoordinator::poll_inbox() {
   }
 }
 
-AgentRecord MailboxCoordinator::self() {
-  std::string agent_id;
+void MailboxCoordinator::require_actor(
+    const AgentRuntimeIdentity &actor) const {
+  if (actor.agent_id.empty() || actor.session_id.empty() ||
+      (actor.kind != "root" && actor.kind != "subagent"))
+    throw MailboxError(MailboxErrorCode::permission_denied,
+                       "mailbox actor identity is invalid");
   {
     std::scoped_lock lock(mutex_);
-    if (!root_active_)
-      throw MailboxError(MailboxErrorCode::not_found,
-                         "mailbox session is not active");
-    agent_id = active_root_agent_id_;
+    if (!root_active_ || session_id_ != actor.session_id)
+      throw MailboxError(MailboxErrorCode::permission_denied,
+                         "mailbox actor is not active");
+    if (actor.kind == "root") {
+      if (actor.agent_id != active_root_agent_id_)
+        throw MailboxError(MailboxErrorCode::permission_denied,
+                           "mailbox actor is not the active root");
+    } else {
+      const auto it = subagent_task_by_endpoint_.find(actor.agent_id);
+      if (it == subagent_task_by_endpoint_.end() || !actor.task_id ||
+          *actor.task_id != it->second)
+        throw MailboxError(MailboxErrorCode::permission_denied,
+                           "mailbox subagent actor is not active");
+    }
   }
-  auto agents = list_agents(AgentQuery{.agent_id = std::move(agent_id),
+  const auto live =
+      store_->list_agents(AgentQuery{.agent_id = actor.agent_id,
+                                     .include_stale = false,
+                                     .include_closed = false,
+                                     .limit = 1,
+                                     .now_ms = options_.store.clock()});
+  if (live.empty())
+    throw MailboxError(MailboxErrorCode::permission_denied,
+                       "mailbox actor lease is not live");
+}
+
+AgentRecord MailboxCoordinator::self(const AgentRuntimeIdentity &actor) {
+  require_actor(actor);
+  auto agents = list_agents(AgentQuery{.agent_id = actor.agent_id,
                                        .include_stale = true,
                                        .include_closed = true});
   if (agents.empty())
     throw MailboxError(MailboxErrorCode::not_found,
                        "mailbox agent is not registered");
   return std::move(agents.front());
+}
+
+std::optional<AgentRuntimeIdentity>
+MailboxCoordinator::active_root_identity() const {
+  std::scoped_lock lock(mutex_);
+  if (!root_active_ || !session_id_)
+    return std::nullopt;
+  return AgentRuntimeIdentity{.agent_id = active_root_agent_id_,
+                              .session_id = *session_id_,
+                              .kind = "root"};
 }
 
 std::vector<AgentRecord> MailboxCoordinator::list_agents(AgentQuery query) {
@@ -555,78 +641,86 @@ std::vector<AgentRecord> MailboxCoordinator::list_agents(AgentQuery query) {
   return store_->list_agents(query);
 }
 
-SendReceipt MailboxCoordinator::send(SendRequest request) {
-  std::string session;
-  std::string agent;
-  {
-    std::scoped_lock lock(mutex_);
-    if (!root_active_)
-      throw MailboxError(MailboxErrorCode::not_found,
-                         "mailbox session is not active");
-    if (!session_id_)
-      throw MailboxError(MailboxErrorCode::not_found,
-                         "mailbox session is not active");
-    session = *session_id_;
-    agent = active_root_agent_id_;
-  }
-  request.sender_agent_id = std::move(agent);
-  request.sender_session_id = std::move(session);
+std::vector<AgentRecord>
+MailboxCoordinator::list_agents(const AgentRuntimeIdentity &actor,
+                                AgentQuery query) {
+  require_actor(actor);
+  query.workspace_id = options_.store.workspace_id;
+  if (query.now_ms == 0)
+    query.now_ms = options_.store.clock();
+  return store_->list_agents(query);
+}
+
+SendReceipt MailboxCoordinator::send(const AgentRuntimeIdentity &actor,
+                                     SendRequest request) {
+  require_actor(actor);
+  request.sender_agent_id = actor.agent_id;
+  request.sender_session_id = actor.session_id;
   request.workspace_id = options_.store.workspace_id;
   return store_->send(request);
 }
 
-std::vector<MailboxMessage> MailboxCoordinator::inspect(InboxQuery query) {
-  std::string session;
-  std::string agent;
-  {
-    std::scoped_lock lock(mutex_);
-    if (!root_active_)
-      throw MailboxError(MailboxErrorCode::not_found,
-                         "mailbox session is not active");
-    if (!session_id_)
-      throw MailboxError(MailboxErrorCode::not_found,
-                         "mailbox session is not active");
-    session = *session_id_;
-    agent = active_root_agent_id_;
-  }
-  query.session_id = std::move(session);
-  query.agent_id = std::move(agent);
+SendReceipt MailboxCoordinator::reply(const AgentRuntimeIdentity &actor,
+                                      std::string message_id,
+                                      MailboxBody body) {
+  require_actor(actor);
+  const auto incoming = inspect(actor, InboxQuery{.message_id = message_id,
+                                                  .include_acknowledged = true,
+                                                  .limit = 1});
+  if (incoming.empty())
+    throw MailboxError(MailboxErrorCode::not_found,
+                       "mailbox message not found");
+  const auto &original = incoming.front();
+  if (original.kind != MailboxMessageKind::request)
+    throw MailboxError(MailboxErrorCode::invalid_message,
+                       "mailbox reply target is not a request");
+  const auto live_sender =
+      list_agents(AgentQuery{.agent_id = original.sender_agent_id,
+                             .include_stale = false,
+                             .include_closed = false,
+                             .limit = 1});
+  MailboxTarget target;
+  if (!live_sender.empty())
+    target.agent_id = original.sender_agent_id;
+  else
+    target.session_id = original.sender_session_id;
+  return send(actor, SendRequest{.target = std::move(target),
+                                 .kind = MailboxMessageKind::reply,
+                                 .body = std::move(body),
+                                 .reply_to_message_id = original.message_id});
+}
+
+std::vector<MailboxMessage>
+MailboxCoordinator::inspect(const AgentRuntimeIdentity &actor,
+                            InboxQuery query) {
+  require_actor(actor);
+  query.session_id = actor.session_id;
+  query.agent_id = actor.agent_id;
+  query.agent_kind = actor.kind;
   query.workspace_id = options_.store.workspace_id;
   if (query.now_ms == 0)
     query.now_ms = options_.store.clock();
   return store_->inspect(query);
 }
 
-ClaimResult MailboxCoordinator::claim(ClaimRequest request) {
-  std::string session;
-  std::string agent;
-  {
-    std::scoped_lock lock(mutex_);
-    if (!root_active_)
-      throw MailboxError(MailboxErrorCode::not_found,
-                         "mailbox session is not active");
-    if (!session_id_)
-      throw MailboxError(MailboxErrorCode::not_found,
-                         "mailbox session is not active");
-    session = *session_id_;
-    agent = active_root_agent_id_;
-  }
-  request.session_id = std::move(session);
-  request.agent_id = std::move(agent);
+ClaimResult MailboxCoordinator::claim(const AgentRuntimeIdentity &actor,
+                                      ClaimRequest request) {
+  require_actor(actor);
+  request.session_id = actor.session_id;
+  request.agent_id = actor.agent_id;
   request.workspace_id = options_.store.workspace_id;
   if (request.now_ms == 0)
     request.now_ms = options_.store.clock();
   return store_->claim(request);
 }
 
-void MailboxCoordinator::acknowledge(AcknowledgeRequest request) {
-  {
-    std::scoped_lock lock(mutex_);
-    if (!root_active_)
-      throw MailboxError(MailboxErrorCode::not_found,
-                         "mailbox session is not active");
-    request.agent_id = active_root_agent_id_;
-  }
+void MailboxCoordinator::acknowledge(const AgentRuntimeIdentity &actor,
+                                     AcknowledgeRequest request) {
+  require_actor(actor);
+  if (!request.agent_id.empty() && request.agent_id != actor.agent_id)
+    throw MailboxError(MailboxErrorCode::permission_denied,
+                       "mailbox acknowledgement actor mismatch");
+  request.agent_id = actor.agent_id;
   request.workspace_id = options_.store.workspace_id;
   if (request.now_ms == 0)
     request.now_ms = options_.store.clock();

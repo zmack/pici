@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/agent_loop.h"
+#include "core/agent_runtime_identity.h"
 #include "core/agent_state.h"
 #include "core/auth_types.h"
 #include "core/event_types.h"
@@ -46,6 +47,7 @@ public:
     std::optional<std::uint32_t> max_tokens;
     std::optional<std::string> cache_retention;
     std::optional<std::string> session_id;
+    std::optional<AgentRuntimeIdentity> runtime_identity;
     Transport transport{Transport::auto_transport};
     std::map<std::string, std::string> headers;
     std::optional<std::uint32_t> timeout_ms;
@@ -116,6 +118,13 @@ public:
 
   AgentState &state() { return state_; }
   const AgentState &state() const { return state_; }
+
+  std::optional<AgentRuntimeIdentity> runtime_identity() const {
+    return state_.runtime_identity();
+  }
+  void set_runtime_identity(std::optional<AgentRuntimeIdentity> identity) {
+    state_.set_runtime_identity(std::move(identity));
+  }
 
   // Return an immutable snapshot of the current raw agent context.
   AgentContext context_snapshot() const;

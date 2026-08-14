@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "core/agent_runtime_identity.h"
 #include "core/message_types.h"
 
 namespace pi::core {
@@ -191,6 +192,16 @@ public:
     return session_id_;
   }
 
+  std::optional<AgentRuntimeIdentity> runtime_identity() const {
+    std::scoped_lock lock(mutex_);
+    return runtime_identity_;
+  }
+
+  void set_runtime_identity(std::optional<AgentRuntimeIdentity> identity) {
+    std::scoped_lock lock(mutex_);
+    runtime_identity_ = std::move(identity);
+  }
+
   void set_session_id(std::string id) {
     std::scoped_lock lock(mutex_);
     session_id_ = std::move(id);
@@ -242,6 +253,7 @@ private:
 
   std::optional<std::string> session_id_;
   std::optional<std::string> session_name_;
+  std::optional<AgentRuntimeIdentity> runtime_identity_;
 
   std::stop_source stop_src_;
   std::stop_token stop_tok_{stop_src_.get_token()};
@@ -252,6 +264,7 @@ struct AgentContext {
   std::vector<Message> messages;
   Model model;
   std::vector<std::shared_ptr<const ToolDefinition>> tools;
+  std::optional<AgentRuntimeIdentity> runtime_identity;
 };
 
 } // namespace pi::core

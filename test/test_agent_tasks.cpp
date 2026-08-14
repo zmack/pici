@@ -5,9 +5,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -15,12 +17,12 @@ using namespace pi::core;
 
 namespace {
 int failed = 0;
-#define CHECK(value)                                                            \
-  do {                                                                          \
-    if (!(value)) {                                                             \
-      ++failed;                                                                 \
-      std::cerr << "FAIL: " << #value << " at " << __LINE__ << "\n";          \
-    }                                                                             \
+#define CHECK(value)                                                           \
+  do {                                                                         \
+    if (!(value)) {                                                            \
+      ++failed;                                                                \
+      std::cerr << "FAIL: " << #value << " at " << __LINE__ << "\n";           \
+    }                                                                          \
   } while (false)
 
 FauxClient::Script response(std::string text) {
@@ -38,15 +40,14 @@ FauxClient::Script response(std::string text) {
                      StopReason::stop, final_message}}}};
 }
 
-
 class InterruptClient : public LLMClient {
 public:
   explicit InterruptClient(std::shared_ptr<std::atomic<int>> calls)
       : calls_(std::move(calls)) {}
 
-  std::shared_ptr<AssistantMessage> stream(
-      const Model &model, const AgentContext &, const StreamOptions &,
-      AssistantEventCallback, std::stop_token stop_token) override {
+  std::shared_ptr<AssistantMessage>
+  stream(const Model &model, const AgentContext &, const StreamOptions &,
+         AssistantEventCallback, std::stop_token stop_token) override {
     const auto call = calls_->fetch_add(1) + 1;
     auto message = std::make_shared<AssistantMessage>();
     message->api = model.api;
@@ -69,6 +70,32 @@ public:
 
 private:
   std::shared_ptr<std::atomic<int>> calls_;
+};
+
+class IdentityClient : public LLMClient {
+public:
+  explicit IdentityClient(
+      std::shared_ptr<std::optional<AgentRuntimeIdentity>> identity)
+      : identity_(std::move(identity)) {}
+
+  std::shared_ptr<AssistantMessage>
+  stream(const Model &model, const AgentContext &context, const StreamOptions &,
+         AssistantEventCallback, std::stop_token) override {
+    *identity_ = context.runtime_identity;
+    auto message = std::make_shared<AssistantMessage>();
+    message->api = model.api;
+    message->provider = model.provider;
+    message->model = model.id;
+    message->stop_reason = StopReason::stop;
+    message->content.emplace_back(TextContent{.text = "identity result"});
+    return message;
+  }
+
+  std::string_view provider_name() const override { return "identity-test"; }
+  std::string_view api_id() const override { return "identity-test"; }
+
+private:
+  std::shared_ptr<std::optional<AgentRuntimeIdentity>> identity_;
 };
 
 AgentTaskSnapshot wait_terminal(AgentTaskManager &manager,
@@ -96,9 +123,8 @@ int main() {
   auto faux = std::make_shared<FauxClient>(
       std::vector{response("child result"), response("follow-up result"),
                   response("third result")});
-  LLMClientRegistry::instance().register_client("faux", [faux] {
-    return faux;
-  });
+  LLMClientRegistry::instance().register_client("faux",
+                                                [faux] { return faux; });
 
   Model model;
   model.id = "task-model";
@@ -108,6 +134,382 @@ int main() {
   options.model = model;
   AgentSession root({.agent_options = options});
   AgentTaskManager manager(root, options);
+  auto observed_identity =
+      std::make_shared<std::optional<AgentRuntimeIdentity>>();
+  LLMClientRegistry::instance().register_client(
+      "identity-test", [observed_identity] {
+        return std::make_shared<IdentityClient>(observed_identity);
+      });
+  Agent::Options identity_options = options;
+  identity_options.model = Model{.id = "identity-model",
+                                 .api = "identity-test",
+                                 .provider = "identity-test"};
+  AgentSession identity_root({.agent_options = identity_options});
+  AgentTaskManager identity_manager(identity_root, identity_options);
+  std::vector<AgentRuntimeIdentity> registered;
+  identity_manager.set_endpoint_registration(
+      [&](const AgentTaskId &task_id, const std::string &task_path,
+          const std::optional<AgentTaskId> &parent_id) {
+        auto identity = AgentRuntimeIdentity{
+            .agent_id = "endpoint-" + std::to_string(registered.size() + 1),
+            .session_id = "session-root",
+            .kind = "subagent",
+            .task_id = task_id,
+            .task_path = task_path,
+            .owner_agent_id = "root-endpoint"};
+        CHECK(parent_id && *parent_id == "root");
+        registered.push_back(identity);
+        return identity;
+      },
+      [&](const AgentTaskId &task_id) {
+        std::erase_if(registered, [&](const auto &identity) {
+          return identity.task_id && *identity.task_id == task_id;
+        });
+      });
+  const auto identity_child =
+      identity_manager.spawn({.task_name = "identity", .prompt = "identify"});
+  const auto identity_result = wait_terminal(identity_manager, identity_child);
+  CHECK(identity_result.status == AgentTaskStatusKind::completed);
+  CHECK(observed_identity->has_value());
+  CHECK(observed_identity->value().agent_id == "endpoint-1");
+  CHECK(observed_identity->value().session_id == "session-root");
+  CHECK(observed_identity->value().kind == "subagent");
+  CHECK(observed_identity->value().task_id == identity_child.id);
+  CHECK(observed_identity->value().task_path == identity_child.task_path);
+  identity_manager.shutdown();
+
+  AgentTaskManager rollback_manager(identity_root, identity_options);
+  bool unregister_called = false;
+  rollback_manager.set_endpoint_registration(
+      [](const AgentTaskId &, const std::string &,
+         const std::optional<AgentTaskId> &) -> AgentRuntimeIdentity {
+        throw std::runtime_error("registration failed");
+      },
+      [&](const AgentTaskId &) { unregister_called = true; });
+  bool registration_failed = false;
+  try {
+    static_cast<void>(rollback_manager.spawn(
+        {.task_name = "registration-failure", .prompt = "fail"}));
+  } catch (const std::runtime_error &) {
+    registration_failed = true;
+  }
+  CHECK(registration_failed);
+  CHECK(!unregister_called);
+  CHECK(rollback_manager.resident_tasks() == 0);
+  CHECK(rollback_manager.active_executions() == 0);
+  rollback_manager.shutdown();
+
+  AgentTaskManager construction_manager(identity_root, identity_options);
+  bool construction_unregistered = false;
+  construction_manager.set_endpoint_registration(
+      [](const AgentTaskId &task_id, const std::string &task_path,
+         const std::optional<AgentTaskId> &) {
+        return AgentRuntimeIdentity{.agent_id = "construction-" + task_id,
+                                    .session_id = "session-root",
+                                    .kind = "subagent",
+                                    .task_id = task_id,
+                                    .task_path = task_path,
+                                    .owner_agent_id = "root-endpoint"};
+      },
+      [&](const AgentTaskId &) { construction_unregistered = true; });
+  bool construction_failed = false;
+  try {
+    static_cast<void>(
+        construction_manager.spawn({.task_name = "construction-failure",
+                                    .prompt = "fail",
+                                    .requested_tools = {"missing-tool"}}));
+  } catch (const AgentTaskError &error) {
+    construction_failed = error.kind() == AgentTaskErrorKind::invalid_tool;
+  }
+  CHECK(construction_failed);
+  CHECK(construction_unregistered);
+  CHECK(construction_manager.resident_tasks() == 0);
+  CHECK(construction_manager.active_executions() == 0);
+  construction_manager.shutdown();
+
+  AgentSession concurrency_root({.agent_options = identity_options});
+  AgentTaskManager concurrency_manager(concurrency_root, identity_options);
+  std::mutex registration_mutex;
+  std::condition_variable registration_changed;
+  bool registration_entered = false;
+  bool registration_release = false;
+  std::atomic<int> unregister_count{0};
+  concurrency_manager.set_endpoint_registration(
+      [&](const AgentTaskId &task_id, const std::string &task_path,
+          const std::optional<AgentTaskId> &parent_id) {
+        {
+          std::scoped_lock lock(registration_mutex);
+          registration_entered = true;
+        }
+        registration_changed.notify_all();
+        std::unique_lock lock(registration_mutex);
+        registration_changed.wait(lock, [&] { return registration_release; });
+        return AgentRuntimeIdentity{.agent_id = "blocked-" + task_id,
+                                    .session_id = "session-root",
+                                    .kind = "subagent",
+                                    .task_id = task_id,
+                                    .task_path = task_path,
+                                    .owner_agent_id = "root-endpoint"};
+      },
+      [&](const AgentTaskId &) { ++unregister_count; });
+  std::atomic<bool> spawn_failed{false};
+  std::thread blocked_spawn([&] {
+    try {
+      static_cast<void>(concurrency_manager.spawn(
+          {.task_name = "blocked", .prompt = "blocked"}));
+    } catch (const AgentTaskError &) {
+      spawn_failed = true;
+    }
+  });
+  {
+    std::unique_lock lock(registration_mutex);
+    registration_changed.wait(lock, [&] { return registration_entered; });
+  }
+  bool duplicate_pending_rejected = false;
+  try {
+    static_cast<void>(concurrency_manager.spawn(
+        {.task_name = "blocked", .prompt = "duplicate"}));
+  } catch (const AgentTaskError &error) {
+    duplicate_pending_rejected =
+        error.kind() == AgentTaskErrorKind::duplicate_name;
+  }
+  CHECK(duplicate_pending_rejected);
+  CHECK(concurrency_manager.list().size() == 1);
+  std::thread shutting_down([&] { concurrency_manager.shutdown(); });
+  while (!concurrency_manager.is_shutting_down())
+    std::this_thread::yield();
+  {
+    std::scoped_lock lock(registration_mutex);
+    registration_release = true;
+  }
+  registration_changed.notify_all();
+  blocked_spawn.join();
+  shutting_down.join();
+  CHECK(spawn_failed);
+  CHECK(concurrency_manager.resident_tasks() == 0);
+  CHECK(concurrency_manager.active_executions() == 0);
+  CHECK(unregister_count == 1);
+
+  AgentSession capacity_root({.agent_options = identity_options});
+  AgentTaskManager::Limits capacity_limits;
+  capacity_limits.max_direct_children = 2;
+  AgentTaskManager capacity_manager(capacity_root, identity_options,
+                                    capacity_limits);
+  std::mutex capacity_mutex;
+  std::condition_variable capacity_changed;
+  std::size_t capacity_entered = 0;
+  bool capacity_release = false;
+  capacity_manager.set_endpoint_registration(
+      [&](const AgentTaskId &task_id, const std::string &task_path,
+          const std::optional<AgentTaskId> &) {
+        {
+          std::scoped_lock lock(capacity_mutex);
+          ++capacity_entered;
+        }
+        capacity_changed.notify_all();
+        std::unique_lock lock(capacity_mutex);
+        capacity_changed.wait(lock, [&] { return capacity_release; });
+        return AgentRuntimeIdentity{.agent_id = "capacity-" + task_id,
+                                    .session_id = "session-root",
+                                    .kind = "subagent",
+                                    .task_id = task_id,
+                                    .task_path = task_path,
+                                    .owner_agent_id = "root-endpoint"};
+      },
+      [](const AgentTaskId &) {});
+  std::thread capacity_first([&] {
+    static_cast<void>(
+        capacity_manager.spawn({.task_name = "first", .prompt = "first"}));
+  });
+  std::thread capacity_second([&] {
+    static_cast<void>(
+        capacity_manager.spawn({.task_name = "second", .prompt = "second"}));
+  });
+  {
+    std::unique_lock lock(capacity_mutex);
+    capacity_changed.wait(lock, [&] { return capacity_entered == 2; });
+  }
+  bool third_rejected = false;
+  try {
+    static_cast<void>(
+        capacity_manager.spawn({.task_name = "third", .prompt = "third"}));
+  } catch (const AgentTaskError &error) {
+    third_rejected = error.kind() == AgentTaskErrorKind::residency_limit;
+  }
+  CHECK(third_rejected);
+  CHECK(capacity_manager.list().size() == 1);
+  {
+    std::scoped_lock lock(capacity_mutex);
+    capacity_release = true;
+  }
+  capacity_changed.notify_all();
+  capacity_first.join();
+  capacity_second.join();
+  CHECK(capacity_manager.resident_tasks() == 2);
+  capacity_manager.shutdown();
+
+  AgentSession parent_root({.agent_options = identity_options});
+  AgentTaskManager parent_manager(parent_root, identity_options);
+  std::mutex parent_mutex;
+  std::condition_variable parent_changed;
+  bool nested_entered = false;
+  bool nested_release = false;
+  std::atomic<int> parent_unregister_count{0};
+  parent_manager.set_endpoint_registration(
+      [&](const AgentTaskId &task_id, const std::string &task_path,
+          const std::optional<AgentTaskId> &parent_id) {
+        if (task_path.ends_with("/nested")) {
+          {
+            std::scoped_lock lock(parent_mutex);
+            nested_entered = true;
+          }
+          parent_changed.notify_all();
+          std::unique_lock lock(parent_mutex);
+          parent_changed.wait(lock, [&] { return nested_release; });
+        }
+        return AgentRuntimeIdentity{.agent_id = "parent-" + task_id,
+                                    .session_id = "session-root",
+                                    .kind = "subagent",
+                                    .task_id = task_id,
+                                    .task_path = task_path,
+                                    .owner_agent_id = "root-endpoint"};
+      },
+      [&](const AgentTaskId &) { ++parent_unregister_count; });
+  const auto parent_child =
+      parent_manager.spawn({.task_name = "parent", .prompt = "parent"});
+  const auto parent_done = wait_terminal(parent_manager, parent_child);
+  CHECK(parent_done.status == AgentTaskStatusKind::completed);
+  std::atomic<bool> nested_failed{false};
+  std::thread nested_spawn([&] {
+    try {
+      static_cast<void>(parent_manager.spawn({.parent_id = parent_child.id,
+                                              .task_name = "nested",
+                                              .prompt = "nested"}));
+    } catch (const AgentTaskError &error) {
+      nested_failed = error.kind() == AgentTaskErrorKind::invalid_state;
+    }
+  });
+  {
+    std::unique_lock lock(parent_mutex);
+    parent_changed.wait(lock, [&] { return nested_entered; });
+  }
+  CHECK(parent_manager.list().size() == 2);
+  static_cast<void>(parent_manager.close(parent_child.id));
+  {
+    std::scoped_lock lock(parent_mutex);
+    nested_release = true;
+  }
+  parent_changed.notify_all();
+  nested_spawn.join();
+  CHECK(nested_failed);
+  CHECK(parent_unregister_count == 2);
+  CHECK(parent_manager.resident_tasks() == 0);
+  parent_manager.shutdown();
+
+  AgentSession unregister_root({.agent_options = identity_options});
+  AgentTaskManager unregister_manager(unregister_root, identity_options);
+  std::mutex unregister_mutex;
+  std::condition_variable unregister_changed;
+  bool nested_registration_entered = false;
+  bool nested_registration_release = false;
+  bool unregister_entered = false;
+  bool unregister_release = false;
+  bool shutdown_started = false;
+  std::string nested_task_id;
+  unregister_manager.set_endpoint_registration(
+      [&](const AgentTaskId &task_id, const std::string &task_path,
+          const std::optional<AgentTaskId> &) {
+        if (task_path.ends_with("/nested")) {
+          {
+            std::scoped_lock lock(unregister_mutex);
+            nested_task_id = task_id;
+            nested_registration_entered = true;
+          }
+          unregister_changed.notify_all();
+          std::unique_lock wait_lock(unregister_mutex);
+          unregister_changed.wait(wait_lock,
+                                  [&] { return nested_registration_release; });
+        }
+        return AgentRuntimeIdentity{.agent_id = "unregister-" + task_id,
+                                    .session_id = "session-root",
+                                    .kind = "subagent",
+                                    .task_id = task_id,
+                                    .task_path = task_path,
+                                    .owner_agent_id = "root-endpoint"};
+      },
+      [&](const AgentTaskId &task_id) {
+        bool block = false;
+        {
+          std::scoped_lock lock(unregister_mutex);
+          block = task_id == nested_task_id;
+        }
+        if (!block)
+          return;
+        {
+          std::scoped_lock lock(unregister_mutex);
+          unregister_entered = true;
+        }
+        unregister_changed.notify_all();
+        std::unique_lock wait_lock(unregister_mutex);
+        unregister_changed.wait(wait_lock, [&] { return unregister_release; });
+      });
+  const auto unregister_parent =
+      unregister_manager.spawn({.task_name = "parent", .prompt = "parent"});
+  CHECK(wait_terminal(unregister_manager, unregister_parent).status ==
+        AgentTaskStatusKind::completed);
+  std::atomic<bool> nested_registration_failed{false};
+  std::thread unregister_spawn([&] {
+    try {
+      static_cast<void>(
+          unregister_manager.spawn({.parent_id = unregister_parent.id,
+                                    .task_name = "nested",
+                                    .prompt = "nested"}));
+    } catch (const AgentTaskError &error) {
+      nested_registration_failed =
+          error.kind() == AgentTaskErrorKind::invalid_state;
+    }
+  });
+  {
+    std::unique_lock lock(unregister_mutex);
+    unregister_changed.wait(lock, [&] { return nested_registration_entered; });
+  }
+  static_cast<void>(unregister_manager.close(unregister_parent.id));
+  {
+    std::scoped_lock lock(unregister_mutex);
+    nested_registration_release = true;
+  }
+  unregister_changed.notify_all();
+  {
+    std::unique_lock lock(unregister_mutex);
+    unregister_changed.wait(lock, [&] { return unregister_entered; });
+  }
+  std::atomic<bool> unregister_shutdown_done{false};
+  std::thread unregister_shutdown([&] {
+    {
+      std::scoped_lock lock(unregister_mutex);
+      shutdown_started = true;
+    }
+    unregister_changed.notify_all();
+    unregister_manager.shutdown();
+    unregister_shutdown_done = true;
+  });
+  {
+    std::unique_lock lock(unregister_mutex);
+    unregister_changed.wait(lock, [&] { return shutdown_started; });
+  }
+  while (!unregister_manager.is_shutting_down())
+    std::this_thread::yield();
+  CHECK(!unregister_shutdown_done.load());
+  {
+    std::scoped_lock lock(unregister_mutex);
+    unregister_release = true;
+  }
+  unregister_changed.notify_all();
+  unregister_spawn.join();
+  unregister_shutdown.join();
+  CHECK(nested_registration_failed);
+  CHECK(unregister_shutdown_done.load());
+  CHECK(unregister_manager.resident_tasks() == 0);
 
   auto child = manager.spawn({.task_name = "review", .prompt = "Review"});
   CHECK(!child.id.empty());
@@ -117,11 +519,11 @@ int main() {
   CHECK(completed.result.has_value());
   CHECK(completed.result->text == "child result");
 
-  auto queued = manager.send_message(child.id, UserMessage{
-                                              .content = {TextContent{.text = "context"}}});
+  auto queued = manager.send_message(
+      child.id, UserMessage{.content = {TextContent{.text = "context"}}});
   CHECK(queued.queued_message_count == 1);
-  auto follow = manager.follow_up(child.id, UserMessage{
-                                             .content = {TextContent{.text = "Summarize"}}});
+  auto follow = manager.follow_up(
+      child.id, UserMessage{.content = {TextContent{.text = "Summarize"}}});
   auto second = wait_terminal(manager, follow);
   CHECK(second.status == AgentTaskStatusKind::completed);
   CHECK(second.result.has_value());
@@ -153,10 +555,10 @@ int main() {
   manager.shutdown();
 
   auto interrupt_calls = std::make_shared<std::atomic<int>>(0);
-  LLMClientRegistry::instance().register_client("interrupt-test",
-                                                   [interrupt_calls] {
-                                                     return std::make_shared<InterruptClient>(interrupt_calls);
-                                                   });
+  LLMClientRegistry::instance().register_client(
+      "interrupt-test", [interrupt_calls] {
+        return std::make_shared<InterruptClient>(interrupt_calls);
+      });
   Model interrupt_model;
   interrupt_model.id = "interrupt-model";
   interrupt_model.api = "interrupt-test";
@@ -165,13 +567,13 @@ int main() {
   interrupt_options.model = interrupt_model;
   AgentSession interrupt_root({.agent_options = interrupt_options});
   AgentTaskManager interrupt_manager(interrupt_root, interrupt_options);
-  auto interrupted = interrupt_manager.spawn(
-      {.task_name = "slow", .prompt = "wait"});
+  auto interrupted =
+      interrupt_manager.spawn({.task_name = "slow", .prompt = "wait"});
   while (interrupt_manager.get(interrupted.id)->status !=
          AgentTaskStatusKind::running)
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  auto immediate = interrupt_manager.interrupt(
-      interrupted.id, AgentInterruptReason::timeout);
+  auto immediate = interrupt_manager.interrupt(interrupted.id,
+                                               AgentInterruptReason::timeout);
   CHECK(immediate.status == AgentTaskStatusKind::running);
   auto settled = wait_terminal(interrupt_manager, immediate);
   CHECK(settled.status == AgentTaskStatusKind::interrupted);
