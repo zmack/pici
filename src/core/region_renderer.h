@@ -1,20 +1,36 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace pi::core {
 
-// One append-ordered transcript block. Tool blocks will be added in a later
-// milestone; keeping this as a distinct type makes the ordering contract
-// explicit for the compositor and its pure frame builder.
+// Append-ordered transcript and tool blocks make the compositor's ordering
+// contract explicit for its pure frame builder.
 struct RegionTextBlock {
   std::string raw;
 };
 
+struct RegionToolBlock {
+  std::string call_id;
+  std::string tool_name;
+  std::string args_json;
+  std::string raw_output;
+  std::string custom_call_output;
+  std::string custom_result_output;
+  bool running{true};
+  bool is_error{false};
+};
+
+using RegionBlock = std::variant<RegionTextBlock, RegionToolBlock>;
+
 struct RegionState {
-  std::vector<RegionTextBlock> blocks;
+  std::vector<RegionBlock> blocks;
+  std::unordered_map<std::string, std::size_t> tool_index;
   std::string thinking;
   bool in_thinking{false};
   int scroll_offset_rows{0};

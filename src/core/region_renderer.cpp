@@ -1,5 +1,6 @@
 #include "core/region_renderer.h"
 
+#include "core/message_types.h"
 #include "core/stream_renderer.h"
 #include "core/terminal.h"
 
@@ -18,12 +19,15 @@
 #include <thread>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace pi::core {
 namespace {
 
 constexpr int kFrameIntervalMs = 16;
+constexpr std::size_t kMaxExpandedToolRegions = 6;
+constexpr int kMaxToolBodyLines = 4;
 
 std::string with_sgr_reset(std::string line) {
   if (!line.ends_with("\033[0m"))
@@ -143,7 +147,72 @@ std::vector<std::string> split_region_lines(std::string_view source,
   return lines;
 }
 
-std::vector<std::string> all_region_lines(const RegionState &state, int width) {
+std::string tool_summary(const RegionToolBlock &tool) {
+  std::string out = "[";
+  out += tool.tool_name;
+  out += tool.running ? "] running\xE2\x80\xA6" : "] ";
+  if (!tool.running) {
+    out += tool.is_error ? "error" : "done";
+  }
+  return out;
+}
+
+std::vector<std::string> tool_lines(const RegionToolBlock &tool, int width,
+                                    bool expanded, int content_rows) {
+  if (width <= 0)
+    return {};
+
+  if (!expanded)
+    return split_region_lines(tool_summary(tool), width);
+
+  if (!tool.running && !tool.custom_result_output.empty()) {
+    auto custom_lines = split_region_lines(tool.custom_result_output, width);
+    const auto max_custom_lines =
+        static_cast<std::size_t>(kMaxToolBodyLines) + 1U;
+    if (custom_lines.size() > max_custom_lines)
+      custom_lines.resize(kMaxToolBodyLines + 1);
+    return custom_lines;
+  }
+
+  std::string header;
+  if (!tool.custom_call_output.empty()) {
+    auto custom_header = split_region_lines(tool.custom_call_output, width);
+    while (!custom_header.empty() && custom_header.front() == "\033[0m")
+      custom_header.erase(custom_header.begin());
+    if (custom_header.size() > 1)
+      custom_header.resize(1);
+    if (!custom_header.empty()) {
+      header = std::move(custom_header.front());
+      if (header.ends_with("\033[0m"))
+        header.resize(header.size() - 4);
+    }
+  }
+  if (header.empty()) {
+    header = "[" + tool.tool_name + "] ";
+    header += "\033[38;5;214m";
+    header += tool.args_json;
+    header += "\033[0m";
+  }
+
+  auto lines = split_region_lines(header, width);
+  if (lines.size() >= static_cast<std::size_t>(content_rows))
+    return lines;
+  if (tool.raw_output.empty())
+    return lines;
+
+  std::string body = "\033[38;5;245m";
+  body += truncate_tool_result(tool.raw_output);
+  body += "\033[0m";
+  auto body_lines = split_region_lines(body, width);
+  if (body_lines.size() > static_cast<std::size_t>(kMaxToolBodyLines))
+    body_lines.resize(kMaxToolBodyLines);
+  lines.insert(lines.end(), std::make_move_iterator(body_lines.begin()),
+               std::make_move_iterator(body_lines.end()));
+  return lines;
+}
+
+std::vector<std::string> all_region_lines(const RegionState &state, int width,
+                                          int content_rows) {
   std::vector<std::string> lines;
   if (width <= 0)
     return lines;
@@ -155,11 +224,28 @@ std::vector<std::string> all_region_lines(const RegionState &state, int width) {
                  std::make_move_iterator(thinking_lines.end()));
   }
 
+  std::size_t tool_count = 0;
   for (const auto &block : state.blocks) {
-    auto rendered = render_visible_markdown(block.raw);
-    auto block_lines = split_region_lines(rendered, width);
-    lines.insert(lines.end(), std::make_move_iterator(block_lines.begin()),
-                 std::make_move_iterator(block_lines.end()));
+    if (std::holds_alternative<RegionToolBlock>(block))
+      ++tool_count;
+  }
+  std::size_t seen_tools = 0;
+  for (const auto &block : state.blocks) {
+    if (const auto *text = std::get_if<RegionTextBlock>(&block)) {
+      auto rendered = render_visible_markdown(text->raw);
+      auto text_lines = split_region_lines(rendered, width);
+      lines.insert(lines.end(), std::make_move_iterator(text_lines.begin()),
+                   std::make_move_iterator(text_lines.end()));
+      continue;
+    }
+
+    const auto &tool = std::get<RegionToolBlock>(block);
+    const bool expanded =
+        content_rows > 1 && seen_tools + kMaxExpandedToolRegions >= tool_count;
+    ++seen_tools;
+    auto rendered = tool_lines(tool, width, expanded, content_rows);
+    lines.insert(lines.end(), std::make_move_iterator(rendered.begin()),
+                 std::make_move_iterator(rendered.end()));
   }
   if (lines.empty())
     lines.emplace_back("\033[0m");
@@ -222,9 +308,11 @@ public:
 
   void on_text_delta(std::string_view delta) override {
     std::scoped_lock lock(mutex_);
-    if (state_.blocks.empty())
-      state_.blocks.emplace_back();
-    state_.blocks.back().raw.append(delta.data(), delta.size());
+    if (state_.blocks.empty() ||
+        !std::holds_alternative<RegionTextBlock>(state_.blocks.back()))
+      state_.blocks.emplace_back(RegionTextBlock{});
+    std::get<RegionTextBlock>(state_.blocks.back())
+        .raw.append(delta.data(), delta.size());
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
@@ -248,6 +336,66 @@ public:
   void on_thinking_end() override {
     std::scoped_lock lock(mutex_);
     state_.in_thinking = false;
+    state_.revision = ++revision_;
+    mark_dirty_locked();
+  }
+
+  void on_tool_start(std::string_view call_id, std::string_view tool_name,
+                     std::string_view args_json) override {
+    std::scoped_lock lock(mutex_);
+    RegionToolBlock tool;
+    tool.call_id.assign(call_id);
+    tool.tool_name.assign(tool_name);
+    tool.args_json.assign(args_json);
+    state_.tool_index[tool.call_id] = state_.blocks.size();
+    state_.blocks.emplace_back(std::move(tool));
+    state_.revision = ++revision_;
+    mark_dirty_locked();
+  }
+
+  void on_tool_update(std::string_view call_id, std::string_view,
+                      std::string_view partial_result) override {
+    std::scoped_lock lock(mutex_);
+    const auto it = state_.tool_index.find(std::string(call_id));
+    if (it == state_.tool_index.end() || it->second >= state_.blocks.size())
+      return;
+    auto *tool = std::get_if<RegionToolBlock>(&state_.blocks[it->second]);
+    if (tool == nullptr)
+      return;
+    tool->raw_output.assign(partial_result);
+    state_.revision = ++revision_;
+    mark_dirty_locked();
+  }
+
+  void on_tool_end(std::string_view call_id, std::string_view,
+                   const ToolResult &result, bool is_error) override {
+    std::scoped_lock lock(mutex_);
+    const auto it = state_.tool_index.find(std::string(call_id));
+    if (it == state_.tool_index.end() || it->second >= state_.blocks.size())
+      return;
+    auto *tool = std::get_if<RegionToolBlock>(&state_.blocks[it->second]);
+    if (tool == nullptr)
+      return;
+    tool->raw_output = result.content();
+    tool->running = false;
+    tool->is_error = is_error;
+    state_.revision = ++revision_;
+    mark_dirty_locked();
+  }
+
+  void on_tool_output_text(std::string_view call_id,
+                           std::string_view text) override {
+    std::scoped_lock lock(mutex_);
+    const auto it = state_.tool_index.find(std::string(call_id));
+    if (it == state_.tool_index.end() || it->second >= state_.blocks.size())
+      return;
+    auto *tool = std::get_if<RegionToolBlock>(&state_.blocks[it->second]);
+    if (tool == nullptr)
+      return;
+    if (tool->running)
+      tool->custom_call_output.assign(text);
+    else
+      tool->custom_result_output.assign(text);
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
@@ -276,6 +424,8 @@ public:
     write_all(fd_, cursor_sequence);
   }
 
+  bool owns_tool_output() const override { return true; }
+
 private:
   struct State : RegionState {
     bool dirty{true};
@@ -283,6 +433,10 @@ private:
     std::uint64_t revision{0};
   };
 
+  // EventStream serializes renderer callbacks on its consumer thread, even
+  // when tool workers enqueue updates concurrently. The mutex only protects
+  // callback-thread writes from the paint-thread snapshot and never guards
+  // callback-to-callback races.
   void mark_dirty_locked() {
     state_.dirty = true;
     cv_.notify_one();
@@ -396,7 +550,7 @@ RegionFrame build_region_frame(const RegionState &state, int width,
   if (content_rows < 1 || width < 1)
     return {};
 
-  auto all_lines = all_region_lines(state, width);
+  auto all_lines = all_region_lines(state, width, content_rows);
   const int total_rows = static_cast<int>(all_lines.size());
   const int max_scroll = std::max(0, total_rows - content_rows);
   const int scroll = std::clamp(state.scroll_offset_rows, 0, max_scroll);
