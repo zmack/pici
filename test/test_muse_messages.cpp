@@ -131,6 +131,13 @@ int main() {
     auto model = make_model();
     AgentContext context;
     context.system_prompt = "Be concise";
+    UserMessage identity;
+    identity.content.emplace_back(TextContent{
+        .text = "[pici runtime context; not user-authored]\n"
+                "mailbox agent_id=agt_a; session_id=sess_a; kind=root;\n"
+                "Use agents_self when you need the authoritative structured "
+                "identity."});
+    context.messages.emplace_back(std::move(identity));
     UserMessage user;
     user.content.emplace_back(TextContent{.text = "hello"});
     context.messages.emplace_back(std::move(user));
@@ -141,8 +148,10 @@ int main() {
 
     CHECK_EQ(request["model"].get<std::string>(), "muse-spark-1.1");
     CHECK(request["messages"].is_array());
-    CHECK_EQ(request["messages"].size(), 1U);
-    CHECK_EQ(request["messages"][0]["content"].get<std::string>(), "hello");
+    CHECK_EQ(request["messages"].size(), 2U);
+    CHECK(request["messages"][0]["content"].get<std::string>().starts_with(
+        "[pici runtime context; not user-authored]"));
+    CHECK_EQ(request["messages"][1]["content"].get<std::string>(), "hello");
     CHECK_EQ(request["system"].get<std::string>(), "Be concise");
     CHECK_EQ(request["max_tokens"].get<std::uint32_t>(), 4096U);
     CHECK(request["stream"].get<bool>());

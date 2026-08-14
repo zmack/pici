@@ -418,12 +418,141 @@ void test_effective_context_callback() {
         CHECK_EQ(observed->model.provider, std::string("request-provider"));
         CHECK_EQ(observed->messages.size(), std::size_t(3));
         CHECK_EQ(sent_to_client.messages.size(), std::size_t(3));
+        CHECK_EQ(std::get<TextContent>(
+                      std::get<UserMessage>(observed->messages[0]).content[0])
+                      .text,
+                  std::string("original"));
         CHECK_EQ(observed->tools.size(), std::size_t(1));
         CHECK_EQ(std::get<TextContent>(
                       std::get<UserMessage>(observed->messages[2]).content[0])
                       .text,
                   std::string("converted"));
     });
+}
+
+void test_request_local_runtime_identity() {
+  tests::register_test("Agent loop: request-local runtime identity", []() {
+    Model model;
+    model.id = "identity-model";
+    model.api = "test";
+    model.provider = "test";
+
+    AgentContext context;
+    context.system_prompt = "stable system prompt";
+    context.runtime_identity =
+        AgentRuntimeIdentity{.agent_id = "agt_child",
+                             .session_id = "sess_root",
+                             .kind = "subagent",
+                             .task_id = "task_7",
+                             .task_path = "/root/research"};
+    UserMessage persisted;
+    persisted.content.emplace_back(TextContent{.text = "persisted"});
+    context.messages.emplace_back(std::move(persisted));
+
+    int prepare_calls = 0;
+    int provider_calls = 0;
+    std::vector<AgentContext> requests;
+    std::vector<Message> final_messages;
+    auto llm_client = std::make_shared<TestLLMClient>(
+        [&provider_calls, &requests](const AgentContext &request,
+                                     const StreamOptions &,
+                                     AssistantEventCallback, std::stop_token) {
+          requests.push_back(request);
+          auto response = std::make_shared<AssistantMessage>();
+          response->api = "test";
+          response->provider = "test";
+          response->model = "identity-model";
+          if (provider_calls++ == 0) {
+            response->stop_reason = StopReason::tool_use;
+            response->content.emplace_back(
+                ToolCall{.id = "call_identity",
+                         .name = "counter",
+                         .arguments = nlohmann::json{{"start", 1}}});
+          } else {
+            response->stop_reason = StopReason::stop;
+            response->content.emplace_back(TextContent{.text = "complete"});
+          }
+          return response;
+        });
+
+    AgentLoopConfig config;
+    config.model = model;
+    config.llm_client = llm_client;
+    config.prepare_context = [&prepare_calls](const AgentContext &raw,
+                                              std::size_t, std::stop_token) {
+      ++prepare_calls;
+      for (const auto &message : raw.messages) {
+        if (const auto *user = std::get_if<UserMessage>(&message)) {
+          if (!user->content.empty()) {
+            const auto *text = std::get_if<TextContent>(&user->content.front());
+            CHECK(text == nullptr ||
+                  !text->text.starts_with("[pici runtime context"));
+          }
+        }
+      }
+      auto prepared = raw.messages;
+      auto *first_user = std::get_if<UserMessage>(&prepared.front());
+      std::get<TextContent>(first_user->content.front()).text =
+          "prepared transcript";
+      return std::optional<std::vector<Message>>(std::move(prepared));
+    };
+    config.convert_to_llm = [](const std::vector<Message> &messages) {
+      return messages;
+    };
+    config.should_stop_after_turn = [](const Message &assistant,
+                                       const std::vector<ToolResultMessage> &,
+                                       AgentContext &) {
+      return !std::get<AssistantMessage>(assistant).content.empty() &&
+             std::holds_alternative<TextContent>(
+                 std::get<AssistantMessage>(assistant).content.front());
+    };
+    config.get_steering_messages = [] { return std::vector<Message>{}; };
+    config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+
+    auto stream =
+        run_agent_loop({}, context, config, [](const AgentEvent &) {});
+    auto [result, error] = stream.wait();
+    CHECK(!error.has_value());
+    if (result)
+      final_messages = *result;
+
+    CHECK_EQ(prepare_calls, 2);
+    CHECK_EQ(requests.size(), std::size_t(2));
+    CHECK_EQ(requests[0].messages.size(), std::size_t(2));
+    CHECK_EQ(requests[1].messages.size(), std::size_t(4));
+    for (const auto &request : requests) {
+      CHECK_EQ(request.system_prompt, std::string("stable system prompt"));
+      const auto *identity = std::get_if<UserMessage>(&request.messages[0]);
+      CHECK(identity != nullptr);
+      CHECK_EQ(std::get<TextContent>(identity->content[0]).text,
+               std::string("[pici runtime context; not user-authored]\n"
+                           "mailbox agent_id=agt_child; session_id=sess_root; "
+                           "kind=subagent;\n"
+                           "task_id=task_7; task_path=/root/research\n"
+                           "Use agents_self when you need the authoritative "
+                           "structured identity."));
+      CHECK_EQ(std::get<TextContent>(
+                   std::get<UserMessage>(request.messages[1]).content[0])
+                   .text,
+               std::string("prepared transcript"));
+    }
+
+    CHECK_EQ(context.messages.size(), std::size_t(1));
+    CHECK_EQ(std::get<TextContent>(
+                 std::get<UserMessage>(context.messages[0]).content[0])
+                 .text,
+             std::string("persisted"));
+    CHECK_EQ(final_messages.size(), std::size_t(3));
+    for (const auto &message : final_messages) {
+      if (const auto *user = std::get_if<UserMessage>(&message)) {
+        if (!user->content.empty()) {
+          const auto *text = std::get_if<TextContent>(&user->content.front());
+          CHECK(text == nullptr ||
+                !text->text.starts_with("[pici runtime context"));
+        }
+      }
+    }
+  });
 }
 
 // ─── Test agent loop: with tool calls ─────────────────────────────────────
@@ -2394,6 +2523,7 @@ int main() {
 
     test_agent_loop_single_turn();
     test_effective_context_callback();
+    test_request_local_runtime_identity();
     test_agent_loop_with_tools();
     test_agent_loop_stop_after_turn();
     test_agent_loop_sequential_tools();

@@ -140,6 +140,31 @@ int main() {
         CHECK(found_user);
     });
 
+    tests::register_test(
+        "build_request_json: runtime identity is valid user input", []() {
+          OpenAICompatibleClient client;
+          auto model = make_model();
+          AgentContext ctx;
+          ctx.system_prompt = "sys";
+          UserMessage identity;
+          identity.content.emplace_back(TextContent{
+              .text = "[pici runtime context; not user-authored]\n"
+                      "mailbox agent_id=agt_a; session_id=sess_a; kind=root;\n"
+                      "Use agents_self when you need the authoritative "
+                      "structured identity."});
+          ctx.messages.emplace_back(std::move(identity));
+          ctx.messages.emplace_back(
+              UserMessage{.content = {TextContent{.text = "hello"}}});
+          StreamOptions opts;
+
+          const auto json = client.build_request_json(model, ctx, opts);
+          CHECK_EQ(json["messages"].size(), std::size_t(3));
+          CHECK_EQ(json["messages"][1]["role"].get<std::string>(), "user");
+          CHECK(json["messages"][1]["content"].get<std::string>().starts_with(
+              "[pici runtime context; not user-authored]"));
+          CHECK_EQ(json["messages"][2]["content"].get<std::string>(), "hello");
+        });
+
     tests::register_test("build_request_json: temperature forwarded", []() {
         OpenAICompatibleClient client;
         auto model = make_model();

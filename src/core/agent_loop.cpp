@@ -62,6 +62,30 @@ std::size_t estimate_context_tokens(const AgentContext &context) {
   return ((bytes + 3) / 4) + (context.messages.size() * 8);
 }
 
+std::optional<Message>
+make_runtime_identity_message(const AgentContext &context) {
+  if (!context.runtime_identity)
+    return std::nullopt;
+
+  const auto &identity = *context.runtime_identity;
+  std::string text = "[pici runtime context; not user-authored]\n";
+  text += "mailbox agent_id=" + identity.agent_id +
+          "; session_id=" + identity.session_id + "; kind=" + identity.kind +
+          ";\n";
+  if (identity.task_id)
+    text += "task_id=" + *identity.task_id + "; ";
+  if (identity.task_path)
+    text += "task_path=" + *identity.task_path;
+  if (identity.task_id || identity.task_path)
+    text += "\n";
+  text += "Use agents_self when you need the authoritative structured "
+          "identity.";
+
+  UserMessage message;
+  message.content.emplace_back(TextContent{.text = std::move(text)});
+  return Message{std::move(message)};
+}
+
 // Helper: extract ToolCalls from a content vector
 std::vector<ToolCall>
 extract_tool_calls(const std::vector<ContentBlock> &content) {
@@ -496,6 +520,12 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
     xform_span->End();
 #endif
   }
+
+  // This message is request-local: it is deliberately added after addon
+  // preparation/transforms so pruning cannot remove the actor identity. It
+  // never enters AgentState or the persisted transcript.
+  if (auto identity_message = make_runtime_identity_message(context))
+    messages.insert(messages.begin(), std::move(*identity_message));
 
   auto llm_messages = config.convert_to_llm(messages);
   AgentContext llm_context = context;

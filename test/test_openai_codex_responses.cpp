@@ -37,6 +37,12 @@ int main() {
   pi::core::AgentContext context;
   context.system_prompt = "Be concise.";
   context.messages.emplace_back(pi::core::UserMessage{
+      .content = {pi::core::TextContent{
+          .text = "[pici runtime context; not user-authored]\n"
+                  "mailbox agent_id=agt_a; session_id=sess_a; kind=root;\n"
+                  "Use agents_self when you need the authoritative structured "
+                  "identity."}}});
+  context.messages.emplace_back(pi::core::UserMessage{
       .content = {pi::core::TextContent{.text = "hello"}}});
   pi::core::StreamOptions options;
   options.session_id = "session-1";
@@ -47,8 +53,14 @@ int main() {
                                                                options);
   CHECK_EQ(request.at("model"), nlohmann::json("gpt-5.3-codex"));
   CHECK_EQ(request.at("instructions"), nlohmann::json("Be concise."));
+  CHECK_EQ(request.at("input").size(), std::size_t{2});
   CHECK_EQ(request.at("input")[0].at("content")[0].at("type"),
            nlohmann::json("input_text"));
+  CHECK(request.at("input")[0]
+            .at("content")[0]
+            .at("text")
+            .get<std::string>()
+            .starts_with("[pici runtime context; not user-authored]"));
   CHECK_EQ(request.at("prompt_cache_key"), nlohmann::json("session-1"));
   CHECK_EQ(request.at("reasoning").at("effort"), nlohmann::json("low"));
   CHECK(!request.contains("tools"));
