@@ -85,22 +85,19 @@ int main() {
         make_coordinator(path, "process-b", "agent-b", "session-b", now);
     auto duplicate_session =
         make_coordinator(path, "process-c", "agent-c", "session-a", now);
-    const auto first_bindings = make_mailbox_bindings(
-        first, [weak = std::weak_ptr<MailboxCoordinator>(first)] {
-          if (const auto current = weak.lock())
-            return current->active_root_identity();
-          return std::optional<AgentRuntimeIdentity>{};
-        });
-    const auto second_bindings = make_mailbox_bindings(
-        second, [weak = std::weak_ptr<MailboxCoordinator>(second)] {
-          if (const auto current = weak.lock())
-            return current->active_root_identity();
-          return std::optional<AgentRuntimeIdentity>{};
-        });
-    const auto call = [](const LuaHooks::MailboxBindings::Callback &callback,
+    const auto first_bindings = make_mailbox_bindings(first);
+    const auto second_bindings = make_mailbox_bindings(second);
+    const auto first_actor = first->active_root_identity();
+    const auto second_actor = second->active_root_identity();
+    const auto call = [&](const LuaHooks::MailboxBindings::Callback &callback,
                          nlohmann::json value,
                          std::stop_token stop_token = {}) {
-      return callback(value, stop_token);
+      return callback(value, first_actor, stop_token);
+    };
+    const auto call_second =
+        [&](const LuaHooks::MailboxBindings::Callback &callback,
+            nlohmann::json value, std::stop_token stop_token = {}) {
+          return callback(value, second_actor, stop_token);
     };
 
     const auto self = call(first_bindings.self, nlohmann::json::object());
@@ -113,6 +110,31 @@ int main() {
     CHECK(list.is_array());
     CHECK_EQ(list.size(), std::size_t{3});
     CHECK(list[0].contains("same_session_attached"));
+    CHECK(list[0].contains("is_self"));
+    CHECK_EQ(std::ranges::count_if(list,
+                                   [](const auto &agent) {
+                                     return agent.value("is_self", false);
+                                   }),
+             std::size_t{1});
+    const auto child_actor =
+        first->register_subagent("child-task", "root/child-task", std::nullopt);
+    const auto child_list = first_bindings.list(
+        nlohmann::json{{"include_self", true}, {"limit", 10}}, child_actor, {});
+    CHECK_EQ(std::ranges::count_if(child_list,
+                                   [](const auto &agent) {
+                                     return agent.value("is_self", false);
+                                   }),
+             std::size_t{1});
+    const auto child_self =
+        child_list[std::ranges::find_if(child_list,
+                                        [](const auto &agent) {
+                                          return agent.value("is_self", false);
+                                        }) -
+                   child_list.begin()];
+    CHECK_EQ(child_self["agent_id"], child_actor.agent_id);
+    CHECK(has_error(
+        first_bindings.self(nlohmann::json::object(), std::nullopt, {}),
+        "permission_denied"));
     duplicate_session->deactivate_root();
 
     CHECK(has_error(call(first_bindings.send, {{"target",
@@ -141,24 +163,57 @@ int main() {
                                    {"kind", "note"}});
     CHECK(exact.contains("message_id"));
     CHECK_EQ(exact["recipient_agent_id"], "agent-b");
-    const auto inspected = call(second_bindings.inbox, {{"claim", false}});
+    const auto inspected =
+        call_second(second_bindings.inbox, {{"claim", false}});
     CHECK_EQ(inspected.size(), std::size_t{1});
     CHECK(!inspected[0].contains("claim_token"));
-    CHECK_EQ(call(second_bindings.inbox, {{"claim", false}}).size(),
+    CHECK_EQ(call_second(second_bindings.inbox, {{"claim", false}}).size(),
              std::size_t{1});
 
-    const auto claimed_exact = call(second_bindings.inbox, {{"claim", true}});
+    const auto claimed_exact =
+        call_second(second_bindings.inbox, {{"claim", true}});
     CHECK_EQ(claimed_exact.size(), std::size_t{1});
     const auto exact_ack =
-        call(second_bindings.ack,
-             {{"message_id", claimed_exact[0]["message_id"]},
-              {"claim_token", claimed_exact[0]["claim_token"]}});
+        call_second(second_bindings.ack,
+                    {{"message_id", claimed_exact[0]["message_id"]},
+                     {"claim_token", claimed_exact[0]["claim_token"]}});
     CHECK_EQ(exact_ack["state"], "acknowledged");
 
-    const auto session_send =
-        call(second_bindings.send, {{"target", {{"session_id", "session-a"}}},
-                                    {"text", "session"},
-                                    {"kind", "steer"}});
+    const auto child_request = first_bindings.request(
+        nlohmann::json{{"target", {{"agent_id", "agent-b"}}},
+                       {"text", "child request"},
+                       {"timeout_ms", 0}},
+        child_actor, {});
+    CHECK_EQ(child_request["state"], "pending");
+    const auto child_request_id =
+        child_request["request_id"].get<std::string>();
+    const auto child_request_inbox =
+        call_second(second_bindings.inbox, {{"claim", false}});
+    const auto child_request_row =
+        std::ranges::find_if(child_request_inbox, [&](const auto &message) {
+          return message["message_id"] == child_request_id;
+        });
+    CHECK(child_request_row != child_request_inbox.end());
+    if (child_request_row != child_request_inbox.end())
+      CHECK_EQ((*child_request_row)["sender_agent_id"], child_actor.agent_id);
+    const auto child_reply =
+        call_second(second_bindings.reply, {{"message_id", child_request_id},
+                                            {"text", "child reply"}});
+    CHECK_EQ(child_reply["recipient_agent_id"], child_actor.agent_id);
+    const auto child_inbox =
+        first_bindings.inbox(nlohmann::json{{"claim", false}}, child_actor, {});
+    CHECK(std::ranges::any_of(child_inbox, [&](const auto &message) {
+      return message["reply_to"] == child_request_id;
+    }));
+    CHECK(!std::ranges::any_of(call(first_bindings.inbox, {{"claim", false}}),
+                               [&](const auto &message) {
+                                 return message["reply_to"] == child_request_id;
+                               }));
+
+    const auto session_send = call_second(
+        second_bindings.send, {{"target", {{"session_id", "session-a"}}},
+                               {"text", "session"},
+                               {"kind", "steer"}});
     CHECK(session_send["recipient_agent_id"].is_null());
     const auto claimed = call(first_bindings.inbox, {{"claim", true}});
     CHECK_EQ(claimed.size(), std::size_t{1});
@@ -178,12 +233,13 @@ int main() {
                                       {"timeout_ms", 0}});
     CHECK_EQ(pending["state"], "pending");
     const auto pending_id = pending["request_id"].get<std::string>();
-    const auto pending_inbox = call(second_bindings.inbox, {{"claim", false}});
+    const auto pending_inbox =
+        call_second(second_bindings.inbox, {{"claim", false}});
     CHECK(std::ranges::any_of(pending_inbox, [&](const auto &message) {
       return message["message_id"] == pending_id;
     }));
     const auto unrelated =
-        call(second_bindings.reply,
+        call_second(second_bindings.reply,
              {{"message_id", pending_id}, {"text", "unrelated"}});
     CHECK(unrelated.contains("message_id"));
     const auto unrelated_inbox = call(first_bindings.inbox, {{"claim", false}});
@@ -201,7 +257,8 @@ int main() {
     });
     std::string correlated_id;
     for (int attempt = 0; attempt < 1'000 && correlated_id.empty(); ++attempt) {
-      const auto messages = call(second_bindings.inbox, {{"claim", false}});
+      const auto messages =
+          call_second(second_bindings.inbox, {{"claim", false}});
       for (const auto &message : messages)
         if (message["kind"] == "request" && message["text"] == "correlated")
           correlated_id = message["message_id"].get<std::string>();
@@ -210,8 +267,8 @@ int main() {
     }
     CHECK(!correlated_id.empty());
     const auto reply =
-        call(second_bindings.reply,
-             {{"message_id", correlated_id}, {"text", "correlated reply"}});
+        call_second(second_bindings.reply, {{"message_id", correlated_id},
+                                            {"text", "correlated reply"}});
     CHECK_EQ(reply["recipient_agent_id"], "agent-a");
     const auto correlated = request_future.get();
     CHECK_EQ(correlated["state"], "replied");
@@ -224,7 +281,7 @@ int main() {
                                       {"timeout_ms", 0}});
     const auto late_id = late["request_id"].get<std::string>();
     const auto late_reply =
-        call(second_bindings.reply,
+        call_second(second_bindings.reply,
              {{"message_id", late_id}, {"text", "late reply"}});
     CHECK_EQ(late_reply["recipient_agent_id"], "agent-a");
     CHECK(std::ranges::any_of(
@@ -249,18 +306,10 @@ int main() {
 
     first->stop();
     const auto stopped = call(first_bindings.self, nlohmann::json::object());
-    CHECK(has_error(stopped, "not_found"));
+    CHECK(has_error(stopped, "permission_denied"));
     first.reset();
     const auto unavailable =
-        call(make_mailbox_bindings(
-                 first,
-                 [weak = std::weak_ptr<MailboxCoordinator>(first)] {
-                   if (const auto current = weak.lock())
-                     return current->active_root_identity();
-                   return std::optional<AgentRuntimeIdentity>{};
-                 })
-                 .self,
-             nlohmann::json::object());
+        call(make_mailbox_bindings(first).self, nlohmann::json::object());
     CHECK(has_error(unavailable, "not_found"));
   } catch (const std::exception &error) {
     std::cout << "unexpected exception: " << error.what() << "\n";

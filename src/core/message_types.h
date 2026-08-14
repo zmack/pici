@@ -11,8 +11,11 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
+
+#include "core/agent_runtime_identity.h"
 
 namespace pi::core {
 
@@ -197,6 +200,20 @@ public:
 
 using ToolUpdateCallback = std::function<void(std::shared_ptr<ToolResult>)>;
 
+// Per-invocation metadata is copied into each tool execution.  Tool
+// implementations must not retain references to this object after execute
+// returns.
+struct ToolExecutionContext {
+  std::string_view call_id;
+  std::optional<AgentRuntimeIdentity> actor;
+  std::stop_token stop_token;
+  ToolUpdateCallback on_update;
+};
+
+struct ToolCapabilities {
+  bool child_safe{false};
+};
+
 class ToolDefinition {
 public:
   virtual ~ToolDefinition() = default;
@@ -214,6 +231,13 @@ public:
   execute(std::string_view call_id, std::string_view args_json,
           std::stop_token stop_tok = std::stop_token{},
           ToolUpdateCallback on_update = {}) const = 0;
+  virtual std::shared_ptr<ToolResult>
+  execute(std::string_view args_json, ToolExecutionContext context) const {
+    auto callback = std::exchange(context.on_update, ToolUpdateCallback{});
+    return execute(context.call_id, args_json, context.stop_token,
+                   std::move(callback));
+  }
+  virtual ToolCapabilities capabilities() const { return {}; }
   // Per-tool execution mode override
   virtual ToolExecutionMode execution_mode() const {
     return ToolExecutionMode::parallel;

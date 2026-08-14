@@ -57,10 +57,7 @@ std::string assistant_text(const AssistantMessage &message) {
 }
 
 bool is_child_safe_tool(const std::shared_ptr<const ToolDefinition> &tool) {
-  if (!tool || tool->source_path() != "builtin")
-    return false;
-  return tool->name() == "read" || tool->name() == "grep" ||
-         tool->name() == "find" || tool->name() == "ls";
+  return tool && tool->capabilities().child_safe;
 }
 
 std::size_t message_bytes(const Message &message) {

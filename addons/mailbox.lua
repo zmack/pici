@@ -93,6 +93,15 @@ local target_properties = {
   },
 }
 
+tool("agents_self", "Return the live activation identity for this invocation. The agent_id is an activation endpoint; session_id is the durable conversation.", {
+  type = "object",
+  properties = {},
+  additionalProperties = false,
+}, function(args)
+  if type(args) ~= "table" then return invalid("arguments must be an object") end
+  return call(mailbox.self, {})
+end)
+
 tool("agents_list", "List live root and subagent endpoints visible in this workspace. agent_id identifies a live activation; session_id identifies a durable conversation.", {
   type = "object",
   properties = {

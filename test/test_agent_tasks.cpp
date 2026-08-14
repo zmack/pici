@@ -1,16 +1,23 @@
 #include "core/agent_task.h"
+#include "core/builtin_tools.h"
 #include "core/llm_client.h"
+#include "core/lua_tool.h"
 #include "core/providers/faux.h"
 #include "core/session/agent_session.h"
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <random>
+#include <ranges>
 #include <string>
+#include <system_error>
 #include <thread>
 
 using namespace pi::core;
@@ -75,13 +82,19 @@ private:
 class IdentityClient : public LLMClient {
 public:
   explicit IdentityClient(
-      std::shared_ptr<std::optional<AgentRuntimeIdentity>> identity)
-      : identity_(std::move(identity)) {}
+      std::shared_ptr<std::optional<AgentRuntimeIdentity>> identity,
+      std::shared_ptr<std::vector<std::string>> tools = {})
+      : identity_(std::move(identity)), tools_(std::move(tools)) {}
 
   std::shared_ptr<AssistantMessage>
   stream(const Model &model, const AgentContext &context, const StreamOptions &,
          AssistantEventCallback, std::stop_token) override {
     *identity_ = context.runtime_identity;
+    if (tools_) {
+      tools_->clear();
+      for (const auto &tool : context.tools)
+        tools_->emplace_back(tool->name());
+    }
     auto message = std::make_shared<AssistantMessage>();
     message->api = model.api;
     message->provider = model.provider;
@@ -96,6 +109,7 @@ public:
 
 private:
   std::shared_ptr<std::optional<AgentRuntimeIdentity>> identity_;
+  std::shared_ptr<std::vector<std::string>> tools_;
 };
 
 AgentTaskSnapshot wait_terminal(AgentTaskManager &manager,
@@ -136,15 +150,54 @@ int main() {
   AgentTaskManager manager(root, options);
   auto observed_identity =
       std::make_shared<std::optional<AgentRuntimeIdentity>>();
+  auto observed_tools = std::make_shared<std::vector<std::string>>();
   LLMClientRegistry::instance().register_client(
-      "identity-test", [observed_identity] {
-        return std::make_shared<IdentityClient>(observed_identity);
+      "identity-test", [observed_identity, observed_tools] {
+        return std::make_shared<IdentityClient>(observed_identity,
+                                                observed_tools);
       });
   Agent::Options identity_options = options;
   identity_options.model = Model{.id = "identity-model",
                                  .api = "identity-test",
                                  .provider = "identity-test"};
-  AgentSession identity_root({.agent_options = identity_options});
+  auto identity_tools = create_read_only_tools();
+  const auto mailbox_path =
+      std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
+  auto mailbox_hooks = load_lua_hooks(mailbox_path, true);
+  identity_tools.insert(identity_tools.end(),
+                        mailbox_hooks->registered_tools.begin(),
+                        mailbox_hooks->registered_tools.end());
+  const auto addon_path =
+      std::filesystem::temp_directory_path() /
+      ("pici-agent-task-addon-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()) +
+       "-" + std::to_string(std::random_device{}()) + ".lua");
+  struct TemporaryAddonCleanup {
+    std::filesystem::path path;
+    ~TemporaryAddonCleanup() {
+      std::error_code error;
+      std::filesystem::remove(path, error);
+    }
+  } addon_cleanup{addon_path};
+  {
+    std::ofstream addon(addon_path);
+    addon << R"lua(
+pici.add_tool({
+  name = "arbitrary_addon",
+  description = "not inherited by child agents",
+  schema = '{"type":"object"}',
+  execute = function() return "ok" end,
+})
+return {}
+)lua";
+  }
+  auto addon_hooks = load_lua_hooks(addon_path);
+  identity_tools.insert(identity_tools.end(),
+                        addon_hooks->registered_tools.begin(),
+                        addon_hooks->registered_tools.end());
+  AgentSession identity_root(
+      {.agent_options = identity_options, .tools = std::move(identity_tools)});
   AgentTaskManager identity_manager(identity_root, identity_options);
   std::vector<AgentRuntimeIdentity> registered;
   identity_manager.set_endpoint_registration(
@@ -176,6 +229,15 @@ int main() {
   CHECK(observed_identity->value().kind == "subagent");
   CHECK(observed_identity->value().task_id == identity_child.id);
   CHECK(observed_identity->value().task_path == identity_child.task_path);
+  const auto has_tool = [&](std::string_view name) {
+    return std::ranges::find(*observed_tools, name) != observed_tools->end();
+  };
+  for (const auto name :
+       {"read", "grep", "find", "ls", "agents_self", "agents_list",
+        "agents_send", "agents_request", "agents_reply", "agents_inbox"})
+    CHECK(has_tool(name));
+  CHECK(!has_tool("agents_close"));
+  CHECK(!has_tool("arbitrary_addon"));
   identity_manager.shutdown();
 
   AgentTaskManager rollback_manager(identity_root, identity_options);

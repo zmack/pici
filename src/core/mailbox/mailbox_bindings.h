@@ -9,11 +9,7 @@
 
 namespace pi::core {
 
-using MailboxActorProvider =
-    std::function<std::optional<AgentRuntimeIdentity>()>;
-
 LuaHooks::MailboxBindings
-make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator,
-                      const MailboxActorProvider &actor_provider = {});
+make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator);
 
 } // namespace pi::core

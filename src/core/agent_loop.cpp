@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <future>
 #include <map>
 #include <memory>
@@ -18,6 +19,7 @@
 #include <variant>
 #include <vector>
 
+#include "core/agent_runtime_identity.h"
 #include "core/agent_state.h"
 #include "core/auth_types.h"
 #include "core/event_types.h"
@@ -354,24 +356,34 @@ struct ToolExecutionOutcome {
   ToolExecutionStatus status{ToolExecutionStatus::success};
 };
 
-ToolExecutionOutcome execute_tool_safely(const PreparedToolCall &call,
-                                         const StreamCallback &emit,
-                                         const std::stop_token &stop_tok) {
+ToolExecutionOutcome
+execute_tool_safely(const PreparedToolCall &call, const StreamCallback &emit,
+                    const std::stop_token &stop_tok,
+                    const std::optional<AgentRuntimeIdentity> &actor) {
   if (stop_tok.stop_requested()) {
     return {.result = make_error_tool_result("Tool execution cancelled"),
             .is_error = true,
             .status = ToolExecutionStatus::cancelled};
   }
   try {
-    auto result = call.tool->execute(
-        call.tool_call.id, call.args_json, stop_tok,
-        // NOLINTNEXTLINE(bugprone-exception-escape)
-        [emit, call](const std::shared_ptr<ToolResult> &partial) {
-          emit(ToolExecutionUpdateEvent(
-              call.tool_call.id, call.tool_call.name, call.args_json,
-              partial ? partial->content() : std::string{},
-              std::source_location::current()));
-        });
+    auto call_id = call.tool_call.id;
+    auto call_name = call.tool_call.name;
+    auto args_json = call.args_json;
+    ToolUpdateCallback on_update =
+        [emit = std::cref(emit), call_id = std::move(call_id),
+         call_name = std::move(call_name), args_json = std::move(args_json)](
+            const std::shared_ptr<ToolResult> &partial) {
+          emit.get()(ToolExecutionUpdateEvent(call_id, call_name, args_json,
+                                              partial ? partial->content()
+                                                      : std::string{},
+                                              std::source_location::current()));
+        };
+    ToolExecutionContext execution_context{.call_id = call.tool_call.id,
+                                           .actor = actor,
+                                           .stop_token = stop_tok,
+                                           .on_update = std::move(on_update)};
+    auto result =
+        call.tool->execute(call.args_json, std::move(execution_context));
     const bool result_is_error = result && result->is_error();
     if (stop_tok.stop_requested())
       return {.result = std::move(result),
@@ -718,7 +730,8 @@ ToolCallResult execute_tool_calls_sequential(
 
     auto call = std::get<PreparedToolCall>(std::move(prepared));
 
-    auto execution = execute_tool_safely(call, emit, stop_tok);
+    auto execution =
+        execute_tool_safely(call, emit, stop_tok, context.runtime_identity);
 
 #ifdef PI_CPP_OTEL_ENABLED
     tool_span->AddEvent("tool.finalize.start");
@@ -815,7 +828,8 @@ ToolCallResult execute_tool_calls_parallel(
           otel::trace::Scope tool_scope(tool_span);
           (void)tool_ctx;
 #endif
-          auto execution = execute_tool_safely(call, emit, stop_tok);
+          auto execution = execute_tool_safely(call, emit, stop_tok,
+                                               context.runtime_identity);
 
 #ifdef PI_CPP_OTEL_ENABLED
           tool_span->AddEvent("tool.finalize.start");

@@ -1,7 +1,9 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iostream>
+#include <mutex>
 #include <ranges>
 #include <source_location>
 #include <string>
@@ -829,10 +831,12 @@ return {
 )lua");
     auto hooks = load_lua_hooks(p);
     LuaHooks::AgentInfo info;
-    info.mailbox.self = [](const nlohmann::json &, std::stop_token) {
-      return nlohmann::json{{"agent_id", "agent-a"}};
-    };
-    info.mailbox.send = [](const nlohmann::json &value, std::stop_token) {
+    info.mailbox.self =
+        [](const nlohmann::json &, const std::optional<AgentRuntimeIdentity> &,
+           std::stop_token) { return nlohmann::json{{"agent_id", "agent-a"}}; };
+    info.mailbox.send = [](const nlohmann::json &value,
+                           const std::optional<AgentRuntimeIdentity> &,
+                           std::stop_token) {
       CHECK(value.at("text") == "hello");
       return nlohmann::json{{"state", "queued"}};
     };
@@ -857,8 +861,7 @@ return {
     hooks->configure(info);
     const auto result = hooks->on_command("mailbox", "", {}, {});
     CHECK(result.handled);
-    CHECK_EQ(result.output.value(),
-             "nil:pici.mailbox is not available");
+    CHECK_EQ(result.output.value(), "nil:pici.mailbox is not available");
   });
 
   tests::register_test("LuaHooks: mailbox errors retain stable code", [&]() {
@@ -873,7 +876,9 @@ return {
 )lua");
     auto hooks = load_lua_hooks(p);
     LuaHooks::AgentInfo info;
-    info.mailbox.status = [](const nlohmann::json &, std::stop_token) {
+    info.mailbox.status = [](const nlohmann::json &,
+                             const std::optional<AgentRuntimeIdentity> &,
+                             std::stop_token) {
       return nlohmann::json{
           {"error", {{"code", "invalid_message"}, {"message", "bad input"}}}};
     };
@@ -1269,80 +1274,103 @@ void test_mailbox_addon() {
   tests::register_test("mailbox addon registers intention tools", []() {
     const auto path =
         std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
-    auto hooks = load_lua_hooks(path);
-    CHECK_EQ(hooks->registered_tools.size(), std::size_t(6));
+    auto hooks = load_lua_hooks(path, true);
+    CHECK_EQ(hooks->registered_tools.size(), std::size_t(7));
     const std::vector<std::string> expected = {
-        "agents_list", "agents_send", "agents_request",
+        "agents_self",  "agents_list",  "agents_send", "agents_request",
         "agents_reply", "agents_inbox", "agents_close"};
     for (std::size_t i = 0; i < expected.size(); ++i) {
       CHECK_EQ(std::string(hooks->registered_tools[i]->name()), expected[i]);
-      const auto schema =
-          nlohmann::json::parse(hooks->registered_tools[i]->schema().serialize());
+      const auto schema = nlohmann::json::parse(
+          hooks->registered_tools[i]->schema().serialize());
       CHECK(schema.is_object());
       CHECK(schema.value("additionalProperties", true) == false);
+      const bool curated = hooks->registered_tools[i]->name() != "agents_close";
+      CHECK_EQ(hooks->registered_tools[i]->capabilities().child_safe, curated);
     }
   });
 
-  tests::register_test("mailbox addon validates and executes intentions", []() {
+  tests::register_test("mailbox addon validates and executes intentions", [&]() {
     const auto path =
         std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
     auto hooks = load_lua_hooks(path);
     std::vector<nlohmann::json> acked;
+    std::mutex actor_mutex;
+    std::vector<std::string> actors;
     LuaHooks::AgentInfo info;
-    info.mailbox.self = [](const nlohmann::json &, std::stop_token) {
-      return nlohmann::json{{"agent_id", "root-a"},
-                            {"process_id", "process-a"}, {"kind", "root"}};
+    info.mailbox.self = [&](const nlohmann::json &,
+                            const std::optional<AgentRuntimeIdentity> &actor,
+                            std::stop_token) {
+      if (actor) {
+        std::scoped_lock lock(actor_mutex);
+        actors.push_back(actor->agent_id);
+        CHECK(actor->agent_id == "root-a" || actor->agent_id == "child-a");
+      }
+      return nlohmann::json{{"agent_id", actor ? actor->agent_id : "root-a"},
+                            {"process_id", "process-a"},
+                            {"kind", actor ? actor->kind : "root"}};
     };
-    info.mailbox.list = [](const nlohmann::json &, std::stop_token) {
-      return nlohmann::json::array(
-          {{{"agent_id", "root-a"},
-            {"process_id", "process-a"},
-            {"kind", "root"}},
-           {{"agent_id", "child-a"},
-            {"process_id", "process-a"},
-            {"kind", "subagent"},
-            {"task_id", "child-task"},
-            {"owner_agent_id", "root-a"}},
-           {{"agent_id", "remote-a"},
-            {"process_id", "process-b"},
-            {"kind", "subagent"},
-            {"owner_agent_id", "root-b"}}});
+    info.mailbox.list = [](const nlohmann::json &,
+                           const std::optional<AgentRuntimeIdentity> &,
+                           std::stop_token) {
+      return nlohmann::json::array({{{"agent_id", "root-a"},
+                                     {"process_id", "process-a"},
+                                     {"kind", "root"}},
+                                    {{"agent_id", "child-a"},
+                                     {"process_id", "process-a"},
+                                     {"kind", "subagent"},
+                                     {"task_id", "child-task"},
+                                     {"owner_agent_id", "root-a"}},
+                                    {{"agent_id", "remote-a"},
+                                     {"process_id", "process-b"},
+                                     {"kind", "subagent"},
+                                     {"owner_agent_id", "root-b"}}});
     };
-    info.mailbox.send = [](const nlohmann::json &value, std::stop_token) {
+    info.mailbox.send = [](const nlohmann::json &value,
+                           const std::optional<AgentRuntimeIdentity> &,
+                           std::stop_token) {
       CHECK(value.at("target").at("session_id") == "session-b");
       return nlohmann::json{{"state", "queued"}, {"message_id", "m1"}};
     };
-    info.mailbox.request = [](const nlohmann::json &, std::stop_token) {
+    info.mailbox.request = [](const nlohmann::json &,
+                              const std::optional<AgentRuntimeIdentity> &,
+                              std::stop_token) {
       return nlohmann::json{{"state", "pending"}, {"request_id", "r1"}};
     };
-    info.mailbox.reply = [](const nlohmann::json &value, std::stop_token) {
+    info.mailbox.reply = [](const nlohmann::json &value,
+                            const std::optional<AgentRuntimeIdentity> &,
+                            std::stop_token) {
       CHECK(value.at("message_id") == "m2");
       return nlohmann::json{{"state", "queued"}, {"message_id", "m3"}};
     };
-    info.mailbox.inbox = [](const nlohmann::json &value, std::stop_token) {
+    info.mailbox.inbox = [](const nlohmann::json &value,
+                            const std::optional<AgentRuntimeIdentity> &,
+                            std::stop_token) {
       CHECK(value.at("claim") == true);
-      return nlohmann::json::array(
-          {{{"message_id", "m2"},
-            {"sender_agent_id", "sender-a"},
-            {"sender_session_id", "session-s"},
-            {"recipient_session_id", "session-a"},
-            {"kind", "request"},
-            {"text", "question"},
-            {"created_at_ms", 42},
-            {"claim_token", "secret"}},
-           {{"message_id", "m4"},
-            {"sender_agent_id", "sender-b"},
-            {"sender_session_id", "session-t"},
-            {"recipient_session_id", "session-a"},
-            {"kind", "note"},
-            {"text", "late"},
-            {"created_at_ms", 43},
-            {"claim_token", "secret-2"}}});
+      return nlohmann::json::array({{{"message_id", "m2"},
+                                     {"sender_agent_id", "sender-a"},
+                                     {"sender_session_id", "session-s"},
+                                     {"recipient_session_id", "session-a"},
+                                     {"kind", "request"},
+                                     {"text", "question"},
+                                     {"created_at_ms", 42},
+                                     {"claim_token", "secret"}},
+                                    {{"message_id", "m4"},
+                                     {"sender_agent_id", "sender-b"},
+                                     {"sender_session_id", "session-t"},
+                                     {"recipient_session_id", "session-a"},
+                                     {"kind", "note"},
+                                     {"text", "late"},
+                                     {"created_at_ms", 43},
+                                     {"claim_token", "secret-2"}}});
     };
-    info.mailbox.ack = [&acked](const nlohmann::json &value, std::stop_token) {
+    info.mailbox.ack = [&acked](const nlohmann::json &value,
+                                const std::optional<AgentRuntimeIdentity> &,
+                                std::stop_token) {
       acked.push_back(value);
       if (acked.size() > 1)
-        return nlohmann::json{{"error", {{"code", "busy"}, {"message", "lease busy"}}}};
+        return nlohmann::json{
+            {"error", {{"code", "busy"}, {"message", "lease busy"}}}};
       return nlohmann::json{{"state", "acknowledged"}};
     };
     info.agents.close = [](const nlohmann::json &value) {
@@ -1353,22 +1381,58 @@ void test_mailbox_addon() {
 
     auto find = [&](std::string_view name) {
       return *std::ranges::find_if(
-          hooks->registered_tools, [&](const auto &tool) {
-            return tool->name() == name;
-          });
+          hooks->registered_tools,
+          [&](const auto &tool) { return tool->name() == name; });
     };
-    auto sent = find("agents_send")->execute(
-        "1", R"({"session_id":"session-b","text":"hello"})");
+    const auto actor = AgentRuntimeIdentity{.agent_id = "child-a",
+                                            .session_id = "session-a",
+                                            .kind = "subagent",
+                                            .task_id = "child-task"};
+    auto self = find("agents_self")
+                    ->execute("{}", ToolExecutionContext{.call_id = "self",
+                                                         .actor = actor});
+    CHECK(!self->is_error());
+    CHECK(nlohmann::json::parse(self->content()).at("agent_id") == "child-a");
+    auto invoke_self = [&](std::string agent_id) {
+      return find("agents_self")
+          ->execute("{}",
+                    ToolExecutionContext{
+                        .call_id = agent_id,
+                        .actor = AgentRuntimeIdentity{
+                            .agent_id = agent_id,
+                            .session_id = "session-a",
+                            .kind = agent_id == "root-a" ? "root" : "subagent",
+                            .task_id = agent_id == "root-a"
+                                           ? std::nullopt
+                                           : std::optional<std::string>{
+                                                 "child-task"}}});
+    };
+    auto root_future = std::async(std::launch::async, invoke_self, "root-a");
+    auto child_future = std::async(std::launch::async, invoke_self, "child-a");
+    CHECK(!root_future.get()->is_error());
+    CHECK(!child_future.get()->is_error());
+    {
+      std::scoped_lock lock(actor_mutex);
+      CHECK(std::ranges::find(actors, "root-a") != actors.end());
+      CHECK(std::ranges::find(actors, "child-a") != actors.end());
+    }
+    auto sent =
+        find("agents_send")
+            ->execute("1", R"({"session_id":"session-b","text":"hello"})");
     CHECK(!sent->is_error());
     CHECK(nlohmann::json::parse(sent->content()).at("message_id") == "m1");
 
-    auto bad_target = find("agents_send")->execute(
-        "2", R"({"agent_id":"a","session_id":"s","text":"x"})");
+    auto bad_target =
+        find("agents_send")
+            ->execute("2", R"({"agent_id":"a","session_id":"s","text":"x"})");
     CHECK(bad_target->is_error());
     CHECK(bad_target->content().find("invalid_message:") == 0);
 
-    auto pending = find("agents_request")->execute(
-        "3", R"({"agent_id":"child-a","text":"question","timeout_ms":0})");
+    auto pending =
+        find("agents_request")
+            ->execute(
+                "3",
+                R"({"agent_id":"child-a","text":"question","timeout_ms":0})");
     CHECK(!pending->is_error());
     CHECK(nlohmann::json::parse(pending->content()).at("request_id") == "r1");
 
@@ -1381,16 +1445,65 @@ void test_mailbox_addon() {
     CHECK_EQ(acked.size(), std::size_t(2));
     CHECK(acked[0].at("claim_token") == "secret");
 
-    auto reply = find("agents_reply")->execute(
-        "5", R"({"message_id":"m2","text":"answer"})");
+    auto reply = find("agents_reply")
+                     ->execute("5", R"({"message_id":"m2","text":"answer"})");
     CHECK(!reply->is_error());
-    auto close = find("agents_close")->execute(
-        "6", R"({"agent_id":"child-a"})");
+    auto close =
+        find("agents_close")->execute("6", R"({"agent_id":"child-a"})");
     CHECK(!close->is_error());
-    auto remote_close = find("agents_close")->execute(
-        "7", R"({"agent_id":"remote-a"})");
+    auto remote_close =
+        find("agents_close")->execute("7", R"({"agent_id":"remote-a"})");
     CHECK(remote_close->is_error());
   });
+
+  tests::register_test(
+      "mailbox addon clears actor after error and cancellation", [&]() {
+        const auto path =
+            std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
+        auto hooks = load_lua_hooks(path, true);
+        LuaHooks::AgentInfo info;
+        info.mailbox.self = [](const nlohmann::json &,
+                               const std::optional<AgentRuntimeIdentity> &actor,
+                               std::stop_token) {
+          if (actor && actor->agent_id == "actor-a")
+            return nlohmann::json{
+                {"error", {{"code", "busy"}, {"message", "try again"}}}};
+          return nlohmann::json{
+              {"agent_id", actor ? actor->agent_id : "missing"}};
+        };
+        hooks->configure(info);
+        auto find = [&](std::string_view name) {
+          return *std::ranges::find_if(
+              hooks->registered_tools,
+              [&](const auto &tool) { return tool->name() == name; });
+        };
+        const auto actor = [](std::string id) {
+          return AgentRuntimeIdentity{.agent_id = std::move(id),
+                                      .session_id = "session",
+                                      .kind = "subagent"};
+        };
+        auto failed =
+            find("agents_self")
+                ->execute("a", ToolExecutionContext{.call_id = "a",
+                                                    .actor = actor("actor-a")});
+        CHECK(failed->is_error());
+        std::stop_source cancelled;
+        cancelled.request_stop();
+        auto stopped =
+            find("agents_self")
+                ->execute("cancel", ToolExecutionContext{
+                                        .call_id = "cancel",
+                                        .actor = actor("actor-a"),
+                                        .stop_token = cancelled.get_token()});
+        CHECK(stopped->is_error());
+        auto recovered =
+            find("agents_self")
+                ->execute("b", ToolExecutionContext{.call_id = "b",
+                                                    .actor = actor("actor-b")});
+        CHECK(!recovered->is_error());
+        CHECK_EQ(nlohmann::json::parse(recovered->content()).at("agent_id"),
+                 "actor-b");
+      });
 }
 
 int main() {

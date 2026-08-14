@@ -902,9 +902,10 @@ int cmd_run(const cli::Args &args,
     };
     bool mailbox_addon_explicit = false;
     for (const auto &path : args.hooks_files) {
-      mailbox_addon_explicit |= same_path(path, bundled_mailbox);
+      const bool is_bundled_mailbox = same_path(path, bundled_mailbox);
+      mailbox_addon_explicit |= is_bundled_mailbox;
       try {
-        hooks_list.push_back(core::load_lua_hooks(path));
+        hooks_list.push_back(core::load_lua_hooks(path, is_bundled_mailbox));
         if (args.verbose)
           std::cerr << "[hooks: " << path << "]\n";
       } catch (const std::exception &e) {
@@ -913,7 +914,11 @@ int cmd_run(const cli::Args &args,
       }
     }
     if (!args.hooks_dir.empty()) {
-      auto dir_hooks = core::load_lua_hooks_dir(args.hooks_dir);
+      const bool bundled_mailbox_dir =
+          same_path(std::filesystem::path(args.hooks_dir) / "mailbox.lua",
+                    bundled_mailbox);
+      auto dir_hooks =
+          core::load_lua_hooks_dir(args.hooks_dir, bundled_mailbox_dir);
       if (dir_hooks) {
         hooks_list.push_back(dir_hooks);
         if (args.verbose)
@@ -930,7 +935,7 @@ int cmd_run(const cli::Args &args,
     }
     if (args.mailbox_enabled && !mailbox_addon_explicit) {
       try {
-        hooks_list.push_back(core::load_lua_hooks(bundled_mailbox));
+        hooks_list.push_back(core::load_lua_hooks(bundled_mailbox, true));
         auto_mailbox_addon_loaded = true;
         if (args.verbose)
           std::cerr << "[hooks: " << bundled_mailbox << "]\n";
@@ -1332,8 +1337,7 @@ int cmd_run(const cli::Args &args,
       return result;
     };
 
-    info.mailbox = core::make_mailbox_bindings(
-        mailbox, [mailbox] { return mailbox->active_root_identity(); });
+    info.mailbox = core::make_mailbox_bindings(mailbox);
 
     auto make_message = [](const nlohmann::json &value) {
       core::UserMessage message;

@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -32,6 +33,7 @@ extern "C" {
 #include <system_error>
 #include <vector>
 
+#include "core/agent_runtime_identity.h"
 #include "core/event_json.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
@@ -576,14 +578,53 @@ void push_context_snapshot_to_lua(lua_State *L,
 // Forward-declared; defined after LuaHooksImpl.
 class LuaHooksImpl;
 
+class LuaRegistryPointerGuard {
+public:
+  static int registry_type(lua_State *state, const char *key) {
+    lua_getfield(state, LUA_REGISTRYINDEX, key);
+    const auto type = lua_type(state, -1);
+    lua_pop(state, 1);
+    return type;
+  }
+
+  LuaRegistryPointerGuard(lua_State *state, const char *key, void *value)
+      : state_(state), key_(key), previous_type_(registry_type(state, key)) {
+    lua_getfield(state_, LUA_REGISTRYINDEX, key_);
+    if (previous_type_ == LUA_TLIGHTUSERDATA)
+      previous_value_ = lua_touserdata(state_, -1);
+    lua_pop(state_, 1);
+    lua_pushlightuserdata(state_, value);
+    lua_setfield(state_, LUA_REGISTRYINDEX, key_);
+  }
+
+  ~LuaRegistryPointerGuard() {
+    if (previous_type_ == LUA_TLIGHTUSERDATA) {
+      lua_pushlightuserdata(state_, previous_value_);
+    } else {
+      lua_pushnil(state_);
+    }
+    lua_setfield(state_, LUA_REGISTRYINDEX, key_);
+  }
+
+  LuaRegistryPointerGuard(const LuaRegistryPointerGuard &) = delete;
+  LuaRegistryPointerGuard &operator=(const LuaRegistryPointerGuard &) = delete;
+
+private:
+  lua_State *state_;
+  const char *key_;
+  int previous_type_{LUA_TNIL};
+  void *previous_value_{nullptr};
+};
+
 class InlineLuaTool final : public ToolDefinition {
 public:
   InlineLuaTool(std::shared_ptr<LuaHooksImpl> impl, int exec_ref,
                 std::string name, std::string description,
-                std::string schema_str, std::string source)
+                std::string schema_str, std::string source, bool child_safe)
       : impl_(std::move(impl)), exec_ref_(exec_ref), name_(std::move(name)),
         description_(std::move(description)), source_(std::move(source)),
-        schema_(std::make_unique<LuaToolSchema>(std::move(schema_str))) {}
+        schema_(std::make_unique<LuaToolSchema>(std::move(schema_str))),
+        child_safe_(child_safe) {}
 
   ~InlineLuaTool() override;
   InlineLuaTool(const InlineLuaTool &) = delete;
@@ -595,23 +636,38 @@ public:
   std::string_view description() const override { return description_; }
   std::string_view source_path() const override { return source_; }
   ToolSchema &schema() const override { return *schema_; }
+  ToolCapabilities capabilities() const override {
+    return {.child_safe = child_safe_};
+  }
 
   std::shared_ptr<ToolResult>
   execute(std::string_view call_id, std::string_view args_json,
-          std::stop_token st, ToolUpdateCallback on_update) const override;
+          std::stop_token stop_token = {},
+          ToolUpdateCallback on_update = {}) const override {
+    return execute(args_json,
+                   ToolExecutionContext{.call_id = call_id,
+                                        .stop_token = stop_token,
+                                        .on_update = std::move(on_update)});
+  }
+
+  std::shared_ptr<ToolResult>
+  execute(std::string_view args_json,
+          ToolExecutionContext context) const override;
 
 private:
   std::shared_ptr<LuaHooksImpl> impl_;
   int exec_ref_;
   std::string name_, description_, source_;
   std::unique_ptr<LuaToolSchema> schema_;
+  bool child_safe_{false};
 };
 
 class LuaHooksImpl : public std::enable_shared_from_this<LuaHooksImpl> {
 public:
-  explicit LuaHooksImpl(const std::filesystem::path &path)
-      : L_(luaL_newstate()) {
-
+  explicit LuaHooksImpl(const std::filesystem::path &path,
+                        bool bundled_child_safe_tools)
+      : L_(luaL_newstate()),
+        bundled_child_safe_tools_(bundled_child_safe_tools) {
     if (L_ == nullptr)
       throw std::runtime_error("Failed to create Lua state for hooks");
     luaL_openlibs(L_);
@@ -1255,6 +1311,15 @@ public:
     return result;
   }
 
+  static std::optional<AgentRuntimeIdentity> mailbox_actor(lua_State *L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_actor");
+    auto *actor = static_cast<std::optional<AgentRuntimeIdentity> *>(
+        lua_touserdata(L, -1));
+    const auto result = actor != nullptr ? *actor : std::nullopt;
+    lua_pop(L, 1);
+    return result;
+  }
+
   static int push_mailbox_binding(lua_State *L,
                                   const LuaHooks::MailboxBindings::Callback &fn,
                                   const nlohmann::json &args) {
@@ -1265,7 +1330,7 @@ public:
     }
     try {
       auto result = fn(args.is_object() ? args : nlohmann::json::object(),
-                       mailbox_stop_token(L));
+                       mailbox_actor(L), mailbox_stop_token(L));
       if (result.contains("error")) {
         lua_pushnil(L);
         const auto &error = result["error"];
@@ -1606,8 +1671,8 @@ public:
 
   std::shared_ptr<ToolResult>
   execute_inline_tool(int ref, std::string_view args_json,
-                      std::stop_token stop_tok, ToolUpdateCallback on_update) {
-    if (stop_tok.stop_requested())
+                      ToolExecutionContext context) {
+    if (context.stop_token.stop_requested())
       return std::make_shared<LuaToolResult>("Tool execution cancelled", true);
     std::scoped_lock lk(mutex_);
     lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
@@ -1616,24 +1681,24 @@ public:
       args = nlohmann::json::object();
     json_to_lua(L_, args);
     lua_newtable(L_);
-    lua_pushlightuserdata(L_, &on_update);
+    lua_pushlightuserdata(L_, &context.on_update);
     lua_pushcclosure(L_, &LuaHooksImpl::lua_tool_update, 1);
     lua_setfield(L_, -2, "update");
-    lua_pushlightuserdata(L_, &stop_tok);
+    lua_pushlightuserdata(L_, &context.stop_token);
     lua_pushcclosure(L_, &LuaHooksImpl::lua_tool_cancelled, 1);
     lua_setfield(L_, -2, "cancelled");
 
-    lua_pushlightuserdata(L_, &stop_tok);
-    lua_setfield(L_, LUA_REGISTRYINDEX, "pici.inline_stop_token");
+    LuaRegistryPointerGuard stop_token_guard(L_, "pici.inline_stop_token",
+                                             &context.stop_token);
+    LuaRegistryPointerGuard actor_guard(L_, "pici.inline_actor",
+                                        &context.actor);
     const auto previous_hook = lua_gethook(L_);
     const auto previous_mask = lua_gethookmask(L_);
     const auto previous_count = lua_gethookcount(L_);
     lua_sethook(L_, &LuaHooksImpl::lua_stop_hook, LUA_MASKCOUNT, 1000);
     const auto call_status = lua_pcall(L_, 2, 1, 0);
     lua_sethook(L_, previous_hook, previous_mask, previous_count);
-    lua_pushnil(L_);
-    lua_setfield(L_, LUA_REGISTRYINDEX, "pici.inline_stop_token");
-    if (stop_tok.stop_requested()) {
+    if (context.stop_token.stop_requested()) {
       lua_pop(L_, 1);
       return std::make_shared<LuaToolResult>("Tool execution cancelled", true);
     }
@@ -1681,10 +1746,17 @@ public:
 
   // Phase 2: called from load_lua_hooks after make_shared returns.
   void finalize_inline_tools() {
+    static constexpr std::array<std::string_view, 6> child_tools = {
+        "agents_self",    "agents_list",  "agents_send",
+        "agents_request", "agents_reply", "agents_inbox"};
     for (auto &spec : pending_tools_) {
+      const bool child_safe =
+          bundled_child_safe_tools_ &&
+          std::ranges::contains(child_tools, std::string_view(spec.name));
       auto tool = std::make_shared<InlineLuaTool>(
           shared_from_this(), spec.exec_ref, std::move(spec.name),
-          std::move(spec.description), std::move(spec.schema), source_path_);
+          std::move(spec.description), std::move(spec.schema), source_path_,
+          child_safe);
       inline_tools_.push_back(std::move(tool));
     }
     pending_tools_.clear();
@@ -1795,6 +1867,7 @@ private:
   int format_tool_call_ref_{LUA_NOREF};
   int format_tool_result_ref_{LUA_NOREF};
   std::string source_path_;
+  bool bundled_child_safe_tools_{false};
   std::vector<PendingTool> pending_tools_;
   std::vector<std::shared_ptr<const ToolDefinition>> inline_tools_;
   std::vector<LuaHooks::Command> commands_;
@@ -1812,11 +1885,9 @@ InlineLuaTool::~InlineLuaTool() {
 }
 
 std::shared_ptr<ToolResult>
-InlineLuaTool::execute(std::string_view, std::string_view args_json,
-                       std::stop_token stop_tok,
-                       ToolUpdateCallback on_update) const {
-  return impl_->execute_inline_tool(exec_ref_, args_json, stop_tok,
-                                    std::move(on_update));
+InlineLuaTool::execute(std::string_view args_json,
+                       ToolExecutionContext context) const {
+  return impl_->execute_inline_tool(exec_ref_, args_json, std::move(context));
 }
 
 } // namespace
@@ -1846,8 +1917,9 @@ load_lua_tools(const std::filesystem::path &directory) {
   return tools;
 }
 
-std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path) {
-  auto impl = std::make_shared<LuaHooksImpl>(path);
+std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path,
+                                         bool bundled_child_safe_tools) {
+  auto impl = std::make_shared<LuaHooksImpl>(path, bundled_child_safe_tools);
   auto hooks = std::make_shared<LuaHooks>();
 
   if (impl->has_before()) {
@@ -2043,14 +2115,17 @@ TestResult run_lua_test_file(const std::filesystem::path &path) {
 }
 
 std::shared_ptr<LuaHooks>
-load_lua_hooks_dir(const std::filesystem::path &directory) {
+load_lua_hooks_dir(const std::filesystem::path &directory,
+                   bool bundled_child_safe_tools) {
   std::vector<std::shared_ptr<LuaHooks>> list;
   std::error_code ec;
   for (const auto &entry : std::filesystem::directory_iterator(directory, ec)) {
     if (!entry.is_regular_file(ec) || entry.path().extension() != ".lua")
       continue;
     try {
-      list.push_back(load_lua_hooks(entry.path()));
+      list.push_back(load_lua_hooks(entry.path(), bundled_child_safe_tools &&
+                                                      entry.path().filename() ==
+                                                          "mailbox.lua"));
     } catch (const std::exception &e) {
       std::cerr << "warning: skipping hooks file " << entry.path() << ": "
                 << e.what() << "\n";

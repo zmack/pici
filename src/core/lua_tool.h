@@ -158,8 +158,9 @@ struct LuaHooks {
   };
 
   struct MailboxBindings {
-    using Callback = std::function<nlohmann::json(const nlohmann::json &,
-                                                  const std::stop_token &)>;
+    using Callback = std::function<nlohmann::json(
+        const nlohmann::json &, const std::optional<AgentRuntimeIdentity> &,
+        const std::stop_token &)>;
     Callback self;
     Callback list;
     Callback send;
@@ -308,13 +309,15 @@ TestResult run_lua_test_file(const std::filesystem::path &path);
 // Load hooks from a Lua file. Only functions present in the returned table are
 // wired up; missing hooks are left as null std::functions.
 // Throws std::runtime_error on load/syntax errors.
-std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path);
+std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path,
+                                         bool bundled_child_safe_tools = false);
 
 // Load all .lua files from a directory as independent add-ons, then compose
 // them. Files that fail to load are skipped with a warning to stderr. Returns
 // nullptr if no files loaded successfully.
 std::shared_ptr<LuaHooks>
-load_lua_hooks_dir(const std::filesystem::path &directory);
+load_lua_hooks_dir(const std::filesystem::path &directory,
+                   bool bundled_child_safe_tools = false);
 
 // Merge multiple LuaHooks into one with these composition rules:
 //   before_tool_call    — run all; first {block=true} short-circuits
