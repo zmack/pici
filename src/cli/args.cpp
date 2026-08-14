@@ -306,7 +306,7 @@ void print_help(const char *prog) {
          "  --hooks-dir <dir>           Load all .lua files from dir as "
          "add-ons\n"
          "  --render <mode>             Rendering: auto (default), markdown, "
-         "raw, viewport\n"
+         "raw, viewport, region\n"
          "  --message, -M <text>        Send an initial message then enter "
          "REPL\n"
          "  --print, -p                 Non-interactive: run prompt and exit\n"

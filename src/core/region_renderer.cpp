@@ -11,8 +11,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -252,6 +254,13 @@ std::vector<std::string> all_region_lines(const RegionState &state, int width,
   return lines;
 }
 
+std::string usage_line(const TokenUsage &usage) {
+  if (usage.input == 0 && usage.output == 0 && usage.cache_read == 0)
+    return {};
+  return "in:" + std::to_string(usage.input) +
+         " out:" + std::to_string(usage.output);
+}
+
 bool write_all(int fd, std::string_view data) {
   std::size_t written = 0;
   while (written < data.size()) {
@@ -268,11 +277,10 @@ bool write_all(int fd, std::string_view data) {
   return true;
 }
 
-void set_scroll_region(int fd, int height) {
+std::string scroll_region_sequence(int height) {
   if (height < 3)
-    return;
-  const auto sequence = "\033[1;" + std::to_string(height - 2) + "r";
-  write_all(fd, sequence);
+    return {};
+  return "\033[1;" + std::to_string(height - 2) + "r";
 }
 
 class RegionRenderer final : public Renderer {
@@ -280,7 +288,8 @@ public:
   explicit RegionRenderer(int fd)
       : fd_(fd), alt_screen_(fd),
         paint_thread_([this](const std::stop_token &st) { paint_loop(st); }) {
-    set_scroll_region(fd_, term_height(fd_));
+    const auto scroll_region = scroll_region_sequence(term_height(fd_));
+    write_all(fd_, scroll_region);
   }
 
   RegionRenderer(const RegionRenderer &) = delete;
@@ -298,7 +307,9 @@ public:
 
   void on_turn_start() override {
     std::scoped_lock lock(mutex_);
+    const auto custom_status = custom_status_line_;
     state_ = {};
+    state_.custom_status_line = custom_status;
     state_.revision = ++revision_;
     state_.dirty = true;
     state_.clear_on_frame = true;
@@ -321,6 +332,7 @@ public:
     std::scoped_lock lock(mutex_);
     state_.thinking.clear();
     state_.in_thinking = true;
+    state_.status_text = "[thinking\xE2\x80\xA6]";
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
@@ -329,6 +341,7 @@ public:
     std::scoped_lock lock(mutex_);
     state_.thinking.append(delta.data(), delta.size());
     state_.in_thinking = true;
+    state_.status_text = "[thinking\xE2\x80\xA6]";
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
@@ -336,6 +349,8 @@ public:
   void on_thinking_end() override {
     std::scoped_lock lock(mutex_);
     state_.in_thinking = false;
+    if (!state_.has_error)
+      state_.status_text.clear();
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
@@ -400,25 +415,129 @@ public:
     mark_dirty_locked();
   }
 
+  void on_message_end(const TokenUsage &usage) override {
+    std::scoped_lock lock(mutex_);
+    state_.last_usage = usage;
+    state_.revision = ++revision_;
+    mark_dirty_locked();
+  }
+
+  void on_command_output(std::string_view text) override {
+    bool paint_now = false;
+    {
+      std::scoped_lock lock(mutex_);
+      if (state_.blocks.empty() ||
+          !std::holds_alternative<RegionTextBlock>(state_.blocks.back())) {
+        state_.blocks.emplace_back(RegionTextBlock{});
+      }
+      auto &block = std::get<RegionTextBlock>(state_.blocks.back()).raw;
+      if (!block.empty() && !block.ends_with('\n'))
+        block.push_back('\n');
+      block.append(text.data(), text.size());
+      state_.revision = ++revision_;
+      mark_dirty_locked();
+      paint_now = !turn_active_;
+    }
+    if (paint_now)
+      paint_idle_synchronously();
+  }
+
+  void on_error(RendererErrorKind, std::string_view message) override {
+    bool paint_now = false;
+    {
+      std::scoped_lock lock(mutex_);
+      state_.status_text = "error: ";
+      state_.status_text.append(message.data(), message.size());
+      state_.has_error = true;
+      state_.revision = ++revision_;
+      mark_dirty_locked();
+      paint_now = !turn_active_;
+    }
+    if (paint_now)
+      paint_idle_synchronously();
+  }
+
+  void on_scroll(RendererScrollCommand command) override {
+    bool paint_now = false;
+    {
+      std::scoped_lock lock(mutex_);
+      const int page_rows = std::max(1, term_height(fd_) - 3);
+      const auto add_scroll = [&](int amount) {
+        if (state_.scroll_offset_rows >
+            std::numeric_limits<int>::max() - amount) {
+          state_.scroll_offset_rows = std::numeric_limits<int>::max();
+        } else {
+          state_.scroll_offset_rows += amount;
+        }
+      };
+      switch (command) {
+      case RendererScrollCommand::line_up:
+        add_scroll(1);
+        break;
+      case RendererScrollCommand::line_down:
+        state_.scroll_offset_rows = std::max(0, state_.scroll_offset_rows - 1);
+        break;
+      case RendererScrollCommand::page_up:
+        add_scroll(page_rows);
+        break;
+      case RendererScrollCommand::page_down:
+        state_.scroll_offset_rows =
+            std::max(0, state_.scroll_offset_rows - page_rows);
+        break;
+      case RendererScrollCommand::top:
+        state_.scroll_offset_rows = std::numeric_limits<int>::max();
+        break;
+      case RendererScrollCommand::bottom:
+        state_.scroll_offset_rows = 0;
+        break;
+      }
+      state_.revision = ++revision_;
+      mark_dirty_locked();
+      paint_now = !turn_active_;
+    }
+    if (paint_now)
+      paint_idle_synchronously();
+  }
+
+  bool owns_status_line() const override { return true; }
+
+  void set_status_line(const std::optional<std::string> &text) override {
+    bool paint_now = false;
+    {
+      std::scoped_lock lock(mutex_);
+      custom_status_line_ = text;
+      state_.custom_status_line = text;
+      state_.revision = ++revision_;
+      mark_dirty_locked();
+      paint_now = !turn_active_;
+    }
+    if (paint_now)
+      paint_idle_synchronously();
+  }
+
   void on_turn_end() override {
     State snapshot;
     {
       std::scoped_lock lock(mutex_);
-      state_.dirty = false;
       turn_active_ = false;
+      if (!state_.has_error) {
+        state_.status_text =
+            "tokens: " + std::to_string(state_.last_usage.output) + "  done";
+      }
       state_.revision = ++revision_;
+      state_.dirty = false;
       snapshot = state_;
     }
     try {
       render_frame(snapshot);
     } catch (...) { // NOLINT(bugprone-empty-catch)
+      std::scoped_lock output_lock(paint_mutex_);
+      last_frame_lines_.clear();
       // Keep terminal teardown available after malformed markdown.
     }
-    // owns_status_line() remains false until the status compositor is added
-    // in M5. Leave readline on the last content row: its leading newline then
-    // advances to the reserved status row before it draws an external status
-    // line and the prompt on the following row.
-    const int prompt_anchor = std::max(1, term_height(fd_) - 2);
+    // Readline's prompt starts with a newline. Leave the cursor on the status
+    // row so that newline advances to the dedicated prompt row.
+    const int prompt_anchor = std::max(1, term_height(fd_) - 1);
     const auto cursor_sequence =
         "\033[" + std::to_string(prompt_anchor) + ";1H\033[?25h";
     write_all(fd_, cursor_sequence);
@@ -431,6 +550,10 @@ private:
     bool dirty{true};
     bool clear_on_frame{true};
     std::uint64_t revision{0};
+    std::string status_text;
+    bool has_error{false};
+    std::optional<std::string> custom_status_line;
+    TokenUsage last_usage;
   };
 
   // EventStream serializes renderer callbacks on its consumer thread, even
@@ -440,6 +563,26 @@ private:
   void mark_dirty_locked() {
     state_.dirty = true;
     cv_.notify_one();
+  }
+
+  void paint_idle_synchronously() {
+    State snapshot;
+    {
+      std::scoped_lock lock(mutex_);
+      if (turn_active_)
+        return;
+      state_.dirty = false;
+      snapshot = state_;
+    }
+
+    write_all(fd_, "\0337");
+    try {
+      render_frame(snapshot);
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+      std::scoped_lock output_lock(paint_mutex_);
+      last_frame_lines_.clear();
+    }
+    write_all(fd_, "\0338");
   }
 
   void paint_loop(const std::stop_token &stop) {
@@ -485,6 +628,7 @@ private:
   }
 
   void render_frame(const State &snapshot) {
+    std::scoped_lock output_lock(paint_mutex_);
     const int width = term_width(fd_);
     const int height = term_height(fd_);
     const int content_rows = std::max(0, height - 2);
@@ -495,28 +639,34 @@ private:
     std::vector<std::string> rows = std::move(frame.lines);
     rows.resize(static_cast<std::size_t>(content_rows));
 
-    std::scoped_lock output_lock(paint_mutex_);
+    int scroll_offset = 0;
     {
       std::scoped_lock lock(mutex_);
       if (snapshot.revision != state_.revision)
         return;
       state_.scroll_offset_rows =
           std::clamp(state_.scroll_offset_rows, 0, frame.max_scroll_rows);
+      scroll_offset = state_.scroll_offset_rows;
     }
 
-    if (width != last_width_ || height != last_height_) {
+    const bool layout_changed = width != last_width_ || height != last_height_;
+    if (layout_changed) {
       last_frame_lines_.clear();
       last_width_ = width;
       last_height_ = height;
-      set_scroll_region(fd_, height);
     }
 
     std::string output;
+    if (layout_changed)
+      output += scroll_region_sequence(height);
     if (snapshot.clear_on_frame) {
       output = "\033[?25l\033[H\033[J";
+      output += scroll_region_sequence(height);
       last_frame_lines_.clear();
     }
     output += diff_region_rows(last_frame_lines_, rows);
+    output += status_sequence(snapshot, width, height, scroll_offset,
+                              frame.max_scroll_rows);
     if (!output.empty() && !write_all(fd_, output)) {
       last_frame_lines_.clear();
       return;
@@ -529,12 +679,63 @@ private:
     }
   }
 
+  static std::string status_sequence(const State &snapshot, int width,
+                                     int height, int scroll, int max_scroll) {
+    if (height < 2 || width < 1)
+      return {};
+
+    std::string left;
+    if (!snapshot.status_text.empty()) {
+      left = snapshot.status_text;
+    } else if (snapshot.custom_status_line) {
+      left = *snapshot.custom_status_line;
+    } else {
+      bool first = true;
+      for (const auto &block : snapshot.blocks) {
+        const auto *tool = std::get_if<RegionToolBlock>(&block);
+        if (tool == nullptr || !tool->running)
+          continue;
+        if (first)
+          left = "[";
+        else
+          left += ", ";
+        left += tool->tool_name;
+        first = false;
+      }
+      if (!first)
+        left += "]";
+    }
+    if (scroll > 0) {
+      if (!left.empty())
+        left += "  ";
+      left +=
+          "scroll " + std::to_string(scroll) + "/" + std::to_string(max_scroll);
+    }
+    left = truncate_ansi_line(left, width);
+
+    auto usage = usage_line(snapshot.last_usage);
+    const int gap = width - display_columns(left) - display_columns(usage);
+    if (usage.empty() || gap < 1)
+      usage.clear();
+
+    std::string bar =
+        "\033[" + std::to_string(height - 1) + ";1H\033[2K\033[2m";
+    bar += left;
+    if (!usage.empty()) {
+      bar.append(static_cast<std::size_t>(gap), ' ');
+      bar += usage;
+    }
+    bar += "\033[0m";
+    return bar;
+  }
+
   int fd_;
   std::mutex mutex_;
   State state_;
   std::condition_variable cv_;
   bool turn_active_{false};
   std::uint64_t revision_{0};
+  std::optional<std::string> custom_status_line_;
   AltScreenSession alt_screen_;
   std::mutex paint_mutex_;
   std::vector<std::string> last_frame_lines_;

@@ -304,8 +304,8 @@ void test_region_factory_lifecycle() {
          "region enters alternate screen");
   expect(output.find("\033[?1049l") != std::string::npos,
          "region leaves alternate screen");
-  expect(output.find("\033[22;1H\033[?25h") != std::string::npos,
-         "turn end leaves cursor at the content/status anchor");
+  expect(output.find("\033[23;1H\033[?25h") != std::string::npos,
+         "turn end leaves cursor on the status row before readline");
   std::size_t clear_count = 0;
   for (std::size_t pos = output.find("\033[H\033[J"); pos != std::string::npos;
        pos = output.find("\033[H\033[J", pos + 1)) {
@@ -313,6 +313,82 @@ void test_region_factory_lifecycle() {
   }
   expect(clear_count == 2,
          "turn-start clear is preserved for a short second turn");
+}
+
+void test_idle_paint_saves_cursor_and_scrolls() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates idle paint capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    std::string command_output;
+    for (int line = 0; line < 40; ++line)
+      command_output += "command output " + std::to_string(line) + "\n\n";
+    renderer->on_command_output(command_output);
+    renderer->set_status_line(std::string("custom status"));
+    renderer->on_scroll(pi::core::RendererScrollCommand::top);
+    renderer->on_scroll(pi::core::RendererScrollCommand::line_up);
+    renderer->on_scroll(pi::core::RendererScrollCommand::page_down);
+    renderer->set_status_line(std::nullopt);
+    renderer->on_error(pi::core::RendererErrorKind::transport,
+                       "connection lost");
+    renderer->on_scroll(pi::core::RendererScrollCommand::bottom);
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[256];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+  expect(output.find("\0337") != std::string::npos,
+         "idle updates save the readline cursor");
+  expect(output.find("\0338") != std::string::npos,
+         "idle updates restore the readline cursor");
+  expect(output.find("custom status") != std::string::npos,
+         "idle status update is painted synchronously");
+  expect(output.find("scroll ") != std::string::npos,
+         "idle scrolling paints a nonzero scroll extent");
+  expect(output.find("error: connection lost") != std::string::npos,
+         "idle errors are painted in the compositor");
+}
+
+void test_error_survives_fast_turn_end() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates fast error capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->set_status_line(std::string("custom status"));
+    renderer->on_turn_start();
+    renderer->on_message_end(pi::core::TokenUsage{.input = 12, .output = 34});
+    renderer->on_error(pi::core::RendererErrorKind::transport,
+                       "request failed");
+    renderer->on_turn_end();
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[256];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+  expect(output.find("error: request failed") != std::string::npos,
+         "fast turn errors remain visible in the final frame");
+  expect(output.rfind("error: request failed") > output.rfind("custom status"),
+         "error status outranks the custom status line");
+  expect(output.find("in:12 out:34") != std::string::npos,
+         "usage is visible in the status bar");
 }
 
 } // namespace
@@ -331,6 +407,8 @@ int main() {
   test_tiny_layout_keeps_tool_body_collapsed();
   test_tool_callbacks_route_into_regions();
   test_region_factory_lifecycle();
+  test_idle_paint_saves_cursor_and_scrolls();
+  test_error_survives_fast_turn_end();
   if (failed != 0)
     return 1;
   std::cout << "region renderer tests passed\n";

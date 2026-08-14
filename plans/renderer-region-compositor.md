@@ -31,9 +31,33 @@ out; do not change `make_auto_renderer`'s default in this work.
   expose shared terminal/markdown helpers.
 - [x] M3: scaffold `RegionRenderer` and implement transcript paint/diff loop.
 - [x] M4: add tool regions and support concurrent updates.
-- [ ] M5: finish scrolling, status/error handling, hardening, manual checks,
+- [x] M5: finish scrolling, status/error handling, hardening, manual checks,
   and documentation. Add the markdown performance cache only if profiling
   measures a need.
+
+### Final M5 acceptance notes
+
+- `RegionRenderer` clamps line/page/top/bottom scrolling in wrapped physical
+  rows, including saturating upward scroll requests before the next frame
+  computes the real document extent.
+- Status, token usage, command output, and errors are rendered inside the
+  compositor. The renderer owns the status row, while `VerboseRenderer`
+  forwards owned errors and suppresses duplicate stderr usage/error output.
+- Paints are restricted to active turns. Idle status, scroll, command, and
+  error updates synchronously save and restore the readline cursor; the paint
+  mutex serializes those writes with the background frame loop.
+- Resize invalidates the row diff cache and reapplies the scroll region.
+  Short/failed writes invalidate the cache so the next frame repaints fully;
+  paint exceptions are contained and renderer teardown joins the paint thread
+  before leaving the alternate screen.
+- Deterministic unit coverage exercises scrolling, SGR continuation rows,
+  status/command output, idle save/restore painting, diffing, and teardown.
+  No markdown performance cache was added because no profiling evidence
+  showed it was needed for the bounded 16ms paint loop.
+- Manual smoke coverage used a pipe-backed renderer with a synthetic
+  multi-paragraph command transcript, idle scroll/status/error updates, and
+  destruction; no live-model interactive PTY or Ctrl-C run was available in
+  this pass.
 
 ## Why not just patch `ViewportRenderer`
 

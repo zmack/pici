@@ -190,6 +190,7 @@ for (const auto &ev : agent.prompt(text))
 | `"auto"` | `make_auto_renderer(fd)` | Markdown on TTY, raw on pipes |
 | `"markdown"` | `make_diff_renderer(fd)` | In-place markdown with scrollback-safe committed regions |
 | `"viewport"` | `make_viewport_renderer(fd)` | Alternate-screen viewport with status bar, readline row, and scroll controls |
+| `"region"` | `make_region_renderer(fd)` | Throttled alternate-screen compositor with diffed transcript rows and concurrent tool regions |
 | `"raw"` | `make_raw_renderer(fd)` | Plain text append, no escape codes |
 
 ### Viewport renderer notes
@@ -209,6 +210,12 @@ separation matters:
 - Scroll state is tracked in wrapped terminal rows, not raw markdown bytes.  The
   row accounting shares the same ANSI/UTF-8 width helpers used by markdown
   rendering.
+
+The `region` renderer is an opt-in alternate-screen compositor for concurrent
+tool output. It coalesces streaming updates into roughly 60fps frames, keeps
+each tool call at its start position, owns the status row, and supports line,
+page, top, and bottom scrolling. While readline is active, status and scroll
+updates use save/restore-cursor painting so they do not disturb the input row.
 
 ### Custom renderers
 

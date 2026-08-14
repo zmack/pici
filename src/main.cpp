@@ -625,7 +625,7 @@ public:
     if (diagnostics_)
       diagnostics_->record_renderer_event("message_end");
     base_.on_message_end(u);
-    if (verbose_) {
+    if (verbose_ && !base_.owns_status_line()) {
       bool has_pricing = u.cost.total != 0 || u.cost.input != 0;
       std::cerr << "[usage: in=" << format_tokens(u.input)
                 << " out=" << format_tokens(u.output)
@@ -647,10 +647,12 @@ public:
     base_.on_command_output(text);
   }
 
-  void on_error(core::RendererErrorKind, std::string_view msg) override {
+  void on_error(core::RendererErrorKind kind, std::string_view msg) override {
     if (diagnostics_)
       diagnostics_->record_renderer_event("error", msg.size());
-    std::cerr << "\nerror: " << msg << "\n";
+    base_.on_error(kind, msg);
+    if (!base_.owns_status_line())
+      std::cerr << "\nerror: " << msg << "\n";
   }
 
   void on_scroll(core::RendererScrollCommand command) override {
