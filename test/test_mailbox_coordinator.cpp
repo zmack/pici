@@ -9,6 +9,7 @@
 #include <iostream>
 #include <source_location>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -174,9 +175,14 @@ int main() {
     CHECK(std::holds_alternative<UserMessage>(delivered.front().message));
     CHECK(std::get<TextContent>(
               std::get<UserMessage>(delivered.front().message).content.front())
-              .text ==
-          "[Mailbox message steer-1 from session sender-session / agent "
-          "sender-agent]\ninspect this");
+              .text == "[pici mailbox message]\n"
+                       "message_id=steer-1\n"
+                       "kind=steer\n"
+                       "sender_session_id=sender-session\n"
+                       "sender_agent_id=sender-agent\n"
+                       "recipient_session_id=session-b\n"
+                       "recipient_agent_id=(session root)\n"
+                       "\ninspect this");
     delivered.front().on_accepted();
     root_queue.clear();
     CHECK(coordinator.store()
@@ -428,10 +434,150 @@ int main() {
     CHECK(same_endpoints[0] != same_endpoints[1]);
     second_coordinator.stop();
 
+    coordinator.set_root_running(false);
+    std::size_t root_wakes = 0;
+    delivery->root_wake = [&root_wakes] { ++root_wakes; };
+    for (const auto kind :
+         {MailboxMessageKind::note, MailboxMessageKind::reply}) {
+      coordinator.store().send(SendRequest{
+          .message_id =
+              kind == MailboxMessageKind::note ? "idle-note" : "idle-reply",
+          .sender_agent_id = "sender-agent",
+          .sender_session_id = "sender-session",
+          .target = MailboxTarget{.session_id = "session-b"},
+          .workspace_id = "workspace",
+          .kind = kind,
+          .body = MailboxBody{.text = "inbox only"},
+          .created_at_ms = now});
+    }
+    coordinator.maintenance_tick();
+    CHECK(!coordinator.idle_root_work_pending());
+    CHECK_EQ(root_wakes, std::size_t{0});
+    const auto probe_root = coordinator.self(root_b).agent_id;
+    coordinator.store().send(
+        SendRequest{.message_id = "a-leased",
+                    .sender_agent_id = "sender-agent",
+                    .sender_session_id = "sender-session",
+                    .target = MailboxTarget{.session_id = "session-b"},
+                    .workspace_id = "workspace",
+                    .kind = MailboxMessageKind::request,
+                    .body = MailboxBody{.text = "leased first"},
+                    .created_at_ms = now});
+    const auto leased = coordinator.store().claim(
+        ClaimRequest{.session_id = "session-b",
+                     .agent_id = probe_root,
+                     .workspace_id = "workspace",
+                     .kinds = {MailboxMessageKind::request},
+                     .limit = 1,
+                     .now_ms = now,
+                     .lease_ms = 100});
+    CHECK_EQ(leased.messages.size(), std::size_t{1});
+    coordinator.store().send(
+        SendRequest{.message_id = "b-claimable",
+                    .sender_agent_id = "sender-agent",
+                    .sender_session_id = "sender-session",
+                    .target = MailboxTarget{.session_id = "session-b"},
+                    .workspace_id = "workspace",
+                    .kind = MailboxMessageKind::request,
+                    .body = MailboxBody{.text = "claimable later"},
+                    .created_at_ms = now});
+    CHECK(coordinator.idle_root_work_pending());
+    const auto claimable_probe = coordinator.claim_idle_root_turn(1);
+    CHECK_EQ(claimable_probe.size(), std::size_t{1});
+    claimable_probe.front().on_accepted();
+    coordinator.set_root_running(false);
+    coordinator.store().acknowledge(
+        AcknowledgeRequest{.message_id = leased.messages.front().message_id,
+                           .agent_id = probe_root,
+                           .claim_token = *leased.messages.front().claim_token,
+                           .workspace_id = "workspace",
+                           .now_ms = now});
+    coordinator.store().send(
+        SendRequest{.message_id = "idle-request-1",
+                    .sender_agent_id = "sender-agent",
+                    .sender_session_id = "sender-session",
+                    .target = MailboxTarget{.session_id = "session-b"},
+                    .workspace_id = "workspace",
+                    .kind = MailboxMessageKind::request,
+                    .body = MailboxBody{.text = "answer this while idle"},
+                    .created_at_ms = now});
+    for (std::size_t index = 0; index < 16; ++index) {
+      const auto message_id = "idle-steer-" + std::to_string(index);
+      coordinator.store().send(
+          SendRequest{.message_id = message_id,
+                      .sender_agent_id = "sender-agent",
+                      .sender_session_id = "sender-session",
+                      .target = MailboxTarget{.session_id = "session-b"},
+                      .workspace_id = "workspace",
+                      .kind = MailboxMessageKind::steer,
+                      .body = MailboxBody{.text = message_id},
+                      .created_at_ms = now});
+    }
+    CHECK(coordinator.idle_root_work_pending());
+    coordinator.maintenance_tick();
+    CHECK(root_wakes > 0);
+    const auto idle_messages = coordinator.claim_idle_root_turn();
+    CHECK_EQ(idle_messages.size(), std::size_t{16});
+    CHECK(coordinator.status().root_running);
+    CHECK(std::get<TextContent>(
+              std::get<UserMessage>(idle_messages.front().message)
+                  .content.front())
+              .text.find(
+                  "Reply with agents_reply(message_id=\"idle-request-1\")") !=
+          std::string::npos);
+    CHECK(coordinator.claim_idle_root_turn().empty());
+    for (const auto &message : idle_messages)
+      message.on_accepted();
+    coordinator.set_root_running(false);
+    CHECK(coordinator.idle_root_work_pending());
+    const auto remaining_idle_messages = coordinator.claim_idle_root_turn();
+    CHECK_EQ(remaining_idle_messages.size(), std::size_t{1});
+    remaining_idle_messages.front().on_accepted();
+    coordinator.set_root_running(false);
+    CHECK(!coordinator.idle_root_work_pending());
+    CHECK(coordinator.claim_idle_root_turn().empty());
+    MailboxAutonomousTurnBudget budget;
+    for (std::size_t index = 0;
+         index < MailboxAutonomousTurnBudget::max_consecutive_turns; ++index) {
+      CHECK(budget.can_run());
+      budget.record();
+    }
+    CHECK(budget.exhausted());
+    budget.reset();
+    CHECK(budget.can_run());
+    coordinator.store().send(SendRequest{
+        .message_id = "idle-redelivery",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxMessageKind::request,
+        .body = MailboxBody{.text = "retry after acceptance failure"},
+        .created_at_ms = now});
+    const auto unaccepted = coordinator.claim_idle_root_turn();
+    CHECK_EQ(unaccepted.size(), std::size_t{1});
+    coordinator.set_root_running(false);
+    CHECK(!coordinator.idle_root_work_pending());
+    now += 101;
+    CHECK(coordinator.idle_root_work_pending());
+    const auto redelivery = coordinator.claim_idle_root_turn();
+    CHECK_EQ(redelivery.size(), std::size_t{1});
+    redelivery.front().on_accepted();
+    coordinator.set_root_running(false);
+    CHECK(coordinator.store()
+              .inspect(InboxQuery{.session_id = "session-b",
+                                  .workspace_id = "workspace",
+                                  .agent_id = coordinator.self(root_b).agent_id,
+                                  .agent_kind = "root",
+                                  .message_id = "idle-request-1",
+                                  .now_ms = now})
+              .empty());
+
+    coordinator.set_root_running(true);
     coordinator.maintenance_tick();
     const auto delivered_after_tick = delivered.size();
     const auto root_endpoint = coordinator.self(root_b).agent_id;
-    now += 100;
+    now += 1;
     coordinator.store().send(
         SendRequest{.message_id = "cadence-1",
                     .sender_agent_id = "sender-agent",
@@ -443,7 +589,7 @@ int main() {
                     .created_at_ms = now});
     coordinator.maintenance_tick();
     CHECK_EQ(delivered.size(), delivered_after_tick);
-    now += 150;
+    now += 249;
     coordinator.maintenance_tick();
     CHECK(delivered.size() > delivered_after_tick);
     CHECK(!root_queue.empty());

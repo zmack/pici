@@ -177,6 +177,7 @@ struct InboxQuery {
   std::optional<std::string> message_id;
   std::vector<MailboxMessageKind> kinds;
   bool include_acknowledged{false};
+  bool claimable_only{false};
   std::size_t limit{50};
   TimestampMs now_ms{0};
 };

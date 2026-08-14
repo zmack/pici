@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -30,10 +31,21 @@ namespace {
 
 Message mailbox_message_to_message(const MailboxMessage &message) {
   UserMessage user;
-  user.content.emplace_back(TextContent{
-      .text = "[Mailbox message " + message.message_id + " from session " +
-              message.sender_session_id + " / agent " +
-              message.sender_agent_id + "]\n" + message.body.text});
+  std::string text = "[pici mailbox message]\n";
+  text += "message_id=" + message.message_id + "\n";
+  text += "kind=" + std::string(mailbox_message_kind_to_string(message.kind)) +
+          "\n";
+  text += "sender_session_id=" + message.sender_session_id + "\n";
+  text += "sender_agent_id=" + message.sender_agent_id + "\n";
+  text += "recipient_session_id=" + message.recipient_session_id + "\n";
+  text += "recipient_agent_id=" +
+          message.recipient_agent_id.value_or("(session root)") + "\n";
+  if (message.kind == MailboxMessageKind::request) {
+    text += "Reply with agents_reply(message_id=\"" + message.message_id +
+            "\") if a response is appropriate.\n";
+  }
+  text += "\n" + message.body.text;
+  user.content.emplace_back(TextContent{.text = std::move(text)});
   return Message{std::move(user)};
 }
 
@@ -442,6 +454,125 @@ void MailboxCoordinator::drop_queued_delivery() {
     delivery->drop_queued();
 }
 
+bool MailboxCoordinator::idle_root_work_pending() {
+  std::string root_agent_id;
+  std::string session_id;
+  {
+    std::scoped_lock lock(mutex_);
+    if (!root_active_ || root_running_ || stopped_ || !session_id_)
+      return false;
+    root_agent_id = active_root_agent_id_;
+    session_id = *session_id_;
+  }
+  try {
+    const auto messages = store_->inspect(InboxQuery{
+        .session_id = std::move(session_id),
+        .workspace_id = options_.store.workspace_id,
+        .agent_id = std::move(root_agent_id),
+        .agent_kind = "root",
+        .kinds = {MailboxMessageKind::steer, MailboxMessageKind::request},
+        .claimable_only = true,
+        .limit = 1,
+        .now_ms = options_.store.clock()});
+    return !messages.empty();
+  } catch (...) {
+    return false;
+  }
+}
+
+std::vector<AgentMessageEnvelope>
+MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
+  if (limit == 0)
+    return {};
+  limit = std::min<std::size_t>(limit, 16);
+
+  std::string root_agent_id;
+  std::string session_id;
+  {
+    std::scoped_lock lock(mutex_);
+    if (!root_active_ || root_running_ || stopped_ || !session_id_)
+      return {};
+    root_agent_id = active_root_agent_id_;
+    session_id = *session_id_;
+
+    // Reserve the root turn before claiming.  This makes the claim and the
+    // main-thread running transition one coordinator-serialized decision.
+    store_->update_agent(
+        AgentUpdate{.agent_id = root_agent_id, .status = "running"});
+    root_running_ = true;
+    try {
+      const auto claimed = store_->claim(ClaimRequest{
+          .session_id = session_id,
+          .agent_id = root_agent_id,
+          .workspace_id = options_.store.workspace_id,
+          .kinds = {MailboxMessageKind::steer, MailboxMessageKind::request},
+          .limit = limit,
+          .now_ms = options_.store.clock(),
+          .lease_ms = options_.store.claim_lease_ms});
+      if (claimed.messages.empty()) {
+        store_->update_agent(
+            AgentUpdate{.agent_id = root_agent_id, .status = "idle"});
+        root_running_ = false;
+        return {};
+      }
+
+      std::vector<AgentMessageEnvelope> result;
+      result.reserve(claimed.messages.size());
+      for (const auto &claimed_message : claimed.messages) {
+        const auto message_id = claimed_message.message_id;
+        const auto claim_token = claimed_message.claim_token.value_or("");
+        const auto endpoint_ref =
+            std::make_shared<const std::string>(root_agent_id);
+        const auto message_id_ref =
+            std::make_shared<const std::string>(message_id);
+        const auto claim_token_ref =
+            std::make_shared<const std::string>(claim_token);
+        result.push_back(AgentMessageEnvelope{
+            .message = mailbox_message_to_message(claimed_message),
+            .on_accepted =
+                [weak = std::weak_ptr<Lifetime>(lifetime_), endpoint_ref,
+                 message_id_ref, claim_token_ref] noexcept {
+                  auto state = weak.lock();
+                  if (!state)
+                    return;
+                  MailboxCoordinator *owner = nullptr;
+                  {
+                    std::scoped_lock lock(state->mutex);
+                    if (!state->active || state->owner == nullptr)
+                      return;
+                    owner = state->owner;
+                    ++state->in_flight;
+                  }
+                  try {
+                    owner->acknowledge_delivery(*endpoint_ref, *message_id_ref,
+                                                *claim_token_ref);
+                  } catch (...) {
+                    static_cast<void>(0);
+                  }
+                  {
+                    std::scoped_lock lock(state->mutex);
+                    if (state->in_flight > 0)
+                      --state->in_flight;
+                    if (state->in_flight == 0)
+                      state->condition.notify_all();
+                  }
+                },
+            .source = AgentMessageSource::mailbox});
+      }
+      return result;
+    } catch (...) {
+      try {
+        store_->update_agent(
+            AgentUpdate{.agent_id = root_agent_id, .status = "idle"});
+      } catch (...) {
+        static_cast<void>(0);
+      }
+      root_running_ = false;
+      throw;
+    }
+  }
+}
+
 void MailboxCoordinator::acknowledge_delivery(std::string agent_id,
                                               std::string message_id,
                                               std::string claim_token) {
@@ -769,9 +900,27 @@ void MailboxCoordinator::maintenance_once(TimestampMs now,
       next_poll_ms_ = now + options_.poll_interval.count();
       poll_inbox();
     }
+    signal_idle_root_work();
   } catch (...) {
     // A transient busy/permission failure must not kill process presence.
     static_cast<void>(0);
+  }
+}
+
+void MailboxCoordinator::signal_idle_root_work() {
+  if (!idle_root_work_pending())
+    return;
+  std::shared_ptr<MailboxDeliveryTargets> delivery;
+  {
+    std::scoped_lock lock(mutex_);
+    delivery = delivery_targets_;
+  }
+  if (delivery && delivery->root_wake) {
+    try {
+      delivery->root_wake();
+    } catch (...) {
+      static_cast<void>(0);
+    }
   }
 }
 

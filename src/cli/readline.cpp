@@ -9,11 +9,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
-#include <poll.h>
 #include <string>
 #include <string_view>
 #include <sys/fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/poll.h>
 #include <system_error>
 #include <termios.h>
 #include <unistd.h>

@@ -992,6 +992,8 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
       " FROM messages WHERE recipient_session_id=? AND workspace_id=? "
       "AND available_at_ms<=? AND (? OR acknowledged_at_ms IS NULL) "
       "AND (? OR message_id=?)";
+  if (query.claimable_only)
+    sql += " AND (claim_expires_at_ms IS NULL OR claim_expires_at_ms<=?)";
   if (query.agent_id)
     sql += " AND (recipient_agent_id=? OR (recipient_agent_id IS NULL AND "
            "?='root'))";
@@ -1013,6 +1015,8 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
   bind_integer(statement.get(), 5, query.message_id ? 0 : 1);
   bind_optional_text(statement.get(), 6, query.message_id);
   int bind_index = 7;
+  if (query.claimable_only)
+    bind_integer(statement.get(), bind_index++, now);
   if (query.agent_id) {
     bind_text(statement.get(), bind_index++, *query.agent_id);
     bind_text(statement.get(), bind_index++, query.agent_kind);

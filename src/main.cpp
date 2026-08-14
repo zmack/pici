@@ -661,10 +661,12 @@ private:
   core::TokenUsage last_usage_;
 };
 
-core::TokenUsage run_turn(core::AgentSession &session, const std::string &input,
-                          core::Renderer &renderer, bool verbose,
-                          std::shared_ptr<core::StreamDiagnostics> diagnostics,
-                          std::shared_ptr<HookRuntime> hook_runtime = nullptr) {
+template <typename Invoke>
+core::TokenUsage
+run_turn_impl(core::AgentSession &session, core::Renderer &renderer,
+              bool verbose,
+              std::shared_ptr<core::StreamDiagnostics> diagnostics,
+              std::shared_ptr<HookRuntime> hook_runtime, Invoke &&invoke) {
   VerboseRenderer vr(renderer, verbose, std::move(diagnostics),
                      std::move(hook_runtime));
   std::jthread interrupt_watcher([&session](const std::stop_token &stop_token) {
@@ -676,13 +678,39 @@ core::TokenUsage run_turn(core::AgentSession &session, const std::string &input,
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   });
-  auto result = session.run_prompt(input, [&vr](const core::AgentEvent &event) {
-    core::dispatch_event(event, vr);
-  });
+  auto result =
+      std::forward<Invoke>(invoke)([&vr](const core::AgentEvent &event) {
+        core::dispatch_event(event, vr);
+      });
   interrupt_watcher.request_stop();
   if (result.error && !session.agent().state().error_message())
     renderer.on_error(core::RendererErrorKind::unknown, *result.error);
   return vr.last_usage();
+}
+
+core::TokenUsage run_turn(core::AgentSession &session, const std::string &input,
+                          core::Renderer &renderer, bool verbose,
+                          std::shared_ptr<core::StreamDiagnostics> diagnostics,
+                          std::shared_ptr<HookRuntime> hook_runtime = nullptr) {
+  return run_turn_impl(session, renderer, verbose, std::move(diagnostics),
+                       std::move(hook_runtime),
+                       [&session, &input](const auto &callback) {
+                         return session.run_prompt(input, callback);
+                       });
+}
+
+core::TokenUsage
+run_message_turn(core::AgentSession &session,
+                 std::vector<core::AgentMessageEnvelope> messages,
+                 core::Renderer &renderer, bool verbose,
+                 std::shared_ptr<core::StreamDiagnostics> diagnostics,
+                 std::shared_ptr<HookRuntime> hook_runtime = nullptr) {
+  return run_turn_impl(
+      session, renderer, verbose, std::move(diagnostics),
+      std::move(hook_runtime),
+      [&session, messages = std::move(messages)](const auto &callback) mutable {
+        return session.run_messages(std::move(messages), callback);
+      });
 }
 
 struct CostAccumulator {
@@ -1186,6 +1214,7 @@ int cmd_run(const cli::Args &args,
           mailbox->unregister_subagent(task_id);
         });
   }
+  auto mailbox_wake = mailbox ? std::make_shared<cli::ReadlineWake>() : nullptr;
   auto mailbox_delivery = std::make_shared<core::MailboxDeliveryTargets>();
   mailbox_delivery->root =
       [&runtime](std::vector<core::AgentMessageEnvelope> messages) {
@@ -1210,6 +1239,10 @@ int cmd_run(const cli::Args &args,
   };
   mailbox_delivery->drop_root_queued = [&runtime] {
     runtime.agent().clear_mailbox_steering_queue();
+  };
+  mailbox_delivery->root_wake = [mailbox_wake] {
+    if (mailbox_wake)
+      static_cast<void>(mailbox_wake->notify());
   };
   if (mailbox)
     mailbox->attach_delivery(mailbox_delivery);
@@ -1718,11 +1751,49 @@ int cmd_run(const cli::Args &args,
     return result;
   };
 
+  constexpr std::size_t kAutonomousBatchLimit = 16;
+  core::MailboxAutonomousTurnBudget autonomous_budget;
+  bool autonomous_budget_exhausted = false;
+  auto run_idle_mailbox_turns = [&] {
+    if (!mailbox || autonomous_budget_exhausted)
+      return;
+    while (autonomous_budget.can_run()) {
+      std::vector<core::AgentMessageEnvelope> messages;
+      try {
+        messages = mailbox->claim_idle_root_turn(kAutonomousBatchLimit);
+      } catch (const std::exception &error) {
+        if (args.verbose)
+          std::cerr << "[mailbox autonomous turn unavailable: " << error.what()
+                    << "]\n";
+        return;
+      }
+      if (messages.empty())
+        return;
+      {
+        core::TerminalTitleActivityGuard activity(title_controller);
+        RootRunningGuard running_guard{mailbox};
+        accumulate(run_message_turn(runtime, std::move(messages), *renderer,
+                                    args.verbose, stream_diagnostics,
+                                    hook_runtime));
+      }
+      autonomous_budget.record();
+    }
+    autonomous_budget_exhausted = autonomous_budget.exhausted();
+  };
+
   auto update_terminal_ui = [&]() -> std::optional<std::string> {
     const auto context = build_ui_context();
     std::optional<std::string> status_line;
     if (hooks && hooks->status_line)
       status_line = hooks->status_line(context);
+    if (autonomous_budget_exhausted) {
+      constexpr std::string_view paused =
+          "mailbox autonomous turns paused; submit input to resume";
+      if (status_line)
+        *status_line += " | " + std::string(paused);
+      else
+        status_line = std::string(paused);
+    }
     renderer->set_status_line(status_line);
     if (hooks && hooks->tab_title) {
       if (auto title = hooks->tab_title(context))
@@ -1768,16 +1839,24 @@ int cmd_run(const cli::Args &args,
     const std::string_view readline_status =
         renderer->owns_status_line() || !status_line ? std::string_view{}
                                                      : *status_line;
+    const int readline_wake_fd = mailbox_wake && !autonomous_budget_exhausted
+                                     ? mailbox_wake->read_fd()
+                                     : -1;
     auto readline_result =
         cli::readline(prompt, complete_fn, control_fn, readline_status,
-                      readline_draft, readline_cursor);
+                      readline_draft, readline_cursor, readline_wake_fd);
     if (readline_result.reason == cli::ReadlineExit::eof)
       break;
     if (readline_result.reason == cli::ReadlineExit::mailbox_wake) {
       readline_draft = std::move(readline_result.text);
       readline_cursor = readline_result.cursor;
+      run_idle_mailbox_turns();
       continue;
     }
+    if (autonomous_budget_exhausted && mailbox_wake)
+      mailbox_wake->drain();
+    autonomous_budget.reset();
+    autonomous_budget_exhausted = false;
     readline_draft.clear();
     readline_cursor = 0;
     const std::string &line = readline_result.text;

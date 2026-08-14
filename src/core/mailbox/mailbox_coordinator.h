@@ -3,6 +3,7 @@
 #include "core/agent_task.h"
 #include "core/mailbox/mailbox_store.h"
 
+#include <cstddef>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -37,6 +38,20 @@ struct MailboxCoordinatorOptions {
   std::chrono::milliseconds cleanup_interval{30'000};
 };
 
+struct MailboxAutonomousTurnBudget {
+  static constexpr std::size_t max_consecutive_turns = 8;
+
+  bool can_run() const noexcept {
+    return consecutive_turns < max_consecutive_turns;
+  }
+  void record() noexcept { ++consecutive_turns; }
+  void reset() noexcept { consecutive_turns = 0; }
+  bool exhausted() const noexcept { return !can_run(); }
+
+private:
+  std::size_t consecutive_turns{0};
+};
+
 struct MailboxDeliveryTargets {
   std::function<bool(std::vector<AgentMessageEnvelope>)> root;
   std::function<bool(std::string, std::string,
@@ -44,6 +59,9 @@ struct MailboxDeliveryTargets {
       subagent;
   std::function<void()> drop_queued;
   std::function<void()> drop_root_queued;
+  // Called by maintenance when an idle root has actionable work.  This is a
+  // wake hint only; the main thread performs the claim and runs the turn.
+  std::function<void()> root_wake;
 };
 
 struct MailboxCoordinatorStatus {
@@ -84,6 +102,9 @@ public:
   void detach_delivery();
   void pump_inbox();
   void drop_queued_delivery();
+  bool idle_root_work_pending();
+  std::vector<AgentMessageEnvelope>
+  claim_idle_root_turn(std::size_t limit = 16);
 
   AgentRecord self(const AgentRuntimeIdentity &actor);
   std::optional<AgentRuntimeIdentity> active_root_identity() const;
@@ -142,6 +163,7 @@ private:
   void maintenance_loop(const std::stop_token &stop_token);
   void maintenance_once(TimestampMs now, TimestampMs &last_cleanup);
   void poll_inbox();
+  void signal_idle_root_work();
   void acknowledge_delivery(std::string agent_id, std::string message_id,
                             std::string claim_token);
   void require_actor(const AgentRuntimeIdentity &actor) const;
