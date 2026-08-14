@@ -120,6 +120,9 @@ std::unique_ptr<Renderer> make_diff_renderer(int fd = 1);
 // immediate-mode full-screen compositor).
 std::unique_ptr<Renderer> make_viewport_renderer(int fd = 1);
 
+// Throttled alternate-screen compositor with diffed transcript rows.
+std::unique_ptr<Renderer> make_region_renderer(int fd = 1);
+
 // Selects make_diff_renderer on a TTY, make_raw_renderer otherwise.
 std::unique_ptr<Renderer> make_auto_renderer(int fd = 1);
 

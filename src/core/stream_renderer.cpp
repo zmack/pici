@@ -759,6 +759,7 @@ StreamRendererRegistry::StreamRendererRegistry() {
   factories_["raw"] = [](int fd) { return make_raw_renderer(fd); };
   factories_["markdown"] = [](int fd) { return make_diff_renderer(fd); };
   factories_["viewport"] = [](int fd) { return make_viewport_renderer(fd); };
+  factories_["region"] = [](int fd) { return make_region_renderer(fd); };
   factories_["auto"] = [](int fd) { return make_auto_renderer(fd); };
 }
 

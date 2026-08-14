@@ -475,6 +475,7 @@ add_library(pi-core
     src/core/syntax_highlight.cpp
     src/core/terminal.cpp
     src/core/stream_renderer.cpp
+    src/core/region_renderer.cpp
     src/core/stream_diagnostics.cpp
     src/core/llm_client.cpp
     src/core/tool_validation.cpp
@@ -579,6 +580,10 @@ if(PI_CPP_BUILD_TESTS)
         target_link_libraries(test-${test_name} PRIVATE pi-core)
         add_test(NAME test-${test_name} COMMAND test-${test_name})
     endforeach()
+
+    add_executable(test-region-renderer test/test_region_renderer.cpp)
+    target_link_libraries(test-region-renderer PRIVATE pi-core)
+    add_test(NAME test-region-renderer COMMAND test-region-renderer)
 
     target_compile_definitions(test-lua_tool PRIVATE
         PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
