@@ -114,7 +114,7 @@ private:
 
 AgentTaskSnapshot wait_terminal(AgentTaskManager &manager,
                                 AgentTaskSnapshot current) {
-  for (;;) {
+  for (int attempts = 0; attempts < 5; ++attempts) {
     if (current.status == AgentTaskStatusKind::completed ||
         current.status == AgentTaskStatusKind::errored ||
         current.status == AgentTaskStatusKind::interrupted)
@@ -125,11 +125,21 @@ AgentTaskSnapshot wait_terminal(AgentTaskManager &manager,
     request.timeout = std::chrono::seconds(2);
     auto update = manager.wait(request);
     CHECK(!update.caller_interrupted);
-    CHECK(!update.timed_out);
+    if (update.timed_out) {
+      CHECK(!update.timed_out);
+      const auto snapshot = manager.get(current.id).value_or(current);
+      std::cout << "wait timed out for task " << current.id
+                << " status=" << agent_task_status_to_string(snapshot.status)
+                << " generation=" << snapshot.generation
+                << " queued=" << snapshot.queued_message_count << "\n";
+      return snapshot;
+    }
     for (const auto &changed : update.changed)
       if (changed.id == current.id)
         current = changed;
   }
+  CHECK(false);
+  return current;
 }
 } // namespace
 
@@ -631,9 +641,20 @@ return {}
   AgentTaskManager interrupt_manager(interrupt_root, interrupt_options);
   auto interrupted =
       interrupt_manager.spawn({.task_name = "slow", .prompt = "wait"});
+  const auto running_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
   while (interrupt_manager.get(interrupted.id)->status !=
-         AgentTaskStatusKind::running)
+             AgentTaskStatusKind::running &&
+         std::chrono::steady_clock::now() < running_deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(interrupt_manager.get(interrupted.id)->status ==
+        AgentTaskStatusKind::running);
+  const auto client_deadline = std::chrono::steady_clock::now() +
+                               std::chrono::seconds(2);
+  while (interrupt_calls->load() == 0 &&
+         std::chrono::steady_clock::now() < client_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(interrupt_calls->load() == 1);
   auto immediate = interrupt_manager.interrupt(interrupted.id,
                                                AgentInterruptReason::timeout);
   CHECK(immediate.status == AgentTaskStatusKind::running);

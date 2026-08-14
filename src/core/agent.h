@@ -197,6 +197,7 @@ private:
 
   mutable std::mutex interrupt_mutex_;
   std::optional<TurnAbortReason> interrupt_reason_;
+  std::optional<TurnAbortReason> pending_interrupt_;
 
   // Internal helpers
   void join_workers();

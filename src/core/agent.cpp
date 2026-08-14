@@ -380,7 +380,10 @@ void Agent::interrupt(TurnAbortReason reason) {
   std::scoped_lock run_lock(worker_mutex_);
   {
     std::scoped_lock lock(interrupt_mutex_);
-    interrupt_reason_ = reason;
+    if (state_.is_streaming())
+      interrupt_reason_ = reason;
+    else
+      pending_interrupt_ = reason;
   }
   state_.stop_source().request_stop();
 }
@@ -389,6 +392,11 @@ void Agent::abort() { interrupt(TurnAbortReason::user_interrupt); }
 
 void Agent::reset() {
   state_.reset();
+  {
+    std::scoped_lock lock(interrupt_mutex_);
+    interrupt_reason_.reset();
+    pending_interrupt_.reset();
+  }
   clear_steering_queue();
   clear_follow_up_queue();
 }
@@ -421,11 +429,18 @@ void Agent::begin_run_locked() {
         "Use steer() or follow_up() to queue messages, or wait for "
         "completion.");
   }
-  state_.reset_stop_source();
+  std::optional<TurnAbortReason> pending_interrupt;
   {
     std::scoped_lock lock(interrupt_mutex_);
+    pending_interrupt = pending_interrupt_;
+    pending_interrupt_.reset();
     interrupt_reason_.reset();
+    if (pending_interrupt)
+      interrupt_reason_ = pending_interrupt;
   }
+  state_.reset_stop_source();
+  if (pending_interrupt)
+    state_.stop_source().request_stop();
   state_.clear_error_message();
   state_.set_streaming(true);
   state_.set_complete(false);
