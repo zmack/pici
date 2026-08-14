@@ -5,16 +5,32 @@ Lua plugins loaded via `--hooks-file`, `--hooks-dir`, or `config.toml [addons]`.
 ## mailbox.lua — agent coordination
 
 When `[mailbox].enabled = true`, pici loads this bundled addon once and exposes
-`agents_list`, `agents_send`, `agents_request`, `agents_reply`, `agents_inbox`,
-and `agents_close`. It uses native mailbox primitives and does not expose
-SQLite or claim tokens to the model. Requests are bounded synchronous waits;
-messages can interrupt a running agent only at a turn boundary. The root is
-not auto-started while idle, and subagents remain available until completion
-or explicit local close. Delivery is at-least-once and message IDs should be
-treated as deduplication keys.
+`agents_self`, `agents_list`, `agents_send`, `agents_request`, `agents_reply`,
+`agents_inbox`, and `agents_close`. It uses native mailbox primitives and does
+not expose SQLite, leases, claim tokens, or raw acknowledgement mechanics to
+the model. `agent_id` identifies a live activation; `session_id` identifies a
+durable conversation. `agents_self` returns the caller's identity and
+`agents_list` marks it with `is_self`.
+
+Children inherit the self/list/send/request/reply/inbox tools but not
+`agents_close`. Requests are bounded synchronous waits of at most 60 seconds.
+Delivery to a running agent occurs at a safe turn boundary. In the interactive
+TTY CLI, only `request` and `steer` wake an idle root; the main thread claims at
+most 16 messages per turn and allows 8 consecutive autonomous turns before
+requiring human input. Human input resets that budget, and the CLI restores a
+partially typed UTF-8 draft and cursor after autonomous output. `note` and
+`reply` remain inbox-only.
+
+Non-TTY input retains blocking `getline` behavior, and print/one-shot modes do
+not remain resident for mailbox work. Subagents remain available until
+completion or explicit local close. Delivery is at-least-once and message IDs
+should be treated as deduplication keys. The coordinator pending-work API is
+the integration boundary for future ACP and GUI event-loop adapters; the
+current self-pipe is CLI-specific. A2A and remote lifecycle control remain out
+of scope.
 
 The bundled source-tree path is a development-build limitation; installed
-addon packaging is a follow-up. A2A/remote transport is not part of v1.
+addon packaging is a follow-up.
 
 ## costline.lua — show last cost in the status line
 

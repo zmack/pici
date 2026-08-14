@@ -10,13 +10,35 @@ This is the execution plan for the two gaps discovered after mailbox v1:
 
 This plan follows `agent-mailbox-and-session-coordination.md` and deliberately
 supersedes the v1 execution manifest's exclusion of automatic idle-root
-execution. It does not reopen the mailbox storage design, introduce A2A, or
-change the rule that ordinary mailbox delivery only interrupts an active agent
-at a safe model/tool boundary.
+execution. It does not reopen the mailbox storage design or introduce A2A.
+Ordinary delivery to a running agent still waits for a safe model/tool boundary;
+only the interactive CLI's main loop may claim and run work for an idle root.
 
 Follow `AGENTS.md` while implementing it. Keep commits reviewable, run a narrow
 build/test target during each phase, run `make format` and inspect `make lint`
 before each commit, and run `make test` before every commit.
+
+## Implementation status
+
+The native identity, caller-scoped tools, request-local context, wakeable
+readline, and autonomous idle-root phases are implemented on the CLI path:
+
+| Phase | Status | Commit |
+| --- | --- | --- |
+| 1. Native runtime identity and endpoint registration | Complete | `41c227d` |
+| 2. Caller-scoped Lua tools and child exposure | Complete | `a9307b2` |
+| 3. Cache-preserving request-local identity context | Complete | `c52d2d9` |
+| 4. Wakeable readline | Complete | `14a4236` |
+| 5. Autonomous idle-root turns | Complete | `54c0a4f` |
+| 6. Documentation and verification | Complete | documentation commit |
+
+The implemented v1 boundary is deliberately narrower than a general agent
+transport: mailbox storage/coordinator APIs are reusable by other hosts, but
+the self-pipe wake adapter and autonomous-turn loop currently belong to the
+interactive CLI. ACP and future GUI hosts need their own event-loop adapters;
+A2A transport, remote lifecycle control, and installed bundled-addon packaging
+remain follow-up work. The documentation updates in this phase are intentionally
+uncommitted so the parent review can inspect them with the implementation.
 
 ## Outcome
 
@@ -31,11 +53,14 @@ After this work:
 - The bundled Lua mailbox tools are usable by subagents under the subagent's
   authority rather than accidentally operating as the root.
 - A `request` or `steer` delivered to an idle interactive root wakes readline,
-  runs an autonomous turn on the main thread, and then restores any partially
-  typed input.
+  runs an autonomous turn on the CLI main thread, and then restores any
+  partially typed input. The maintenance thread only emits a coalesced wake
+  hint.
 - `note` and `reply` remain inbox-only. A synchronous `agents_request` continues
   to observe its reply directly through correlation.
-- Mailbox turns cannot recursively run without a local safety bound.
+- Mailbox turns cannot recursively run without a local safety bound: up to 16
+  actionable envelopes are batched per turn and at most 8 autonomous turns
+  run consecutively before human input is required.
 
 ## Frozen design decisions
 

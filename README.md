@@ -530,24 +530,44 @@ retention_days = 30
 presence lease used by independent processes. The database is private to the current user and stores a deterministic short
 workspace identity (derived from the canonical workspace path), the original
 workspace path, session identity, presence, and durable messages. The bundled
-`addons/mailbox.lua`
-registers the intention-level `agents_list`, `agents_send`, `agents_request`,
-`agents_reply`, `agents_inbox`, and `agents_close` tools when mailbox is
-enabled. A request waits synchronously for at most 60 seconds; a timeout leaves
-the request durable and a late reply remains visible in the inbox.
+`addons/mailbox.lua` registers the intention-level `agents_self`,
+`agents_list`, `agents_send`, `agents_request`, `agents_reply`, `agents_inbox`,
+and `agents_close` tools when mailbox is enabled. `agent_id` is the live
+activation endpoint; `session_id` is the durable conversation. `agents_self`
+is authoritative, and `agents_list` marks exactly one entry with
+`is_self = true` for the calling activation. A request waits synchronously for
+at most 60 seconds; a timeout leaves the request durable and a late reply
+remains visible in the inbox.
 
-Steering is delivered between model turns. An idle root is not started by an
-incoming message; the next explicit run drains it. Subagents remain present
-until they complete or are explicitly closed, and only locally owned
-subagents may be closed through the model-facing tool. Delivery is at-least-
-once: message IDs are stable and a crash or expired lease can cause redelivery.
+The bundled tools are caller-scoped. Children inherit the self/list/send/
+request/reply/inbox tools but not `agents_close`; a child can ask its parent to
+close it. Raw claims, acknowledgement tokens, leases, and SQLite are native
+Lua bookkeeping rather than model-facing state.
+
+For a running agent, `request` and `steer` are injected only at the existing
+safe model/tool boundary. In the interactive TTY CLI, the maintenance thread
+only signals a coalesced wake; the main thread claims up to 16 actionable
+messages and runs the turn. `note` and `reply` never wake an idle root. At most
+8 autonomous root turns run consecutively; the CLI shows a paused/unread status
+and waits for human input, which resets the budget. A model is never given an
+invented reply when it omits `agents_reply`.
+
+The CLI preserves a partially typed draft and its UTF-8 cursor across an
+autonomous turn. Non-TTY input keeps blocking `getline` behavior, and print or
+one-shot modes do not remain resident for mailbox work. Subagents remain
+present until they complete or are explicitly closed, and only locally owned
+subagents may be closed through the model-facing tool. Delivery is
+at-least-once: message IDs are stable and a crash or expired lease can cause
+redelivery.
 
 The mailbox path is sensitive local state; do not put it on a shared or
 world-readable directory. Mailbox startup failures print a diagnostic and
 disable mailbox only, allowing ordinary chat to continue. The source-tree
 bundled addon path is used by development builds; packaging/install support
 for relocating that addon is a follow-up. Remote A2A transport and process
-control are intentionally out of scope for v1.
+control are intentionally out of scope for v1. The coordinator's pending-work
+API is the host boundary for future ACP and GUI adapters; the current
+self-pipe/readline integration is CLI-specific and is not a remote transport.
 
 ## Key Design Decisions
 
