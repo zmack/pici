@@ -652,6 +652,11 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-rpc_mode PRIVATE pi-http)
     add_test(NAME test-rpc_mode COMMAND test-rpc_mode)
 
+    add_executable(test-readline test/test_readline.cpp src/cli/readline.cpp)
+    target_include_directories(test-readline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-readline PRIVATE pi-core)
+    add_test(NAME test-readline COMMAND test-readline)
+
     add_test(
         NAME test-addons
         COMMAND $<TARGET_FILE:pi-cli>

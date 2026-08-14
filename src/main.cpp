@@ -1747,6 +1747,8 @@ int cmd_run(const cli::Args &args,
       return 0;
   }
 
+  std::string readline_draft;
+  std::size_t readline_cursor = 0;
   while (true) {
     // Build the prompt — let add-ons customise it
     std::string prompt = "\n> ";
@@ -1766,11 +1768,19 @@ int cmd_run(const cli::Args &args,
     const std::string_view readline_status =
         renderer->owns_status_line() || !status_line ? std::string_view{}
                                                      : *status_line;
-    auto maybe_line =
-        cli::readline(prompt, complete_fn, control_fn, readline_status);
-    if (!maybe_line)
+    auto readline_result =
+        cli::readline(prompt, complete_fn, control_fn, readline_status,
+                      readline_draft, readline_cursor);
+    if (readline_result.reason == cli::ReadlineExit::eof)
       break;
-    const std::string &line = *maybe_line;
+    if (readline_result.reason == cli::ReadlineExit::mailbox_wake) {
+      readline_draft = std::move(readline_result.text);
+      readline_cursor = readline_result.cursor;
+      continue;
+    }
+    readline_draft.clear();
+    readline_cursor = 0;
+    const std::string &line = readline_result.text;
     if (line.empty())
       continue;
     if (line == "/exit" || line == "/quit")
