@@ -612,6 +612,37 @@ void test_event_json() {
         CHECK(value.contains("data"));
     });
 
+    tests::register_test("MessageStartEvent: request provenance JSON", []() {
+      UserMessage user;
+      user.content.emplace_back(TextContent{.text = "hello"});
+      auto ordinary = event_to_json(MessageStartEvent{Message{user}});
+      CHECK(!ordinary["data"].contains("request"));
+
+      AssistantMessage assistant;
+      assistant.content.emplace_back(TextContent{.text = "answer"});
+      const auto assistant_json =
+          event_to_json(MessageStartEvent{Message{std::move(assistant)}});
+      CHECK(!assistant_json["data"].contains("request"));
+
+      RequestPresentation presentation{.source = RequestSource::mailbox,
+                                       .message_id = "msg-1",
+                                       .message_kind = "request",
+                                       .sender_agent_id = "agent-1",
+                                       .sender_session_id = "session-1",
+                                       .sender_task_path = "/task",
+                                       .sender_session_name = "session-name"};
+      auto mailbox = event_to_json(
+          MessageStartEvent{Message{std::move(user)}, presentation});
+      const auto &request = mailbox["data"]["request"];
+      CHECK_STR(request.value("source", ""), "mailbox");
+      CHECK_STR(request.value("message_id", ""), "msg-1");
+      CHECK_STR(request.value("message_kind", ""), "request");
+      CHECK_STR(request.value("sender_agent_id", ""), "agent-1");
+      CHECK_STR(request.value("sender_session_id", ""), "session-1");
+      CHECK_STR(request.value("sender_task_path", ""), "/task");
+      CHECK_STR(request.value("sender_session_name", ""), "session-name");
+    });
+
     tests::register_test("ToolEvent: structured status JSON", []() {
         ToolExecutionEndEvent event("call-1", "bash", nullptr, true,
                                     ToolExecutionStatus::blocked);

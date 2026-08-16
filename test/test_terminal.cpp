@@ -296,6 +296,58 @@ void test_dispatch_tool_update() {
     CHECK_EQ(renderer.seen_tool_name, "bash");
     CHECK_EQ(renderer.seen_result, "out");
   });
+
+  tests::register_test("dispatch_event: forwards typed request metadata", [] {
+    class RequestRenderer final : public Renderer {
+    public:
+      void on_text_delta(std::string_view) override {}
+      void on_request(const RendererRequest &request) override {
+        ++calls;
+        seen = request;
+      }
+
+      int calls{0};
+      RendererRequest seen;
+    } renderer;
+
+    UserMessage user;
+    user.content.emplace_back(TextContent{.text = "hello"});
+    user.content.emplace_back(
+        ImageContent{.data = "base64", .mime_type = "image/png"});
+    user.content.emplace_back(ThinkingContent{.thinking = "not user text"});
+    RequestPresentation presentation{.source = RequestSource::mailbox,
+                                     .message_id = "message-1",
+                                     .message_kind = "request",
+                                     .sender_agent_id = "agent-1",
+                                     .sender_session_id = "session-1"};
+
+    dispatch_event(
+        MessageStartEvent{Message{std::move(user)}, std::move(presentation)},
+        renderer);
+    CHECK_EQ(renderer.calls, 1);
+    CHECK_EQ(renderer.seen.text, "hello");
+    CHECK_EQ(renderer.seen.non_text_attachments, std::size_t{2});
+    tests::check_eq_impl(renderer.seen.presentation.source ==
+                             RequestSource::mailbox,
+                         "mailbox source");
+    CHECK_EQ(renderer.seen.presentation.message_id.value(), "message-1");
+    CHECK_EQ(renderer.seen.presentation.sender_agent_id.value(), "agent-1");
+
+    UserMessage ordinary;
+    ordinary.content.emplace_back(TextContent{.text = "ordinary"});
+    dispatch_event(MessageStartEvent{Message{std::move(ordinary)}}, renderer);
+    CHECK_EQ(renderer.calls, 2);
+    tests::check_eq_impl(renderer.seen.presentation.source ==
+                             RequestSource::ordinary,
+                         "ordinary source");
+    tests::check_eq_impl(!renderer.seen.presentation.message_id.has_value(),
+                         "ordinary metadata absent");
+
+    AssistantMessage assistant;
+    assistant.content.emplace_back(TextContent{.text = "assistant"});
+    dispatch_event(MessageStartEvent{Message{std::move(assistant)}}, renderer);
+    CHECK_EQ(renderer.calls, 2);
+  });
 }
 
 // ── cursor_rows_for_rendered ──────────────────────────────────────────────────

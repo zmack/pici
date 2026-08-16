@@ -18,6 +18,37 @@ nlohmann::json message_json( // NOLINT(misc-include-cleaner)
 }
 
 } // namespace
+namespace {
+
+nlohmann::json request_json(const RequestPresentation &request) {
+  const auto source = [&] {
+    switch (request.source) {
+    case RequestSource::ordinary:
+      return "ordinary";
+    case RequestSource::mailbox:
+      return "mailbox";
+    case RequestSource::follow_up:
+      return "follow_up";
+    }
+    return "ordinary";
+  }();
+  nlohmann::json result = {{"source", source}};
+  if (request.message_id)
+    result["message_id"] = *request.message_id;
+  if (request.message_kind)
+    result["message_kind"] = *request.message_kind;
+  if (request.sender_agent_id)
+    result["sender_agent_id"] = *request.sender_agent_id;
+  if (request.sender_session_id)
+    result["sender_session_id"] = *request.sender_session_id;
+  if (request.sender_task_path)
+    result["sender_task_path"] = *request.sender_task_path;
+  if (request.sender_session_name)
+    result["sender_session_name"] = *request.sender_session_name;
+  return result;
+}
+
+} // namespace
 
 nlohmann::json event_to_json(const AgentEvent &event) {
   nlohmann::json data;
@@ -31,8 +62,11 @@ nlohmann::json event_to_json(const AgentEvent &event) {
         } else if constexpr (std::is_same_v<T, TurnEndEvent>) {
           data["message"] = message_json(value.message);
           data["tool_result_count"] = value.tool_results.size();
-        } else if constexpr (std::is_same_v<T, MessageStartEvent> ||
-                             std::is_same_v<T, MessageEndEvent>) {
+        } else if constexpr (std::is_same_v<T, MessageStartEvent>) {
+          data["message"] = message_json(value.message);
+          if (value.request)
+            data["request"] = request_json(*value.request);
+        } else if constexpr (std::is_same_v<T, MessageEndEvent>) {
           data["message"] = message_json(value.message);
         } else if constexpr (std::is_same_v<T, MessageUpdateEvent>) {
           std::visit(

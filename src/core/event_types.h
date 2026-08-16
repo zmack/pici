@@ -4,6 +4,7 @@
 #include <concepts>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <source_location>
 #include <string>
 #include <string_view>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "core/message_types.h"
+#include "core/request_presentation.h"
 
 namespace pi::core {
 
@@ -187,9 +189,14 @@ struct TurnAbortedEvent : EventBase {
 struct MessageStartEvent : EventBase {
   static constexpr EventType type = EventType::message_start;
   Message message;
+  std::optional<RequestPresentation> request;
   explicit MessageStartEvent(
       Message msg, std::source_location loc = std::source_location::current())
       : EventBase(EventType::message_start, loc), message(std::move(msg)) {}
+  MessageStartEvent(Message msg, RequestPresentation request_presentation,
+                    std::source_location loc = std::source_location::current())
+      : EventBase(EventType::message_start, loc), message(std::move(msg)),
+        request(std::move(request_presentation)) {}
 };
 
 struct MessageUpdateEvent : EventBase {

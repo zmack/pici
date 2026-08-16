@@ -672,6 +672,23 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
         } else if constexpr (std::is_same_v<T, TurnEndEvent>) {
           r.on_turn_end();
 
+        } else if constexpr (std::is_same_v<T, MessageStartEvent>) {
+          if (const auto *user = std::get_if<UserMessage>(&e.message)) {
+            RendererRequest request{
+                .presentation = e.request.value_or(RequestPresentation{})};
+            for (const auto &content : user->content) {
+              std::visit(
+                  [&request](const auto &block) {
+                    using Block = std::decay_t<decltype(block)>;
+                    if constexpr (std::is_same_v<Block, TextContent>)
+                      request.text += block.text;
+                    else
+                      ++request.non_text_attachments;
+                  },
+                  content);
+            }
+            r.on_request(request);
+          }
         } else if constexpr (std::is_same_v<T, MessageUpdateEvent>) {
           std::visit(
               [&r](const auto &ae) {

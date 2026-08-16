@@ -2,7 +2,10 @@
 
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/request_presentation.h"
 #include "core/terminal.h"
+
+#include <cstddef>
 
 #include <functional>
 #include <map>
@@ -13,6 +16,12 @@
 #include <string_view>
 
 namespace pi::core {
+
+struct RendererRequest {
+  RequestPresentation presentation;
+  std::string text;
+  std::size_t non_text_attachments{0};
+};
 
 enum class RendererErrorKind {
   llm,       // LLM returned an error response
@@ -46,6 +55,9 @@ public:
 
   // A new user → assistant turn is beginning.
   virtual void on_turn_start() {}
+
+  // The typed request that initiated this turn. Renderers may ignore it.
+  virtual void on_request(const RendererRequest &) {}
 
   // Streaming assistant answer text.  The only pure-virtual method.
   virtual void on_text_delta(std::string_view delta) = 0;

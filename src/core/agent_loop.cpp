@@ -1040,7 +1040,7 @@ void run_agent_loop_worker_impl(std::vector<AgentMessageEnvelope> prompts,
   for (auto &prompt : prompts) {
     if (stop_tok.stop_requested())
       break;
-    publish(MessageStartEvent(prompt.message));
+    publish(MessageStartEvent(prompt.message, prompt.presentation));
     publish(MessageEndEvent(prompt.message));
     context.messages.push_back(prompt.message);
     new_messages.push_back(prompt.message);
@@ -1076,7 +1076,7 @@ void run_agent_loop_worker_impl(std::vector<AgentMessageEnvelope> prompts,
         for (auto &envelope : pending_messages) {
           if (stop_tok.stop_requested())
             break;
-          publish(MessageStartEvent(envelope.message));
+          publish(MessageStartEvent(envelope.message, envelope.presentation));
           publish(MessageEndEvent(envelope.message));
           context.messages.push_back(envelope.message);
           new_messages.push_back(envelope.message);

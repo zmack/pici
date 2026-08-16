@@ -183,6 +183,13 @@ int main() {
                        "recipient_session_id=session-b\n"
                        "recipient_agent_id=(session root)\n"
                        "\ninspect this");
+    CHECK(delivered.front().presentation.source == RequestSource::mailbox);
+    CHECK_EQ(delivered.front().presentation.message_id.value(), "steer-1");
+    CHECK_EQ(delivered.front().presentation.message_kind.value(), "steer");
+    CHECK_EQ(delivered.front().presentation.sender_agent_id.value(),
+             "sender-agent");
+    CHECK_EQ(delivered.front().presentation.sender_session_id.value(),
+             "sender-session");
     delivered.front().on_accepted();
     root_queue.clear();
     CHECK(coordinator.store()
@@ -528,6 +535,9 @@ int main() {
     CHECK(coordinator.claim_idle_root_turn().empty());
     for (const auto &message : idle_messages)
       message.on_accepted();
+    CHECK(idle_messages.front().presentation.source == RequestSource::mailbox);
+    CHECK(idle_messages.front().presentation.message_id.has_value());
+    CHECK(idle_messages.front().presentation.message_kind.has_value());
     coordinator.set_root_running(false);
     CHECK(coordinator.idle_root_work_pending());
     const auto remaining_idle_messages = coordinator.claim_idle_root_turn();

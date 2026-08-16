@@ -1256,21 +1256,29 @@ void test_agent_loop_message_envelopes() {
             return Message{std::move(message)};
         };
         std::vector<AgentMessageEnvelope> prompts;
-        prompts.push_back({
-            .message = make_message("one"),
-            .on_accepted = [&order, &accepted] {
-                CHECK_EQ(order.back(), std::string("end"));
-                ++accepted;
-                order.push_back("accepted");
-                throw std::runtime_error("observer failure");
-            }});
-        prompts.push_back({
-            .message = make_message("two"),
-            .on_accepted = [&order, &accepted] {
-                CHECK_EQ(order.back(), std::string("end"));
-                ++accepted;
-                order.push_back("accepted");
-            }});
+        prompts.push_back(
+            {.message = make_message("one"),
+             .on_accepted =
+                 [&order, &accepted] {
+                   CHECK_EQ(order.back(), std::string("end"));
+                   ++accepted;
+                   order.push_back("accepted");
+                   throw std::runtime_error("observer failure");
+                 },
+             .source = AgentMessageSource::mailbox,
+             .presentation = RequestPresentation{
+                 .source = RequestSource::mailbox, .message_id = "one"}});
+        prompts.push_back(
+            {.message = make_message("two"),
+             .on_accepted =
+                 [&order, &accepted] {
+                   CHECK_EQ(order.back(), std::string("end"));
+                   ++accepted;
+                   order.push_back("accepted");
+                 },
+             .source = AgentMessageSource::ordinary,
+             .presentation = RequestPresentation{
+                 .source = RequestSource::follow_up, .message_id = "two"}});
 
         AgentContext context;
         AgentLoopConfig config;
@@ -1282,18 +1290,29 @@ void test_agent_loop_message_envelopes() {
         config.get_steering_envelopes = [] {
             return std::vector<AgentMessageEnvelope>{};
         };
+        std::vector<RequestPresentation> requests;
         auto stream = run_agent_loop_envelopes(
-            std::move(prompts), context, config, [&order](const AgentEvent& event) {
-                if (const auto* end = std::get_if<MessageEndEvent>(&event)) {
-                    if (std::holds_alternative<UserMessage>(end->message))
-                        order.push_back("end");
-                }
+            std::move(prompts), context, config,
+            [&order, &requests](const AgentEvent &event) {
+              if (const auto *start = std::get_if<MessageStartEvent>(&event)) {
+                if (std::holds_alternative<UserMessage>(start->message))
+                  requests.push_back(start->request.value());
+              } else if (const auto *end =
+                             std::get_if<MessageEndEvent>(&event)) {
+                if (std::holds_alternative<UserMessage>(end->message))
+                  order.push_back("end");
+              }
             });
         std::vector<Message> result;
         for (auto& event : stream) {
             if (const auto* end = std::get_if<AgentEndEvent>(&event))
                 result = end->messages;
         }
+        CHECK_EQ(requests.size(), std::size_t(2));
+        CHECK(requests[0].source == RequestSource::mailbox);
+        CHECK_EQ(requests[0].message_id.value(), "one");
+        CHECK(requests[1].source == RequestSource::follow_up);
+        CHECK_EQ(requests[1].message_id.value(), "two");
 
         CHECK_EQ(accepted, 2);
         CHECK_EQ(result.size(), std::size_t(3));

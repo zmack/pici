@@ -17,6 +17,7 @@
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
+#include "core/request_presentation.h"
 #include "core/stream.h"
 
 #ifdef PI_CPP_OTEL_ENABLED
@@ -51,6 +52,7 @@ struct AgentMessageEnvelope {
   Message message;
   MessageAcceptanceCallback on_accepted;
   AgentMessageSource source{AgentMessageSource::ordinary};
+  RequestPresentation presentation;
 };
 
 struct BeforeToolCallContext {

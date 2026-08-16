@@ -49,6 +49,16 @@ Message mailbox_message_to_message(const MailboxMessage &message) {
   return Message{std::move(user)};
 }
 
+RequestPresentation
+mailbox_request_presentation(const MailboxMessage &message) {
+  return {.source = RequestSource::mailbox,
+          .message_id = message.message_id,
+          .message_kind =
+              std::string(mailbox_message_kind_to_string(message.kind)),
+          .sender_agent_id = message.sender_agent_id,
+          .sender_session_id = message.sender_session_id};
+}
+
 TimestampMs retention_milliseconds(std::int64_t days) {
   constexpr auto day_ms = static_cast<std::int64_t>(24) * 60 * 60 * 1000;
   if (days <= 0)
@@ -557,7 +567,8 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
                       state->condition.notify_all();
                   }
                 },
-            .source = AgentMessageSource::mailbox});
+            .source = AgentMessageSource::mailbox,
+            .presentation = mailbox_request_presentation(claimed_message)});
       }
       return result;
     } catch (...) {
@@ -691,7 +702,8 @@ void MailboxCoordinator::poll_inbox() {
                     state->condition.notify_all();
                 }
               },
-          .source = AgentMessageSource::mailbox};
+          .source = AgentMessageSource::mailbox,
+          .presentation = mailbox_request_presentation(claimed_message)};
       bool routed = false;
       try {
         if (is_root)
