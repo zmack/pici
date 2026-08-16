@@ -12,6 +12,7 @@
 #include "core/session/session_store.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -469,6 +470,194 @@ int main() {
     server.join();
     CHECK(server_result == 0);
     CHECK(!std::filesystem::exists(path));
+  }
+
+  // Deterministic regression driver (plan milestone 6, item 1): an ordinary
+  // request whose two tool calls finish out of call order, followed by a
+  // final answer; and a mailbox request whose reply is queued before the
+  // final acknowledgement. Assertions read the structured event stream
+  // rather than painted terminal output, which pure frame tests already
+  // cover in test_region_renderer.cpp.
+  {
+    Fixture fixture;
+    std::vector<nlohmann::json> output;
+    auto &agent = fixture.session.agent();
+    cli::FauxControlMode mode(
+        fixture.session, *fixture.client, fixture.tool_registry,
+        [&output](const nlohmann::json &value) { output.push_back(value); },
+        [&agent,
+         tool_registry = fixture.tool_registry](const std::string &name) {
+          agent.add_tool(
+              std::make_shared<core::ScriptedTool>(name, tool_registry));
+        });
+
+    mode.handle(
+        {{"type", "round"},
+         {"id", "ordinary-tools"},
+         {"stop_reason", "tool_calls"},
+         {"content",
+          {{{"type", "text"},
+            {"text", "Checking how tool blocks are inserted..."}},
+           {{"type", "tool_call"},
+            {"call_id", "slow-call"},
+            {"name", "slow-tool"},
+            {"args", nlohmann::json::object()},
+            {"result", {{"content", "slow result"}, {"is_error", false}}},
+            {"finish_after_ms", 60}},
+           {{"type", "tool_call"},
+            {"call_id", "fast-call"},
+            {"name", "fast-tool"},
+            {"args", nlohmann::json::object()},
+            {"result", {{"content", "fast result"}, {"is_error", false}}},
+            {"finish_after_ms", 5}}}}});
+    mode.handle(
+        {{"type", "round"},
+         {"id", "ordinary-closing"},
+         {"stop_reason", "end_turn"},
+         {"content",
+          {{{"type", "text"},
+            {"text", "Tool blocks were ordered by completion rather than call "
+                     "order."}}}}});
+    mode.handle({{"type", "turn"},
+                 {"id", "ordinary-driver"},
+                 {"prompt",
+                  {{"text", "Why are parallel tool calls displayed out of "
+                            "order?"},
+                   {"source", "ordinary"}}}});
+    mode.wait_for_idle();
+    CHECK(output.back().value("type", "") == "turn.completed");
+
+    std::optional<std::uint64_t> request_sequence;
+    std::optional<std::uint64_t> slow_start_sequence;
+    std::optional<std::uint64_t> fast_start_sequence;
+    std::optional<std::uint64_t> slow_end_sequence;
+    std::optional<std::uint64_t> fast_end_sequence;
+    std::optional<std::uint64_t> answer_sequence;
+    for (const auto &value : output) {
+      if (value.value("type", "") != "event")
+        continue;
+      const auto event = value.value("event", "");
+      const auto &data = value["data"];
+      const auto sequence = value.value("sequence", std::uint64_t{0});
+      if (event == "message_start" && data.contains("request") &&
+          data["request"].value("source", "") == "ordinary")
+        request_sequence = sequence;
+      else if (event == "tool_execution_start" &&
+               data.value("tool_call_id", "") == "slow-call")
+        slow_start_sequence = sequence;
+      else if (event == "tool_execution_start" &&
+               data.value("tool_call_id", "") == "fast-call")
+        fast_start_sequence = sequence;
+      else if (event == "tool_execution_end" &&
+               data.value("tool_call_id", "") == "slow-call")
+        slow_end_sequence = sequence;
+      else if (event == "tool_execution_end" &&
+               data.value("tool_call_id", "") == "fast-call")
+        fast_end_sequence = sequence;
+      else if (event == "message_end" &&
+               data["message"].value("stopReason", "") == "stop" &&
+               !data["message"]["content"].empty() &&
+               data["message"]["content"][0]
+                       .value("text", "")
+                       .find("ordered by completion") != std::string::npos)
+        answer_sequence = sequence;
+    }
+    CHECK(request_sequence.has_value());
+    CHECK(slow_start_sequence.has_value() && fast_start_sequence.has_value());
+    CHECK(slow_end_sequence.has_value() && fast_end_sequence.has_value());
+    CHECK(answer_sequence.has_value());
+    // Calls dispatch in call order even though the fast tool's shorter
+    // finish_after_ms makes it complete first. Their completion events may
+    // land in either order on the wire; the renderer is responsible for
+    // pinning both regions to call order regardless (see
+    // test_tool_regions_preserve_call_order in test_region_renderer.cpp).
+    CHECK(request_sequence < slow_start_sequence);
+    CHECK(slow_start_sequence < fast_start_sequence);
+    // The final answer always lands after both tool completions regardless
+    // of their out-of-order finish.
+    CHECK(slow_end_sequence < answer_sequence);
+    CHECK(fast_end_sequence < answer_sequence);
+    mode.stop();
+  }
+
+  {
+    Fixture fixture;
+    std::vector<nlohmann::json> output;
+    auto &agent = fixture.session.agent();
+    cli::FauxControlMode mode(
+        fixture.session, *fixture.client, fixture.tool_registry,
+        [&output](const nlohmann::json &value) { output.push_back(value); },
+        [&agent,
+         tool_registry = fixture.tool_registry](const std::string &name) {
+          agent.add_tool(
+              std::make_shared<core::ScriptedTool>(name, tool_registry));
+        });
+
+    mode.handle(
+        {{"type", "round"},
+         {"id", "mailbox-reply"},
+         {"stop_reason", "tool_calls"},
+         {"content",
+          {{{"type", "tool_call"},
+            {"call_id", "reply-call"},
+            {"name", "agents_reply"},
+            {"args", {{"message_id", "message-1"}, {"text", "queued reply"}}},
+            {"result", {{"content", "queued"}, {"is_error", false}}},
+            {"presentation",
+             {{"kind", "mailbox_reply_queued"},
+              {"request_message_id", "message-1"},
+              {"recipient_session_id", "session-luna"},
+              {"recipient_agent_id", "agent-luna"},
+              {"text", "queued reply"}}},
+            {"finish_after_ms", 5}}}}});
+    mode.handle({{"type", "round"},
+                 {"id", "mailbox-closing"},
+                 {"stop_reason", "end_turn"},
+                 {"content",
+                  {{{"type", "text"},
+                    {"text", "The mailbox reply was queued successfully."}}}}});
+    mode.handle({{"type", "turn"},
+                 {"id", "mailbox-driver"},
+                 {"prompt",
+                  {{"text", "Implement milestone 2 and verify it in tmux."},
+                   {"source", "mailbox"},
+                   {"message_id", "message-1"},
+                   {"sender_task_path", "/root/luna"}}}});
+    mode.wait_for_idle();
+    CHECK(output.back().value("type", "") == "turn.completed");
+
+    std::optional<std::uint64_t> request_sequence;
+    std::optional<std::uint64_t> reply_sequence;
+    std::optional<std::uint64_t> answer_sequence;
+    for (const auto &value : output) {
+      if (value.value("type", "") != "event")
+        continue;
+      const auto event = value.value("event", "");
+      const auto &data = value["data"];
+      const auto sequence = value.value("sequence", std::uint64_t{0});
+      if (event == "message_start" && data.contains("request") &&
+          data["request"].value("source", "") == "mailbox")
+        request_sequence = sequence;
+      else if (event == "tool_presentation") {
+        CHECK(data.value("kind", "") == "mailbox_reply_queued");
+        CHECK(data.value("request_message_id", "") == "message-1");
+        CHECK(data.value("recipient_agent_id", "") == "agent-luna");
+        CHECK(data.value("state", "") == "queued");
+        reply_sequence = sequence;
+      } else if (event == "message_end" &&
+                 data["message"].value("stopReason", "") == "stop" &&
+                 !data["message"]["content"].empty() &&
+                 data["message"]["content"][0]
+                         .value("text", "")
+                         .find("queued successfully") != std::string::npos)
+        answer_sequence = sequence;
+    }
+    CHECK(request_sequence.has_value());
+    CHECK(reply_sequence.has_value());
+    CHECK(answer_sequence.has_value());
+    CHECK(request_sequence < reply_sequence);
+    CHECK(reply_sequence < answer_sequence);
+    mode.stop();
   }
 
   std::cout << "faux control mode: " << (failed == 0 ? "passed" : "failed")

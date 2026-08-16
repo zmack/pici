@@ -118,6 +118,40 @@ start, not from the preceding update. Updates must be sorted by `after_ms`.
 result content, error state, and finish delay default to an empty object, empty
 list, empty string, `false`, and zero respectively.
 
+A `tool_call` may include an optional `presentation` object to exercise a
+typed domain presentation notice — currently only a mailbox reply receipt —
+without a real mailbox database:
+
+```json
+{
+  "type": "tool_call",
+  "call_id": "reply-call",
+  "name": "agents_reply",
+  "args": {"message_id": "message-1", "text": "Milestone 5 is done."},
+  "result": {"content": "queued", "is_error": false},
+  "presentation": {
+    "kind": "mailbox_reply_queued",
+    "request_message_id": "message-1",
+    "recipient_session_id": "session-luna",
+    "recipient_agent_id": "agent-luna",
+    "text": "Milestone 5 is done."
+  },
+  "finish_after_ms": 20
+}
+```
+
+`presentation.kind` must currently be `mailbox_reply_queued`.
+`request_message_id`, `recipient_session_id`, and `text` are required strings;
+`recipient_agent_id` is an optional string. The notice fires only once the
+tool's scripted execution actually finishes and only when `result.is_error`
+is `false` or omitted — a failed or cancelled tool call never emits it,
+mirroring the real `pici.mailbox.reply` binding, which only calls the
+presentation callback after `MailboxCoordinator::reply()` returns a queued
+receipt. The notice reaches the renderer as a `tool_presentation` event (see
+[Implementation map](#implementation-map)) and, under `--render region`,
+paints a persistent `REPLY -> <recipient> queued` block rather than being
+inferred from the tool's own result text.
+
 `delay_between_ms` paces synthesized assistant streaming events and is
 cancellable; it does not control tool timing. Use unique call IDs. Behaviors
 are consumed by call ID exactly once, so an accidental replay returns an error
@@ -329,10 +363,22 @@ pixels.
 ## Implementation map
 
 - `src/core/providers/faux_control.{h,cpp}`: round compilation, queued model
-  replay, scripted tools, and behavior storage.
+  replay, scripted tools, behavior storage, and the optional
+  `presentation` notice on a scripted tool call.
 - `src/cli/faux_control_mode.{h,cpp}`: commands, turn lifecycle, event output,
   and the Unix socket server.
+- `src/core/message_types.h`: `ToolPresentationNotice` /
+  `ToolPresentationCallback`, threaded through `ToolExecutionContext`.
+- `src/core/event_types.h` / `event_json.cpp`: the `tool_presentation`
+  `AgentEvent` and its wire encoding.
+- `src/core/region_renderer.{h,cpp}`: `RegionReplyBlock` and
+  `Renderer::on_mailbox_reply_queued`, which paint the persistent
+  `REPLY -> <recipient> queued` block.
 - `src/main.cpp`: synthetic model/tool wiring and renderer dispatch.
-- `test/test_faux_control.cpp`: compilation, timing, results, and cancellation.
+- `docs/region-renderer.md`: the semantic turn model this presentation
+  notice feeds into (`REQUEST` / `WORK` / `ANSWER` / `REPLY`).
+- `test/test_faux_control.cpp`: compilation, timing, results, cancellation,
+  and presentation-notice suppression on error/cancellation.
 - `test/test_faux_control_mode.cpp`: lifecycle, concurrency, framing,
-  reconnects, peer drops, and filesystem safety.
+  reconnects, peer drops, filesystem safety, and the deterministic
+  ordinary/mailbox regression driver described above.

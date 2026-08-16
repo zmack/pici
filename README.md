@@ -216,6 +216,10 @@ tool output. It coalesces streaming updates into roughly 60fps frames, keeps
 each tool call at its start position, owns the status row, and supports line,
 page, top, and bottom scrolling. While readline is active, status and scroll
 updates use save/restore-cursor painting so they do not disturb the input row.
+It also structures each turn into `REQUEST` / `WORK` / `ANSWER` / `REPLY`
+sections — see [region renderer architecture](docs/region-renderer.md) for the
+semantic turn model, provisional-text classification, and mailbox reply
+truthfulness guarantees.
 
 Use [faux control renderer testing](docs/faux-control.md) to drive the real
 agent loop and renderer with deterministic text, thinking, concurrent tool
