@@ -49,6 +49,7 @@ struct Args {
   bool print_mode{false}; // -p: run prompt and exit
   bool rpc_mode{false};   // --mode rpc: JSONL control protocol on stdio
   std::string render;     // auto | markdown | raw
+  std::string faux_control_socket; // --faux-control <socket>
 
   // Listing
   bool list_models{false};

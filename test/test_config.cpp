@@ -331,6 +331,21 @@ path = "/toml/mailbox.sqlite3"
     CHECK(threw);
   }
 
+  // faux-control selects a Unix socket without consuming unrelated arguments
+  {
+    auto args =
+        parse({"pi", "--faux-control", "/tmp/faux.sock", "--render", "region"});
+    CHECK_EQ(args.faux_control_socket, std::string("/tmp/faux.sock"));
+    CHECK_EQ(args.render, std::string("region"));
+    CHECK(args.diagnostics.empty());
+    std::vector<std::string> values{"pi", "--faux-control", "/tmp/merged.sock"};
+    std::vector<char *> argv;
+    for (auto &value : values)
+      argv.push_back(value.data());
+    auto merged = load_and_merge(static_cast<int>(argv.size()), argv.data());
+    CHECK_EQ(merged.faux_control_socket, std::string("/tmp/merged.sock"));
+  }
+
   // auth commands have an explicit, CLI-only grammar
   {
     auto args = parse({"pi", "--config", "/tmp/config.toml", "auth", "login",

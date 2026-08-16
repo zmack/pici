@@ -8,6 +8,7 @@
 #include <ctime>
 #include <exception>
 #include <format>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -32,6 +33,7 @@
 
 #include "cli/args.h"
 #include "cli/config.h"
+#include "cli/faux_control_mode.h"
 #include "cli/model_selector.h"
 #include "cli/readline.h"
 #include "cli/rpc_mode.h"
@@ -54,6 +56,7 @@
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/otel_init.h"
+#include "core/providers/faux_control.h"
 #include "core/providers/muse_messages.h"
 #include "core/providers/openai_codex_responses.h"
 #include "core/providers/openai_completions.h"
@@ -844,12 +847,43 @@ std::vector<cli::ContextFile> load_context_files() {
 
 int cmd_run(const cli::Args &args,
             const std::shared_ptr<const core::ModelRegistry> &registry) {
-  const auto resolution = resolve_model(args, registry);
-  if (!resolution) {
-    std::cerr << "error: " << resolution.error << "\n";
-    return 1;
+  auto effective_registry = registry;
+  std::shared_ptr<core::RemoteFauxClient> remote_client;
+  std::shared_ptr<core::ScriptedToolRegistry> scripted_registry;
+  core::Model model;
+  if (args.faux_control_socket.empty()) {
+    const auto resolution = resolve_model(args, registry);
+    if (!resolution) {
+      std::cerr << "error: " << resolution.error << "\n";
+      return 1;
+    }
+    model = *resolution.model;
+  } else {
+    core::ProviderConfig provider;
+    provider.id = "faux-control";
+    provider.api = "faux-control";
+    provider.base_url = "http://faux-control";
+    provider.auth = core::ProviderAuthPolicy::none;
+    core::ConfiguredModel configured;
+    configured.id = "faux-control";
+    configured.name = "faux-control";
+    provider.models.push_back(configured);
+    effective_registry = std::make_shared<const core::ModelRegistry>(
+        std::map<std::string, core::ProviderConfig>{
+            {"faux-control", provider}});
+    model.id = "faux-control";
+    model.name = "faux-control";
+    model.api = "faux-control";
+    model.provider = "faux-control";
+    model.base_url = "http://faux-control";
+    model.input_capabilities = {"text"};
+    model.context_window = 128000;
+    model.max_tokens = 4096;
+    remote_client = std::make_shared<core::RemoteFauxClient>();
+    scripted_registry = std::make_shared<core::ScriptedToolRegistry>();
+    core::LLMClientRegistry::instance().register_client(
+        "faux-control", [remote_client] { return remote_client; });
   }
-  core::Model model = *resolution.model;
   if (model.provider == "openai-codex" && !args.api_key.empty()) {
     std::cerr << "error: --api-key cannot be used with openai-codex; run "
                  "pi-cli auth login openai-codex\n";
@@ -915,7 +949,7 @@ int cmd_run(const cli::Args &args,
 
   core::Agent::Options opts;
   opts.model = model;
-  opts.model_registry = registry;
+  opts.model_registry = effective_registry;
   opts.system_prompt = args.system_prompt;
   opts.thinking_level = to_core_thinking(args.thinking);
   auto hook_runtime = std::make_shared<HookRuntime>();
@@ -936,7 +970,8 @@ int cmd_run(const cli::Args &args,
     }
   }
   opts.diagnostics = stream_diagnostics;
-  auto auth_resolver = std::make_shared<pi::auth::AuthResolver>(registry);
+  auto auth_resolver =
+      std::make_shared<pi::auth::AuthResolver>(effective_registry);
   if (!args.api_key.empty())
     auth_resolver->set_runtime_api_key(model.provider, args.api_key);
   opts.get_auth =
@@ -1018,7 +1053,9 @@ int cmd_run(const cli::Args &args,
     hooks_list_saved = hooks_list;
     return core::compose_hooks(std::move(hooks_list));
   };
-  auto hooks = load_hooks();
+  std::shared_ptr<core::LuaHooks> hooks;
+  if (args.faux_control_socket.empty())
+    hooks = load_hooks();
   {
     std::scoped_lock lock(hook_runtime->mutex);
     hook_runtime->hooks = hooks;
@@ -1091,8 +1128,16 @@ int cmd_run(const cli::Args &args,
                               .session_store = store,
                               .sandbox_policy = sandbox_policy});
   auto &agent = runtime.agent();
+  std::function<void(const std::string &)> faux_tool_registrar;
+  if (scripted_registry) {
+    faux_tool_registrar = [scripted_registry, &agent](const std::string &name) {
+      agent.add_tool(
+          std::make_shared<core::ScriptedTool>(name, scripted_registry));
+    };
+  }
 
-  if (!args.no_tools && !args.no_builtin_tools) {
+  if (!args.no_tools && !args.no_builtin_tools &&
+      args.faux_control_socket.empty()) {
     if (args.tools.empty()) {
       agent.set_tools(core::create_all_tools(std::filesystem::current_path(),
                                              sandbox_policy));
@@ -1110,7 +1155,8 @@ int cmd_run(const cli::Args &args,
     }
   }
 
-  if (!args.no_tools && !args.tools_dir.empty()) {
+  if (!args.no_tools && !args.tools_dir.empty() &&
+      args.faux_control_socket.empty()) {
     for (auto &t : core::load_lua_tools(args.tools_dir)) {
       if (args.tools.empty()) {
         agent.add_tool(t);
@@ -1132,7 +1178,8 @@ int cmd_run(const cli::Args &args,
                    hooks->registered_tools.end());
     agent.set_tools(std::move(tools));
   };
-  apply_hook_tools();
+  if (args.faux_control_socket.empty())
+    apply_hook_tools();
 
   std::vector<std::string> tool_names;
   for (const auto &tool : agent.state().tools())
@@ -1230,7 +1277,8 @@ int cmd_run(const cli::Args &args,
         std::scoped_lock lock(hook_runtime->mutex);
         hook_runtime->hooks = hooks;
       }
-      apply_hook_tools();
+      if (args.faux_control_socket.empty())
+        apply_hook_tools();
     }
   }
   auto mailbox_observer = std::make_shared<MailboxTaskObserver>();
@@ -1577,7 +1625,8 @@ int cmd_run(const cli::Args &args,
       std::scoped_lock lock(hook_runtime->mutex);
       hook_runtime->hooks = hooks;
     }
-    apply_hook_tools();
+    if (args.faux_control_socket.empty())
+      apply_hook_tools();
     configure_hooks();
   };
 
@@ -1628,6 +1677,18 @@ int cmd_run(const cli::Args &args,
   }
 
   configure_hooks();
+
+  if (remote_client) {
+    auto faux_renderer = make_renderer(args);
+    VerboseRenderer renderer_adapter(*faux_renderer, args.verbose,
+                                     stream_diagnostics, hook_runtime);
+    return cli::run_faux_control_socket(
+        runtime, *remote_client, scripted_registry, args.faux_control_socket,
+        faux_tool_registrar,
+        [&renderer_adapter](const core::AgentEvent &event) {
+          core::dispatch_event(event, renderer_adapter);
+        });
+  }
 
   if (args.rpc_mode)
     return cli::run_rpc_mode(runtime, std::cin, std::cout, task_manager.get(),

@@ -685,6 +685,7 @@ Args merge_args(const Args &config, const Args &cli) {
   out.hooks_dir = merge_str(config.hooks_dir, cli.hooks_dir);
 
   out.render = merge_str(config.render, cli.render);
+  out.faux_control_socket = cli.faux_control_socket;
   out.verbose = config.verbose || cli.verbose;
   out.no_context_files = config.no_context_files || cli.no_context_files;
 

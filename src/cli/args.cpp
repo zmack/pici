@@ -221,6 +221,8 @@ Args parse_args(int argc, char **argv) {
       }
     } else if (arg == "--session-dir") {
       result.session_dir = std::string(need("--session-dir"));
+    } else if (arg == "--faux-control") {
+      result.faux_control_socket = std::string(need("--faux-control"));
     } else if (arg == "--sandbox") {
       auto v = need("--sandbox");
       if (v == "auto" || v == "required" || v == "disabled" || v == "off") {
@@ -312,6 +314,7 @@ void print_help(const char *prog) {
          "  --print, -p                 Non-interactive: run prompt and exit\n"
          "  --mode rpc                  JSONL control protocol on "
          "stdin/stdout\n"
+         "  --faux-control <socket>     JSONL faux control over Unix socket\n"
          "  --test <file>               Run Lua test file and exit "
          "(repeatable)\n"
          "  --continue, -c              Resume the most recent session\n"

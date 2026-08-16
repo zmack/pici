@@ -483,6 +483,7 @@ add_library(pi-core
     src/core/env_api_keys.cpp
     src/core/models.cpp
     src/core/providers/faux.cpp
+    src/core/providers/faux_control.cpp
     src/core/providers/transform_messages.cpp
     src/core/otel_init.cpp
     src/core/session/session_id.cpp
@@ -544,6 +545,7 @@ add_executable(pi-cli
     src/cli/readline.cpp
     src/cli/model_selector.cpp
     src/cli/rpc_mode.cpp
+    src/cli/faux_control_mode.cpp
     src/cli/system_prompt.cpp
     src/cli/tree_selector.cpp
 )
@@ -598,6 +600,9 @@ if(PI_CPP_BUILD_TESTS)
     add_executable(test-faux_client test/test_faux_client.cpp)
     target_link_libraries(test-faux_client PRIVATE pi-core)
     add_test(NAME test-faux_client COMMAND test-faux_client)
+    add_executable(test-faux_control test/test_faux_control.cpp)
+    target_link_libraries(test-faux_control PRIVATE pi-core)
+    add_test(NAME test-faux_control COMMAND test-faux_control)
 
     add_executable(test-auth_resolver test/test_auth_resolver.cpp)
     target_link_libraries(test-auth_resolver PRIVATE pi-http)
@@ -656,6 +661,10 @@ if(PI_CPP_BUILD_TESTS)
     target_include_directories(test-rpc_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test-rpc_mode PRIVATE pi-http)
     add_test(NAME test-rpc_mode COMMAND test-rpc_mode)
+    add_executable(test-faux_control_mode test/test_faux_control_mode.cpp src/cli/faux_control_mode.cpp)
+    target_include_directories(test-faux_control_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-faux_control_mode PRIVATE pi-core)
+    add_test(NAME test-faux_control_mode COMMAND test-faux_control_mode)
 
     add_executable(test-readline test/test_readline.cpp src/cli/readline.cpp)
     target_include_directories(test-readline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
