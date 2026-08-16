@@ -360,6 +360,38 @@ void append_request_lines(std::vector<std::string> &lines,
   }
 }
 
+enum class RegionSection { none, provisional, work, answer, truncated };
+
+RegionSection region_section(RegionAssistantTextKind kind) {
+  switch (kind) {
+  case RegionAssistantTextKind::provisional:
+    return RegionSection::provisional;
+  case RegionAssistantTextKind::work:
+    return RegionSection::work;
+  case RegionAssistantTextKind::answer:
+    return RegionSection::answer;
+  case RegionAssistantTextKind::answer_truncated:
+    return RegionSection::truncated;
+  }
+  return RegionSection::provisional;
+}
+
+std::string_view region_section_heading(RegionSection section) {
+  switch (section) {
+  case RegionSection::provisional:
+    return "\033[38;5;245mASSISTANT...\033[0m";
+  case RegionSection::work:
+    return "\033[38;5;245mWORK\033[0m";
+  case RegionSection::answer:
+    return "\033[1;97mANSWER\033[0m";
+  case RegionSection::truncated:
+    return "\033[1;93mANSWER | TRUNCATED\033[0m";
+  case RegionSection::none:
+    return {};
+  }
+  return {};
+}
+
 std::vector<std::string> turn_region_lines(const RegionState &state, int width,
                                            int content_rows) {
   std::vector<std::string> lines;
@@ -377,8 +409,19 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
   std::size_t seen_tools = 0;
   for (const auto &turn : state.turns) {
     append_request_lines(lines, turn, width);
+    RegionSection section = RegionSection::none;
+    const auto append_section_heading = [&](RegionSection next) {
+      if (next == section)
+        return;
+      section = next;
+      auto heading_lines =
+          split_region_lines(region_section_heading(next), width);
+      lines.insert(lines.end(), std::make_move_iterator(heading_lines.begin()),
+                   std::make_move_iterator(heading_lines.end()));
+    };
     for (const auto &block : turn.blocks) {
       if (const auto *text = std::get_if<RegionTextBlock>(&block)) {
+        append_section_heading(region_section(text->kind));
         auto rendered = render_visible_markdown(text->raw);
         auto text_lines = split_region_lines(rendered, width);
         lines.insert(lines.end(), std::make_move_iterator(text_lines.begin()),
@@ -386,6 +429,7 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
         continue;
       }
       if (const auto *thinking = std::get_if<RegionThinkingBlock>(&block)) {
+        append_section_heading(RegionSection::work);
         auto rendered = render_visible_markdown("[thinking]\n" + thinking->raw);
         auto thinking_lines = split_region_lines(rendered, width);
         lines.insert(lines.end(),
@@ -395,6 +439,7 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
       }
 
       const auto &tool = std::get<RegionToolBlock>(block);
+      append_section_heading(RegionSection::work);
       const bool expanded = content_rows > 1 &&
                             seen_tools + kMaxExpandedToolRegions >= tool_count;
       ++seen_tools;
@@ -536,6 +581,11 @@ public:
     std::scoped_lock lock(mutex_);
     if (state_.has_active_turn) {
       auto &turn = state_.turns[state_.active_turn_index];
+      if (!turn.blocks.empty()) {
+        if (auto *text = std::get_if<RegionTextBlock>(&turn.blocks.back()))
+          if (text->kind == RegionAssistantTextKind::provisional)
+            text->kind = RegionAssistantTextKind::work;
+      }
       turn.blocks.emplace_back(RegionThinkingBlock{});
     }
     state_.thinking.clear();
@@ -581,6 +631,12 @@ public:
     if (state_.has_active_turn) {
       auto &turn = state_.turns[state_.active_turn_index];
       const auto block_index = turn.blocks.size();
+      if (!turn.blocks.empty()) {
+        if (auto *text = std::get_if<RegionTextBlock>(&turn.blocks.back()))
+          if (text->kind == RegionAssistantTextKind::provisional)
+            text->kind = RegionAssistantTextKind::work;
+      }
+
       turn.blocks.emplace_back(std::move(tool));
       state_.tool_addresses[std::string(call_id)] =
           RegionToolAddress{state_.active_turn_index, block_index};
@@ -686,11 +742,34 @@ public:
     mark_dirty_locked();
   }
 
-  void on_message_end(const TokenUsage &usage) override {
+  void on_message_end_presentation(const MessageEndPresentation &end) override {
     std::scoped_lock lock(mutex_);
-    state_.last_usage = usage;
+    if (state_.has_active_turn &&
+        state_.active_turn_index < state_.turns.size()) {
+      auto &turn = state_.turns[state_.active_turn_index];
+      RegionAssistantTextKind kind = RegionAssistantTextKind::work;
+      if (end.stop_reason == StopReason::stop)
+        kind = RegionAssistantTextKind::answer;
+      else if (end.stop_reason == StopReason::length)
+        kind = RegionAssistantTextKind::answer_truncated;
+      if (!turn.blocks.empty()) {
+        if (auto *text = std::get_if<RegionTextBlock>(&turn.blocks.back()))
+          text->kind = kind;
+        else if (end.stop_reason == StopReason::stop ||
+                 end.stop_reason == StopReason::length)
+          turn.blocks.emplace_back(RegionTextBlock{.kind = kind});
+      } else if (end.stop_reason == StopReason::stop ||
+                 end.stop_reason == StopReason::length) {
+        turn.blocks.emplace_back(RegionTextBlock{.kind = kind});
+      }
+    }
+    state_.last_usage = end.usage;
     state_.revision = ++revision_;
     mark_dirty_locked();
+  }
+
+  void on_message_end(const TokenUsage &usage) override {
+    on_message_end_presentation(MessageEndPresentation{.usage = usage});
   }
 
   void on_command_output(std::string_view text) override {
@@ -732,6 +811,16 @@ public:
     {
       std::scoped_lock lock(mutex_);
       state_.status_text = "error: ";
+      if (state_.has_active_turn &&
+          state_.active_turn_index < state_.turns.size()) {
+        auto &turn = state_.turns[state_.active_turn_index];
+        if (!turn.blocks.empty()) {
+          if (auto *text = std::get_if<RegionTextBlock>(&turn.blocks.back()))
+            if (text->kind == RegionAssistantTextKind::provisional)
+              text->kind = RegionAssistantTextKind::work;
+        }
+      }
+
       state_.status_text.append(message.data(), message.size());
       state_.has_error = true;
       state_.revision = ++revision_;

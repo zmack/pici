@@ -615,6 +615,173 @@ void test_request_audit_behaviors() {
          "sanitized request removes cursor, clear-screen, and OSC controls");
 }
 
+void test_assistant_section_classification() {
+  auto count_heading = [](const pi::core::RegionFrame &frame,
+                          std::string_view heading) {
+    std::size_t count = 0;
+    for (const auto &line : frame.lines)
+      count += line.find(heading) != std::string::npos ? 1U : 0U;
+    return count;
+  };
+
+  pi::core::RegionState state;
+  pi::core::RegionTurn turn;
+  turn.blocks.emplace_back(pi::core::RegionTextBlock{
+      .raw = "streaming preamble",
+      .kind = pi::core::RegionAssistantTextKind::provisional});
+  turn.blocks.emplace_back(pi::core::RegionTextBlock{
+      .raw = "checking tools",
+      .kind = pi::core::RegionAssistantTextKind::work});
+  turn.blocks.emplace_back(pi::core::RegionThinkingBlock{"reasoning"});
+  pi::core::RegionToolBlock tool;
+  tool.call_id = "tool-call";
+  tool.tool_name = "tool";
+  tool.args_json = "{}";
+  tool.running = false;
+  tool.raw_output = "tool output";
+  turn.blocks.emplace_back(std::move(tool));
+  turn.blocks.emplace_back(pi::core::RegionTextBlock{
+      .raw = "more work", .kind = pi::core::RegionAssistantTextKind::work});
+  turn.blocks.emplace_back(pi::core::RegionTextBlock{
+      .raw = "final answer",
+      .kind = pi::core::RegionAssistantTextKind::answer});
+  state.turns.push_back(std::move(turn));
+
+  auto frame = pi::core::build_region_frame(state, 80, 30);
+  expect(count_heading(frame, "ASSISTANT...") == 1,
+         "streaming assistant text has a provisional heading");
+  expect(count_heading(frame, "WORK") == 1,
+         "contiguous narration, thinking, and tools share one WORK heading");
+  expect(count_heading(frame, "ANSWER") == 1,
+         "terminal assistant text has one ANSWER heading");
+  expect(frame.lines.back().find("final answer") != std::string::npos,
+         "final answer remains after ordered work blocks");
+
+  auto &first = std::get<pi::core::RegionTextBlock>(state.turns[0].blocks[0]);
+  first.kind = pi::core::RegionAssistantTextKind::answer;
+  frame = pi::core::build_region_frame(state, 80, 30);
+  expect(count_heading(frame, "ASSISTANT...") == 0 &&
+             count_heading(frame, "ANSWER") == 2,
+         "reclassification relabels the existing provisional block atomically");
+
+  pi::core::RegionState truncated;
+  pi::core::RegionTurn truncated_turn;
+  truncated_turn.blocks.emplace_back(pi::core::RegionTextBlock{
+      .raw = "partial output",
+      .kind = pi::core::RegionAssistantTextKind::answer_truncated});
+  truncated.turns.push_back(std::move(truncated_turn));
+  frame = pi::core::build_region_frame(truncated, 80, 10);
+  expect(count_heading(frame, "ANSWER | TRUNCATED") == 1,
+         "length stop reasons use a truncated answer heading");
+
+  pi::core::RegionState failed_state;
+  pi::core::RegionTurn failed_turn;
+  failed_turn.blocks.emplace_back(pi::core::RegionTextBlock{
+      .raw = "error text", .kind = pi::core::RegionAssistantTextKind::work});
+  failed_state.turns.push_back(std::move(failed_turn));
+  frame = pi::core::build_region_frame(failed_state, 80, 10);
+  expect(count_heading(frame, "WORK") == 1 &&
+             count_heading(frame, "ANSWER") == 0,
+         "error and aborted assistant text remain under WORK");
+
+  pi::core::RegionState empty_answer;
+  pi::core::RegionTurn empty_turn;
+  empty_turn.blocks.emplace_back(pi::core::RegionTextBlock{
+      .kind = pi::core::RegionAssistantTextKind::answer});
+  empty_answer.turns.push_back(std::move(empty_turn));
+  frame = pi::core::build_region_frame(empty_answer, 80, 10);
+  expect(count_heading(frame, "ANSWER") == 1,
+         "empty terminal answers still expose an ANSWER section");
+
+  const auto visible_length = [](std::string_view line) {
+    std::size_t length = 0;
+    for (std::size_t index = 0; index < line.size(); ++index) {
+      if (line[index] != '\033') {
+        ++length;
+        continue;
+      }
+      ++index;
+      if (index < line.size() && line[index] == '[')
+        while (index + 1 < line.size() && line[++index] != 'm')
+          ;
+    }
+    return length;
+  };
+  frame = pi::core::build_region_frame(state, 5, 4);
+  for (const auto &line : frame.lines) {
+    expect(line.ends_with("\033[0m"),
+           "semantic headings and content reset every narrow row");
+    expect(visible_length(line) <= 5,
+           "semantic headings remain within narrow physical width");
+  }
+}
+
+void test_callback_classification_lifecycle() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates callback classification capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->on_turn_start();
+    renderer->on_text_delta("streaming preamble");
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    renderer->on_tool_start("call", "tool", "{}");
+    renderer->on_message_end_presentation(pi::core::MessageEndPresentation{
+        .stop_reason = pi::core::StopReason::tool_use});
+    renderer->on_tool_end("call", "tool", TestToolResult{"tool result"}, false);
+    renderer->on_text_delta("final answer");
+    renderer->on_message_end_presentation(pi::core::MessageEndPresentation{
+        .stop_reason = pi::core::StopReason::stop});
+    renderer->on_turn_end();
+
+    renderer->on_turn_start();
+    renderer->on_text_delta("truncated text");
+    renderer->on_message_end_presentation(pi::core::MessageEndPresentation{
+        .stop_reason = pi::core::StopReason::length});
+    renderer->on_turn_end();
+
+    renderer->on_turn_start();
+    renderer->on_text_delta("error text");
+    renderer->on_error(pi::core::RendererErrorKind::llm, "failed");
+    renderer->on_message_end_presentation(pi::core::MessageEndPresentation{
+        .stop_reason = pi::core::StopReason::error});
+    renderer->on_turn_end();
+
+    renderer->on_turn_start();
+    renderer->on_text_delta("aborted text");
+    renderer->on_message_end_presentation(pi::core::MessageEndPresentation{
+        .stop_reason = pi::core::StopReason::aborted});
+    renderer->on_turn_end();
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+  expect(output.find("ASSISTANT...") != std::string::npos,
+         "callback text is initially provisional");
+  expect(output.find("WORK") != std::string::npos,
+         "tool-use preamble and failed text are rendered as work");
+  expect(output.find("ANSWER") != std::string::npos,
+         "stop callback reclassifies the existing text as answer");
+  expect(output.find("ANSWER | TRUNCATED") != std::string::npos,
+         "length callback preserves a truncated answer label");
+  expect(output.find("[38;5;245mWORK") != std::string::npos,
+         "WORK uses subordinate renderer-owned styling");
+  expect(output.find("[1;97mANSWER") != std::string::npos,
+         "ANSWER uses high-contrast renderer-owned styling");
+  expect(output.find("ASSISTANT...") < output.find("WORK") &&
+             output.find("WORK") < output.find("ANSWER"),
+         "callback lifecycle preserves provisional, work, and answer order");
+}
+
 void test_error_survives_fast_turn_end() {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
@@ -669,6 +836,8 @@ int main() {
   test_idle_paint_saves_cursor_and_scrolls();
   test_explicit_turn_request_sections();
   test_request_audit_behaviors();
+  test_assistant_section_classification();
+  test_callback_classification_lifecycle();
   test_error_survives_fast_turn_end();
   if (failed != 0)
     return 1;

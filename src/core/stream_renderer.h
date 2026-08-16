@@ -83,6 +83,13 @@ public:
   // when tool calls are involved).  usage is the token count for this message.
   virtual void on_message_end(const TokenUsage &usage) {}
 
+  // Presentation-level message completion, including the immutable stop
+  // reason needed by semantic renderers. Legacy renderers receive usage via
+  // the existing callback above.
+  virtual void on_message_end_presentation(const MessageEndPresentation &end) {
+    on_message_end(end.usage);
+  }
+
   // The entire agent turn is complete (all messages + tool results).
   virtual void on_turn_end() {}
 

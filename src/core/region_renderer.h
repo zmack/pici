@@ -12,7 +12,12 @@
 
 namespace pi::core {
 
-enum class RegionAssistantTextKind { provisional, work, answer };
+enum class RegionAssistantTextKind {
+  provisional,
+  work,
+  answer,
+  answer_truncated
+};
 
 struct RegionRequestBlock {
   RequestPresentation metadata;

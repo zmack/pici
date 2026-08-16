@@ -348,6 +348,26 @@ void test_dispatch_tool_update() {
     dispatch_event(MessageStartEvent{Message{std::move(assistant)}}, renderer);
     CHECK_EQ(renderer.calls, 2);
   });
+
+  tests::register_test("dispatch_event: forwards message-end presentation", [] {
+    class EndRenderer final : public Renderer {
+    public:
+      void on_text_delta(std::string_view) override {}
+      void
+      on_message_end_presentation(const MessageEndPresentation &end) override {
+        seen = end;
+      }
+
+      MessageEndPresentation seen;
+    } renderer;
+
+    AssistantMessage assistant;
+    assistant.stop_reason = StopReason::length;
+    assistant.usage.output = 17;
+    dispatch_event(MessageEndEvent{Message{std::move(assistant)}}, renderer);
+    CHECK_EQ(renderer.seen.stop_reason, StopReason::length);
+    CHECK_EQ(renderer.seen.usage.output, std::uint64_t{17});
+  });
 }
 
 // ── cursor_rows_for_rendered ──────────────────────────────────────────────────

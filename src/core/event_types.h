@@ -208,13 +208,23 @@ struct MessageUpdateEvent : EventBase {
       : EventBase(EventType::message_update, loc), message(std::move(msg)),
         assistant_message_event(std::move(ev)) {}
 };
+struct MessageEndPresentation {
+  StopReason stop_reason{StopReason::stop};
+  TokenUsage usage;
+};
 
 struct MessageEndEvent : EventBase {
   static constexpr EventType type = EventType::message_end;
   Message message;
+  MessageEndPresentation presentation;
   explicit MessageEndEvent(
       Message msg, std::source_location loc = std::source_location::current())
-      : EventBase(EventType::message_end, loc), message(std::move(msg)) {}
+      : EventBase(EventType::message_end, loc), message(std::move(msg)) {
+    if (const auto *assistant = std::get_if<AssistantMessage>(&message)) {
+      presentation.stop_reason = assistant->stop_reason;
+      presentation.usage = assistant->usage;
+    }
+  }
 };
 
 struct ToolExecutionStartEvent : EventBase {

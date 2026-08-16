@@ -725,7 +725,7 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
           if (const auto *am = std::get_if<AssistantMessage>(&e.message)) {
             if (am->error_message)
               r.on_error(RendererErrorKind::llm, *am->error_message);
-            r.on_message_end(am->usage);
+            r.on_message_end_presentation(e.presentation);
           }
 
         } else if constexpr (std::is_same_v<T, ToolExecutionStartEvent>) {

@@ -640,6 +640,24 @@ public:
     }
   }
 
+  void on_message_end_presentation(
+      const core::MessageEndPresentation &end) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("message_end");
+    base_.on_message_end_presentation(end);
+    const auto &u = end.usage;
+    if (verbose_ && !base_.owns_status_line()) {
+      bool has_pricing = u.cost.total != 0 || u.cost.input != 0;
+      std::cerr << "[usage: in=" << format_tokens(u.input)
+                << " out=" << format_tokens(u.output)
+                << " cache_r=" << format_tokens(u.cache_read);
+      if (has_pricing)
+        std::cerr << " " << format_cost(u.cost.total);
+      std::cerr << "]\n";
+    }
+    last_usage_ = u;
+  }
+
   void on_message_end(const core::TokenUsage &u) override {
     if (diagnostics_)
       diagnostics_->record_renderer_event("message_end");
