@@ -200,6 +200,16 @@ public:
 
 using ToolUpdateCallback = std::function<void(std::shared_ptr<ToolResult>)>;
 
+struct MailboxReplyQueuedNotice {
+  std::string request_message_id;
+  std::string recipient_session_id;
+  std::optional<std::string> recipient_agent_id;
+  std::string reply_text;
+};
+
+using ToolPresentationNotice = std::variant<MailboxReplyQueuedNotice>;
+using ToolPresentationCallback = std::function<void(ToolPresentationNotice)>;
+
 // Per-invocation metadata is copied into each tool execution.  Tool
 // implementations must not retain references to this object after execute
 // returns.
@@ -208,6 +218,7 @@ struct ToolExecutionContext {
   std::optional<AgentRuntimeIdentity> actor;
   std::stop_token stop_token;
   ToolUpdateCallback on_update;
+  ToolPresentationCallback on_presentation;
 };
 
 struct ToolCapabilities {

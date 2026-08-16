@@ -832,11 +832,9 @@ return {
     auto hooks = load_lua_hooks(p);
     LuaHooks::AgentInfo info;
     info.mailbox.self =
-        [](const nlohmann::json &, const std::optional<AgentRuntimeIdentity> &,
-           std::stop_token) { return nlohmann::json{{"agent_id", "agent-a"}}; };
+        [](const nlohmann::json &, const LuaHooks::MailboxBindings::InvocationContext &context) { return nlohmann::json{{"agent_id", "agent-a"}}; };
     info.mailbox.send = [](const nlohmann::json &value,
-                           const std::optional<AgentRuntimeIdentity> &,
-                           std::stop_token) {
+                           const LuaHooks::MailboxBindings::InvocationContext &context) {
       CHECK(value.at("text") == "hello");
       return nlohmann::json{{"state", "queued"}};
     };
@@ -877,8 +875,7 @@ return {
     auto hooks = load_lua_hooks(p);
     LuaHooks::AgentInfo info;
     info.mailbox.status = [](const nlohmann::json &,
-                             const std::optional<AgentRuntimeIdentity> &,
-                             std::stop_token) {
+                             const LuaHooks::MailboxBindings::InvocationContext &context) {
       return nlohmann::json{
           {"error", {{"code", "invalid_message"}, {"message", "bad input"}}}};
     };
@@ -1374,8 +1371,8 @@ void test_mailbox_addon() {
     std::vector<std::string> actors;
     LuaHooks::AgentInfo info;
     info.mailbox.self = [&](const nlohmann::json &,
-                            const std::optional<AgentRuntimeIdentity> &actor,
-                            std::stop_token) {
+                            const LuaHooks::MailboxBindings::InvocationContext &context) {
+                              const auto &actor = context.actor;
       if (actor) {
         std::scoped_lock lock(actor_mutex);
         actors.push_back(actor->agent_id);
@@ -1386,8 +1383,7 @@ void test_mailbox_addon() {
                             {"kind", actor ? actor->kind : "root"}};
     };
     info.mailbox.list = [](const nlohmann::json &,
-                           const std::optional<AgentRuntimeIdentity> &,
-                           std::stop_token) {
+                           const LuaHooks::MailboxBindings::InvocationContext &context) {
       return nlohmann::json::array({{{"agent_id", "root-a"},
                                      {"process_id", "process-a"},
                                      {"kind", "root"}},
@@ -1402,25 +1398,21 @@ void test_mailbox_addon() {
                                      {"owner_agent_id", "root-b"}}});
     };
     info.mailbox.send = [](const nlohmann::json &value,
-                           const std::optional<AgentRuntimeIdentity> &,
-                           std::stop_token) {
+                           const LuaHooks::MailboxBindings::InvocationContext &context) {
       CHECK(value.at("target").at("session_id") == "session-b");
       return nlohmann::json{{"state", "queued"}, {"message_id", "m1"}};
     };
     info.mailbox.request = [](const nlohmann::json &,
-                              const std::optional<AgentRuntimeIdentity> &,
-                              std::stop_token) {
+                              const LuaHooks::MailboxBindings::InvocationContext &context) {
       return nlohmann::json{{"state", "pending"}, {"request_id", "r1"}};
     };
     info.mailbox.reply = [](const nlohmann::json &value,
-                            const std::optional<AgentRuntimeIdentity> &,
-                            std::stop_token) {
+                            const LuaHooks::MailboxBindings::InvocationContext &context) {
       CHECK(value.at("message_id") == "m2");
       return nlohmann::json{{"state", "queued"}, {"message_id", "m3"}};
     };
     info.mailbox.inbox = [](const nlohmann::json &value,
-                            const std::optional<AgentRuntimeIdentity> &,
-                            std::stop_token) {
+                            const LuaHooks::MailboxBindings::InvocationContext &context) {
       CHECK(value.at("claim") == true);
       return nlohmann::json::array({{{"message_id", "m2"},
                                      {"sender_agent_id", "sender-a"},
@@ -1440,8 +1432,7 @@ void test_mailbox_addon() {
                                      {"claim_token", "secret-2"}}});
     };
     info.mailbox.ack = [&acked](const nlohmann::json &value,
-                                const std::optional<AgentRuntimeIdentity> &,
-                                std::stop_token) {
+                                const LuaHooks::MailboxBindings::InvocationContext &context) {
       acked.push_back(value);
       if (acked.size() > 1)
         return nlohmann::json{
@@ -1532,14 +1523,69 @@ void test_mailbox_addon() {
   });
 
   tests::register_test(
+      "mailbox addon reply threads presentation callback through registry",
+      []() {
+        const auto path =
+            std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
+        auto hooks = load_lua_hooks(path, true);
+        LuaHooks::AgentInfo info;
+        ToolPresentationCallback *seen_presentation = nullptr;
+        info.mailbox.reply =
+            [&](const nlohmann::json &value,
+                const LuaHooks::MailboxBindings::InvocationContext &context) {
+              CHECK(value.at("message_id") == "m2");
+              seen_presentation = context.presentation;
+              if (context.presentation != nullptr && *context.presentation) {
+                (*context.presentation)(MailboxReplyQueuedNotice{
+                    .request_message_id = value.at("message_id"),
+                    .recipient_session_id = "session-b",
+                    .recipient_agent_id = "agent-b",
+                    .reply_text = value.at("text")});
+              }
+              return nlohmann::json{{"state", "queued"}, {"message_id", "m3"}};
+            };
+        hooks->configure(info);
+        auto tool = *std::ranges::find_if(
+            hooks->registered_tools,
+            [](const auto &t) { return t->name() == "agents_reply"; });
+
+        std::optional<MailboxReplyQueuedNotice> notice;
+        auto reply = tool->execute(
+            R"({"message_id":"m2","text":"answer"})",
+            ToolExecutionContext{
+                .call_id = "reply-1",
+                .on_presentation = [&](ToolPresentationNotice value) {
+                  notice = std::get<MailboxReplyQueuedNotice>(std::move(value));
+                }});
+        CHECK(!reply->is_error());
+        CHECK(seen_presentation != nullptr);
+        CHECK(notice.has_value());
+        if (notice.has_value()) {
+          CHECK(notice->request_message_id == "m2");
+          CHECK(notice->recipient_agent_id == "agent-b");
+          CHECK(notice->reply_text == "answer");
+        }
+
+        // A subsequent call with no presentation callback must not resurrect
+        // the previous execution's registry pointer or crash.
+        notice.reset();
+        seen_presentation = nullptr;
+        auto reply_no_presentation = tool->execute(
+            R"({"message_id":"m2","text":"again"})",
+            ToolExecutionContext{.call_id = "reply-2"});
+        CHECK(!reply_no_presentation->is_error());
+        CHECK(!notice.has_value());
+      });
+
+  tests::register_test(
       "mailbox addon clears actor after error and cancellation", [&]() {
         const auto path =
             std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
         auto hooks = load_lua_hooks(path, true);
         LuaHooks::AgentInfo info;
         info.mailbox.self = [](const nlohmann::json &,
-                               const std::optional<AgentRuntimeIdentity> &actor,
-                               std::stop_token) {
+                               const LuaHooks::MailboxBindings::InvocationContext &context) {
+                                 const auto &actor = context.actor;
           if (actor && actor->agent_id == "actor-a")
             return nlohmann::json{
                 {"error", {{"code", "busy"}, {"message", "try again"}}}};

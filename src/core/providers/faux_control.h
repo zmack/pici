@@ -28,6 +28,7 @@ struct ScriptedToolBehavior {
   std::string result_content;
   bool is_error{false};
   int finish_after_ms{0};
+  std::optional<MailboxReplyQueuedNotice> presentation_notice;
 };
 
 class ScriptedToolRegistry {

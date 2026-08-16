@@ -158,9 +158,13 @@ struct LuaHooks {
   };
 
   struct MailboxBindings {
-    using Callback = std::function<nlohmann::json(
-        const nlohmann::json &, const std::optional<AgentRuntimeIdentity> &,
-        const std::stop_token &)>;
+    struct InvocationContext {
+      const std::optional<AgentRuntimeIdentity> &actor;
+      const std::stop_token &stop_token;
+      ToolPresentationCallback *presentation{nullptr};
+    };
+    using Callback = std::function<nlohmann::json(const nlohmann::json &,
+                                                  const InvocationContext &)>;
     Callback self;
     Callback list;
     Callback send;

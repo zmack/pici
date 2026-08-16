@@ -438,11 +438,26 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
         continue;
       }
 
-      const auto &tool = std::get<RegionToolBlock>(block);
+      if (const auto *reply = std::get_if<RegionReplyBlock>(&block)) {
+        append_section_heading(RegionSection::none);
+        auto heading = std::string("\033[1;96mREPLY -> ") +
+                       sanitize_tool_output(reply->recipient_label) +
+                       " queued\033[0m";
+        auto reply_heading = split_region_lines(heading, width);
+        lines.insert(lines.end(),
+                     std::make_move_iterator(reply_heading.begin()),
+                     std::make_move_iterator(reply_heading.end()));
+        auto reply_text =
+            split_region_lines(sanitize_tool_output(reply->raw_text), width);
+        lines.insert(lines.end(), std::make_move_iterator(reply_text.begin()),
+                     std::make_move_iterator(reply_text.end()));
+        continue;
+      }
       append_section_heading(RegionSection::work);
       const bool expanded = content_rows > 1 &&
                             seen_tools + kMaxExpandedToolRegions >= tool_count;
       ++seen_tools;
+      const auto &tool = std::get<RegionToolBlock>(block);
       auto rendered = tool_lines(tool, width, expanded, content_rows);
       lines.insert(lines.end(), std::make_move_iterator(rendered.begin()),
                    std::make_move_iterator(rendered.end()));
@@ -708,6 +723,25 @@ public:
     mark_dirty_locked();
   }
 
+  void
+  on_mailbox_reply_queued(std::string_view call_id,
+                          const MailboxReplyQueuedNotice &notice) override {
+    std::scoped_lock lock(mutex_);
+    if (!state_.has_active_turn ||
+        state_.active_turn_index >= state_.turns.size())
+      return;
+    auto &turn = state_.turns[state_.active_turn_index];
+    const auto recipient = notice.recipient_agent_id.value_or(
+        notice.recipient_session_id.empty() ? "unknown recipient"
+                                            : notice.recipient_session_id);
+    turn.blocks.emplace_back(
+        RegionReplyBlock{.request_message_id = notice.request_message_id,
+                         .call_id = std::string(call_id),
+                         .recipient_label = recipient,
+                         .raw_text = notice.reply_text});
+    state_.revision = ++revision_;
+    mark_dirty_locked();
+  }
   void on_tool_output_text(std::string_view call_id,
                            std::string_view text) override {
     std::scoped_lock lock(mutex_);

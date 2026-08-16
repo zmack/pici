@@ -33,6 +33,8 @@ std::string_view event_type_to_string(EventType type) {
     return "tool_execution_update";
   case EventType::tool_execution_end:
     return "tool_execution_end";
+  case EventType::tool_presentation:
+    return "tool_presentation";
   }
   return "unknown";
 }
@@ -121,6 +123,8 @@ std::ostream &operator<<(std::ostream &os, const AgentEvent &event) {
         } else if constexpr (std::same_as<T, ToolExecutionEndEvent>) {
           os << "type:" << event_type_to_string(ev.type)
              << ", tool: " << ev.tool_name << ", error: " << ev.is_error << "}";
+        } else if constexpr (std::same_as<T, ToolPresentationEvent>) {
+          os << "type:" << event_type_to_string(ev.type) << "}";
         }
       },
       event);

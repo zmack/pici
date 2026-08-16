@@ -1320,6 +1320,14 @@ public:
     return result;
   }
 
+  static ToolPresentationCallback *mailbox_presentation_callback(lua_State *L) {
+    lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_presentation");
+    auto *callback =
+        static_cast<ToolPresentationCallback *>(lua_touserdata(L, -1));
+    lua_pop(L, 1);
+    return callback;
+  }
+
   static int push_mailbox_binding(lua_State *L,
                                   const LuaHooks::MailboxBindings::Callback &fn,
                                   const nlohmann::json &args) {
@@ -1329,8 +1337,11 @@ public:
       return 2;
     }
     try {
-      auto result = fn(args.is_object() ? args : nlohmann::json::object(),
-                       mailbox_actor(L), mailbox_stop_token(L));
+      const LuaHooks::MailboxBindings::InvocationContext context{
+          mailbox_actor(L), mailbox_stop_token(L),
+          mailbox_presentation_callback(L)};
+      auto result =
+          fn(args.is_object() ? args : nlohmann::json::object(), context);
       if (result.contains("error")) {
         lua_pushnil(L);
         const auto &error = result["error"];
@@ -1692,6 +1703,8 @@ public:
                                              &context.stop_token);
     LuaRegistryPointerGuard actor_guard(L_, "pici.inline_actor",
                                         &context.actor);
+    LuaRegistryPointerGuard presentation_guard(L_, "pici.inline_presentation",
+                                               &context.on_presentation);
     const auto previous_hook = lua_gethook(L_);
     const auto previous_mask = lua_gethookmask(L_);
     const auto previous_count = lua_gethookcount(L_);

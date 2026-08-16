@@ -513,6 +513,11 @@ public:
   void on_request(const core::RendererRequest &request) override {
     base_.on_request(request);
   }
+  void on_mailbox_reply_queued(
+      std::string_view call_id,
+      const core::MailboxReplyQueuedNotice &notice) override {
+    base_.on_mailbox_reply_queued(call_id, notice);
+  }
 
   void on_text_delta(std::string_view d) override {
     if (diagnostics_)

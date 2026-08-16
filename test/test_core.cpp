@@ -650,6 +650,22 @@ void test_event_json() {
         CHECK_STR(value["data"].value("status", ""), "blocked");
         CHECK(value["data"].value("is_error", false));
     });
+
+    tests::register_test("ToolPresentationEvent: mailbox receipt JSON", []() {
+        MailboxReplyQueuedNotice notice{
+            .request_message_id = "request-1",
+            .recipient_session_id = "session-b",
+            .recipient_agent_id = "agent-b",
+            .reply_text = "queued text"};
+        ToolPresentationEvent event("call-7", notice);
+        const auto value = event_to_json(event);
+        CHECK_STR(value["event"].get<std::string>(), "tool_presentation");
+        CHECK_STR(value["data"].value("kind", ""), "mailbox_reply_queued");
+        CHECK_STR(value["data"].value("tool_call_id", ""), "call-7");
+        CHECK_STR(value["data"].value("request_message_id", ""), "request-1");
+        CHECK_STR(value["data"].value("state", ""), "queued");
+        CHECK_STR(value["data"].value("recipient_agent_id", ""), "agent-b");
+    });
 }
 
 void test_session_journal_replay() {

@@ -79,6 +79,12 @@ int main() {
                            {{{"after_ms", 2}, {"partial", "running"}},
                             {{"after_ms", 4}, {"partial", "done"}}}},
                           {"result", {{"content", "hi"}, {"is_error", false}}},
+                          {"presentation",
+                           {{"kind", "mailbox_reply_queued"},
+                            {"request_message_id", "request-1"},
+                            {"recipient_session_id", "session-b"},
+                            {"recipient_agent_id", "agent-b"},
+                            {"text", "hello"}}},
                           {"finish_after_ms", 5}}}}},
                       registry, error);
     CHECK(script.has_value());
@@ -105,6 +111,8 @@ int main() {
     CHECK(behavior->updates[1].partial == "done");
     CHECK(behavior->result_content == "hi");
     CHECK(!behavior->is_error);
+    CHECK(behavior->presentation_notice.has_value());
+    CHECK(behavior->presentation_notice->reply_text == "hello");
     CHECK(behavior->finish_after_ms == 5);
     CHECK(!registry.take_behavior("call-1").has_value());
   }
@@ -159,6 +167,45 @@ int main() {
       CHECK(elapsed >= std::chrono::milliseconds(12));
       CHECK(elapsed < std::chrono::milliseconds(500));
 
+      std::optional<MailboxReplyQueuedNotice> notice;
+      registry->register_behavior(
+          "reply-ok",
+          ScriptedToolBehavior{
+              .result_content = "queued",
+              .presentation_notice = MailboxReplyQueuedNotice{
+                  .request_message_id = "request-1",
+                  .recipient_session_id = "session-b",
+                  .recipient_agent_id = "agent-b",
+                  .reply_text = "hello"}});
+      auto reply_result = tool.execute(
+          "{}", ToolExecutionContext{
+                    .call_id = "reply-ok",
+                    .on_presentation = [&](ToolPresentationNotice value) {
+                      notice = std::get<MailboxReplyQueuedNotice>(std::move(value));
+                    }});
+      CHECK(reply_result != nullptr && !reply_result->is_error());
+
+      std::optional<MailboxReplyQueuedNotice> error_notice;
+      registry->register_behavior(
+          "reply-error",
+          ScriptedToolBehavior{
+              .result_content = "failed",
+              .is_error = true,
+              .presentation_notice = MailboxReplyQueuedNotice{
+                  .request_message_id = "request-2",
+                  .recipient_session_id = "session-b",
+                  .reply_text = "must not paint"}});
+      auto failed_reply = tool.execute(
+          "{}", ToolExecutionContext{
+                    .call_id = "reply-error",
+                    .on_presentation = [&](ToolPresentationNotice value) {
+                      error_notice = std::get<MailboxReplyQueuedNotice>(std::move(value));
+                    }});
+      CHECK(failed_reply != nullptr && failed_reply->is_error());
+      CHECK(!error_notice.has_value());
+      CHECK(notice.has_value() && notice->request_message_id == "request-1");
+      CHECK(notice.has_value() && notice->recipient_agent_id == "agent-b");
+
       registry->register_behavior(
           "error",
           ScriptedToolBehavior{.result_content = "failed", .is_error = true});
@@ -173,15 +220,27 @@ int main() {
       CHECK(missing_result != nullptr &&
             missing_result->content().find("missing") != std::string::npos);
 
-      registry->register_behavior("cancel",
-                                  ScriptedToolBehavior{.finish_after_ms = 250});
+      registry->register_behavior(
+          "cancel",
+          ScriptedToolBehavior{
+              .finish_after_ms = 250,
+              .presentation_notice = MailboxReplyQueuedNotice{
+                  .request_message_id = "request-3",
+                  .recipient_session_id = "session-b",
+                  .reply_text = "must not paint while cancelled"}});
       const auto cancel_started = std::chrono::steady_clock::now();
       std::stop_source stop_source;
       std::shared_ptr<ToolResult> cancelled;
+      std::optional<MailboxReplyQueuedNotice> cancel_notice;
       std::thread worker([&] {
         cancelled = tool.execute(
-            "{}", ToolExecutionContext{.call_id = "cancel",
-                                       .stop_token = stop_source.get_token()});
+            "{}", ToolExecutionContext{
+                      .call_id = "cancel",
+                      .stop_token = stop_source.get_token(),
+                      .on_presentation = [&](ToolPresentationNotice value) {
+                        cancel_notice =
+                            std::get<MailboxReplyQueuedNotice>(std::move(value));
+                      }});
       });
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
       stop_source.request_stop();
@@ -191,6 +250,7 @@ int main() {
       CHECK(cancel_elapsed < std::chrono::milliseconds(200));
       CHECK(cancelled != nullptr && cancelled->is_error());
       CHECK(cancelled != nullptr && cancelled->content() == "cancelled");
+      CHECK(!cancel_notice.has_value());
     }
 
     RemoteFauxClient client;

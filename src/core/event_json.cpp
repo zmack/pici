@@ -112,6 +112,24 @@ nlohmann::json event_to_json(const AgentEvent &event) {
           data = {{"tool_call_id", value.tool_call_id},
                   {"tool_name", value.tool_name},
                   {"partial_result", value.partial_result}};
+        } else if constexpr (std::is_same_v<T, ToolPresentationEvent>) {
+          std::visit(
+              [&data, &value](const auto &notice) {
+                using N = std::decay_t<decltype(notice)>;
+                if constexpr (std::is_same_v<N, MailboxReplyQueuedNotice>) {
+                  data = {{"kind", "mailbox_reply_queued"},
+                          {"request_message_id", notice.request_message_id},
+                          {"tool_call_id", value.tool_call_id},
+                          {"recipient_session_id", notice.recipient_session_id},
+                          {"recipient_agent_id",
+                           notice.recipient_agent_id
+                               ? nlohmann::json(*notice.recipient_agent_id)
+                               : nlohmann::json(nullptr)},
+                          {"reply_text", notice.reply_text},
+                          {"state", "queued"}};
+                }
+              },
+              value.notice);
         } else if constexpr (std::is_same_v<T, ToolExecutionEndEvent>) {
           data = {{"tool_call_id", value.tool_call_id},
                   {"tool_name", value.tool_name},

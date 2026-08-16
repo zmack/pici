@@ -738,6 +738,11 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
           if (e.result)
             r.on_tool_end(e.tool_call_id, e.tool_name, *e.result, e.is_error);
 
+        } else if constexpr (std::is_same_v<T, ToolPresentationEvent>) {
+          if (const auto *notice =
+                  std::get_if<MailboxReplyQueuedNotice>(&e.notice))
+            r.on_mailbox_reply_queued(e.tool_call_id, *notice);
+
         } else if constexpr (std::is_same_v<T, TurnAbortedEvent>) {
           r.on_error(RendererErrorKind::abort, "agent turn aborted");
         } else if constexpr (std::is_same_v<T, AgentEndEvent>) {

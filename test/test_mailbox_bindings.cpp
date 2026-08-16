@@ -91,13 +91,15 @@ int main() {
     const auto second_actor = second->active_root_identity();
     const auto call = [&](const LuaHooks::MailboxBindings::Callback &callback,
                          nlohmann::json value,
-                         std::stop_token stop_token = {}) {
-      return callback(value, first_actor, stop_token);
+                         std::stop_token stop_token = {},
+                         ToolPresentationCallback *presentation = nullptr) {
+      return callback(value, {first_actor, stop_token, presentation});
     };
     const auto call_second =
         [&](const LuaHooks::MailboxBindings::Callback &callback,
-            nlohmann::json value, std::stop_token stop_token = {}) {
-          return callback(value, second_actor, stop_token);
+            nlohmann::json value, std::stop_token stop_token = {},
+            ToolPresentationCallback *presentation = nullptr) {
+          return callback(value, {second_actor, stop_token, presentation});
     };
 
     const auto self = call(first_bindings.self, nlohmann::json::object());
@@ -119,7 +121,7 @@ int main() {
     const auto child_actor =
         first->register_subagent("child-task", "root/child-task", std::nullopt);
     const auto child_list = first_bindings.list(
-        nlohmann::json{{"include_self", true}, {"limit", 10}}, child_actor, {});
+        nlohmann::json{{"include_self", true}, {"limit", 10}}, {child_actor, std::stop_token{}, nullptr});
     CHECK_EQ(std::ranges::count_if(child_list,
                                    [](const auto &agent) {
                                      return agent.value("is_self", false);
@@ -133,7 +135,7 @@ int main() {
                    child_list.begin()];
     CHECK_EQ(child_self["agent_id"], child_actor.agent_id);
     CHECK(has_error(
-        first_bindings.self(nlohmann::json::object(), std::nullopt, {}),
+        first_bindings.self(nlohmann::json::object(), {std::nullopt, std::stop_token{}, nullptr}),
         "permission_denied"));
     duplicate_session->deactivate_root();
 
@@ -156,6 +158,16 @@ int main() {
         "invalid_message"));
     CHECK(has_error(call(first_bindings.inbox, {{"limit", 51}}),
                     "invalid_message"));
+
+    std::optional<MailboxReplyQueuedNotice> error_notice;
+    ToolPresentationCallback error_callback = [&](ToolPresentationNotice value) {
+      error_notice = std::get<MailboxReplyQueuedNotice>(std::move(value));
+    };
+    const auto invalid_reply = call(
+        first_bindings.reply, {{"message_id", "missing"}, {"text", "bad"}},
+        std::stop_token{}, &error_callback);
+    CHECK(has_error(invalid_reply, "not_found"));
+    CHECK(!error_notice.has_value());
 
     const auto exact =
         call(first_bindings.send, {{"target", {{"agent_id", "agent-b"}}},
@@ -183,7 +195,7 @@ int main() {
         nlohmann::json{{"target", {{"agent_id", "agent-b"}}},
                        {"text", "child request"},
                        {"timeout_ms", 0}},
-        child_actor, {});
+        {child_actor, std::stop_token{}, nullptr});
     CHECK_EQ(child_request["state"], "pending");
     const auto child_request_id =
         child_request["request_id"].get<std::string>();
@@ -196,12 +208,20 @@ int main() {
     CHECK(child_request_row != child_request_inbox.end());
     if (child_request_row != child_request_inbox.end())
       CHECK_EQ((*child_request_row)["sender_agent_id"], child_actor.agent_id);
-    const auto child_reply =
-        call_second(second_bindings.reply, {{"message_id", child_request_id},
-                                            {"text", "child reply"}});
+    std::optional<MailboxReplyQueuedNotice> child_notice;
+    ToolPresentationCallback child_callback = [&](ToolPresentationNotice value) {
+      child_notice = std::get<MailboxReplyQueuedNotice>(std::move(value));
+    };
+    const auto child_reply = call_second(
+        second_bindings.reply,
+        {{"message_id", child_request_id}, {"text", "child reply"}},
+        std::stop_token{}, &child_callback);
+    CHECK(child_notice.has_value());
+    CHECK(child_notice->request_message_id == child_request_id);
+    CHECK(child_notice->reply_text == "child reply");
     CHECK_EQ(child_reply["recipient_agent_id"], child_actor.agent_id);
     const auto child_inbox =
-        first_bindings.inbox(nlohmann::json{{"claim", false}}, child_actor, {});
+        first_bindings.inbox(nlohmann::json{{"claim", false}}, {child_actor, std::stop_token{}, nullptr});
     CHECK(std::ranges::any_of(child_inbox, [&](const auto &message) {
       return message["reply_to"] == child_request_id;
     }));

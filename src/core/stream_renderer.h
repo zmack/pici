@@ -90,6 +90,10 @@ public:
     on_message_end(end.usage);
   }
 
+  // A domain-level tool presentation notice, delivered on the event stream.
+  virtual void on_mailbox_reply_queued(std::string_view,
+                                       const MailboxReplyQueuedNotice &) {}
+
   // The entire agent turn is complete (all messages + tool results).
   virtual void on_turn_end() {}
 

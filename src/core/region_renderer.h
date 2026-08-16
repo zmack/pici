@@ -46,8 +46,15 @@ struct RegionToolBlock {
   bool is_error{false};
 };
 
-using RegionTurnBlock =
-    std::variant<RegionTextBlock, RegionThinkingBlock, RegionToolBlock>;
+struct RegionReplyBlock {
+  std::string request_message_id;
+  std::string call_id;
+  std::string recipient_label;
+  std::string raw_text;
+};
+
+using RegionTurnBlock = std::variant<RegionTextBlock, RegionThinkingBlock,
+                                     RegionToolBlock, RegionReplyBlock>;
 
 struct RegionTurn {
   std::vector<RegionRequestBlock> requests;

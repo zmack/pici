@@ -3,6 +3,7 @@
 #include "core/stream_renderer.h"
 #include "core/terminal.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <iostream>
@@ -354,6 +355,115 @@ void test_tool_callbacks_route_into_regions() {
   expect(output.find("[alpha]") < output.find("[beta]") &&
              output.find("[beta]") < output.find("after"),
          "callback-created regions preserve transcript order");
+}
+void test_mailbox_reply_callback_path() {
+  int fds[2]{};
+  if (::pipe(fds) != 0) {
+    expect(false, "pipe creates mailbox callback capture fd");
+    return;
+  }
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->on_turn_start();
+    pi::core::dispatch_event(
+        pi::core::ToolPresentationEvent{
+            "call-1", pi::core::MailboxReplyQueuedNotice{
+                          .request_message_id = "request-1",
+                          .recipient_session_id = "session-b",
+                          .recipient_agent_id = "agent-b",
+                          .reply_text = "first queued"}},
+        *renderer);
+    pi::core::dispatch_event(
+        pi::core::ToolPresentationEvent{
+            "call-2", pi::core::MailboxReplyQueuedNotice{
+                          .request_message_id = "request-2",
+                          .recipient_session_id = "session-c",
+                          .reply_text = "second queued"}},
+        *renderer);
+    renderer->on_turn_end();
+    pi::core::dispatch_event(
+        pi::core::ToolPresentationEvent{
+            "late", pi::core::MailboxReplyQueuedNotice{
+                        .request_message_id = "late",
+                        .recipient_session_id = "late",
+                        .reply_text = "must be dropped"}},
+        *renderer);
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (ssize_t count; (count = ::read(fds[0], buffer, sizeof(buffer))) > 0;)
+    output.append(buffer, static_cast<std::size_t>(count));
+  ::close(fds[0]);
+  expect(output.find("REPLY -> agent-b queued") != std::string::npos,
+         "callback paints agent recipient receipt");
+  expect(output.find("REPLY -> session-c queued") != std::string::npos,
+         "callback falls back to session recipient");
+  expect(output.find("first queued") < output.find("second queued"),
+         "multiple callback receipts preserve order");
+  expect(output.find("must be dropped") == std::string::npos,
+         "callback without active turn is dropped");
+}
+
+void test_mailbox_reply_receipt_is_persistent_and_safe() {
+  pi::core::RegionState state;
+  pi::core::RegionTurn turn;
+  turn.blocks.emplace_back(pi::core::RegionReplyBlock{
+      .request_message_id = "request-1",
+      .call_id = "reply-call",
+      .recipient_label = "agent-b",
+      .raw_text = "queued reply text"});
+  state.turns.push_back(std::move(turn));
+  const auto frame = pi::core::build_region_frame(state, 40, 10);
+  expect(frame.lines.size() >= 2, "reply receipt paints persistent rows");
+  expect(frame.lines[0].find("REPLY -> agent-b queued") != std::string::npos,
+         "reply heading identifies recipient and queued state");
+  expect(frame.lines[1].find("queued reply text") != std::string::npos,
+         "reply body remains visible");
+  for (const auto &row : frame.lines)
+    expect(row.ends_with("\033[0m"), "reply rows close SGR");
+}
+
+void test_mailbox_reply_alongside_parallel_unrelated_tools() {
+  pi::core::RegionState state;
+  pi::core::RegionTurn turn;
+  pi::core::RegionToolBlock preceding;
+  preceding.call_id = "call-a";
+  preceding.tool_name = "unrelated-a";
+  preceding.args_json = "{}";
+  preceding.raw_output = "a-result";
+  turn.blocks.emplace_back(std::move(preceding));
+  turn.blocks.emplace_back(pi::core::RegionReplyBlock{
+      .request_message_id = "request-1",
+      .call_id = "call-b",
+      .recipient_label = "agent-b",
+      .raw_text = "queued reply text"});
+  pi::core::RegionToolBlock following;
+  following.call_id = "call-c";
+  following.tool_name = "unrelated-c";
+  following.args_json = "{}";
+  following.raw_output = "c-result";
+  turn.blocks.emplace_back(std::move(following));
+  state.turns.push_back(std::move(turn));
+  const auto frame = pi::core::build_region_frame(state, 80, 20);
+  const auto first_tool = std::ranges::find_if(
+      frame.lines, [](const auto &line) { return line.find("[unrelated-a]") != std::string::npos; });
+  const auto reply = std::ranges::find_if(
+      frame.lines, [](const auto &line) { return line.find("REPLY -> agent-b queued") != std::string::npos; });
+  const auto second_tool = std::ranges::find_if(
+      frame.lines, [](const auto &line) { return line.find("[unrelated-c]") != std::string::npos; });
+  expect(first_tool != frame.lines.end() && reply != frame.lines.end() &&
+             second_tool != frame.lines.end(),
+         "reply and unrelated tools all render");
+  expect(first_tool < reply && reply < second_tool,
+         "reply block preserves call order between unrelated parallel tools");
+  const auto a_result = std::ranges::find_if(
+      frame.lines, [](const auto &line) { return line.find("a-result") != std::string::npos; });
+  const auto c_result = std::ranges::find_if(
+      frame.lines, [](const auto &line) { return line.find("c-result") != std::string::npos; });
+  expect(a_result != frame.lines.end() && c_result != frame.lines.end(),
+         "unrelated tool output is untouched by the reply block");
 }
 
 void test_region_factory_lifecycle() {
@@ -885,6 +995,9 @@ int main() {
   test_tiny_layout_keeps_tool_body_collapsed();
   test_tool_callbacks_route_into_regions();
   test_region_factory_lifecycle();
+  test_mailbox_reply_receipt_is_persistent_and_safe();
+  test_mailbox_reply_alongside_parallel_unrelated_tools();
+  test_mailbox_reply_callback_path();
   test_idle_paint_saves_cursor_and_scrolls();
   test_explicit_turn_request_sections();
   test_request_audit_behaviors();

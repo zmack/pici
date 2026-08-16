@@ -92,6 +92,7 @@ enum class EventType {
   tool_execution_start,
   tool_execution_update,
   tool_execution_end,
+  tool_presentation,
 };
 
 std::string_view event_type_to_string(EventType type);
@@ -227,6 +228,17 @@ struct MessageEndEvent : EventBase {
   }
 };
 
+struct ToolPresentationEvent : EventBase {
+  static constexpr EventType type = EventType::tool_presentation;
+  std::string tool_call_id;
+  ToolPresentationNotice notice;
+  explicit ToolPresentationEvent(
+      std::string call_id, ToolPresentationNotice value,
+      std::source_location loc = std::source_location::current())
+      : EventBase(EventType::tool_presentation, loc),
+        tool_call_id(std::move(call_id)), notice(std::move(value)) {}
+};
+
 struct ToolExecutionStartEvent : EventBase {
   static constexpr EventType type = EventType::tool_execution_start;
   std::string tool_call_id;
@@ -282,7 +294,8 @@ using AgentEvent =
     std::variant<AgentStartEvent, AgentEndEvent, TurnStartEvent, TurnEndEvent,
                  TurnAbortedEvent, MessageStartEvent, MessageUpdateEvent,
                  MessageEndEvent, ToolExecutionStartEvent,
-                 ToolExecutionUpdateEvent, ToolExecutionEndEvent>;
+                 ToolExecutionUpdateEvent, ToolExecutionEndEvent,
+                 ToolPresentationEvent>;
 
 template <typename F>
   requires(std::is_invocable_v<F, AgentStartEvent> &&
@@ -295,7 +308,8 @@ template <typename F>
            std::is_invocable_v<F, MessageEndEvent> &&
            std::is_invocable_v<F, ToolExecutionStartEvent> &&
            std::is_invocable_v<F, ToolExecutionUpdateEvent> &&
-           std::is_invocable_v<F, ToolExecutionEndEvent>)
+           std::is_invocable_v<F, ToolExecutionEndEvent> &&
+           std::is_invocable_v<F, ToolPresentationEvent>)
 void visit_event(const AgentEvent &ev, F &&visitor) {
   std::visit(std::forward<F>(visitor), ev);
 }
@@ -311,7 +325,8 @@ template <typename F>
            std::is_invocable_v<F, MessageEndEvent> &&
            std::is_invocable_v<F, ToolExecutionStartEvent> &&
            std::is_invocable_v<F, ToolExecutionUpdateEvent> &&
-           std::is_invocable_v<F, ToolExecutionEndEvent>)
+           std::is_invocable_v<F, ToolExecutionEndEvent> &&
+           std::is_invocable_v<F, ToolPresentationEvent>)
 auto map_event(const AgentEvent &ev,
                F &&visitor) -> decltype(visitor(AgentStartEvent{})) {
   return std::visit(std::forward<F>(visitor), ev);

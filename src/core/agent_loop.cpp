@@ -394,18 +394,25 @@ execute_tool_safely(const PreparedToolCall &call, const StreamCallback &emit,
     auto call_name = call.tool_call.name;
     auto args_json = call.args_json;
     ToolUpdateCallback on_update =
-        [emit = std::cref(emit), call_id = std::move(call_id),
-         call_name = std::move(call_name), args_json = std::move(args_json)](
-            const std::shared_ptr<ToolResult> &partial) {
+        [emit = std::cref(emit), call_id, call_name = std::move(call_name),
+         args_json =
+             std::move(args_json)](const std::shared_ptr<ToolResult> &partial) {
           emit.get()(ToolExecutionUpdateEvent(call_id, call_name, args_json,
                                               partial ? partial->content()
                                                       : std::string{},
                                               std::source_location::current()));
         };
+    ToolPresentationCallback on_presentation =
+        [emit = std::cref(emit), call_id](ToolPresentationNotice notice) {
+          emit.get()(ToolPresentationEvent(call_id, std::move(notice),
+                                           std::source_location::current()));
+        };
     ToolExecutionContext execution_context{.call_id = call.tool_call.id,
                                            .actor = actor,
                                            .stop_token = stop_tok,
-                                           .on_update = std::move(on_update)};
+                                           .on_update = std::move(on_update),
+                                           .on_presentation =
+                                               std::move(on_presentation)};
     auto result =
         call.tool->execute(call.args_json, std::move(execution_context));
     const bool result_is_error = result && result->is_error();

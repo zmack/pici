@@ -159,6 +159,9 @@ ScriptedTool::execute(std::string_view, ToolExecutionContext context) const {
   if (!wait_until(start + std::chrono::milliseconds(behavior->finish_after_ms),
                   context.stop_token))
     return std::make_shared<ScriptedToolResult>("cancelled", true);
+  if (!behavior->is_error && behavior->presentation_notice &&
+      context.on_presentation)
+    context.on_presentation(*behavior->presentation_notice);
   return std::make_shared<ScriptedToolResult>(behavior->result_content,
                                               behavior->is_error);
 }
@@ -435,6 +438,42 @@ std::optional<FauxClient::Script> compile_round(const nlohmann::json &round,
           }
           behavior.is_error = result.at("is_error").get<bool>();
         }
+      }
+      if (block.contains("presentation")) {
+        const auto &presentation = block.at("presentation");
+        if (!presentation.is_object()) {
+          error = "tool_call field 'presentation' must be an object";
+          return std::nullopt;
+        }
+        std::string kind;
+        if (!require_string(presentation, "kind", kind, error))
+          return std::nullopt;
+        if (kind != "mailbox_reply_queued") {
+          error = "tool_call presentation field 'kind' must be "
+                  "'mailbox_reply_queued'";
+          return std::nullopt;
+        }
+        MailboxReplyQueuedNotice notice;
+        if (!require_string(presentation, "request_message_id",
+                            notice.request_message_id, error))
+          return std::nullopt;
+        if (!require_string(presentation, "text", notice.reply_text, error))
+          return std::nullopt;
+        if (!require_string(presentation, "recipient_session_id",
+                            notice.recipient_session_id, error))
+          return std::nullopt;
+        if (presentation.contains("recipient_agent_id") &&
+            !presentation.at("recipient_agent_id").is_null() &&
+            !presentation.at("recipient_agent_id").is_string()) {
+          error = "tool_call presentation field 'recipient_agent_id' must be a "
+                  "string or null";
+          return std::nullopt;
+        }
+        if (presentation.contains("recipient_agent_id") &&
+            presentation.at("recipient_agent_id").is_string())
+          notice.recipient_agent_id =
+              presentation.at("recipient_agent_id").get<std::string>();
+        behavior.presentation_notice = std::move(notice);
       }
       if (block.contains("finish_after_ms") &&
           !require_nonnegative_int(block, "finish_after_ms",
