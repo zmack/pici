@@ -217,6 +217,11 @@ each tool call at its start position, owns the status row, and supports line,
 page, top, and bottom scrolling. While readline is active, status and scroll
 updates use save/restore-cursor painting so they do not disturb the input row.
 
+Use [faux control renderer testing](docs/faux-control.md) to drive the real
+agent loop and renderer with deterministic text, thinking, concurrent tool
+updates, and results over a local JSONL socket—without a model, network call,
+API key, or real tool execution.
+
 ### Custom renderers
 
 Implement `Renderer` and register with the global registry:
