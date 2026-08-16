@@ -26,7 +26,11 @@ cmake --build build --target pi-cli --parallel
 repeatable renderer tests. Faux-control mode selects a synthetic
 `faux-control` model, skips credential resolution, and does not load real,
 Lua, or hook-registered tools. Tool names referenced by the script are
-registered on demand as `ScriptedTool` instances.
+registered on demand as `ScriptedTool` instances. Explicit
+`--hooks-file`/`--hooks-dir` inputs are loaded only for
+`format_tool_call` and `format_tool_result` presentation; every other hook
+capability, registered tool, command, and the automatic mailbox add-on remains
+disabled.
 
 The selected renderer is the real CLI renderer. Events pass through the same
 `VerboseRenderer` and `dispatch_event` path used by an interactive turn; the

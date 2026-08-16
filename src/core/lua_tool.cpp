@@ -2135,6 +2135,17 @@ load_lua_hooks_dir(const std::filesystem::path &directory,
 }
 
 std::shared_ptr<LuaHooks>
+tool_formatter_hooks_only(const std::shared_ptr<LuaHooks> &hooks) {
+  if (!hooks)
+    return nullptr;
+  auto filtered = std::make_shared<LuaHooks>();
+  filtered->source_path = hooks->source_path;
+  filtered->format_tool_call = hooks->format_tool_call;
+  filtered->format_tool_result = hooks->format_tool_result;
+  return filtered;
+}
+
+std::shared_ptr<LuaHooks>
 compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   // Drop nulls
   auto removed = std::ranges::remove_if(list, [](const auto &h) { return !h; });

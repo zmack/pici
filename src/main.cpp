@@ -1012,7 +1012,8 @@ int cmd_run(const cli::Args &args,
   // Load and compose Lua hooks
   std::vector<std::shared_ptr<core::LuaHooks>> hooks_list_saved;
   bool auto_mailbox_addon_loaded = false;
-  auto load_hooks = [&]() -> std::shared_ptr<core::LuaHooks> {
+  auto load_hooks = [&](bool allow_auto_mailbox =
+                            true) -> std::shared_ptr<core::LuaHooks> {
     std::vector<std::shared_ptr<core::LuaHooks>> hooks_list;
     const auto bundled_mailbox = bundled_mailbox_addon_path();
     auto same_path = [](const std::filesystem::path &left,
@@ -1060,7 +1061,7 @@ int cmd_run(const cli::Args &args,
           std::filesystem::exists(mailbox_entry, mailbox_entry_error) ||
           mailbox_addon_explicit;
     }
-    if (args.mailbox_enabled && !mailbox_addon_explicit) {
+    if (allow_auto_mailbox && args.mailbox_enabled && !mailbox_addon_explicit) {
       try {
         hooks_list.push_back(core::load_lua_hooks(bundled_mailbox, true));
         auto_mailbox_addon_loaded = true;
@@ -1076,8 +1077,14 @@ int cmd_run(const cli::Args &args,
     return core::compose_hooks(std::move(hooks_list));
   };
   std::shared_ptr<core::LuaHooks> hooks;
-  if (args.faux_control_socket.empty())
-    hooks = load_hooks();
+  auto load_presentation_hooks = [&]() -> std::shared_ptr<core::LuaHooks> {
+    if (args.faux_control_socket.empty())
+      return load_hooks();
+    if (args.hooks_files.empty() && args.hooks_dir.empty())
+      return nullptr;
+    return core::tool_formatter_hooks_only(load_hooks(false));
+  };
+  hooks = load_presentation_hooks();
   {
     std::scoped_lock lock(hook_runtime->mutex);
     hook_runtime->hooks = hooks;
@@ -1642,7 +1649,7 @@ int cmd_run(const cli::Args &args,
   std::optional<std::string> current_session_name;
 
   auto reload_addons = [&]() {
-    hooks = load_hooks();
+    hooks = load_presentation_hooks();
     {
       std::scoped_lock lock(hook_runtime->mutex);
       hook_runtime->hooks = hooks;

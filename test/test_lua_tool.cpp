@@ -1270,6 +1270,81 @@ end)
   std::filesystem::remove_all(dir);
 }
 
+void test_tool_formatter_hooks_only() {
+  tests::register_test(
+      "tool_formatter_hooks_only: strips non-formatting capabilities", []() {
+        auto hooks = std::make_shared<LuaHooks>();
+        hooks->source_path = "theme.lua";
+        hooks->registered_tools.emplace_back(nullptr);
+        hooks->commands.push_back({.name = "unsafe"});
+        hooks->before_tool_call = [](const BeforeToolCallContext &,
+                                     std::stop_token) {
+          return std::optional<BeforeToolCallResult>{};
+        };
+        hooks->after_tool_call = [](const AfterToolCallContext &,
+                                    std::stop_token) {
+          return std::optional<AfterToolCallResult>{};
+        };
+        hooks->on_event = [](const AgentEvent &) {};
+        hooks->prepare_context = [](const AgentContext &, std::size_t,
+                                    std::stop_token) {
+          return std::optional<std::vector<Message>>{};
+        };
+        hooks->should_stop_after_turn =
+            [](const Message &, const std::vector<ToolResultMessage> &,
+               const AgentContext &) { return true; };
+        hooks->configure = [](const LuaHooks::AgentInfo &) {};
+        hooks->prompt_line = [](std::size_t, std::string_view, std::size_t,
+                                const TokenUsage &, const TokenUsage &) {
+          return std::optional<std::string>{"unsafe"};
+        };
+        hooks->status_line = [](const LuaUiContext &) {
+          return std::optional<std::string>{"unsafe"};
+        };
+        hooks->tab_title = [](const LuaUiContext &) {
+          return std::optional<std::string>{"unsafe"};
+        };
+        hooks->complete = [](std::string_view, const std::vector<Message> &) {
+          return std::vector<std::string>{"unsafe"};
+        };
+        hooks->on_command = [](std::string_view, std::string_view,
+                               const std::vector<Message> &,
+                               const LuaContextSnapshot &) {
+          return LuaHooks::CommandResult{.handled = true};
+        };
+        hooks->format_tool_call = [](const LuaHooks::FormatToolCallContext &) {
+          return std::optional<std::string>{"formatted call"};
+        };
+        hooks->format_tool_result =
+            [](const LuaHooks::FormatToolResultContext &) {
+              return std::optional<std::string>{"formatted result"};
+            };
+
+        auto filtered = tool_formatter_hooks_only(hooks);
+        CHECK(filtered != nullptr);
+        CHECK_EQ(filtered->source_path, std::string("theme.lua"));
+        CHECK(filtered->registered_tools.empty());
+        CHECK(filtered->commands.empty());
+        CHECK(!filtered->before_tool_call);
+        CHECK(!filtered->after_tool_call);
+        CHECK(!filtered->on_event);
+        CHECK(!filtered->prepare_context);
+        CHECK(!filtered->should_stop_after_turn);
+        CHECK(!filtered->configure);
+        CHECK(!filtered->prompt_line);
+        CHECK(!filtered->status_line);
+        CHECK(!filtered->tab_title);
+        CHECK(!filtered->complete);
+        CHECK(!filtered->on_command);
+        CHECK(filtered->format_tool_call);
+        CHECK(filtered->format_tool_result);
+        CHECK_EQ(*filtered->format_tool_call({}),
+                 std::string("formatted call"));
+        CHECK_EQ(*filtered->format_tool_result({}),
+                 std::string("formatted result"));
+      });
+}
+
 void test_mailbox_addon() {
   tests::register_test("mailbox addon registers intention tools", []() {
     const auto path =
@@ -1518,6 +1593,7 @@ int main() {
   test_json_bridge();
   test_load_lua_tools_directory();
   test_lua_hooks();
+  test_tool_formatter_hooks_only();
   test_mailbox_addon();
 
   tests::print_summary();

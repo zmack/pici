@@ -1,6 +1,7 @@
 #include "core/message_types.h"
 #include "core/region_renderer.h"
 #include "core/stream_renderer.h"
+#include "core/terminal.h"
 
 #include <chrono>
 #include <cstddef>
@@ -226,6 +227,55 @@ void test_custom_tool_output_is_rendered() {
          "custom formatted tool output is routed to the region");
   expect(frame.lines[1].find("custom body") != std::string::npos,
          "custom formatted tool body is preserved");
+}
+
+void test_formatter_regions_cap_and_reset() {
+  pi::core::RegionState state;
+  pi::core::RegionToolBlock running;
+  running.call_id = "running";
+  running.tool_name = "theme";
+  running.args_json = "{}";
+  running.custom_call_output = "\033[31mCALL first\nCALL second\033[0m";
+  state.blocks.emplace_back(running);
+  auto frame = pi::core::build_region_frame(state, 80, 20);
+  expect(frame.lines.size() == 1,
+         "running formatter keeps only its first header row");
+  expect(frame.lines[0].find("CALL first") != std::string::npos,
+         "running formatter preserves its first header line");
+  expect(frame.lines[0].find("CALL second") == std::string::npos,
+         "running formatter omits later header lines");
+  expect(frame.lines[0].ends_with("\033[0m"),
+         "running formatter row resets SGR");
+
+  pi::core::RegionToolBlock completed = running;
+  completed.running = false;
+  completed.custom_call_output.clear();
+  completed.custom_result_output =
+      "\033[32mone\ntwo\nthree\nfour\nfive\nsix\033[0m";
+  state.blocks.clear();
+  state.blocks.emplace_back(std::move(completed));
+  frame = pi::core::build_region_frame(state, 80, 20);
+  expect(frame.lines.size() == 5, "completed formatter result honors body cap");
+  for (const auto &line : frame.lines)
+    expect(line.ends_with("\033[0m"), "completed formatter rows reset SGR");
+  expect(frame.lines.back().find("five") != std::string::npos,
+         "completed formatter keeps the capped final visible line");
+  expect(frame.lines.back().find("six") == std::string::npos,
+         "completed formatter omits rows beyond the cap");
+}
+
+void test_formatter_sanitization_contract() {
+  const auto output = pi::core::sanitize_tool_output(
+      "\033[31mred\033[2J\033[H\033]0;title\007plain\033[0m");
+  expect(output.find("red") != std::string::npos,
+         "sanitizer preserves visible formatter text");
+  expect(output.find("\033[31m") != std::string::npos &&
+             output.find("\033[0m") != std::string::npos,
+         "sanitizer preserves SGR formatting");
+  expect(output.find("\033[2J") == std::string::npos &&
+             output.find("\033[H") == std::string::npos &&
+             output.find("\033]0;") == std::string::npos,
+         "sanitizer removes cursor and OSC controls");
 }
 
 void test_tiny_layout_keeps_tool_body_collapsed() {
@@ -830,6 +880,8 @@ int main() {
   test_interleaved_text_rounds();
   test_tool_body_cap_and_expansion_cap();
   test_custom_tool_output_is_rendered();
+  test_formatter_regions_cap_and_reset();
+  test_formatter_sanitization_contract();
   test_tiny_layout_keeps_tool_body_collapsed();
   test_tool_callbacks_route_into_regions();
   test_region_factory_lifecycle();

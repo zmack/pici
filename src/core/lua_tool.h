@@ -319,6 +319,12 @@ std::shared_ptr<LuaHooks>
 load_lua_hooks_dir(const std::filesystem::path &directory,
                    bool bundled_child_safe_tools = false);
 
+// Return a capability-filtered hook object suitable for faux-control mode.
+// Only tool presentation callbacks are retained; all execution, UI, command,
+// and tool-registration capabilities are intentionally removed.
+std::shared_ptr<LuaHooks>
+tool_formatter_hooks_only(const std::shared_ptr<LuaHooks> &hooks);
+
 // Merge multiple LuaHooks into one with these composition rules:
 //   before_tool_call    — run all; first {block=true} short-circuits
 //   after_tool_call     — run all; first non-null return wins
