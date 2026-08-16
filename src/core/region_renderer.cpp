@@ -1,6 +1,7 @@
 #include "core/region_renderer.h"
 
 #include "core/message_types.h"
+#include "core/request_presentation.h"
 #include "core/stream_renderer.h"
 #include "core/terminal.h"
 
@@ -213,8 +214,8 @@ std::vector<std::string> tool_lines(const RegionToolBlock &tool, int width,
   return lines;
 }
 
-std::vector<std::string> all_region_lines(const RegionState &state, int width,
-                                          int content_rows) {
+std::vector<std::string> legacy_region_lines(const RegionState &state,
+                                             int width, int content_rows) {
   std::vector<std::string> lines;
   if (width <= 0)
     return lines;
@@ -264,6 +265,155 @@ std::vector<std::string> all_region_lines(const RegionState &state, int width,
   return lines;
 }
 
+std::string request_source_label(RequestSource source) {
+  switch (source) {
+  case RequestSource::ordinary:
+    return {};
+  case RequestSource::mailbox:
+    return "MAILBOX";
+  case RequestSource::follow_up:
+    return "FOLLOW-UP";
+  }
+  return {};
+}
+
+std::string request_sender_label(const RequestPresentation &metadata) {
+  if (metadata.sender_task_path)
+    return *metadata.sender_task_path;
+  if (metadata.sender_session_name)
+    return *metadata.sender_session_name;
+  if (metadata.sender_agent_id) {
+    constexpr std::size_t kMaxSenderIdLength = 24;
+    const auto &id = *metadata.sender_agent_id;
+    if (id.size() <= kMaxSenderIdLength)
+      return id;
+    constexpr std::size_t kSuffixLength = 5;
+    constexpr std::size_t kPrefixLength =
+        kMaxSenderIdLength - 3 - kSuffixLength;
+    return id.substr(0, kPrefixLength) + "..." +
+           id.substr(id.size() - kSuffixLength);
+  }
+  if (metadata.source == RequestSource::mailbox)
+    return "unknown sender";
+  return {};
+}
+
+std::string request_heading(const RegionRequestBlock &request) {
+  std::string heading = "-- REQUEST";
+  const auto source = request_source_label(request.metadata.source);
+  if (!source.empty()) {
+    heading += " | ";
+    heading += source;
+    const auto sender = request_sender_label(request.metadata);
+    if (!sender.empty()) {
+      heading += " | ";
+      heading += sender;
+    }
+  }
+  return heading;
+}
+
+void append_request_lines(std::vector<std::string> &lines,
+                          const RegionTurn &turn, int width) {
+  if (turn.requests.empty())
+    return;
+  const auto has_content = [](const RegionRequestBlock &request) {
+    return !request.raw_text.empty() || request.non_text_attachments != 0 ||
+           request.metadata.source != RequestSource::ordinary ||
+           request.metadata.message_id.has_value() ||
+           request.metadata.message_kind.has_value() ||
+           request.metadata.sender_agent_id.has_value() ||
+           request.metadata.sender_session_id.has_value() ||
+           request.metadata.sender_task_path.has_value() ||
+           request.metadata.sender_session_name.has_value();
+  };
+  if (std::none_of(turn.requests.begin(), turn.requests.end(), has_content))
+    return;
+
+  std::string heading =
+      sanitize_tool_output(request_heading(turn.requests.front()));
+  const auto first_source = turn.requests.front().metadata.source;
+  const auto first_sender =
+      request_sender_label(turn.requests.front().metadata);
+  const bool mixed = std::any_of(
+      turn.requests.begin() + 1, turn.requests.end(), [&](const auto &request) {
+        return request.metadata.source != first_source ||
+               request_sender_label(request.metadata) != first_sender;
+      });
+  if (mixed)
+    heading = "-- REQUEST";
+  auto heading_lines = split_region_lines(heading, width);
+  lines.insert(lines.end(), std::make_move_iterator(heading_lines.begin()),
+               std::make_move_iterator(heading_lines.end()));
+  for (const auto &request : turn.requests) {
+    std::string request_text = sanitize_tool_output(request.raw_text);
+    for (std::size_t index = 0; index < request.non_text_attachments; ++index) {
+      if (!request_text.empty())
+        request_text.push_back('\n');
+      request_text += "[image attachment]";
+    }
+    if (request_text.empty())
+      continue;
+    auto request_lines = split_region_lines(request_text, width);
+    lines.insert(lines.end(), std::make_move_iterator(request_lines.begin()),
+                 std::make_move_iterator(request_lines.end()));
+  }
+}
+
+std::vector<std::string> turn_region_lines(const RegionState &state, int width,
+                                           int content_rows) {
+  std::vector<std::string> lines;
+  if (width <= 0)
+    return lines;
+
+  std::size_t tool_count = 0;
+  for (const auto &turn : state.turns) {
+    for (const auto &block : turn.blocks) {
+      if (std::holds_alternative<RegionToolBlock>(block))
+        ++tool_count;
+    }
+  }
+
+  std::size_t seen_tools = 0;
+  for (const auto &turn : state.turns) {
+    append_request_lines(lines, turn, width);
+    for (const auto &block : turn.blocks) {
+      if (const auto *text = std::get_if<RegionTextBlock>(&block)) {
+        auto rendered = render_visible_markdown(text->raw);
+        auto text_lines = split_region_lines(rendered, width);
+        lines.insert(lines.end(), std::make_move_iterator(text_lines.begin()),
+                     std::make_move_iterator(text_lines.end()));
+        continue;
+      }
+      if (const auto *thinking = std::get_if<RegionThinkingBlock>(&block)) {
+        auto rendered = render_visible_markdown("[thinking]\n" + thinking->raw);
+        auto thinking_lines = split_region_lines(rendered, width);
+        lines.insert(lines.end(),
+                     std::make_move_iterator(thinking_lines.begin()),
+                     std::make_move_iterator(thinking_lines.end()));
+        continue;
+      }
+
+      const auto &tool = std::get<RegionToolBlock>(block);
+      const bool expanded = content_rows > 1 &&
+                            seen_tools + kMaxExpandedToolRegions >= tool_count;
+      ++seen_tools;
+      auto rendered = tool_lines(tool, width, expanded, content_rows);
+      lines.insert(lines.end(), std::make_move_iterator(rendered.begin()),
+                   std::make_move_iterator(rendered.end()));
+    }
+  }
+  if (lines.empty())
+    lines.emplace_back("\033[0m");
+  return lines;
+}
+
+std::vector<std::string> all_region_lines(const RegionState &state, int width,
+                                          int content_rows) {
+  if (!state.turns.empty())
+    return turn_region_lines(state, width, content_rows);
+  return legacy_region_lines(state, width, content_rows);
+}
 std::string usage_line(const TokenUsage &usage) {
   if (usage.input == 0 && usage.output == 0 && usage.cache_read == 0)
     return {};
@@ -317,7 +467,11 @@ public:
 
   void on_turn_start() override {
     std::scoped_lock lock(mutex_);
+    state_.turns.emplace_back();
+    state_.active_turn_index = state_.turns.size() - 1;
+    state_.has_active_turn = true;
     state_.tool_index.clear();
+    state_.tool_addresses.clear();
     state_.thinking.clear();
     state_.thinking_block_index = state_.blocks.size();
     state_.in_thinking = false;
@@ -333,20 +487,57 @@ public:
     cv_.notify_one();
   }
 
+  void on_request(const RendererRequest &request) override {
+    std::scoped_lock lock(mutex_);
+    if (!state_.has_active_turn ||
+        state_.active_turn_index >= state_.turns.size())
+      return;
+    if (request.text.empty() && request.non_text_attachments == 0 &&
+        request.presentation.source == RequestSource::ordinary &&
+        !request.presentation.message_id &&
+        !request.presentation.message_kind &&
+        !request.presentation.sender_agent_id &&
+        !request.presentation.sender_session_id &&
+        !request.presentation.sender_task_path &&
+        !request.presentation.sender_session_name)
+      return;
+    RegionRequestBlock block;
+    block.metadata = request.presentation;
+    block.raw_text = request.text;
+    block.non_text_attachments = request.non_text_attachments;
+    state_.turns[state_.active_turn_index].requests.push_back(std::move(block));
+    state_.revision = ++revision_;
+    mark_dirty_locked();
+  }
+
   void on_text_delta(std::string_view delta) override {
     std::scoped_lock lock(mutex_);
-    if (state_.start_new_text_block || state_.blocks.empty() ||
-        !std::holds_alternative<RegionTextBlock>(state_.blocks.back()))
-      state_.blocks.emplace_back(RegionTextBlock{});
-    state_.start_new_text_block = false;
-    std::get<RegionTextBlock>(state_.blocks.back())
-        .raw.append(delta.data(), delta.size());
+    if (state_.has_active_turn) {
+      auto &turn = state_.turns[state_.active_turn_index];
+      if (state_.start_new_text_block || turn.blocks.empty() ||
+          !std::holds_alternative<RegionTextBlock>(turn.blocks.back()))
+        turn.blocks.emplace_back(RegionTextBlock{});
+      state_.start_new_text_block = false;
+      std::get<RegionTextBlock>(turn.blocks.back())
+          .raw.append(delta.data(), delta.size());
+    } else {
+      if (state_.start_new_text_block || state_.blocks.empty() ||
+          !std::holds_alternative<RegionTextBlock>(state_.blocks.back()))
+        state_.blocks.emplace_back(RegionTextBlock{});
+      state_.start_new_text_block = false;
+      std::get<RegionTextBlock>(state_.blocks.back())
+          .raw.append(delta.data(), delta.size());
+    }
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
 
   void on_thinking_start() override {
     std::scoped_lock lock(mutex_);
+    if (state_.has_active_turn) {
+      auto &turn = state_.turns[state_.active_turn_index];
+      turn.blocks.emplace_back(RegionThinkingBlock{});
+    }
     state_.thinking.clear();
     state_.in_thinking = true;
     state_.status_text = "[thinking\xE2\x80\xA6]";
@@ -356,6 +547,14 @@ public:
 
   void on_thinking_delta(std::string_view delta) override {
     std::scoped_lock lock(mutex_);
+    if (state_.has_active_turn) {
+      auto &turn = state_.turns[state_.active_turn_index];
+      if (!turn.blocks.empty()) {
+        if (auto *thinking =
+                std::get_if<RegionThinkingBlock>(&turn.blocks.back()))
+          thinking->raw.append(delta.data(), delta.size());
+      }
+    }
     state_.thinking.append(delta.data(), delta.size());
     state_.in_thinking = true;
     state_.status_text = "[thinking\xE2\x80\xA6]";
@@ -379,8 +578,17 @@ public:
     tool.call_id.assign(call_id);
     tool.tool_name.assign(tool_name);
     tool.args_json.assign(args_json);
-    state_.tool_index[tool.call_id] = state_.blocks.size();
-    state_.blocks.emplace_back(std::move(tool));
+    if (state_.has_active_turn) {
+      auto &turn = state_.turns[state_.active_turn_index];
+      const auto block_index = turn.blocks.size();
+      turn.blocks.emplace_back(std::move(tool));
+      state_.tool_addresses[std::string(call_id)] =
+          RegionToolAddress{state_.active_turn_index, block_index};
+      state_.tool_index[std::string(call_id)] = block_index;
+    } else {
+      state_.tool_index[std::string(call_id)] = state_.blocks.size();
+      state_.blocks.emplace_back(std::move(tool));
+    }
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
@@ -388,13 +596,26 @@ public:
   void on_tool_update(std::string_view call_id, std::string_view,
                       std::string_view partial_result) override {
     std::scoped_lock lock(mutex_);
-    const auto it = state_.tool_index.find(std::string(call_id));
-    if (it == state_.tool_index.end() || it->second >= state_.blocks.size())
-      return;
-    auto *tool = std::get_if<RegionToolBlock>(&state_.blocks[it->second]);
-    if (tool == nullptr)
-      return;
-    tool->raw_output.assign(partial_result);
+    const auto it = state_.tool_addresses.find(std::string(call_id));
+    if (it != state_.tool_addresses.end() &&
+        it->second.turn_index < state_.turns.size()) {
+      auto &turn = state_.turns[it->second.turn_index];
+      if (it->second.block_index < turn.blocks.size()) {
+        auto *tool =
+            std::get_if<RegionToolBlock>(&turn.blocks[it->second.block_index]);
+        if (tool != nullptr)
+          tool->raw_output.assign(partial_result);
+      }
+    } else {
+      const auto legacy = state_.tool_index.find(std::string(call_id));
+      if (legacy == state_.tool_index.end() ||
+          legacy->second >= state_.blocks.size())
+        return;
+      auto *tool = std::get_if<RegionToolBlock>(&state_.blocks[legacy->second]);
+      if (tool == nullptr)
+        return;
+      tool->raw_output.assign(partial_result);
+    }
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
@@ -402,15 +623,31 @@ public:
   void on_tool_end(std::string_view call_id, std::string_view,
                    const ToolResult &result, bool is_error) override {
     std::scoped_lock lock(mutex_);
-    const auto it = state_.tool_index.find(std::string(call_id));
-    if (it == state_.tool_index.end() || it->second >= state_.blocks.size())
-      return;
-    auto *tool = std::get_if<RegionToolBlock>(&state_.blocks[it->second]);
-    if (tool == nullptr)
-      return;
-    tool->raw_output = result.content();
-    tool->running = false;
-    tool->is_error = is_error;
+    const auto it = state_.tool_addresses.find(std::string(call_id));
+    if (it != state_.tool_addresses.end() &&
+        it->second.turn_index < state_.turns.size()) {
+      auto &turn = state_.turns[it->second.turn_index];
+      if (it->second.block_index < turn.blocks.size()) {
+        auto *tool =
+            std::get_if<RegionToolBlock>(&turn.blocks[it->second.block_index]);
+        if (tool != nullptr) {
+          tool->raw_output = result.content();
+          tool->running = false;
+          tool->is_error = is_error;
+        }
+      }
+    } else {
+      const auto legacy = state_.tool_index.find(std::string(call_id));
+      if (legacy == state_.tool_index.end() ||
+          legacy->second >= state_.blocks.size())
+        return;
+      auto *tool = std::get_if<RegionToolBlock>(&state_.blocks[legacy->second]);
+      if (tool == nullptr)
+        return;
+      tool->raw_output = result.content();
+      tool->running = false;
+      tool->is_error = is_error;
+    }
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
@@ -418,16 +655,33 @@ public:
   void on_tool_output_text(std::string_view call_id,
                            std::string_view text) override {
     std::scoped_lock lock(mutex_);
-    const auto it = state_.tool_index.find(std::string(call_id));
-    if (it == state_.tool_index.end() || it->second >= state_.blocks.size())
-      return;
-    auto *tool = std::get_if<RegionToolBlock>(&state_.blocks[it->second]);
-    if (tool == nullptr)
-      return;
-    if (tool->running)
-      tool->custom_call_output.assign(text);
-    else
-      tool->custom_result_output.assign(text);
+    const auto it = state_.tool_addresses.find(std::string(call_id));
+    if (it != state_.tool_addresses.end() &&
+        it->second.turn_index < state_.turns.size()) {
+      auto &turn = state_.turns[it->second.turn_index];
+      if (it->second.block_index < turn.blocks.size()) {
+        auto *tool =
+            std::get_if<RegionToolBlock>(&turn.blocks[it->second.block_index]);
+        if (tool != nullptr) {
+          if (tool->running)
+            tool->custom_call_output.assign(text);
+          else
+            tool->custom_result_output.assign(text);
+        }
+      }
+    } else {
+      const auto legacy = state_.tool_index.find(std::string(call_id));
+      if (legacy == state_.tool_index.end() ||
+          legacy->second >= state_.blocks.size())
+        return;
+      auto *tool = std::get_if<RegionToolBlock>(&state_.blocks[legacy->second]);
+      if (tool == nullptr)
+        return;
+      if (tool->running)
+        tool->custom_call_output.assign(text);
+      else
+        tool->custom_result_output.assign(text);
+    }
     state_.revision = ++revision_;
     mark_dirty_locked();
   }
@@ -443,14 +697,28 @@ public:
     bool paint_now = false;
     {
       std::scoped_lock lock(mutex_);
-      if (state_.blocks.empty() ||
-          !std::holds_alternative<RegionTextBlock>(state_.blocks.back())) {
-        state_.blocks.emplace_back(RegionTextBlock{});
+      if (state_.has_active_turn &&
+          state_.active_turn_index < state_.turns.size()) {
+        auto &turn = state_.turns[state_.active_turn_index];
+        if (turn.blocks.empty() ||
+            !std::holds_alternative<RegionTextBlock>(turn.blocks.back()))
+          turn.blocks.emplace_back(RegionTextBlock{});
+        auto &block = std::get<RegionTextBlock>(turn.blocks.back()).raw;
+        if (!block.empty() && !block.ends_with('\n'))
+          block.push_back('\n');
+        block.append(text.data(), text.size());
+      } else {
+        state_.turns.emplace_back();
+        auto &turn = state_.turns.back();
+        turn.complete = true;
+        if (turn.blocks.empty() ||
+            !std::holds_alternative<RegionTextBlock>(turn.blocks.back()))
+          turn.blocks.emplace_back(RegionTextBlock{});
+        auto &block = std::get<RegionTextBlock>(turn.blocks.back()).raw;
+        if (!block.empty() && !block.ends_with('\n'))
+          block.push_back('\n');
+        block.append(text.data(), text.size());
       }
-      auto &block = std::get<RegionTextBlock>(state_.blocks.back()).raw;
-      if (!block.empty() && !block.ends_with('\n'))
-        block.push_back('\n');
-      block.append(text.data(), text.size());
       state_.revision = ++revision_;
       mark_dirty_locked();
       paint_now = !turn_active_;
@@ -537,6 +805,11 @@ public:
     {
       std::scoped_lock lock(mutex_);
       turn_active_ = false;
+      if (state_.has_active_turn &&
+          state_.active_turn_index < state_.turns.size()) {
+        state_.turns[state_.active_turn_index].complete = true;
+        state_.has_active_turn = false;
+      }
       if (!state_.has_error) {
         state_.status_text =
             "tokens: " + std::to_string(state_.last_usage.output) + "  done";
@@ -706,16 +979,24 @@ private:
       left = *snapshot.custom_status_line;
     } else {
       bool first = true;
-      for (const auto &block : snapshot.blocks) {
-        const auto *tool = std::get_if<RegionToolBlock>(&block);
-        if (tool == nullptr || !tool->running)
-          continue;
-        if (first)
-          left = "[";
-        else
-          left += ", ";
-        left += tool->tool_name;
-        first = false;
+      const auto append_tools = [&first, &left](const auto &blocks) {
+        for (const auto &block : blocks) {
+          const auto *tool = std::get_if<RegionToolBlock>(&block);
+          if (tool == nullptr || !tool->running)
+            continue;
+          if (first)
+            left = "[";
+          else
+            left += ", ";
+          left += tool->tool_name;
+          first = false;
+        }
+      };
+      if (!snapshot.turns.empty()) {
+        for (const auto &turn : snapshot.turns)
+          append_tools(turn.blocks);
+      } else {
+        append_tools(snapshot.blocks);
       }
       if (!first)
         left += "]";

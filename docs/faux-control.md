@@ -121,13 +121,51 @@ tool result instead of blocking.
 
 ### `turn`
 
+The legacy empty-prompt form remains supported:
+
 ```json
 {"type":"turn","id":"turn-1"}
 ```
 
-`turn` starts `AgentSession::run_prompt` asynchronously. A second `turn` while
-one is active is rejected. The empty synthetic user prompt is an implementation
-detail and is not painted as assistant output.
+To provide a visible request and typed provenance, include a prompt object:
+
+```json
+{
+  "type": "turn",
+  "id": "turn-1",
+  "prompt": {
+    "text": "Why are parallel tools reordered?",
+    "source": "ordinary"
+  }
+}
+```
+
+`prompt.text` is required and must be a string. `prompt.source`, when present,
+must be one of `ordinary`, `mailbox`, or `follow_up`; it defaults to `ordinary`.
+The optional `message_id`, `message_kind`, `sender_agent_id`,
+`sender_session_id`, `sender_task_path`, and `sender_session_name` fields must
+all be strings when supplied. These values are typed presentation metadata and
+do not replace the existing model-facing mailbox envelope text.
+
+A mailbox example is:
+
+```json
+{
+  "type": "turn",
+  "id": "mailbox-turn",
+  "prompt": {
+    "text": "Implement milestone 2.",
+    "source": "mailbox",
+    "message_id": "message-1",
+    "sender_task_path": "/root/luna"
+  }
+}
+```
+
+Malformed prompt objects or source metadata receive a protocol error response.
+A supplied prompt runs through `AgentSession::run_messages`; the legacy form
+continues to use the empty synthetic prompt for compatibility. A second `turn`
+while one is active is rejected.
 
 ### `quit`
 

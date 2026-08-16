@@ -510,6 +510,10 @@ public:
       diagnostics_->record_renderer_event("turn_start");
     base_.on_turn_start();
   }
+  void on_request(const core::RendererRequest &request) override {
+    base_.on_request(request);
+  }
+
   void on_text_delta(std::string_view d) override {
     if (diagnostics_)
       diagnostics_->record_renderer_event("text_delta", d.size());

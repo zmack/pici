@@ -195,6 +195,63 @@ int main() {
     CHECK(completed);
     CHECK(observed_events > 0);
 
+    mode.handle({{"type", "turn"},
+                 {"id", "bad-prompt"},
+                 {"prompt", {{"text", "bad"}, {"source", "invalid"}}}});
+    CHECK(!output.back().value("success", true));
+
+    auto reject_prompt = [&](nlohmann::json prompt, const char *id) {
+      mode.handle(
+          {{"type", "turn"}, {"id", id}, {"prompt", std::move(prompt)}});
+      CHECK(!output.back().value("success", true));
+    };
+    reject_prompt(nlohmann::json::array(), "prompt-array");
+    reject_prompt(nlohmann::json::object(), "prompt-missing-text");
+    reject_prompt({{"text", 3}}, "prompt-number-text");
+    reject_prompt({{"text", "text"}, {"source", 3}}, "prompt-number-source");
+    reject_prompt({{"text", "text"}, {"message_id", 3}},
+                  "prompt-number-metadata");
+
+    fixture.client->push_round(done_script());
+    mode.handle(
+        {{"type", "turn"},
+         {"id", "ordinary-prompt"},
+         {"prompt", {{"text", "ordinary request"}, {"source", "ordinary"}}}});
+    mode.wait_for_idle();
+    bool saw_ordinary_request = false;
+    for (const auto &value : output) {
+      if (value.value("event", "") != "message_start" ||
+          !value["data"].contains("request"))
+        continue;
+      const auto &request = value["data"]["request"];
+      saw_ordinary_request =
+          saw_ordinary_request || request.value("source", "") == "ordinary";
+    }
+    CHECK(saw_ordinary_request);
+
+    fixture.client->push_round(done_script());
+    mode.handle({{"type", "turn"},
+                 {"id", "mailbox-prompt"},
+                 {"prompt",
+                  {{"text", "mailbox request"},
+                   {"source", "mailbox"},
+                   {"message_id", "message-1"},
+                   {"sender_task_path", "/root/luna"}}}});
+    mode.wait_for_idle();
+    bool saw_mailbox_request = false;
+    for (const auto &value : output) {
+      if (value.value("event", "") != "message_start" ||
+          !value["data"].contains("request"))
+        continue;
+      const auto &request = value["data"]["request"];
+      saw_mailbox_request =
+          saw_mailbox_request ||
+          (request.value("source", "") == "mailbox" &&
+           request.value("message_id", "") == "message-1" &&
+           request.value("sender_task_path", "") == "/root/luna");
+    }
+    CHECK(saw_mailbox_request);
+
     mode.handle({{"type", "quit"}, {"id", "quit"}});
     CHECK(mode.quit_requested());
     CHECK(output.back().value("success", false));

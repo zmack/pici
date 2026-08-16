@@ -1,8 +1,11 @@
 #include "cli/faux_control_mode.h"
 
+#include "core/agent_loop.h"
 #include "core/event_json.h"
 #include "core/event_types.h"
+#include "core/message_types.h"
 #include "core/providers/faux_control.h"
+#include "core/request_presentation.h"
 #include "core/session/agent_session.h"
 
 #include <array>
@@ -14,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
@@ -62,6 +66,78 @@ private:
 
 bool valid_socket_path(const std::string &path) {
   return !path.empty() && path.size() < sizeof(sockaddr_un::sun_path);
+}
+
+bool optional_prompt_string(const nlohmann::json &prompt,
+                            std::string_view field,
+                            std::optional<std::string> &out,
+                            std::string &error) {
+  if (!prompt.contains(field))
+    return true;
+  if (!prompt.at(field).is_string()) {
+    error = "turn prompt field '" + std::string(field) + "' must be a string";
+    return false;
+  }
+  out = prompt.at(field).get<std::string>();
+  return true;
+}
+
+std::optional<core::AgentMessageEnvelope>
+parse_turn_prompt(const nlohmann::json &command, std::string &error) {
+  if (!command.contains("prompt"))
+    return std::nullopt;
+  const auto &prompt = command.at("prompt");
+  if (!prompt.is_object()) {
+    error = "turn field 'prompt' must be an object";
+    return std::nullopt;
+  }
+  if (!prompt.contains("text") || !prompt.at("text").is_string()) {
+    error = "turn prompt field 'text' must be a string";
+    return std::nullopt;
+  }
+
+  core::RequestPresentation presentation;
+  if (prompt.contains("source")) {
+    if (!prompt.at("source").is_string()) {
+      error = "turn prompt field 'source' must be a string";
+      return std::nullopt;
+    }
+    const auto source = prompt.at("source").get<std::string>();
+    if (source == "ordinary")
+      presentation.source = core::RequestSource::ordinary;
+    else if (source == "mailbox")
+      presentation.source = core::RequestSource::mailbox;
+    else if (source == "follow_up")
+      presentation.source = core::RequestSource::follow_up;
+    else {
+      error = "turn prompt field 'source' must be 'ordinary', 'mailbox', or "
+              "'follow_up'";
+      return std::nullopt;
+    }
+  }
+  if (!optional_prompt_string(prompt, "message_id", presentation.message_id,
+                              error) ||
+      !optional_prompt_string(prompt, "message_kind", presentation.message_kind,
+                              error) ||
+      !optional_prompt_string(prompt, "sender_agent_id",
+                              presentation.sender_agent_id, error) ||
+      !optional_prompt_string(prompt, "sender_session_id",
+                              presentation.sender_session_id, error) ||
+      !optional_prompt_string(prompt, "sender_task_path",
+                              presentation.sender_task_path, error) ||
+      !optional_prompt_string(prompt, "sender_session_name",
+                              presentation.sender_session_name, error))
+    return std::nullopt;
+
+  core::UserMessage user;
+  user.content.emplace_back(
+      core::TextContent{.text = prompt.at("text").get<std::string>()});
+  return core::AgentMessageEnvelope{
+      .message = core::Message{std::move(user)},
+      .source = presentation.source == core::RequestSource::mailbox
+                    ? core::AgentMessageSource::mailbox
+                    : core::AgentMessageSource::ordinary,
+      .presentation = std::move(presentation)};
 }
 
 } // namespace
@@ -142,15 +218,25 @@ void FauxControlMode::handle_turn(const nlohmann::json &command) {
   if (run_thread_.joinable())
     run_thread_.join();
 
+  std::string prompt_error;
+  auto prompt = parse_turn_prompt(command, prompt_error);
+  if (!prompt_error.empty()) {
+    run_active_ = false;
+    response(command, false, nullptr, std::move(prompt_error));
+    return;
+  }
+
   response(command, true);
-  run_thread_ = std::jthread([this] {
+  run_thread_ = std::jthread([this, prompt = std::move(prompt)]() mutable {
     try {
+      const auto callback = [this](const core::AgentEvent &event) {
+        if (event_observer_)
+          event_observer_(event);
+        emit(core::event_to_json(event));
+      };
       const auto result =
-          session_.run_prompt("", [this](const core::AgentEvent &event) {
-            if (event_observer_)
-              event_observer_(event);
-            emit(core::event_to_json(event));
-          });
+          prompt ? session_.run_messages({std::move(*prompt)}, callback)
+                 : session_.run_prompt("", callback);
       if (result.error)
         emit({{"type", "turn.failed"}, {"error", *result.error}});
       else

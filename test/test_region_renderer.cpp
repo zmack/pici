@@ -397,6 +397,224 @@ void test_idle_paint_saves_cursor_and_scrolls() {
          "idle errors are painted in the compositor");
 }
 
+void test_explicit_turn_request_sections() {
+  pi::core::RegionState state;
+  pi::core::RegionTurn ordinary;
+  ordinary.requests.push_back(pi::core::RegionRequestBlock{
+      .metadata = {}, .raw_text = "ordinary prompt"});
+  ordinary.blocks.emplace_back(
+      pi::core::RegionTextBlock{.raw = "ordinary answer"});
+  state.turns.push_back(std::move(ordinary));
+
+  pi::core::RegionTurn mailbox;
+  pi::core::RequestPresentation metadata{.source =
+                                             pi::core::RequestSource::mailbox,
+                                         .sender_task_path = "/root/luna"};
+  mailbox.requests.push_back(
+      pi::core::RegionRequestBlock{.metadata = metadata,
+                                   .raw_text = "mailbox prompt\nwrapped text",
+                                   .non_text_attachments = 1});
+  mailbox.requests.push_back(pi::core::RegionRequestBlock{
+      .metadata = metadata, .raw_text = "second prompt"});
+  mailbox.blocks.emplace_back(
+      pi::core::RegionTextBlock{.raw = "mailbox answer"});
+  mailbox.complete = true;
+  state.turns.push_back(std::move(mailbox));
+
+  const auto frame = pi::core::build_region_frame(state, 24, 40);
+  std::size_t request_headings = 0;
+  std::size_t ordinary_prompt = frame.lines.size();
+  std::size_t mailbox_prompt = frame.lines.size();
+  std::size_t mailbox_heading = frame.lines.size();
+  std::size_t attachment = frame.lines.size();
+  std::size_t answer = frame.lines.size();
+  for (std::size_t index = 0; index < frame.lines.size(); ++index) {
+    const auto &line = frame.lines[index];
+    request_headings += line.find("-- REQUEST") != std::string::npos;
+    if (line.find("MAILBOX") != std::string::npos)
+      mailbox_heading = index;
+    if (line.find("ordinary prompt") != std::string::npos)
+      ordinary_prompt = index;
+    if (line.find("mailbox prompt") != std::string::npos)
+      mailbox_prompt = index;
+    if (line.find("[image attachment]") != std::string::npos)
+      attachment = index;
+    if (line.find("mailbox answer") != std::string::npos)
+      answer = index;
+  }
+  expect(request_headings == 2, "each explicit turn has one request heading");
+  expect(frame.lines[0].find("-- REQUEST") != std::string::npos,
+         "ordinary request heading is visible");
+  expect(mailbox_prompt < frame.lines.size() &&
+             frame.lines[mailbox_prompt].find("MAILBOX") == std::string::npos,
+         "mailbox source stays on its heading");
+  expect(mailbox_heading < frame.lines.size(),
+         "mailbox heading includes source");
+  expect(std::any_of(frame.lines.begin(), frame.lines.end(),
+                     [](const auto &line) {
+                       return line.find("root/luna") != std::string::npos;
+                     }),
+         "mailbox heading prefers task path");
+  expect(ordinary_prompt < mailbox_prompt,
+         "completed history precedes new request");
+  expect(attachment < answer, "attachment placeholder stays before answer");
+  expect(frame.lines[answer].find("mailbox answer") != std::string::npos,
+         "completed turn preserves answer text");
+
+  state.scroll_offset_rows = frame.max_scroll_rows;
+  const auto top = pi::core::build_region_frame(state, 24, 4);
+  expect(top.total_rows > top.lines.size(),
+         "explicit turns expose physical scroll rows");
+  expect(top.max_scroll_rows > 0, "explicit turns have a scroll boundary");
+}
+
+void test_request_audit_behaviors() {
+  pi::core::RegionState empty;
+  empty.turns.push_back(pi::core::RegionTurn{
+      .requests = {pi::core::RegionRequestBlock{}}, .blocks = {}});
+  const auto empty_frame = pi::core::build_region_frame(empty, 40, 20);
+  expect(std::all_of(empty_frame.lines.begin(), empty_frame.lines.end(),
+                     [](const auto &line) {
+                       return line.find("-- REQUEST") == std::string::npos;
+                     }),
+         "legacy empty ordinary requests do not paint a heading");
+
+  pi::core::RegionTurn mixed;
+  mixed.requests.push_back(
+      pi::core::RegionRequestBlock{.metadata = {}, .raw_text = "ordinary"});
+  mixed.requests.push_back(pi::core::RegionRequestBlock{
+      .metadata =
+          pi::core::RequestPresentation{.source =
+                                            pi::core::RequestSource::mailbox,
+                                        .sender_task_path = "/root/task"},
+      .raw_text = "mailbox"});
+  const auto mixed_frame = pi::core::build_region_frame(
+      pi::core::RegionState{.turns = {std::move(mixed)}}, 40, 20);
+  expect(mixed_frame.lines[0] == "-- REQUEST\033[0m",
+         "mixed request provenance uses a neutral heading");
+  expect(std::all_of(mixed_frame.lines.begin(), mixed_frame.lines.end(),
+                     [](const auto &line) {
+                       return line.find("MAILBOX") == std::string::npos &&
+                              line.find("/root/task") == std::string::npos;
+                     }),
+         "mixed request heading does not claim one provenance");
+
+  pi::core::RequestPresentation long_sender{
+      .source = pi::core::RequestSource::mailbox,
+      .sender_agent_id = "abcdefghijklmnopqrstuvwx12345"};
+  pi::core::RegionTurn narrow;
+  narrow.requests.push_back(pi::core::RegionRequestBlock{
+      .metadata = std::move(long_sender), .raw_text = "prompt"});
+  const auto narrow_frame = pi::core::build_region_frame(
+      pi::core::RegionState{.turns = {std::move(narrow)}}, 12, 20);
+  const auto visible_text = [](std::string_view line) {
+    std::string text;
+    for (std::size_t index = 0; index < line.size(); ++index) {
+      if (line[index] != '\033') {
+        text.push_back(line[index]);
+        continue;
+      }
+      ++index;
+      if (index < line.size() && line[index] == '[')
+        while (index + 1 < line.size() && line[++index] != 'm')
+          ;
+    }
+    return text;
+  };
+  std::string narrow_text;
+  for (const auto &line : narrow_frame.lines)
+    narrow_text += visible_text(line);
+  expect(narrow_text.find("abcdefghijklmnop...12345") != std::string::npos,
+         "long raw agent IDs use a deterministic shortened label");
+  const auto visible_length = [](std::string_view line) {
+    std::size_t length = 0;
+    for (std::size_t index = 0; index < line.size(); ++index) {
+      if (line[index] != '\033') {
+        ++length;
+        continue;
+      }
+      ++index;
+      if (index < line.size() && line[index] == '[')
+        while (index + 1 < line.size() && line[++index] != 'm')
+          ;
+    }
+    return length;
+  };
+  expect(
+      std::all_of(narrow_frame.lines.begin(), narrow_frame.lines.end(),
+                  [&](const auto &line) { return visible_length(line) <= 12; }),
+      "long request headings wrap to the requested width");
+
+  pi::core::RegionState command_state;
+  pi::core::RegionTurn before_first;
+  before_first.blocks.emplace_back(
+      pi::core::RegionTextBlock{"command before first"});
+  before_first.complete = true;
+  command_state.turns.push_back(std::move(before_first));
+  pi::core::RegionTurn first;
+  first.requests.push_back(pi::core::RegionRequestBlock{
+      .metadata = {}, .raw_text = "first request"});
+  first.blocks.emplace_back(pi::core::RegionTextBlock{"first answer"});
+  first.complete = true;
+  command_state.turns.push_back(std::move(first));
+  command_state.turns.emplace_back();
+  command_state.turns.back().complete = true;
+  command_state.turns.back().blocks.emplace_back(
+      pi::core::RegionTextBlock{"command output"});
+  expect(command_state.turns.back().complete,
+         "standalone idle command turns are complete");
+  pi::core::RegionTurn second;
+  second.requests.push_back(pi::core::RegionRequestBlock{
+      .metadata = {}, .raw_text = "second request"});
+  command_state.turns.push_back(std::move(second));
+  const auto command_frame =
+      pi::core::build_region_frame(command_state, 40, 20);
+  std::size_t before_first_command = command_frame.lines.size();
+  std::size_t first_answer = command_frame.lines.size();
+  std::size_t command = command_frame.lines.size();
+  std::size_t second_heading = command_frame.lines.size();
+  for (std::size_t index = 0; index < command_frame.lines.size(); ++index) {
+    if (command_frame.lines[index].find("first answer") != std::string::npos)
+      first_answer = index;
+    if (command_frame.lines[index].find("command before first") !=
+        std::string::npos)
+      before_first_command = index;
+    if (command_frame.lines[index].find("command output") != std::string::npos)
+      command = index;
+    if (index > command &&
+        command_frame.lines[index].find("-- REQUEST") != std::string::npos)
+      second_heading = index;
+  }
+  expect(before_first_command < first_answer,
+         "idle command output remains visible before the first turn");
+  expect(first_answer < command && command < second_heading,
+         "idle command output remains standalone between completed turns");
+
+  pi::core::RegionTurn unsafe;
+  unsafe.requests.push_back(pi::core::RegionRequestBlock{
+      .metadata =
+          pi::core::RequestPresentation{
+              .source = pi::core::RequestSource::mailbox,
+              .sender_task_path = "\033[31msender\033[0m\033]52;c;bad\007"},
+      .raw_text = "visible \033[2Jtext \033[?25l\033[31mred\033[0m"});
+  const auto unsafe_frame = pi::core::build_region_frame(
+      pi::core::RegionState{.turns = {std::move(unsafe)}}, 10, 20);
+  std::string unsafe_text;
+  for (const auto &line : unsafe_frame.lines) {
+    unsafe_text += visible_text(line);
+    expect(line.ends_with("\033[0m"),
+           "sanitized request rows close their SGR state");
+    expect(visible_length(line) <= 10,
+           "sanitized request rows stay within the requested width");
+  }
+  expect(unsafe_text.find("visible text red") != std::string::npos,
+         "sanitized request keeps visible text");
+  expect(unsafe_text.find("2J") == std::string::npos &&
+             unsafe_text.find("?25l") == std::string::npos &&
+             unsafe_text.find("52;c;bad") == std::string::npos,
+         "sanitized request removes cursor, clear-screen, and OSC controls");
+}
+
 void test_error_survives_fast_turn_end() {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
@@ -449,6 +667,8 @@ int main() {
   test_tool_callbacks_route_into_regions();
   test_region_factory_lifecycle();
   test_idle_paint_saves_cursor_and_scrolls();
+  test_explicit_turn_request_sections();
+  test_request_audit_behaviors();
   test_error_survives_fast_turn_end();
   if (failed != 0)
     return 1;

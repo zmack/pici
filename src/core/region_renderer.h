@@ -1,6 +1,9 @@
 #pragma once
 
+#include "core/request_presentation.h"
+
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -9,10 +12,22 @@
 
 namespace pi::core {
 
-// Append-ordered transcript and tool blocks make the compositor's ordering
-// contract explicit for its pure frame builder.
+enum class RegionAssistantTextKind { provisional, work, answer };
+
+struct RegionRequestBlock {
+  RequestPresentation metadata;
+  std::string raw_text;
+  std::size_t non_text_attachments{0};
+};
+
+struct RegionThinkingBlock {
+  std::string raw;
+};
+
 struct RegionTextBlock {
   std::string raw;
+  RegionAssistantTextKind kind{RegionAssistantTextKind::provisional};
+  std::uint64_t message_sequence{0};
 };
 
 struct RegionToolBlock {
@@ -26,11 +41,32 @@ struct RegionToolBlock {
   bool is_error{false};
 };
 
+using RegionTurnBlock =
+    std::variant<RegionTextBlock, RegionThinkingBlock, RegionToolBlock>;
+
+struct RegionTurn {
+  std::vector<RegionRequestBlock> requests;
+  std::vector<RegionTurnBlock> blocks;
+  bool complete{false};
+};
+
 using RegionBlock = std::variant<RegionTextBlock, RegionToolBlock>;
 
+struct RegionToolAddress {
+  std::size_t turn_index{0};
+  std::size_t block_index{0};
+};
+
 struct RegionState {
+  std::vector<RegionTurn> turns;
+  std::size_t active_turn_index{0};
+  bool has_active_turn{false};
+
+  // Legacy flat fields remain accepted by the pure builder for callers that
+  // render a transcript without turn callbacks.
   std::vector<RegionBlock> blocks;
   std::unordered_map<std::string, std::size_t> tool_index;
+  std::unordered_map<std::string, RegionToolAddress> tool_addresses;
   std::string thinking;
   std::size_t thinking_block_index{0};
   bool in_thinking{false};
@@ -43,13 +79,9 @@ struct RegionFrame {
   int total_rows{0};
 };
 
-// Build the visible transcript rows without touching a terminal. Each row is
-// self-contained with respect to SGR state so a row can be repainted alone.
 RegionFrame build_region_frame(const RegionState &state, int width,
                                int content_rows);
 
-// Produce the terminal writes needed to change old_rows into new_rows. The
-// returned string is empty when no row changed.
 std::string diff_region_rows(const std::vector<std::string> &old_rows,
                              const std::vector<std::string> &new_rows);
 
