@@ -704,6 +704,7 @@ Args merge_args(const Args &config, const Args &cli) {
   // Pass-through CLI-only fields
   out.messages = cli.messages;
   out.print_mode = cli.print_mode;
+  out.rpc_mode = cli.rpc_mode;
   out.list_models = cli.list_models;
   out.list_models_filter = cli.list_models_filter;
   out.list_tools = cli.list_tools;
