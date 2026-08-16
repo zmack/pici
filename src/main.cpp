@@ -550,8 +550,7 @@ public:
     }
     pending_tool_args_[std::string(call_id)] = parsed_args;
 
-    std::string display;
-    bool has_custom_display = false;
+    std::optional<std::string> custom_display;
     std::shared_ptr<core::LuaHooks> hooks;
     if (hook_runtime_) {
       std::scoped_lock lock(hook_runtime_->mutex);
@@ -563,20 +562,29 @@ public:
       ctx.call_id = std::string(call_id);
       ctx.args = parsed_args;
       if (auto custom = hooks->format_tool_call(ctx)) {
-        has_custom_display = true;
-        display = core::sanitize_tool_output(*custom);
-        if (!display.empty() && display.back() != '\n')
-          display += '\n';
+        auto sanitized = core::sanitize_tool_output(*custom);
+        if (!sanitized.empty() && sanitized.back() != '\n')
+          sanitized += '\n';
+        custom_display = std::move(sanitized);
       }
     }
-    if (!has_custom_display) {
-      display = "\n[tool: ";
+    if (custom_display) {
+      // Genuine hook-produced text: route it through the base renderer (or
+      // stdout) exactly like before.
+      emit_tool_output(call_id, *custom_display);
+    } else if (!owns_tool_output()) {
+      // No hook: only the flat-stdout renderers need the fallback string.
+      // A renderer that owns its own tool presentation (RegionRenderer)
+      // already has call_id/name/args_json from base_.on_tool_start above
+      // and builds its own display from that — piping this fallback text
+      // through on_tool_output_text would just clobber it.
+      std::string display = "\n[tool: ";
       display += name;
       display += "(\033[38;5;214m";
       display += args_json;
       display += "\033[0m)]\n";
+      std::cout << display << std::flush;
     }
-    emit_tool_output(call_id, display);
   }
   void on_tool_end(std::string_view call_id, std::string_view name,
                    const core::ToolResult &result, bool is_error) override {
@@ -595,8 +603,7 @@ public:
       pending_tool_args_.erase(it);
     }
 
-    std::string display;
-    bool has_custom_display = false;
+    std::optional<std::string> custom_display;
     if (hooks && hooks->format_tool_result) {
       core::LuaHooks::FormatToolResultContext ctx;
       ctx.tool_name = std::string(name);
@@ -605,20 +612,25 @@ public:
       ctx.content = result.content();
       ctx.is_error = is_error;
       if (auto custom = hooks->format_tool_result(ctx)) {
-        has_custom_display = true;
-        display = core::sanitize_tool_output(*custom);
-        if (!display.empty() && display.back() != '\n')
-          display += '\n';
+        auto sanitized = core::sanitize_tool_output(*custom);
+        if (!sanitized.empty() && sanitized.back() != '\n')
+          sanitized += '\n';
+        custom_display = std::move(sanitized);
       }
     }
-    if (!has_custom_display) {
-      display = "\033[38;5;245m  [";
+    if (custom_display) {
+      emit_tool_output(call_id, *custom_display);
+    } else if (!owns_tool_output()) {
+      // See the matching comment in on_tool_start: a renderer that owns its
+      // own tool presentation already has the result via base_.on_tool_end
+      // above and builds its own display from that.
+      std::string display = "\033[38;5;245m  [";
       display += name;
       display += "] ";
       display += format_tool_result(result.content());
       display += "\033[0m\n";
+      std::cout << display << std::flush;
     }
-    emit_tool_output(call_id, display);
   }
 
   void on_message_end(const core::TokenUsage &u) override {
