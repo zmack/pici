@@ -57,6 +57,7 @@ public:
     model_ = std::move(m);
     thinking_level_ = level;
     messages_ = std::move(msgs);
+    ++transcript_epoch_;
     session_id_ = std::move(id);
     session_name_ = std::move(name);
   }
@@ -82,20 +83,46 @@ public:
     return messages_;
   }
 
+  // Monotonically increasing counter bumped every time messages_ is mutated
+  // (append or wholesale replacement). Used by any operation that snapshots
+  // the transcript, does slow work (a network call), and must detect whether
+  // another operation mutated the transcript before it installs a
+  // replacement — e.g. CompactionManager's stale-snapshot guard.
+  std::uint64_t transcript_epoch() const {
+    std::scoped_lock lock(mutex_);
+    return transcript_epoch_;
+  }
+
+  struct TranscriptSnapshot {
+    std::vector<Message> messages;
+    std::uint64_t epoch{0};
+  };
+
+  // Atomically reads messages_ and transcript_epoch_ together so a caller
+  // never observes a torn pair (e.g. epoch from after an append but messages
+  // from before it).
+  TranscriptSnapshot snapshot_transcript() const {
+    std::scoped_lock lock(mutex_);
+    return {.messages = messages_, .epoch = transcript_epoch_};
+  }
+
   void set_messages(std::vector<Message> msgs) {
     std::scoped_lock lock(mutex_);
     messages_ = std::move(msgs);
+    ++transcript_epoch_;
   }
 
   void append_message(Message msg) {
     std::scoped_lock lock(mutex_);
     messages_.push_back(std::move(msg));
+    ++transcript_epoch_;
   }
 
   void append_messages(std::vector<Message> msgs) {
     std::scoped_lock lock(mutex_);
     messages_.insert(messages_.end(), std::make_move_iterator(msgs.begin()),
                      std::make_move_iterator(msgs.end()));
+    ++transcript_epoch_;
   }
 
   Message last_message() const {
@@ -228,6 +255,7 @@ public:
     model_ = Model{};
     thinking_level_ = ThinkingLevel::off;
     messages_.clear();
+    ++transcript_epoch_;
     tools_.clear();
     pending_tool_calls_.clear();
     error_message_.reset();
@@ -244,6 +272,7 @@ private:
   Model model_;
   ThinkingLevel thinking_level_{ThinkingLevel::off};
   std::vector<Message> messages_;
+  std::uint64_t transcript_epoch_{0};
   std::vector<std::shared_ptr<const ToolDefinition>> tools_;
 
   bool is_streaming_{false};

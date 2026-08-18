@@ -2,6 +2,7 @@
 
 #include "core/agent.h"
 #include "core/agent_loop.h"
+#include "core/compaction.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/models.h"
@@ -277,6 +278,71 @@ AgentSession::run_messages(std::vector<AgentMessageEnvelope> messages,
 
   if (!result.error && persistence_error)
     result.error = persistence_error;
+  return result;
+}
+
+AgentSession::CompactionRunResult
+AgentSession::compact_active_session(CompactionTrigger trigger,
+                                     const EventCallback &callback) {
+  CompactionRunResult result;
+  if (!active_session_id_) {
+    result.error = "no active session";
+    return result;
+  }
+  const auto session_id = *active_session_id_;
+
+  auto handle_event = [&](const AgentEvent &event) {
+    if (const auto *compaction = std::get_if<CompactionEvent>(&event)) {
+      if (compaction->kind == CompactionEventKind::complete) {
+        result.retained_message_count = compaction->retained_message_count;
+
+        SessionCompactionRecord record;
+        record.messages = compaction->replacement_messages;
+        record.provider = compaction->provider;
+        record.model = compaction->model;
+        record.summary = compaction->summary;
+        record.timestamp = compaction->timestamp;
+
+        std::function<void()> persist;
+        if (session_store_) {
+          persist = [store = session_store_, session_id, record] {
+            store->append_compaction(session_id, record);
+          };
+        }
+
+        try {
+          auto commit = agent_.commit_compaction(
+              compaction->snapshot_epoch, compaction->replacement_messages,
+              persist);
+          if (commit.installed)
+            result.success = true;
+          else
+            result.error = commit.error.value_or("compaction install failed");
+        } catch (const std::exception &e) {
+          result.error = e.what();
+        } catch (...) {
+          result.error = "Unknown compaction commit error";
+        }
+      } else if (compaction->kind == CompactionEventKind::error) {
+        result.cancelled = compaction->cancelled;
+        result.unsupported = compaction->unsupported;
+        result.error = compaction->error_message;
+      }
+    }
+    if (callback)
+      callback(event);
+  };
+
+  try {
+    auto stream = agent_.compact(trigger);
+    for (const auto &event : stream)
+      handle_event(event);
+  } catch (const std::exception &e) {
+    result.error = e.what();
+  } catch (...) {
+    result.error = "Unknown compaction error";
+  }
+
   return result;
 }
 

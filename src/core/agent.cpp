@@ -3,6 +3,7 @@
 #include <chrono>
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iterator>
@@ -12,6 +13,7 @@
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -20,7 +22,10 @@
 
 #include "core/agent_loop.h"
 #include "core/agent_state.h"
+#include "core/auth_types.h"
+#include "core/compaction.h"
 #include "core/event_types.h"
+#include "core/llm_client.h"
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/stream.h"
@@ -238,45 +243,57 @@ EventStream<AgentEvent, std::vector<Message>> Agent::continue_() {
   return stream;
 }
 
-ModelSwitchResult Agent::set_model(Model model, ThinkingLevel thinking,
-                                   const std::function<void()> &persist) {
+void Agent::with_idle_transition(std::string_view operation,
+                                 const std::function<void()> &transition) {
   std::scoped_lock run_lock(worker_mutex_);
   if (state_.is_streaming())
-    throw std::runtime_error("model switching requires an idle agent");
+    throw std::runtime_error(std::string(operation) +
+                             " requires an idle agent");
   if (!state_.pending_tool_calls().empty())
-    throw std::runtime_error(
-        "model switching is unavailable while tool execution is pending");
+    throw std::runtime_error(std::string(operation) +
+                             " is unavailable while tool execution is "
+                             "pending");
   {
     std::scoped_lock queue_lock(steering_mutex_, followup_mutex_);
     if (!steering_queue_.empty() || !followup_queue_.empty())
-      throw std::runtime_error(
-          "model switching requires empty steering and follow-up queues");
+      throw std::runtime_error(std::string(operation) +
+                               " requires empty steering and follow-up "
+                               "queues");
   }
+  if (transition)
+    transition();
+}
 
-  const auto previous = state_.model();
-  const auto normalized = resolve_thinking_level(model, thinking);
-  std::optional<std::string> warning = normalized.warning;
-  if (model.context_window != 0) {
-    const auto estimated = estimate_context_tokens(state_.messages());
-    if (estimated > model.context_window) {
-      const auto context_warning =
-          "raw context estimate " + std::to_string(estimated) +
-          " tokens exceeds " + model.provider + "/" + model.id +
-          " context window " + std::to_string(model.context_window) +
-          " tokens; context preparation will be attempted";
-      if (warning)
-        *warning += "; " + context_warning;
-      else
-        warning = context_warning;
+ModelSwitchResult Agent::set_model(Model model, ThinkingLevel thinking,
+                                   const std::function<void()> &persist) {
+  ModelSwitchResult switch_result;
+  with_idle_transition("model switching", [&] {
+    const auto previous = state_.model();
+    const auto normalized = resolve_thinking_level(model, thinking);
+    std::optional<std::string> warning = normalized.warning;
+    if (model.context_window != 0) {
+      const auto estimated = estimate_context_tokens(state_.messages());
+      if (estimated > model.context_window) {
+        const auto context_warning =
+            "raw context estimate " + std::to_string(estimated) +
+            " tokens exceeds " + model.provider + "/" + model.id +
+            " context window " + std::to_string(model.context_window) +
+            " tokens; context preparation will be attempted";
+        if (warning)
+          *warning += "; " + context_warning;
+        else
+          warning = context_warning;
+      }
     }
-  }
-  if (persist)
-    persist();
-  state_.set_model_and_thinking(std::move(model), normalized.level);
-  return {.previous = previous,
-          .current = state_.model(),
-          .thinking_level = normalized.level,
-          .warning = std::move(warning)};
+    if (persist)
+      persist();
+    state_.set_model_and_thinking(std::move(model), normalized.level);
+    switch_result = {.previous = previous,
+                     .current = state_.model(),
+                     .thinking_level = normalized.level,
+                     .warning = std::move(warning)};
+  });
+  return switch_result;
 }
 
 ModelSwitchResult
@@ -544,6 +561,129 @@ AgentLoopConfig Agent::create_loop_config() {
   config.llm_client = LLMClient::create(config.model);
 
   return config;
+}
+
+CompactionOptions Agent::create_compaction_options() {
+  CompactionOptions opts;
+  opts.reasoning = state_.thinking_level();
+  opts.session_id = options_.session_id;
+  opts.headers = options_.headers;
+  opts.timeout_ms = options_.timeout_ms;
+  opts.metadata = options_.metadata;
+  opts.on_payload = options_.on_payload;
+  opts.on_response = options_.on_response;
+  opts.diagnostics = options_.diagnostics;
+  opts.verbose = options_.verbose;
+  try {
+    if (options_.get_auth)
+      opts.auth = options_.get_auth(state_.model().provider);
+    if (!opts.auth && options_.get_api_key) {
+      if (auto key = options_.get_api_key(state_.model().provider)) {
+        opts.api_key = std::move(key);
+        opts.auth = RequestAuth{.kind = AuthKind::api_key,
+                                .bearer_token = opts.api_key,
+                                .source = "legacy-api-key"};
+      }
+    }
+  } catch (...) {
+    // A misbehaving auth callback should surface as a normal compaction
+    // failure (the client rejects the request for lack of auth), not crash
+    // the worker thread building the request.
+    static_cast<void>(0);
+  }
+  return opts;
+}
+
+EventStream<AgentEvent, CompactionOutcome>
+Agent::compact(CompactionTrigger trigger) {
+  EventStream<AgentEvent, CompactionOutcome> stream(
+      [](const AgentEvent &ev) {
+        const auto *e = std::get_if<CompactionEvent>(&ev);
+        return e != nullptr && e->kind != CompactionEventKind::start;
+      },
+      [](const AgentEvent &ev) -> CompactionOutcome {
+        CompactionOutcome outcome;
+        const auto *e = std::get_if<CompactionEvent>(&ev);
+        if (e == nullptr)
+          return outcome;
+        if (e->kind == CompactionEventKind::complete) {
+          outcome.success = true;
+          outcome.retained_message_count = e->retained_message_count;
+        } else {
+          outcome.cancelled = e->cancelled;
+          outcome.unsupported = e->unsupported;
+          outcome.error = e->error_message;
+        }
+        return outcome;
+      });
+
+  join_workers();
+
+  CompactionRunRequest request;
+  request.trigger = trigger;
+  request.max_retries = options_.max_retries.value_or(2);
+  request.max_retry_delay_ms = options_.max_retry_delay_ms.value_or(4000);
+
+  // Snapshot + idle-check share set_model's exact guard: this call fails
+  // outright (nothing launched) if streaming, if tool calls are pending, or
+  // if steering/follow-up work is queued. The snapshot deliberately does
+  // NOT hold worker_mutex_ for the network call that follows below — only
+  // the drain-side commit_compaction() re-acquires it, rechecking the
+  // transcript epoch captured here before installing anything.
+  with_idle_transition("compaction", [&] {
+    request.context = create_context_snapshot();
+    request.snapshot_epoch = state_.transcript_epoch();
+    request.llm_client = LLMClient::create(state_.model());
+    request.options = create_compaction_options();
+  });
+
+  {
+    std::scoped_lock lock(worker_mutex_);
+    launch_worker_locked(
+        [this, request = std::move(request), stream]() mutable {
+          const auto epoch = request.snapshot_epoch;
+          try {
+            run_compaction(
+                request,
+                [this, &stream](AgentEvent event) {
+                  process_event(event);
+                  return stream.push(std::move(event));
+                },
+                state_.stop_token());
+          } catch (const std::exception &error) {
+            CompactionEvent error_event(CompactionEventKind::error);
+            error_event.snapshot_epoch = epoch;
+            error_event.error_message = error.what();
+            stream.push(AgentEvent{std::move(error_event)});
+          } catch (...) {
+            CompactionEvent error_event(CompactionEventKind::error);
+            error_event.snapshot_epoch = epoch;
+            error_event.error_message = "Unknown compaction error";
+            stream.push(AgentEvent{std::move(error_event)});
+          }
+        });
+  }
+
+  return stream;
+}
+
+Agent::CompactionCommitResult
+Agent::commit_compaction(std::uint64_t expected_epoch,
+                         std::vector<Message> replacement,
+                         const std::function<void()> &persist) {
+  CompactionCommitResult result;
+  with_idle_transition("compaction", [&] {
+    if (state_.transcript_epoch() != expected_epoch) {
+      result.error = "transcript changed since the compaction snapshot "
+                     "(stale snapshot); retry compaction";
+      return;
+    }
+    if (persist)
+      persist();
+    state_.set_messages(std::move(replacement));
+    result.installed = true;
+  });
+  return result;
 }
 
 void Agent::process_event(const AgentEvent &event) {

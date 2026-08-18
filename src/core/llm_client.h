@@ -95,6 +95,14 @@ struct CompactionResult {
   TokenUsage usage;
   std::optional<std::string> error_message;
   bool cancelled{false};
+  // HTTP status of the provider's response, when one was received at all.
+  // Unset means the request never got a response (a transient transport
+  // failure); set distinguishes a retryable server error (429/5xx) from a
+  // non-retryable client error (4xx other than 429) for the retry policy in
+  // core/compaction.h. Not part of the original Phase 2 contract — added in
+  // Phase 3 because CompactionResult::error_message alone (a free-form
+  // string) is not a reliable signal to retry on.
+  std::optional<int> http_status;
 };
 
 // Each provider (OpenAI, Anthropic, etc.) implements this interface.

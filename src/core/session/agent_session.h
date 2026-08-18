@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/agent.h"
+#include "core/compaction.h"
 #include "core/models.h"
 #include "core/sandbox.h"
 #include "core/session/session_record.h"
@@ -77,6 +78,26 @@ public:
 
   RunResult run_prompt(std::string prompt, const EventCallback &callback = {});
   RunResult run_messages(std::vector<AgentMessageEnvelope> messages,
+                         const EventCallback &callback = {});
+
+  struct CompactionRunResult {
+    bool success{false};
+    bool unsupported{false};
+    bool cancelled{false};
+    std::optional<std::string> error;
+    std::size_t retained_message_count{0};
+  };
+
+  // Drains agent_.compact(trigger), and on the `complete` CompactionEvent
+  // performs the durable-write-then-install step: writes the replayable
+  // compaction journal record via SessionStore::append_compaction, and only
+  // if that succeeds, installs the replacement transcript via
+  // agent_.commit_compaction(). This is the drain-thread persistence path
+  // required by plans/server-side-compaction.md §5 — the durable write
+  // happens here (on whichever thread calls this method), never inside
+  // agent_.compact()'s own worker thread.
+  CompactionRunResult
+  compact_active_session(CompactionTrigger trigger = CompactionTrigger::manual,
                          const EventCallback &callback = {});
 
 private:

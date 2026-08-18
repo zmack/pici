@@ -139,6 +139,22 @@ nlohmann::json event_to_json(const AgentEvent &event) {
             data["result"] = value.result->content();
           if (value.result && value.result->details())
             data["details"] = *value.result->details();
+        } else if constexpr (std::is_same_v<T, CompactionEvent>) {
+          // Deliberately metadata-only: never serialize replacement_messages
+          // here. That would risk round-tripping opaque provider-encrypted
+          // compaction payloads (or plain transcript text) into a
+          // machine-facing event log; counts/timing/status are sufficient
+          // for RPC/ACP observers per the plan's privacy requirements.
+          data = {{"kind", compaction_event_kind_to_string(value.kind)},
+                  {"provider", value.provider},
+                  {"model", value.model},
+                  {"summary", value.summary},
+                  {"retained_message_count", value.retained_message_count}};
+          if (value.response_id)
+            data["response_id"] = *value.response_id;
+          if (value.error_message)
+            data["error"] = *value.error_message;
+          data["cancelled"] = value.cancelled;
         }
       },
       event);

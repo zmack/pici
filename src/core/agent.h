@@ -18,6 +18,7 @@
 #include "core/agent_runtime_identity.h"
 #include "core/agent_state.h"
 #include "core/auth_types.h"
+#include "core/compaction.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/stream.h"
@@ -175,6 +176,39 @@ public:
   void set_session_identity(std::string session_id,
                             std::optional<std::string> session_name = {});
 
+  // Start a server-side compaction attempt. Shares the idle-transition guard
+  // with set_model/restore_session (see with_idle_transition below), so it
+  // is rejected outright while streaming, while tool calls are pending, or
+  // while steering/follow-up work is queued. A prompt that starts after this
+  // call's snapshot but before commit_compaction() installs the replacement
+  // does not corrupt anything: commit_compaction() rechecks the transcript
+  // epoch and fails closed (stale snapshot) instead of silently discarding
+  // the prompt's messages. See core/compaction.h and
+  // AgentSession::compact_active_session for the intended drain-side wiring
+  // — the durable journal write and the memory install must both happen on
+  // whichever thread drains this stream's `complete` CompactionEvent, never
+  // from inside this call's own worker thread.
+  EventStream<AgentEvent, CompactionOutcome>
+  compact(CompactionTrigger trigger = CompactionTrigger::manual);
+
+  struct CompactionCommitResult {
+    bool installed{false};
+    std::optional<std::string> error;
+  };
+
+  // Drain-side commit step for a compaction's `complete` CompactionEvent.
+  // Rechecks `expected_epoch` against the live transcript epoch under the
+  // same idle-transition lock the snapshot used; if it no longer matches,
+  // installs nothing and reports a stale-snapshot error. Otherwise runs
+  // `persist` (e.g. the durable journal write) while still holding the
+  // lock and, only if `persist` does not throw, installs `replacement` as
+  // the new transcript. Mirrors set_model's `persist`-runs-before-commit
+  // contract.
+  CompactionCommitResult
+  commit_compaction(std::uint64_t expected_epoch,
+                    std::vector<Message> replacement,
+                    const std::function<void()> &persist = {});
+
   // Wait for the agent to become idle
   void wait_for_idle();
 
@@ -209,6 +243,18 @@ private:
   AgentContext create_context_snapshot() const;
   AgentLoopConfig create_loop_config();
   void process_event(const AgentEvent &event);
+
+  // Runs `transition` while holding worker_mutex_, after verifying the
+  // agent is idle: not streaming, no pending tool calls, and both
+  // steering/follow-up queues empty. Shared by set_model, compact(), and
+  // commit_compaction() so this four-condition guard exists in exactly one
+  // place. Throws std::runtime_error (message prefixed by `operation`,
+  // e.g. "model switching requires an idle agent") without invoking
+  // `transition` when the agent is not idle.
+  void with_idle_transition(std::string_view operation,
+                            const std::function<void()> &transition);
+
+  CompactionOptions create_compaction_options();
 };
 
 } // namespace pi::core

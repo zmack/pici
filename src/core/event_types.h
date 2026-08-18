@@ -93,6 +93,7 @@ enum class EventType {
   tool_execution_update,
   tool_execution_end,
   tool_presentation,
+  compaction,
 };
 
 std::string_view event_type_to_string(EventType type);
@@ -290,12 +291,67 @@ struct ToolExecutionEndEvent : EventBase {
         result(std::move(res)), is_error(err), status(outcome) {}
 };
 
+// Lifecycle phase of a CompactionEvent. `start` is published immediately;
+// exactly one of `complete` or `error` follows once the operation resolves.
+enum class CompactionEventKind {
+  start,
+  complete,
+  error,
+};
+
+std::string_view compaction_event_kind_to_string(CompactionEventKind kind);
+
+// Published by CompactionManager (see core/compaction.h) on the same
+// EventStream mechanism Agent::prompt() uses, so a `complete` event is
+// observed by the caller-drained consumer thread rather than the compaction
+// worker thread. AgentSession's event-drain loop writes the durable journal
+// record and installs the replacement transcript in response to `complete`
+// — never in response to a `start` or from inside the worker itself. See
+// plans/server-side-compaction.md §5.
+struct CompactionEvent : EventBase {
+  static constexpr EventType type = EventType::compaction;
+  CompactionEventKind kind{CompactionEventKind::start};
+
+  // The transcript_epoch (AgentState::transcript_epoch()) observed at
+  // snapshot time. The drain-side installer rechecks this against the live
+  // epoch immediately before installing and fails closed (stale-snapshot)
+  // if it no longer matches, rather than silently discarding whatever
+  // mutated the transcript in the meantime.
+  std::uint64_t snapshot_epoch{0};
+
+  // Populated only when kind == complete: the full replacement transcript,
+  // to both persist as a journal record and install in memory.
+  std::vector<Message> replacement_messages;
+  std::string provider;
+  std::string model;
+  std::string summary; // "server" (remote) or "local" (fallback)
+  std::optional<std::string> response_id;
+  TokenUsage usage_before;
+  TokenUsage usage_after;
+  std::size_t retained_message_count{0};
+
+  // Populated only when kind == error.
+  std::optional<std::string> error_message;
+  bool cancelled{false};
+  // True when the failure was "this provider does not support remote
+  // compaction" rather than a request-level failure (transport, auth,
+  // malformed response, ...). Lets callers distinguish "nothing to do here,
+  // use local fallback" from "the attempt failed and should surface as an
+  // error."
+  bool unsupported{false};
+
+  explicit CompactionEvent(
+      CompactionEventKind k,
+      std::source_location loc = std::source_location::current())
+      : EventBase(EventType::compaction, loc), kind(k) {}
+};
+
 using AgentEvent =
     std::variant<AgentStartEvent, AgentEndEvent, TurnStartEvent, TurnEndEvent,
                  TurnAbortedEvent, MessageStartEvent, MessageUpdateEvent,
                  MessageEndEvent, ToolExecutionStartEvent,
                  ToolExecutionUpdateEvent, ToolExecutionEndEvent,
-                 ToolPresentationEvent>;
+                 ToolPresentationEvent, CompactionEvent>;
 
 template <typename F>
   requires(std::is_invocable_v<F, AgentStartEvent> &&
@@ -309,7 +365,8 @@ template <typename F>
            std::is_invocable_v<F, ToolExecutionStartEvent> &&
            std::is_invocable_v<F, ToolExecutionUpdateEvent> &&
            std::is_invocable_v<F, ToolExecutionEndEvent> &&
-           std::is_invocable_v<F, ToolPresentationEvent>)
+           std::is_invocable_v<F, ToolPresentationEvent> &&
+           std::is_invocable_v<F, CompactionEvent>)
 void visit_event(const AgentEvent &ev, F &&visitor) {
   std::visit(std::forward<F>(visitor), ev);
 }
@@ -326,7 +383,8 @@ template <typename F>
            std::is_invocable_v<F, ToolExecutionStartEvent> &&
            std::is_invocable_v<F, ToolExecutionUpdateEvent> &&
            std::is_invocable_v<F, ToolExecutionEndEvent> &&
-           std::is_invocable_v<F, ToolPresentationEvent>)
+           std::is_invocable_v<F, ToolPresentationEvent> &&
+           std::is_invocable_v<F, CompactionEvent>)
 auto map_event(const AgentEvent &ev,
                F &&visitor) -> decltype(visitor(AgentStartEvent{})) {
   return std::visit(std::forward<F>(visitor), ev);

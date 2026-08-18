@@ -35,6 +35,20 @@ std::string_view event_type_to_string(EventType type) {
     return "tool_execution_end";
   case EventType::tool_presentation:
     return "tool_presentation";
+  case EventType::compaction:
+    return "compaction";
+  }
+  return "unknown";
+}
+
+std::string_view compaction_event_kind_to_string(CompactionEventKind kind) {
+  switch (kind) {
+  case CompactionEventKind::start:
+    return "start";
+  case CompactionEventKind::complete:
+    return "complete";
+  case CompactionEventKind::error:
+    return "error";
   }
   return "unknown";
 }
@@ -125,6 +139,10 @@ std::ostream &operator<<(std::ostream &os, const AgentEvent &event) {
              << ", tool: " << ev.tool_name << ", error: " << ev.is_error << "}";
         } else if constexpr (std::same_as<T, ToolPresentationEvent>) {
           os << "type:" << event_type_to_string(ev.type) << "}";
+        } else if constexpr (std::same_as<T, CompactionEvent>) {
+          os << "type:" << event_type_to_string(ev.type)
+             << ", kind: " << compaction_event_kind_to_string(ev.kind)
+             << ", retained: " << ev.retained_message_count << "}";
         }
       },
       event);

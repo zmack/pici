@@ -753,6 +753,16 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
                 r.on_error(RendererErrorKind::abort, "agent aborted");
             }
           }
+        } else if constexpr (std::is_same_v<T, CompactionEvent>) {
+          if (e.kind == CompactionEventKind::start) {
+            r.on_compaction_start();
+          } else if (e.kind == CompactionEventKind::complete) {
+            r.on_compaction_complete(e.retained_message_count, e.usage_before,
+                                     e.usage_after);
+          } else {
+            r.on_compaction_error(e.error_message.value_or("compaction failed"),
+                                  e.cancelled);
+          }
         }
       },
       ev);

@@ -468,6 +468,7 @@ add_library(pi-core
     src/core/agent_loop.cpp
     src/core/agent.cpp
     src/core/agent_task.cpp
+    src/core/compaction.cpp
     src/core/builtin_tools.cpp
     src/core/sandbox.cpp
     src/core/lua_tool.cpp
@@ -575,7 +576,7 @@ target_link_libraries(pi-acp PRIVATE pi-core pi-http httplib::httplib tomlpluspl
 if(PI_CPP_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name IN ITEMS core agent_loop agent agent_tasks stream tool_validation builtin_tools lua_tool markdown terminal)
+    foreach(test_name IN ITEMS core agent_loop agent agent_tasks compaction stream tool_validation builtin_tools lua_tool markdown terminal)
         add_executable(test-${test_name}
             test/test_${test_name}.cpp
         )

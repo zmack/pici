@@ -104,6 +104,15 @@ public:
   // An error occurred.  kind distinguishes LLM / transport / abort errors.
   virtual void on_error(RendererErrorKind kind, std::string_view message) {}
 
+  // Compaction lifecycle. Renderers must not attempt to display the
+  // replacement transcript's opaque server payload; these hooks intentionally
+  // carry only counts/usage, never message content.
+  virtual void on_compaction_start() {}
+  virtual void on_compaction_complete(std::size_t retained_message_count,
+                                      const TokenUsage &usage_before,
+                                      const TokenUsage &usage_after) {}
+  virtual void on_compaction_error(std::string_view message, bool cancelled) {}
+
   // Optional viewport/navigation input. Renderers without an addressable
   // viewport can ignore it.
   virtual void on_scroll(RendererScrollCommand command) {}

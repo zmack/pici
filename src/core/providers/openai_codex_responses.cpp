@@ -969,6 +969,7 @@ CompactionResult OpenAICodexResponsesClient::compact(
         message += ": " + text;
     }
     result.error_message = message;
+    result.http_status = response->status_code;
     return result;
   }
 
