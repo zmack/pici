@@ -1212,9 +1212,14 @@ int cmd_run(const cli::Args &args,
     return std::nullopt;
   };
 
-  core::AgentSession runtime({.agent_options = opts,
-                              .session_store = store,
-                              .sandbox_policy = sandbox_policy});
+  core::AgentSession runtime(
+      {.agent_options = opts,
+       .session_store = store,
+       .sandbox_policy = sandbox_policy,
+       .auto_compaction = {.enabled = args.remote_compaction_enabled,
+                           .threshold_pct = args.compaction_threshold_pct > 0.0
+                                                ? args.compaction_threshold_pct
+                                                : 0.85}});
   auto &agent = runtime.agent();
   std::function<void(const std::string &)> faux_tool_registrar;
   if (scripted_registry) {

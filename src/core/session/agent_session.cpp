@@ -9,6 +9,7 @@
 #include "core/sandbox.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
+#include "core/stream.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -52,7 +53,8 @@ AgentSession::AgentSession(Config config)
       sandbox_policy_(std::move(config.sandbox_policy)),
       model_registry_(config.model_registry
                           ? std::move(config.model_registry)
-                          : config.agent_options.model_registry) {
+                          : config.agent_options.model_registry),
+      auto_compaction_(config.auto_compaction) {
   if (!sandbox_policy_)
     sandbox_policy_ = std::make_shared<SandboxPolicy>();
   agent_.set_tools(std::move(config.tools));
@@ -231,9 +233,9 @@ AgentSession::run_prompt(std::string prompt, const EventCallback &callback) {
       {AgentMessageEnvelope{.message = Message{std::move(message)}}}, callback);
 }
 
-AgentSession::RunResult
-AgentSession::run_messages(std::vector<AgentMessageEnvelope> messages,
-                           const EventCallback &callback) {
+AgentSession::RunResult AgentSession::drain_agent_stream(
+    EventStream<AgentEvent, std::vector<Message>> stream,
+    const EventCallback &callback) {
   RunResult result;
   bool started = false;
   std::optional<std::string> persistence_error;
@@ -257,7 +259,6 @@ AgentSession::run_messages(std::vector<AgentMessageEnvelope> messages,
   };
 
   try {
-    auto stream = agent_.prompt(std::move(messages));
     started = true;
     for (const auto &event : stream)
       handle_event(event);
@@ -278,6 +279,87 @@ AgentSession::run_messages(std::vector<AgentMessageEnvelope> messages,
 
   if (!result.error && persistence_error)
     result.error = persistence_error;
+  return result;
+}
+
+AgentSession::RunResult AgentSession::maybe_retry_after_context_window_error(
+    RunResult result, const EventCallback &callback, bool &retried) {
+  retried = false;
+  if (!result.error || !auto_compaction_.enabled)
+    return result;
+  if (!looks_like_context_window_error(*result.error))
+    return result;
+
+  const auto model = agent_.state().model();
+  if (!supports_remote_compaction(model))
+    return result; // no local fallback exists yet; surface the original error
+
+  // Unlike the post-turn threshold trigger below, this path does not need
+  // our own budget estimate to agree that the context is oversized — the
+  // provider has already said so via the error we just received. Only
+  // "nothing to compact" (no prior successful assistant/tool turn) makes
+  // this degenerate.
+  const auto context = agent_.context_snapshot();
+  if (!has_compactable_history(context)) {
+    result.error = "context window exceeded and there is no prior "
+                   "assistant/tool history to compact away (original "
+                   "error: " +
+                   *result.error + ")";
+    return result;
+  }
+
+  retried = true;
+  auto compaction =
+      compact_active_session(CompactionTrigger::context_window_retry, callback);
+  if (!compaction.success)
+    return result; // keep the original context-window error
+
+  // Retry exactly once: continue from the compacted context without
+  // recursing back into this function, per plan §7's "avoid repeated
+  // compaction loops" / "at most one compaction retry."
+  return drain_agent_stream(agent_.continue_(), callback);
+}
+
+void AgentSession::maybe_auto_compact_after_turn(
+    const EventCallback &callback) {
+  if (!auto_compaction_.enabled)
+    return;
+  const auto model = agent_.state().model();
+  if (!supports_remote_compaction(model))
+    return;
+
+  const ContextBudgetPolicy policy{.threshold_pct =
+                                       auto_compaction_.threshold_pct};
+  const auto context = agent_.context_snapshot();
+  // Nothing compaction can do about a still-oversized single first turn;
+  // do not spend a network round-trip finding that out again here (the
+  // context-window-retry path already reports this distinctly if the
+  // provider itself rejects the request).
+  if (is_degenerate_oversized_context(context, policy))
+    return;
+  if (!exceeds_context_budget(context, policy))
+    return;
+
+  // Fire-and-forget from the caller's perspective: the turn that just
+  // completed already succeeded, so a failed automatic compaction here
+  // does not fail it. The next completed turn (or a context-window error)
+  // gets another chance to trigger.
+  compact_active_session(CompactionTrigger::automatic_pre_turn, callback);
+}
+
+AgentSession::RunResult
+AgentSession::run_messages(std::vector<AgentMessageEnvelope> messages,
+                           const EventCallback &callback) {
+  auto result =
+      drain_agent_stream(agent_.prompt(std::move(messages)), callback);
+
+  bool retried = false;
+  result = maybe_retry_after_context_window_error(std::move(result), callback,
+                                                  retried);
+
+  if (!result.error && !retried)
+    maybe_auto_compact_after_turn(callback);
+
   return result;
 }
 

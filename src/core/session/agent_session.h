@@ -6,6 +6,7 @@
 #include "core/sandbox.h"
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
+#include "core/stream.h"
 
 #include <cstddef>
 #include <functional>
@@ -18,12 +19,22 @@ namespace pi::core {
 
 class AgentSession {
 public:
+  // Phase 5 automatic compaction policy (plan §7). Off by default, matching
+  // Args::remote_compaction_enabled's existing default and doc comment
+  // ("automatic pre-turn compaction only fires when this is explicitly
+  // enabled"). threshold_pct is only consulted when enabled is true.
+  struct AutoCompactionConfig {
+    bool enabled{false};
+    double threshold_pct{0.85};
+  };
+
   struct Config {
     Agent::Options agent_options;
     std::shared_ptr<const ModelRegistry> model_registry;
     std::vector<std::shared_ptr<const ToolDefinition>> tools;
     std::shared_ptr<SessionStore> session_store;
     SandboxPolicyPtr sandbox_policy;
+    AutoCompactionConfig auto_compaction;
   };
 
   using EventCallback = std::function<void(const AgentEvent &)>;
@@ -104,12 +115,41 @@ private:
   void activate_session_state(std::string session_id,
                               std::vector<Message> messages,
                               std::optional<std::string> session_name = {});
+
+  // Shared drain loop for agent_.prompt()/agent_.continue_(): persists
+  // MessageEndEvent to the session store, forwards every event to
+  // `callback`, waits for idle, and aborts a still-streaming agent on an
+  // exception (mirrors the pre-Phase-5 body of run_messages exactly).
+  RunResult
+  drain_agent_stream(EventStream<AgentEvent, std::vector<Message>> stream,
+                     const EventCallback &callback);
+
+  // Phase 5 context-window-error retry (plan §7): if `result` carries an
+  // error that looks like a provider context-window failure, automatic
+  // compaction is enabled, and the model supports remote compaction, runs
+  // at most one compact-then-continue retry and returns its result instead.
+  // Sets `retried` to true when a retry was attempted (successfully or not)
+  // so the caller does not also run the ordinary post-turn threshold check
+  // immediately afterward. The degenerate case (no prior assistant/tool
+  // turn to discard) fails with a distinct, actionable error instead of
+  // spending a network round-trip on a no-op compaction.
+  RunResult maybe_retry_after_context_window_error(
+      RunResult result, const EventCallback &callback, bool &retried);
+
+  // Phase 5 automatic pre-turn trigger (plan §7): after a turn completes
+  // cleanly, compacts once if the estimated context usage has crossed the
+  // configured threshold. Never throws; a failed automatic attempt is
+  // reported through `callback`'s CompactionEvent but does not fail the
+  // turn that already completed successfully.
+  void maybe_auto_compact_after_turn(const EventCallback &callback);
+
   Agent agent_;
   std::shared_ptr<SessionStore> session_store_;
   SandboxPolicyPtr sandbox_policy_;
   std::shared_ptr<const ModelRegistry> model_registry_;
   std::optional<std::string> active_session_id_;
   std::optional<std::string> last_warning_;
+  AutoCompactionConfig auto_compaction_;
 };
 
 } // namespace pi::core

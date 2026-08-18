@@ -82,6 +82,13 @@ struct Args {
   // compaction (once implemented) is not gated by this flag.
   bool remote_compaction_enabled{false};
 
+  // Fraction of Model::context_window at which automatic pre-turn
+  // compaction triggers, once remote_compaction_enabled is set. 0 means
+  // "unset" so config/CLI merging (and the effective 0.85 default) can be
+  // told apart from an explicit value; a threshold of exactly 0 would be
+  // nonsensical anyway (it would trigger on every turn).
+  double compaction_threshold_pct{0.0};
+
   // Config file
   std::string config_path; // Resolved config path selected by CLI/env/defaults.
 

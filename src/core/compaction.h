@@ -91,4 +91,61 @@ CompactionOutcome run_compaction(const CompactionRunRequest &request,
                                  const std::function<bool(AgentEvent)> &push,
                                  const std::stop_token &stop_tok);
 
+// Phase 5: automatic pre-turn trigger and context-window-error retry (plan
+// §7). This is deliberately a separate, dedicated policy rather than a reuse
+// of agent_loop.cpp's/agent.cpp's rough byte estimators, which exist to
+// drive `prepare_context` and a `set_model` warning respectively — neither
+// is meant to be an authoritative "should we spend a compaction round-trip"
+// signal. This one is: it is the only estimator that knows about
+// `Model::context_window` and a configurable threshold fraction.
+struct ContextBudgetPolicy {
+  // Fraction of Model::context_window at which automatic compaction should
+  // trigger. Reserves the remainder for the next user message, tool
+  // definitions, and model output, per plan §7.
+  double threshold_pct{0.85};
+};
+
+// Conservative, provider-agnostic token estimate for the context as it
+// currently stands (system prompt + messages + tool definitions). Uses the
+// same bytes-divided-by-4 heuristic as the other ad hoc estimators in this
+// codebase; kept local to this policy rather than shared so each caller's
+// intent (warning vs. prepare_context budget vs. this threshold policy)
+// stays independently adjustable.
+std::size_t estimate_context_budget_tokens(const AgentContext &context);
+
+// True when Model::context_window is known (non-zero) and the estimated
+// usage has already crossed threshold_pct of it. A model with an unknown
+// (zero) context window never triggers automatic compaction.
+bool exceeds_context_budget(const AgentContext &context,
+                            const ContextBudgetPolicy &policy);
+
+// True when no assistant turn in `context` completed successfully — i.e.
+// compaction has nothing to discard. Assistant messages whose stop_reason
+// is `error` do not count: an errored request contributes no compactable
+// content, so a first-turn context-window error still reads as "no prior
+// turns." Shared by both degenerate-case checks below so the two trigger
+// paths (our own budget estimate vs. a provider-reported context-window
+// error) apply the same definition of "nothing to compact."
+bool has_compactable_history(const AgentContext &context);
+
+// The degenerate case plan §7 calls out separately from the ordinary
+// repeated-compaction-loop guard: no compactable history exists yet and the
+// context is already at or over *our own estimated* budget — e.g. a single
+// oversized pasted-file user message as the first turn. Used by the
+// automatic pre-turn threshold trigger, which only has our own estimate to
+// go on (see the context-window-error path in AgentSession for the
+// provider-reported-error variant, which does not require this estimate to
+// agree since the provider has already said the request is too large).
+bool is_degenerate_oversized_context(const AgentContext &context,
+                                     const ContextBudgetPolicy &policy);
+
+// Best-effort detection of a provider "context window exceeded" error from
+// its untyped error message string. No pici provider today reports a
+// structured error kind for this (see AssistantMessage::error_message), so
+// this is a heuristic over vocabulary common across OpenAI/Anthropic-style
+// APIs. False negatives just fall back to the ordinary error path (safe);
+// false positives trigger one extra, otherwise-harmless compaction attempt
+// that a stale-snapshot-free retry then either fixes or gives up on.
+bool looks_like_context_window_error(std::string_view message);
+
 } // namespace pi::core

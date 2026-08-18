@@ -468,6 +468,14 @@ static void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
       return b->get();
     return false;
   };
+  auto number = [&](std::string_view section,
+                    std::string_view key) -> std::optional<double> {
+    if (const auto *f = tbl[section][key].as_floating_point())
+      return f->get();
+    if (const auto *i = tbl[section][key].as_integer())
+      return static_cast<double>(i->get());
+    return std::nullopt;
+  };
   auto str_array = [&](std::string_view section,
                        std::string_view key) -> std::vector<std::string> {
     std::vector<std::string> result;
@@ -532,6 +540,9 @@ static void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
 
   // [compaction]
   cfg.remote_compaction_enabled = boolean("compaction", "remote_enabled");
+  if (auto v = number("compaction", "threshold_pct");
+      v && *v > 0.0 && *v <= 1.0)
+    cfg.compaction_threshold_pct = *v;
 }
 
 bool Config::has_errors() const {
@@ -693,6 +704,9 @@ Args merge_args(const Args &config, const Args &cli) {
   out.no_context_files = config.no_context_files || cli.no_context_files;
   out.remote_compaction_enabled =
       config.remote_compaction_enabled || cli.remote_compaction_enabled;
+  out.compaction_threshold_pct = cli.compaction_threshold_pct > 0.0
+                                     ? cli.compaction_threshold_pct
+                                     : config.compaction_threshold_pct;
 
   // Session: CLI --session-dir wins over config
   out.session_dir = merge_str(config.session_dir, cli.session_dir);

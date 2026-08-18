@@ -6,11 +6,15 @@
 #include "core/message_types.h"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <ranges>
 #include <stop_token>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -81,6 +85,61 @@ filter_compacted_history(const std::vector<Message> &messages) {
                      "content nor a compaction item"};
 
   return {.ok = true, .error = {}};
+}
+
+std::size_t estimate_context_budget_tokens(const AgentContext &context) {
+  std::size_t bytes = context.system_prompt.size();
+  for (const auto &message : context.messages)
+    bytes += json::to_json(message).size();
+  for (const auto &tool : context.tools)
+    bytes += tool->name().size() + tool->description().size() +
+             tool->schema().serialize().size();
+  return ((bytes + 3) / 4) + (context.messages.size() * 8);
+}
+
+bool exceeds_context_budget(const AgentContext &context,
+                            const ContextBudgetPolicy &policy) {
+  if (context.model.context_window == 0)
+    return false;
+  const auto budget = static_cast<std::size_t>(
+      static_cast<double>(context.model.context_window) * policy.threshold_pct);
+  return estimate_context_budget_tokens(context) >= budget;
+}
+
+bool has_compactable_history(const AgentContext &context) {
+  return std::ranges::any_of(context.messages, [](const Message &message) {
+    const auto *assistant = std::get_if<AssistantMessage>(&message);
+    return assistant != nullptr && assistant->stop_reason != StopReason::error;
+  });
+}
+
+bool is_degenerate_oversized_context(const AgentContext &context,
+                                     const ContextBudgetPolicy &policy) {
+  if (has_compactable_history(context))
+    return false;
+  return exceeds_context_budget(context, policy);
+}
+
+bool looks_like_context_window_error(std::string_view message) {
+  std::string lower(message);
+  std::ranges::transform(lower, lower.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  static constexpr std::array<std::string_view, 10> needles{
+      "context_length_exceeded",
+      "context length",
+      "context window",
+      "maximum context length",
+      "too many tokens",
+      "reduce the length",
+      "prompt is too long",
+      "input is too long",
+      "exceeds the model's maximum",
+      "exceeds context",
+  };
+  return std::ranges::any_of(needles, [&](std::string_view needle) {
+    return lower.find(needle) != std::string::npos;
+  });
 }
 
 namespace {

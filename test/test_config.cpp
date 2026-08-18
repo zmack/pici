@@ -362,6 +362,75 @@ path = "/toml/mailbox.sqlite3"
     CHECK(invalid.diagnostics.front().is_error);
   }
 
+  // --compaction-threshold parses a valid fraction
+  {
+    auto args = parse({"pi", "--remote-compaction", "--compaction-threshold",
+                       "0.7"});
+    CHECK(args.remote_compaction_enabled);
+    CHECK(args.compaction_threshold_pct > 0.699);
+    CHECK(args.compaction_threshold_pct < 0.701);
+    CHECK(args.diagnostics.empty());
+  }
+
+  // --compaction-threshold rejects an out-of-range fraction
+  {
+    auto args = parse({"pi", "--compaction-threshold", "1.5"});
+    CHECK(!args.diagnostics.empty());
+    CHECK(args.diagnostics.front().is_error);
+  }
+
+  // --compaction-threshold rejects garbage
+  {
+    auto args = parse({"pi", "--compaction-threshold", "not-a-number"});
+    CHECK(!args.diagnostics.empty());
+    CHECK(args.diagnostics.front().is_error);
+  }
+
+  // [compaction] threshold_pct loads from TOML
+  {
+    auto p = write_toml("pici_compaction.toml", R"toml(
+[compaction]
+remote_enabled = true
+threshold_pct = 0.65
+)toml");
+    auto cfg = load_config(p);
+    CHECK(cfg.remote_compaction_enabled);
+    CHECK(cfg.compaction_threshold_pct > 0.649);
+    CHECK(cfg.compaction_threshold_pct < 0.651);
+  }
+
+  // an out-of-range TOML threshold_pct is ignored (falls back to the
+  // effective default applied at the AgentSession construction site)
+  {
+    auto p = write_toml("pici_compaction_invalid.toml", R"toml(
+[compaction]
+threshold_pct = 1.5
+)toml");
+    auto cfg = load_config(p);
+    CHECK_EQ(cfg.compaction_threshold_pct, 0.0);
+  }
+
+  // merge: CLI threshold wins over config
+  {
+    Args conf;
+    conf.compaction_threshold_pct = 0.6;
+    Args cli;
+    cli.compaction_threshold_pct = 0.9;
+    auto out = merge_args(conf, cli);
+    CHECK(out.compaction_threshold_pct > 0.899);
+    CHECK(out.compaction_threshold_pct < 0.901);
+  }
+
+  // merge: config threshold survives when CLI leaves it unset
+  {
+    Args conf;
+    conf.compaction_threshold_pct = 0.6;
+    Args cli;
+    auto out = merge_args(conf, cli);
+    CHECK(out.compaction_threshold_pct > 0.599);
+    CHECK(out.compaction_threshold_pct < 0.601);
+  }
+
   std::cout << "\n========================================\n"
             << "  Tests: " << tests::total  << " total, "
             << tests::passed << " passed, "

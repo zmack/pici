@@ -118,6 +118,16 @@ cancellation the transcript is left exactly as it was. See
 `plans/server-side-compaction.md` for the full design, and the JSONL RPC mode
 section below for the `compact` RPC command.
 
+Automatic pre-turn compaction is off by default; enable it with
+`--remote-compaction` or `[compaction] remote_enabled = true` in the config
+file. When enabled, pici compacts once after a completed turn if the
+estimated context usage crosses `--compaction-threshold <fraction>` (or
+`[compaction] threshold_pct` in config; default `0.85`, i.e. 85% of the
+active model's context window), and retries once through compaction if a
+request fails with a provider context-window error. A single oversized
+first turn with no prior assistant/tool history to discard fails with a
+distinct, actionable error instead of a no-op compaction attempt.
+
 ## Bash sandbox
 
 The `bash` tool supports per-session process isolation on Linux through

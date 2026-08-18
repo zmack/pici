@@ -1,6 +1,7 @@
 #include "cli/args.h"
 
 #include <cstddef>
+#include <exception>
 #include <iostream>
 #include <span>
 #include <string>
@@ -253,6 +254,29 @@ Args parse_args(int argc, char **argv) {
       result.no_context_files = true;
     } else if (arg == "--remote-compaction") {
       result.remote_compaction_enabled = true;
+    } else if (arg == "--compaction-threshold") {
+      auto v = need("--compaction-threshold");
+      if (!v.empty()) {
+        try {
+          std::size_t consumed = 0;
+          const double parsed = std::stod(std::string(v), &consumed);
+          if (consumed != v.size() || !(parsed > 0.0) || parsed > 1.0) {
+            result.diagnostics.push_back(
+                {.is_error = true,
+                 .message = "--compaction-threshold expects a fraction in "
+                            "(0, 1], got \"" +
+                            std::string(v) + "\""});
+          } else {
+            result.compaction_threshold_pct = parsed;
+          }
+        } catch (const std::exception &) {
+          result.diagnostics.push_back(
+              {.is_error = true,
+               .message = "--compaction-threshold expects a fraction in "
+                          "(0, 1], got \"" +
+                          std::string(v) + "\""});
+        }
+      }
     } else if (arg == "--config") {
       result.config_path = std::string(need("--config"));
     } else if (arg == "--list-tools") {

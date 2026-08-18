@@ -730,6 +730,488 @@ void test_compact_active_session_persists_then_installs() {
         });
 }
 
+// --- Phase 5: automatic pre-turn flow -------------------------------------
+
+void test_context_budget_policy() {
+    tests::register_test(
+        "ContextBudgetPolicy: threshold, degenerate, and unknown-window handling",
+        []() {
+            AgentContext context;
+            context.model.context_window = 1000;
+            ContextBudgetPolicy policy{.threshold_pct = 0.8};
+
+            CHECK(!exceeds_context_budget(context, policy));
+            CHECK(!is_degenerate_oversized_context(context, policy));
+            CHECK(!has_compactable_history(context));
+
+            UserMessage huge;
+            huge.content.push_back(TextContent{.text = std::string(5000, 'x')});
+            context.messages.push_back(Message{huge});
+            CHECK(exceeds_context_budget(context, policy));
+            CHECK(is_degenerate_oversized_context(context, policy));
+            CHECK(!has_compactable_history(context));
+
+            context.messages.push_back(Message{make_assistant_message("ok")});
+            CHECK(has_compactable_history(context));
+            CHECK(exceeds_context_budget(context, policy));
+            CHECK(!is_degenerate_oversized_context(context, policy));
+
+            AgentContext error_only;
+            error_only.model.context_window = 1000;
+            error_only.messages.push_back(Message{huge});
+            AssistantMessage errored = make_assistant_message("");
+            errored.stop_reason = StopReason::error;
+            errored.content.clear();
+            error_only.messages.push_back(Message{errored});
+            CHECK(!has_compactable_history(error_only));
+            CHECK(is_degenerate_oversized_context(error_only, policy));
+
+            AgentContext unknown_window;
+            unknown_window.messages.push_back(Message{huge});
+            CHECK(!exceeds_context_budget(unknown_window, policy));
+            CHECK(!is_degenerate_oversized_context(unknown_window, policy));
+        });
+}
+
+void test_looks_like_context_window_error() {
+    tests::register_test(
+        "looks_like_context_window_error: heuristic vocabulary match", []() {
+            CHECK(looks_like_context_window_error(
+                "This model's maximum context length is 128000 tokens."));
+            CHECK(looks_like_context_window_error("context_length_exceeded"));
+            CHECK(looks_like_context_window_error(
+                "Please reduce the length of the messages."));
+            CHECK(looks_like_context_window_error(
+                "Your input is too long for this model."));
+            CHECK(!looks_like_context_window_error("invalid api key"));
+            CHECK(!looks_like_context_window_error("rate limit exceeded"));
+            CHECK(!looks_like_context_window_error("internal server error"));
+        });
+}
+
+void test_automatic_compaction_triggers_once_at_threshold() {
+    tests::register_test(
+        "AgentSession: automatic compaction triggers once after a completed "
+        "turn crosses the threshold",
+        []() {
+            const auto session_dir =
+                std::filesystem::temp_directory_path() /
+                ("pici-auto-compaction-session-" +
+                 std::to_string(std::chrono::steady_clock::now()
+                                    .time_since_epoch()
+                                    .count()));
+            auto store = std::make_shared<SessionStore>(session_dir);
+
+            AssistantMessage reply = make_assistant_message(
+                "hello", "openai-codex-responses", "openai-codex",
+                "gpt-5.3-codex");
+            FauxClient::Script script;
+            script.events = {
+                AssistantMessageEvent{AssistantMessageStartEvent{}},
+                AssistantMessageEvent{
+                    AssistantMessageDoneEvent{StopReason::stop, reply}},
+            };
+            CompactionResult compact_success;
+            compact_success.messages.push_back(
+                Message{make_user_message("summary")});
+
+            LLMClientRegistry::instance().register_client(
+                "openai-codex-responses", [script, compact_success] {
+                    return std::make_shared<FauxClient>(
+                        std::vector<FauxClient::Script>{script},
+                        std::vector<CompactionResult>{compact_success});
+                });
+
+            AgentSession::Config config;
+            config.agent_options.model.id = "gpt-5.3-codex";
+            config.agent_options.model.api = "openai-codex-responses";
+            config.agent_options.model.provider = "openai-codex";
+            // A context window of 1 token guarantees the post-turn estimate
+            // crosses any nonzero threshold, regardless of message content.
+            config.agent_options.model.context_window = 1;
+            config.session_store = store;
+            config.auto_compaction = {.enabled = true, .threshold_pct = 0.85};
+            AgentSession session(std::move(config));
+
+            SessionHeader header;
+            session.create_session(header);
+
+            std::size_t compaction_event_count = 0;
+            auto result = session.run_prompt(
+                "hi", [&](const AgentEvent &ev) {
+                    if (std::holds_alternative<CompactionEvent>(ev))
+                        compaction_event_count++;
+                });
+
+            CHECK(!result.error.has_value());
+            // Exactly one compaction attempt: a `start` and a `complete`
+            // CompactionEvent, not a loop.
+            CHECK_EQ(compaction_event_count, std::size_t(2));
+            // The compacted replacement (a single retained user message)
+            // replaced the original prompt+reply pair.
+            CHECK_EQ(session.agent().state().messages().size(), std::size_t(1));
+
+            store.reset();
+            std::filesystem::remove_all(session_dir);
+        });
+}
+
+void test_automatic_compaction_off_by_default() {
+    tests::register_test(
+        "AgentSession: automatic compaction stays off unless explicitly "
+        "enabled",
+        []() {
+            const auto session_dir =
+                std::filesystem::temp_directory_path() /
+                ("pici-auto-compaction-off-session-" +
+                 std::to_string(std::chrono::steady_clock::now()
+                                    .time_since_epoch()
+                                    .count()));
+            auto store = std::make_shared<SessionStore>(session_dir);
+
+            AssistantMessage reply = make_assistant_message(
+                "hello", "openai-codex-responses-off", "openai-codex",
+                "gpt-5.3-codex");
+            FauxClient::Script script;
+            script.events = {
+                AssistantMessageEvent{AssistantMessageStartEvent{}},
+                AssistantMessageEvent{
+                    AssistantMessageDoneEvent{StopReason::stop, reply}},
+            };
+            LLMClientRegistry::instance().register_client(
+                "openai-codex-responses-off",
+                [script] {
+                    return std::make_shared<FauxClient>(
+                        std::vector<FauxClient::Script>{script});
+                });
+
+            AgentSession::Config config;
+            config.agent_options.model.id = "gpt-5.3-codex";
+            config.agent_options.model.api = "openai-codex-responses-off";
+            config.agent_options.model.provider = "openai-codex";
+            config.agent_options.model.context_window = 1;
+            config.session_store = store;
+            // auto_compaction left at its default: enabled == false.
+            AgentSession session(std::move(config));
+
+            SessionHeader header;
+            session.create_session(header);
+
+            std::size_t compaction_event_count = 0;
+            auto result = session.run_prompt(
+                "hi", [&](const AgentEvent &ev) {
+                    if (std::holds_alternative<CompactionEvent>(ev))
+                        compaction_event_count++;
+                });
+
+            CHECK(!result.error.has_value());
+            CHECK_EQ(compaction_event_count, std::size_t(0));
+            // Both the prompt and the reply remain — nothing was compacted.
+            CHECK_EQ(session.agent().state().messages().size(), std::size_t(2));
+
+            store.reset();
+            std::filesystem::remove_all(session_dir);
+        });
+}
+
+void test_context_window_error_triggers_one_compaction_retry() {
+    tests::register_test(
+        "AgentSession: a context-window error triggers exactly one "
+        "compaction retry",
+        []() {
+            const auto session_dir =
+                std::filesystem::temp_directory_path() /
+                ("pici-cw-retry-session-" +
+                 std::to_string(std::chrono::steady_clock::now()
+                                    .time_since_epoch()
+                                    .count()));
+            auto store = std::make_shared<SessionStore>(session_dir);
+
+            AssistantMessage error_msg = make_assistant_message(
+                "", "openai-codex-responses-retry", "openai-codex",
+                "gpt-5.3-codex");
+            error_msg.stop_reason = StopReason::error;
+            error_msg.error_message =
+                "This model's maximum context length is 128000 tokens.";
+            error_msg.content.clear();
+            FauxClient::Script error_script;
+            error_script.events = {AssistantMessageEvent{
+                AssistantMessageErrorEvent{StopReason::error, error_msg}}};
+
+            AssistantMessage retry_reply = make_assistant_message(
+                "ok after retry", "openai-codex-responses",
+                "openai-codex", "gpt-5.3-codex");
+            FauxClient::Script success_script;
+            success_script.events = {
+                AssistantMessageEvent{AssistantMessageStartEvent{}},
+                AssistantMessageEvent{AssistantMessageDoneEvent{
+                    StopReason::stop, retry_reply}},
+            };
+
+            CompactionResult compact_success;
+            compact_success.messages.push_back(
+                Message{make_user_message("summary of prior turn")});
+
+            // Every LLMClient::create() call re-invokes this factory, so the
+            // *same* client instance (not a fresh one) must be returned each
+            // time — otherwise the retry's call_count_ would restart at 0
+            // and replay the error script instead of the success script.
+            // Registered under the real "openai-codex-responses" api id
+            // (rather than a test-local suffix) because
+            // supports_remote_compaction() checks that exact api string.
+            auto client = std::make_shared<FauxClient>(
+                std::vector<FauxClient::Script>{error_script, success_script},
+                std::vector<CompactionResult>{compact_success});
+            LLMClientRegistry::instance().register_client(
+                "openai-codex-responses", [client] { return client; });
+
+            AgentSession::Config config;
+            config.agent_options.model.id = "gpt-5.3-codex";
+            config.agent_options.model.api = "openai-codex-responses";
+            config.agent_options.model.provider = "openai-codex";
+            config.session_store = store;
+            config.auto_compaction = {.enabled = true, .threshold_pct = 0.85};
+            AgentSession session(std::move(config));
+
+            SessionHeader header;
+            session.create_session(header);
+            // A genuinely completed prior turn (not just a user message) is
+            // required for has_compactable_history() to be true; otherwise
+            // this reads as the degenerate no-prior-history case and the
+            // retry is (correctly) refused instead of attempted.
+            session.agent().state().append_message(
+                Message{make_user_message("earlier turn")});
+            session.agent().state().append_message(Message{
+                make_assistant_message("earlier reply", "openai-codex-responses",
+                                       "openai-codex", "gpt-5.3-codex")});
+
+            std::size_t compaction_event_count = 0;
+            auto result = session.run_prompt(
+                "please help", [&](const AgentEvent &ev) {
+                    if (std::holds_alternative<CompactionEvent>(ev))
+                        compaction_event_count++;
+                });
+
+            CHECK(!result.error.has_value());
+            CHECK_EQ(compaction_event_count, std::size_t(2));
+
+            bool found_retry_reply = false;
+            for (const auto &msg : session.agent().state().messages()) {
+                if (const auto *am = std::get_if<AssistantMessage>(&msg)) {
+                    if (am->stop_reason == StopReason::stop &&
+                        !am->content.empty())
+                        found_retry_reply = true;
+                    CHECK(am->stop_reason != StopReason::error);
+                }
+            }
+            CHECK(found_retry_reply);
+
+            store.reset();
+            std::filesystem::remove_all(session_dir);
+        });
+}
+
+void test_context_window_error_does_not_recursively_retry() {
+    tests::register_test(
+        "AgentSession: a second compaction is not recursively triggered by "
+        "an already-compacted request",
+        []() {
+            const auto session_dir =
+                std::filesystem::temp_directory_path() /
+                ("pici-cw-no-loop-session-" +
+                 std::to_string(std::chrono::steady_clock::now()
+                                    .time_since_epoch()
+                                    .count()));
+            auto store = std::make_shared<SessionStore>(session_dir);
+
+            AssistantMessage error_msg = make_assistant_message(
+                "", "openai-codex-responses", "openai-codex",
+                "gpt-5.3-codex");
+            error_msg.stop_reason = StopReason::error;
+            error_msg.error_message = "context window exceeded";
+            error_msg.content.clear();
+            FauxClient::Script error_script;
+            error_script.events = {AssistantMessageEvent{
+                AssistantMessageErrorEvent{StopReason::error, error_msg}}};
+
+            // The retried request also fails with a context-window error —
+            // the retry must not spawn a second compaction attempt.
+            AssistantMessage still_too_big = error_msg;
+            FauxClient::Script still_error_script;
+            still_error_script.events = {AssistantMessageEvent{
+                AssistantMessageErrorEvent{StopReason::error, still_too_big}}};
+
+            CompactionResult compact_success;
+            compact_success.messages.push_back(
+                Message{make_user_message("summary")});
+
+            // Same client instance reused across every LLMClient::create()
+            // call in this test — see the comment in the retry test above.
+            auto client = std::make_shared<FauxClient>(
+                std::vector<FauxClient::Script>{error_script,
+                                                still_error_script},
+                std::vector<CompactionResult>{compact_success});
+            LLMClientRegistry::instance().register_client(
+                "openai-codex-responses", [client] { return client; });
+
+            AgentSession::Config config;
+            config.agent_options.model.id = "gpt-5.3-codex";
+            config.agent_options.model.api = "openai-codex-responses";
+            config.agent_options.model.provider = "openai-codex";
+            config.session_store = store;
+            config.auto_compaction = {.enabled = true, .threshold_pct = 0.85};
+            AgentSession session(std::move(config));
+
+            SessionHeader header;
+            session.create_session(header);
+            session.agent().state().append_message(
+                Message{make_user_message("earlier turn")});
+            session.agent().state().append_message(Message{
+                make_assistant_message("earlier reply", "openai-codex-responses",
+                                       "openai-codex", "gpt-5.3-codex")});
+
+            std::size_t compaction_event_count = 0;
+            auto result = session.run_prompt(
+                "please help", [&](const AgentEvent &ev) {
+                    if (std::holds_alternative<CompactionEvent>(ev))
+                        compaction_event_count++;
+                });
+
+            // Still an error (the retried request failed too), but only one
+            // compaction attempt (start + complete) was made, not two.
+            CHECK(result.error.has_value());
+            CHECK_EQ(compaction_event_count, std::size_t(2));
+
+            store.reset();
+            std::filesystem::remove_all(session_dir);
+        });
+}
+
+void test_degenerate_first_turn_context_window_error() {
+    tests::register_test(
+        "AgentSession: an oversized first turn with no prior history fails "
+        "distinctly instead of a no-op compaction",
+        []() {
+            AssistantMessage error_msg = make_assistant_message(
+                "", "openai-codex-responses", "openai-codex",
+                "gpt-5.3-codex");
+            error_msg.stop_reason = StopReason::error;
+            error_msg.error_message =
+                "maximum context length exceeded for this request";
+            error_msg.content.clear();
+            FauxClient::Script error_script;
+            error_script.events = {AssistantMessageEvent{
+                AssistantMessageErrorEvent{StopReason::error, error_msg}}};
+
+            // No compact result is queued: a degenerate first turn must
+            // never even attempt a remote compaction call.
+            LLMClientRegistry::instance().register_client(
+                "openai-codex-responses", [error_script] {
+                    return std::make_shared<FauxClient>(
+                        std::vector<FauxClient::Script>{error_script});
+                });
+
+            AgentSession::Config config;
+            config.agent_options.model.id = "gpt-5.3-codex";
+            config.agent_options.model.api = "openai-codex-responses";
+            config.agent_options.model.provider = "openai-codex";
+            config.auto_compaction = {.enabled = true, .threshold_pct = 0.85};
+            AgentSession session(std::move(config));
+
+            std::size_t compaction_event_count = 0;
+            auto result = session.run_prompt(
+                "a giant pasted file", [&](const AgentEvent &ev) {
+                    if (std::holds_alternative<CompactionEvent>(ev))
+                        compaction_event_count++;
+                });
+
+            CHECK(result.error.has_value());
+            CHECK_EQ(compaction_event_count, std::size_t(0));
+            if (result.error) {
+                CHECK(result.error->find("no prior") != std::string::npos);
+            }
+        });
+}
+
+void test_set_model_races_inflight_compaction_without_corruption() {
+    tests::register_test(
+        "Agent::set_model during an in-flight compaction does not corrupt "
+        "the transcript, and the old-model opaque item is dropped for the "
+        "new model",
+        []() {
+            CompactionResult compact_success;
+            compact_success.messages.push_back(
+                Message{make_user_message("summary")});
+            ContextCompactionMessage opaque;
+            opaque.api = "compaction-model-switch-test";
+            opaque.provider = "faux";
+            opaque.model = "old-model";
+            opaque.encrypted_content = "old-model-opaque-bytes";
+            compact_success.messages.push_back(Message{opaque});
+
+            auto blocking_client = std::make_shared<BlockingCompactionClient>(
+                FauxClient::Script{}, compact_success);
+            LLMClientRegistry::instance().register_client(
+                "compaction-model-switch-test",
+                [blocking_client] { return blocking_client; });
+
+            Agent::Options opts;
+            opts.model.id = "old-model";
+            opts.model.api = "compaction-model-switch-test";
+            opts.model.provider = "faux";
+            Agent agent(opts);
+            agent.state().append_message(Message{make_user_message("original")});
+
+            auto compact_stream = agent.compact();
+            blocking_client->wait_until_started();
+
+            // set_model must not deadlock or be rejected while compaction's
+            // network call is in flight: with_idle_transition only holds
+            // worker_mutex_ for compact()'s brief snapshot phase, not for
+            // the network call, and set_model does not consider "a
+            // compaction is in flight" part of its idle check.
+            Model new_model;
+            new_model.id = "new-model";
+            new_model.api = "some-other-api";
+            new_model.provider = "other";
+            auto switch_result = agent.set_model(new_model, ThinkingLevel::off);
+            CHECK_EQ(switch_result.current.id, std::string("new-model"));
+            CHECK_EQ(agent.state().model().id, std::string("new-model"));
+
+            blocking_client->release();
+
+            std::optional<CompactionEvent> complete_event;
+            for (const auto &event : compact_stream) {
+                if (const auto *ce = std::get_if<CompactionEvent>(&event))
+                    if (ce->kind == CompactionEventKind::complete)
+                        complete_event = *ce;
+            }
+            CHECK(complete_event.has_value());
+            if (!complete_event)
+                return;
+
+            // set_model does not touch transcript_epoch, so the snapshot
+            // taken before the switch is still valid: the install succeeds
+            // rather than being rejected as stale.
+            auto commit = agent.commit_compaction(complete_event->snapshot_epoch,
+                                                  complete_event->replacement_messages);
+            CHECK(commit.installed);
+
+            // The installed opaque item still carries the OLD model's
+            // identity (it was never rewritten by the switch). Building a
+            // request against the NEW (now-active) model must drop it
+            // rather than forward provider-A bytes to provider B — this is
+            // the same same-model gate transform_messages.cpp already
+            // applies (see test_transform_messages_compaction_same_model_gate
+            // in test_core.cpp), verified here end-to-end through an actual
+            // compaction install rather than a hand-built message list.
+            auto sent = transform_messages(agent.state().messages(),
+                                           agent.state().model());
+            for (const auto &msg : sent)
+                CHECK(!std::holds_alternative<ContextCompactionMessage>(msg));
+        });
+}
+
 void test_compact_active_session_durable_failure_installs_nothing() {
     tests::register_test(
         "AgentSession::compact_active_session: a durable-write failure installs nothing",
@@ -808,6 +1290,15 @@ int main() {
     test_commit_compaction_persist_runs_before_install_and_blocks_on_failure();
     test_compact_active_session_persists_then_installs();
     test_compact_active_session_durable_failure_installs_nothing();
+
+    test_context_budget_policy();
+    test_looks_like_context_window_error();
+    test_automatic_compaction_triggers_once_at_threshold();
+    test_automatic_compaction_off_by_default();
+    test_context_window_error_triggers_one_compaction_retry();
+    test_context_window_error_does_not_recursively_retry();
+    test_degenerate_first_turn_context_window_error();
+    test_set_model_races_inflight_compaction_without_corruption();
 
     tests::print_summary();
 
