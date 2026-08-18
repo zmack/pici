@@ -746,25 +746,40 @@ if(CLANG_TIDY_BIN)
     # Enumerate sources instead of relying on run-clang-tidy's path-regex
     # matching. The latter accepts a regex as a positional argument but a
     # non-match silently results in no translation units being analyzed.
+    # Passing the enumerated absolute paths as run-clang-tidy's positional
+    # "files" arguments keeps that safety property (each file matches at
+    # least itself) while still selecting the file list explicitly.
     file(GLOB_RECURSE TIDY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
     list(FILTER TIDY_SOURCES EXCLUDE REGEX "/src/acp/handlers[.]cpp$")
     set(TIDY_HANDLERS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/acp/handlers.cpp")
 
+    include(ProcessorCount)
+    ProcessorCount(PI_CPP_NPROC)
+    if(PI_CPP_NPROC EQUAL 0)
+        set(PI_CPP_NPROC 1)
+    endif()
+
     if(RUN_CLANG_TIDY_BIN)
-        set(TIDY_SOURCE_FILTER "^${CMAKE_CURRENT_SOURCE_DIR}/src/(?!acp/handlers[.]cpp$).*")
+        # NOTE: -source-filter was replaced by a positional path-regex
+        # argument in newer run-clang-tidy releases (LLVM 18+); older
+        # releases used -source-filter instead. If `make lint` reports an
+        # "unrecognized arguments" error for whichever form is in use here,
+        # the installed run-clang-tidy predates or postdates this switch —
+        # check `run-clang-tidy -h` and swap the flag accordingly.
         add_custom_target(tidy
             COMMAND ${RUN_CLANG_TIDY_BIN}
                 -clang-tidy-binary ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
                 -quiet
-                -source-filter ${TIDY_SOURCE_FILTER}
+                -j ${PI_CPP_NPROC}
+                ${TIDY_SOURCES}
             COMMAND ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
                 -quiet
                 -checks=-clang-analyzer-*
                 ${TIDY_HANDLERS_SOURCE}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Running clang-tidy (parallel, ${CLANG_TIDY_BIN})"
+            COMMENT "Running clang-tidy (parallel x${PI_CPP_NPROC}, ${CLANG_TIDY_BIN})"
             VERBATIM
         )
         add_custom_target(tidy-fix
@@ -773,7 +788,8 @@ if(CLANG_TIDY_BIN)
                 -p ${CMAKE_BINARY_DIR}
                 -quiet
                 -fix
-                -source-filter ${TIDY_SOURCE_FILTER}
+                -j ${PI_CPP_NPROC}
+                ${TIDY_SOURCES}
             COMMAND ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
                 -quiet
@@ -781,7 +797,7 @@ if(CLANG_TIDY_BIN)
                 -checks=-clang-analyzer-*
                 ${TIDY_HANDLERS_SOURCE}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Running clang-tidy --fix (parallel)"
+            COMMENT "Running clang-tidy --fix (parallel x${PI_CPP_NPROC})"
             VERBATIM
         )
     else()
