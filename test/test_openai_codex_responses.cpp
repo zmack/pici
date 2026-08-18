@@ -1,14 +1,27 @@
 #include "core/providers/openai_codex_responses.h"
 
+#include "core/agent.h"
 #include "core/providers/faux.h"
+#include "core/session/agent_session.h"
 #include "core/session/session_store.h"
+#include "core/stream_diagnostics.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <source_location>
+#include <sstream>
+#include <string>
 #include <string_view>
+#include <thread>
 #include <variant>
+
+#include <httplib.h>
 
 namespace tests {
 int passed{0};
@@ -294,6 +307,308 @@ int main() {
              std::string("GATE_TEST_OPAQUE_SUMMARY"));
 
     std::filesystem::remove_all(dir);
+  }
+
+  // --- Compact endpoint: timeout multiplier (Phase 6 hardening) ---
+  // compact_request_timeout_ms is the only place kCompactTimeoutIdleMultiplier
+  // (4x, matching Codex's COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER) is applied;
+  // exercise the formula directly rather than only observing it indirectly
+  // through a real timed-out HTTP call, which would only prove "some timeout
+  // fired," not that the 4x scaling and its saturating cast are correct.
+  {
+    CHECK_EQ(pi::core::OpenAICodexResponsesClient::compact_request_timeout_ms(
+                 std::optional<std::uint32_t>{1000}),
+             std::uint32_t{4000});
+    // Unset configured timeout falls back to HttpClient's own 600s default
+    // before scaling, matching the documented kDefaultRequestTimeoutMs.
+    CHECK_EQ(pi::core::OpenAICodexResponsesClient::compact_request_timeout_ms(
+                 std::nullopt),
+             std::uint32_t{2400000});
+    // Saturates at UINT32_MAX rather than overflowing/wrapping.
+    CHECK_EQ(pi::core::OpenAICodexResponsesClient::compact_request_timeout_ms(
+                 std::optional<std::uint32_t>{
+                     std::numeric_limits<std::uint32_t>::max()}),
+             std::numeric_limits<std::uint32_t>::max());
+  }
+
+  // --- Compact endpoint: oversized response content round-trips intact ---
+  // "Oversized" per the plan's test matrix is a response whose retained
+  // opaque payload or item count is large, not a transport-layer size cap
+  // (post_authenticated enforces none) — the requirement is that parsing
+  // does not truncate, corrupt, or choke on it.
+  {
+    const std::string huge_payload(std::size_t{4} * 1024 * 1024, 'X'); // 4 MiB
+    std::ostringstream body;
+    body << R"({"output":[)";
+    for (int i = 0; i < 500; ++i) {
+      if (i > 0)
+        body << ",";
+      body << R"({"type":"message","role":"user",)"
+           << R"("content":[{"type":"input_text","text":"item )" << i
+           << R"("}]})";
+    }
+    body << R"(,{"type":"compaction","id":"cmp_huge","encrypted_content":")"
+         << huge_payload << R"("}]})";
+    auto oversized = nlohmann::json::parse(body.str());
+
+    auto result = pi::core::parse_compact_response(model, oversized);
+    CHECK_EQ(result.messages.size(), std::size_t{501});
+    CHECK(std::holds_alternative<pi::core::ContextCompactionMessage>(
+        result.messages.back()));
+    CHECK_EQ(std::get<pi::core::ContextCompactionMessage>(result.messages.back())
+                 .encrypted_content.size(),
+             huge_payload.size());
+    CHECK_EQ(std::get<pi::core::ContextCompactionMessage>(result.messages.back())
+                 .encrypted_content,
+             huge_payload);
+  }
+
+  // --- Compact endpoint: real HTTP round trip (Phase 6 hardening) ---
+  // Every other test above builds/parses JSON directly, never exercising
+  // OpenAICodexResponsesClient::compact() itself over a real socket. Spin up
+  // a loopback httplib::Server (the same library pici's own OAuth callback
+  // server and ACP server use) so status codes, malformed bodies, and
+  // no-response/timeout behavior are exercised through the real HTTP layer,
+  // not simulated by constructing a CompactionResult by hand.
+  {
+    using Clock = std::chrono::steady_clock;
+
+    // --- success ---
+    {
+      httplib::Server server;
+      server.Post("/codex/responses/compact",
+                  [](const httplib::Request &request,
+                     httplib::Response &response) {
+                    CHECK(request.get_header_value("OpenAI-Beta") ==
+                          "responses=experimental");
+                    response.set_content(
+                        R"({"id":"resp_1","output":[)"
+                        R"({"type":"compaction","id":"cmp_1",)"
+                        R"("encrypted_content":"OPAQUE_SECRET_BLOB"}],)"
+                        R"("usage":{"input_tokens":5,"output_tokens":1,)"
+                        R"("total_tokens":6}})",
+                        "application/json");
+                  });
+      const auto port = server.bind_to_any_port("127.0.0.1");
+      CHECK(port > 0);
+      std::thread listener([&server] { server.listen_after_bind(); });
+
+      auto real_model = model;
+      real_model.base_url = "http://127.0.0.1:" + std::to_string(port);
+      pi::core::OpenAICodexResponsesClient client;
+      pi::core::AgentContext ctx;
+      ctx.messages.emplace_back(pi::core::UserMessage{
+          .content = {pi::core::TextContent{.text = "hello"}}});
+
+      const auto trace_path = (std::filesystem::temp_directory_path() /
+                               "pici-compact-diag-success.jsonl")
+                                  .string();
+      {
+        auto diagnostics =
+            std::make_shared<pi::core::StreamDiagnostics>(trace_path);
+        pi::core::CompactionOptions options;
+        options.diagnostics = diagnostics;
+        auto result = client.compact(real_model, ctx, options, {});
+        CHECK(result.supported);
+        CHECK(!result.error_message.has_value());
+        CHECK_EQ(result.messages.size(), std::size_t{1});
+        CHECK_EQ(result.response_id.value_or(""), std::string("resp_1"));
+        CHECK_EQ(result.usage.input, std::uint64_t{5});
+      }
+      // diagnostics destructor flushes; read the trace back.
+      {
+        std::ifstream trace(trace_path);
+        std::ostringstream contents;
+        contents << trace.rdbuf();
+        const auto text = contents.str();
+        CHECK(text.find("\"stage\":\"compact\"") != std::string::npos);
+        CHECK(text.find("request_sent") != std::string::npos);
+        CHECK(text.find("parsed_ok") != std::string::npos);
+        // No-secret/no-payload requirement: the opaque content and request
+        // text must never appear in the trace, only counts/labels.
+        CHECK(text.find("OPAQUE_SECRET_BLOB") == std::string::npos);
+        CHECK(text.find("hello") == std::string::npos);
+      }
+      std::filesystem::remove(trace_path);
+
+      server.stop();
+      listener.join();
+    }
+
+    // --- malformed JSON body over the wire ---
+    {
+      httplib::Server server;
+      server.Post("/codex/responses/compact",
+                  [](const httplib::Request &, httplib::Response &response) {
+                    response.set_content("{not valid json", "application/json");
+                  });
+      const auto port = server.bind_to_any_port("127.0.0.1");
+      CHECK(port > 0);
+      std::thread listener([&server] { server.listen_after_bind(); });
+
+      auto real_model = model;
+      real_model.base_url = "http://127.0.0.1:" + std::to_string(port);
+      pi::core::OpenAICodexResponsesClient client;
+      pi::core::AgentContext ctx;
+      auto result = client.compact(real_model, ctx, {}, {});
+      CHECK(result.supported);
+      CHECK(result.error_message.has_value());
+      CHECK(result.error_message->find("not valid JSON") != std::string::npos);
+      CHECK(!result.http_status.has_value());
+
+      server.stop();
+      listener.join();
+    }
+
+    // --- distinct non-2xx statuses ---
+    for (const int status : {401, 429, 500}) {
+      httplib::Server server;
+      server.Post("/codex/responses/compact",
+                  [status](const httplib::Request &, httplib::Response &response) {
+                    response.status = status;
+                    response.set_content(R"({"error":{"message":"nope"}})",
+                                         "application/json");
+                  });
+      const auto port = server.bind_to_any_port("127.0.0.1");
+      CHECK(port > 0);
+      std::thread listener([&server] { server.listen_after_bind(); });
+
+      auto real_model = model;
+      real_model.base_url = "http://127.0.0.1:" + std::to_string(port);
+      pi::core::OpenAICodexResponsesClient client;
+      pi::core::AgentContext ctx;
+      auto result = client.compact(real_model, ctx, {}, {});
+      CHECK(result.supported);
+      CHECK(result.error_message.has_value());
+      CHECK_EQ(result.http_status.value_or(0), status);
+
+      server.stop();
+      listener.join();
+    }
+
+    // --- timeout / no-response ---
+    {
+      std::atomic<bool> release{false};
+      httplib::Server server;
+      server.Post("/codex/responses/compact",
+                  [&release](const httplib::Request &, httplib::Response &response) {
+                    // Block well past the client's configured timeout so the
+                    // request aborts with no response, rather than racing a
+                    // sleep duration against wall-clock scheduling jitter.
+                    while (!release.load())
+                      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    response.set_content(R"({"output":[]})", "application/json");
+                  });
+      const auto port = server.bind_to_any_port("127.0.0.1");
+      CHECK(port > 0);
+      std::thread listener([&server] { server.listen_after_bind(); });
+
+      auto real_model = model;
+      real_model.base_url = "http://127.0.0.1:" + std::to_string(port);
+      pi::core::OpenAICodexResponsesClient client;
+      pi::core::AgentContext ctx;
+      pi::core::CompactionOptions options;
+      // compact_request_timeout_ms scales this by 4x; 100ms configured ->
+      // 400ms actual, comfortably shorter than the handler's indefinite
+      // block, so this is deterministic rather than timing-sensitive.
+      options.timeout_ms = 100;
+      const auto started = Clock::now();
+      auto result = client.compact(real_model, ctx, options, {});
+      const auto elapsed = Clock::now() - started;
+      CHECK(result.supported);
+      CHECK(result.error_message.has_value());
+      CHECK(!result.cancelled);
+      CHECK(elapsed < std::chrono::seconds(5));
+
+      release.store(true);
+      server.stop();
+      listener.join();
+    }
+
+    // --- acceptance criterion #1: a real openai-codex-responses session
+    // manually compacts through the dedicated endpoint, end to end ---
+    // Every other manual-compaction test in this suite (test_compaction.cpp,
+    // test_rpc_mode.cpp) drives AgentSession::compact_active_session()
+    // through a FauxClient registered under a synthetic api id. This is the
+    // one test that registers the *real* OpenAICodexResponsesClient under
+    // its real "openai-codex-responses" api id, points it at a local
+    // /codex/responses/compact mock, and drives the full manual transaction
+    // (Agent::compact -> run_compaction -> journal write -> in-memory
+    // install) through AgentSession, then reloads the session to confirm
+    // durability — proving the dedicated endpoint is reachable through the
+    // real provider identity, not just through a test double standing in
+    // for "some provider."
+    {
+      httplib::Server server;
+      server.Post(
+          "/codex/responses/compact",
+          [](const httplib::Request &, httplib::Response &response) {
+            response.set_content(
+                R"({"id":"resp_e2e","output":[)"
+                R"({"type":"message","role":"user",)"
+                R"("content":[{"type":"input_text","text":"retained"}]},)"
+                R"({"type":"compaction","id":"cmp_e2e",)"
+                R"("encrypted_content":"E2E_OPAQUE_SUMMARY"}],)"
+                R"("usage":{"input_tokens":3,"output_tokens":0,)"
+                R"("total_tokens":3}})",
+                "application/json");
+          });
+      const auto port = server.bind_to_any_port("127.0.0.1");
+      CHECK(port > 0);
+      std::thread listener([&server] { server.listen_after_bind(); });
+
+      pi::core::register_openai_codex_responses_client();
+
+      const auto session_dir = std::filesystem::temp_directory_path() /
+                               "pici-compact-e2e-codex-session";
+      std::filesystem::remove_all(session_dir);
+      auto store = std::make_shared<pi::core::SessionStore>(session_dir);
+
+      pi::core::AgentSession::Config config;
+      config.agent_options.model.id = "gpt-5.3-codex";
+      config.agent_options.model.api = "openai-codex-responses";
+      config.agent_options.model.provider = "openai-codex";
+      config.agent_options.model.base_url =
+          "http://127.0.0.1:" + std::to_string(port);
+      config.session_store = store;
+      pi::core::AgentSession session(std::move(config));
+
+      pi::core::SessionHeader header;
+      const auto session_id = session.create_session(header);
+      session.agent().state().append_message(pi::core::Message{
+          pi::core::UserMessage{
+              .content = {pi::core::TextContent{.text = "pre-compaction"}}}});
+
+      auto result = session.compact_active_session();
+      CHECK(result.success);
+      CHECK(!result.unsupported);
+      CHECK(!result.error.has_value());
+      CHECK_EQ(result.retained_message_count, std::size_t{2});
+
+      // Installed in memory immediately.
+      CHECK_EQ(session.agent().state().messages().size(), std::size_t{2});
+      CHECK(std::holds_alternative<pi::core::ContextCompactionMessage>(
+          session.agent().state().messages()[1]));
+
+      // Survives save/reload: the replacement transcript and opaque item are
+      // what a follow-up request would see, not the pre-compaction message.
+      auto reloaded = store->load(session_id);
+      CHECK(reloaded.has_value());
+      if (reloaded) {
+        CHECK_EQ(reloaded->messages.size(), std::size_t{2});
+        CHECK(std::holds_alternative<pi::core::ContextCompactionMessage>(
+            reloaded->messages[1]));
+        CHECK_EQ(
+            std::get<pi::core::ContextCompactionMessage>(reloaded->messages[1])
+                .encrypted_content,
+            std::string("E2E_OPAQUE_SUMMARY"));
+      }
+
+      store.reset();
+      std::filesystem::remove_all(session_dir);
+      server.stop();
+      listener.join();
+    }
   }
 
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed

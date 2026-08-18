@@ -96,6 +96,11 @@ void StreamDiagnostics::record_renderer_event(std::string_view event,
   record("renderer", event, bytes);
 }
 
+void StreamDiagnostics::record_compact_event(std::string_view event,
+                                             std::size_t bytes) {
+  record("compact", event, bytes);
+}
+
 void StreamDiagnostics::record(std::string_view stage, std::string_view event,
                                std::size_t bytes) {
   std::scoped_lock lock(mutex_);

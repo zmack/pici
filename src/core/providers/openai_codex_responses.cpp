@@ -292,6 +292,11 @@ OpenAICodexResponsesClient::compact_endpoint_url(std::string base_url) {
   return endpoint_url(std::move(base_url)) + "/compact";
 }
 
+std::uint32_t OpenAICodexResponsesClient::compact_request_timeout_ms(
+    std::optional<std::uint32_t> configured) {
+  return ::pi::core::compact_request_timeout_ms(configured);
+}
+
 nlohmann::json
 OpenAICodexResponsesClient::build_request_json(const Model &model,
                                                const AgentContext &context,
@@ -944,6 +949,14 @@ CompactionResult OpenAICodexResponsesClient::compact(
                        .source = "legacy-api-key"};
 
   const auto timeout_ms = compact_request_timeout_ms(options.timeout_ms);
+  // Diagnostics record only the outgoing payload's byte length, never its
+  // content — mirrors how the streaming path's StreamDiagnostics calls only
+  // ever pass byte counts. The "compact" stage keeps these entries
+  // distinguishable from ordinary streaming "transport"/"parser" events in
+  // the same trace file.
+  if (options.diagnostics)
+    options.diagnostics->record_compact_event("request_sent",
+                                              request.dump().size());
   auto response = HttpClient::post_authenticated(
       compact_endpoint_url(model.base_url), request.dump(), headers, auth,
       timeout_ms, stop_tok);
@@ -951,14 +964,22 @@ CompactionResult OpenAICodexResponsesClient::compact(
   if (stop_tok.stop_requested()) {
     result.cancelled = true;
     result.error_message = "Request was aborted";
+    if (options.diagnostics)
+      options.diagnostics->record_compact_event("cancelled");
     return result;
   }
   if (!response) {
     result.error_message = "OpenAI Codex compact request failed (no response)";
+    if (options.diagnostics)
+      options.diagnostics->record_compact_event("no_response");
     return result;
   }
   if (options.on_response)
     options.on_response(response->status_code, response->headers, model);
+  if (options.diagnostics)
+    options.diagnostics->record_compact_event(
+        "response_status_" + std::to_string(response->status_code),
+        response->body.size());
   if (response->status_code < 200 || response->status_code >= 300) {
     std::string message = "OpenAI Codex compact request failed with status " +
                           std::to_string(response->status_code);
@@ -970,12 +991,16 @@ CompactionResult OpenAICodexResponsesClient::compact(
     }
     result.error_message = message;
     result.http_status = response->status_code;
+    if (options.diagnostics)
+      options.diagnostics->record_compact_event("http_error");
     return result;
   }
 
   auto body = Json::parse(response->body, nullptr, false);
   if (body.is_discarded()) {
     result.error_message = "OpenAI Codex compact response was not valid JSON";
+    if (options.diagnostics)
+      options.diagnostics->record_compact_event("invalid_json");
     return result;
   }
   try {
@@ -983,6 +1008,8 @@ CompactionResult OpenAICodexResponsesClient::compact(
   } catch (const std::exception &error) {
     result = CompactionResult{};
     result.error_message = error.what();
+    if (options.diagnostics)
+      options.diagnostics->record_compact_event("parse_failed");
     return result;
   }
   if (body.contains("id") && body["id"].is_string())
@@ -994,6 +1021,9 @@ CompactionResult OpenAICodexResponsesClient::compact(
     result.usage.total_tokens =
         usage.value("total_tokens", result.usage.input + result.usage.output);
   }
+  if (options.diagnostics)
+    options.diagnostics->record_compact_event("parsed_ok",
+                                              result.messages.size());
   return result;
 }
 

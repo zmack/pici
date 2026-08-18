@@ -26,6 +26,14 @@ public:
   void record_parser_event(std::string_view event, std::size_t bytes = 0);
   void record_renderer_event(std::string_view event, std::size_t bytes = 0);
 
+  // Records a unary compaction-request lifecycle event (request sent,
+  // response received, parsed, failed, ...) under a "compact" stage so it is
+  // distinguishable in the trace from ordinary streaming "transport" events.
+  // Like every other record_* method, only an event label and a byte count
+  // are ever written — never request/response body content, prompts, or
+  // secrets.
+  void record_compact_event(std::string_view event, std::size_t bytes = 0);
+
 private:
   void record(std::string_view stage, std::string_view event,
               std::size_t bytes);

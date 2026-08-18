@@ -3,6 +3,7 @@
 #include "core/agent_state.h"
 #include "core/llm_client.h"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -83,6 +84,13 @@ public:
   static std::string endpoint_url(std::string base_url);
   // Appends "/compact" to the Responses endpoint exactly once.
   static std::string compact_endpoint_url(std::string base_url);
+  // Scales `configured` (or the same 600s default HttpClient falls back to)
+  // by the Codex reference client's COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER
+  // (4x), saturating at UINT32_MAX. Exposed so the multiplier is directly
+  // unit-testable rather than only observable through a real timed-out HTTP
+  // call.
+  static std::uint32_t
+  compact_request_timeout_ms(std::optional<std::uint32_t> configured);
 };
 
 void register_openai_codex_responses_client();

@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -1267,6 +1268,103 @@ void test_compact_active_session_durable_failure_installs_nothing() {
         });
 }
 
+// A client that never overrides compact(), so every call falls through to
+// LLMClient's own default body: CompactionResult{.supported = false, ...}.
+// stream() is never expected to be called by these tests; it aborts the
+// process if it is, which would surface immediately as a test failure
+// rather than silently returning a bogus assistant message.
+class UnsupportedCompactionClient : public LLMClient {
+public:
+    std::shared_ptr<AssistantMessage> stream(const Model &, const AgentContext &,
+                                             const StreamOptions &,
+                                             AssistantEventCallback,
+                                             std::stop_token) override {
+        std::abort();
+    }
+    std::string_view provider_name() const override { return "unsupported-test"; }
+    std::string_view api_id() const override { return "unsupported-compaction-test"; }
+};
+
+void test_compact_active_session_unsupported_provider_leaves_transcript_untouched() {
+    tests::register_test(
+        "AgentSession::compact_active_session: an unsupported provider reports "
+        "unsupported and leaves the transcript/journal untouched",
+        []() {
+            const auto session_dir = std::filesystem::temp_directory_path() /
+                                     ("pici-compaction-unsupported-session-" +
+                                      std::to_string(
+                                          std::chrono::steady_clock::now()
+                                              .time_since_epoch()
+                                              .count()));
+            auto store = std::make_shared<SessionStore>(session_dir);
+
+            LLMClientRegistry::instance().register_client(
+                "compaction-unsupported-test",
+                [] { return std::make_shared<UnsupportedCompactionClient>(); });
+
+            AgentSession::Config config;
+            config.agent_options.model.id = "unsupported-model";
+            config.agent_options.model.api = "compaction-unsupported-test";
+            config.agent_options.model.provider = "unsupported-test";
+            config.session_store = store;
+            AgentSession session(std::move(config));
+
+            SessionHeader header;
+            const auto session_id = session.create_session(header);
+            session.agent().state().append_message(
+                Message{make_user_message("only message")});
+            const auto messages_before = session.agent().state().messages();
+            // append_message only mutates in-memory state; nothing is
+            // journaled until a real prompt/compaction drains through
+            // AgentSession's persistence path. Compare against the actual
+            // on-disk state before the attempt, not an assumption about it,
+            // so this test asserts "compaction wrote nothing new" rather
+            // than a specific message count that happens to depend on how
+            // the fixture built the transcript.
+            const auto journal_before = store->load(session_id);
+            CHECK(journal_before.has_value());
+
+            std::vector<AgentEvent> events;
+            auto result = session.compact_active_session(
+                CompactionTrigger::manual,
+                [&](const AgentEvent &event) { events.push_back(event); });
+
+            CHECK(!result.success);
+            CHECK(result.unsupported);
+            CHECK(!result.cancelled);
+            CHECK(result.error.has_value());
+            if (result.error)
+                CHECK(result.error->find("not supported") != std::string::npos);
+
+            // Transcript is byte-for-byte the pre-attempt transcript: no
+            // partial install, no placeholder compaction item spliced in.
+            CHECK_EQ(session.agent().state().messages().size(),
+                     messages_before.size());
+            CHECK(std::holds_alternative<UserMessage>(
+                session.agent().state().messages()[0]));
+
+            // No durable record was ever written: the session reloads to
+            // exactly the same single message, and specifically never
+            // observes a `complete` CompactionEvent (only `start`+`error`),
+            // which is what would have driven a journal write.
+            bool saw_complete = false;
+            for (const auto &event : events)
+                if (const auto *compaction = std::get_if<CompactionEvent>(&event))
+                    if (compaction->kind == CompactionEventKind::complete)
+                        saw_complete = true;
+            CHECK(!saw_complete);
+
+            auto reloaded = store->load(session_id);
+            CHECK(reloaded.has_value());
+            if (reloaded && journal_before)
+                CHECK_EQ(reloaded->messages.size(),
+                         journal_before->messages.size());
+
+            store.reset();
+            std::filesystem::remove_all(session_dir);
+        });
+}
+
 int main() {
     std::cout << "=== pi-cpp compaction tests ===\n\n";
 
@@ -1290,6 +1388,7 @@ int main() {
     test_commit_compaction_persist_runs_before_install_and_blocks_on_failure();
     test_compact_active_session_persists_then_installs();
     test_compact_active_session_durable_failure_installs_nothing();
+    test_compact_active_session_unsupported_provider_leaves_transcript_untouched();
 
     test_context_budget_policy();
     test_looks_like_context_window_error();
