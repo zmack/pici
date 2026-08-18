@@ -16,8 +16,10 @@
 
 namespace pi::core {
 
-FauxClient::FauxClient(std::vector<Script> scripts)
-    : scripts_(std::move(scripts)), call_count_(0) {}
+FauxClient::FauxClient(std::vector<Script> scripts,
+                       std::vector<CompactionResult> compact_results)
+    : scripts_(std::move(scripts)), call_count_(0),
+      compact_results_(std::move(compact_results)), compact_call_count_(0) {}
 
 std::shared_ptr<AssistantMessage>
 FauxClient::stream(const Model &model, const AgentContext &context,
@@ -84,6 +86,23 @@ FauxClient::stream(const Model &model, const AgentContext &context,
   }
 
   return final_msg;
+}
+
+CompactionResult FauxClient::compact(const Model &model,
+                                     const AgentContext &context,
+                                     const CompactionOptions &options,
+                                     std::stop_token stop_tok) {
+  (void)model;
+  (void)context;
+  (void)options;
+  (void)stop_tok;
+  auto idx = compact_call_count_.fetch_add(1);
+  if (idx >= compact_results_.size()) {
+    CompactionResult result;
+    result.error_message = "No more faux compact results queued";
+    return result;
+  }
+  return compact_results_[idx];
 }
 
 } // namespace pi::core

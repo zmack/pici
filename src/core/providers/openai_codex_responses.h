@@ -53,6 +53,15 @@ private:
   std::string error_;
 };
 
+// Parses the JSON body of a `/responses/compact` response
+// (`{"output": [...]}`) into a CompactionResult. Pure/free so it is
+// directly unit-testable without any HTTP involved, mirroring how
+// OpenAICodexResponsesParser is tested by feeding it synthetic SSE lines.
+// Throws std::runtime_error on a malformed/empty response; the caller is
+// expected to catch it and report a failed CompactionResult.
+CompactionResult parse_compact_response(const Model &model,
+                                        const nlohmann::json &body);
+
 class OpenAICodexResponsesClient final : public LLMClient {
 public:
   std::shared_ptr<AssistantMessage> stream(const Model &, const AgentContext &,
@@ -60,12 +69,20 @@ public:
                                            AssistantEventCallback,
                                            std::stop_token) override;
 
+  CompactionResult compact(const Model &, const AgentContext &,
+                           const CompactionOptions &, std::stop_token) override;
+
   std::string_view provider_name() const override { return "openai-codex"; }
   std::string_view api_id() const override { return "openai-codex-responses"; }
 
   static nlohmann::json build_request_json(const Model &, const AgentContext &,
                                            const StreamOptions &);
+  static nlohmann::json build_compact_request_json(const Model &,
+                                                   const AgentContext &,
+                                                   const CompactionOptions &);
   static std::string endpoint_url(std::string base_url);
+  // Appends "/compact" to the Responses endpoint exactly once.
+  static std::string compact_endpoint_url(std::string base_url);
 };
 
 void register_openai_codex_responses_client();

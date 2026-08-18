@@ -116,7 +116,25 @@ struct ToolResultMessage {
   std::int64_t timestamp{0};
 };
 
-using Message = std::variant<UserMessage, AssistantMessage, ToolResultMessage>;
+// An opaque server-side compaction item returned by a provider's dedicated
+// compaction endpoint (e.g. OpenAI Codex's `/responses/compact`). The
+// content is provider-encrypted and must never be displayed, logged, or
+// forwarded to a different api/provider/model than the one that produced
+// it. `api`/`provider`/`model` let transform_messages.cpp apply the same
+// same-model gate it already uses for redacted reasoning content.
+struct ContextCompactionMessage {
+  static constexpr std::string_view role = "contextCompaction";
+  std::string api;
+  std::string provider;
+  std::string model;
+  std::string encrypted_content;
+  std::optional<std::string> item_id;
+  std::optional<std::string> response_id;
+  std::int64_t timestamp{0};
+};
+
+using Message = std::variant<UserMessage, AssistantMessage, ToolResultMessage,
+                             ContextCompactionMessage>;
 
 enum class ThinkingLevel {
   off,

@@ -8,6 +8,56 @@ milestone targets the existing OpenAI Codex Responses provider and its dedicated
 `/responses/compact` endpoint. Local summarization remains the fallback for
 providers that do not advertise server-side compaction.
 
+This plan has been through one architecture review against the current
+codebase (see "Review resolutions" below); the five must-fix findings from
+that review are folded into the relevant sections in place, so the plan as
+written is ready to start at Phase 0.
+
+## Review resolutions (must-fix, folded into the sections below)
+
+This plan went through an architecture review against the actual code
+(`agent.cpp`, `agent_state.h`, `session_store.cpp`, `transform_messages.cpp`,
+`event_types.h`). The review confirmed the overall shape — capability model,
+unary operation, typed opaque item, durable-before-memory ordering, content
+filtering — is sound, but found five issues that block a productive Phase 0
+and must be resolved before implementation starts. Each is called out inline
+where it applies, and summarized here for a single reading:
+
+1. **Journal-write ordering race.** `Agent::prompt()` streams events to a
+   caller-drained `EventStream`; `AgentSession` persists on `MessageEndEvent`
+   from the *drain* thread, not the worker thread. A compaction record must
+   never be written directly from the worker — it must flow through the same
+   event-drain persistence path via a `CompactionEvent`, or replay can
+   resurrect content the compaction was supposed to remove. See §5.
+2. **No epoch guard against a concurrent prompt (not just a concurrent
+   compaction).** §5's original snapshot/install description only guarded
+   against two compactions racing each other. A prompt started between
+   snapshot and install can have its messages silently discarded when the
+   snapshot is installed. Fixed by reusing `Agent::worker_mutex_` with a
+   monotonic transcript epoch. See §5.
+3. **Parent-compacts-while-child-exists corruption.** `parent_offset` is a
+   raw message-count index into the parent's replayed vector
+   (`session_store.cpp:114`, set from `state().messages().size()` in
+   `main.cpp:2191`). If the parent compacts, that index no longer means what
+   it meant when the child forked. See §6.
+4. **Contradictory/under-specified journal schema.** The original §6 example
+   carried both a `through` offset and a full `messages` replacement, and
+   never said what the loader does with a malformed compaction record (today
+   it silently swallows unknown/malformed records — see `load_recursive` in
+   `session_store.cpp`). Fixed by committing to full-replacement-only and
+   requiring malformed records to throw. See §6.
+5. **The opaque-item type was deferred ("prefer public typed variant") but
+   Phase 1 cannot start without deciding it.** Resolved: it is a public 4th
+   `Message` alternative. See Phase 0 and §1/§9 below.
+
+The cross-plan dependency this document originally treated as aspirational
+(sharing a lock/invariant with
+`plans/configurable-providers-and-live-model-switching.md`) is in fact
+already implemented today: `Agent::set_model` holds `worker_mutex_` and
+rejects streaming/pending-tool/queued-steering state
+(`agent.cpp:241-254`). Compaction should reuse that exact mechanism rather
+than inventing a parallel one — see the Risks section.
+
 ## Goal
 
 When a conversation approaches a model's context limit, pici should be able to
@@ -116,19 +166,18 @@ compaction request by calling `stream()` and parsing a normal assistant answer.
 ### 1. Provider capability and operation types
 
 Add a small provider-neutral capability model, initially attached to `Model` or
-resolved from its API identifier:
+resolved from its API identifier. A full `unsupported`/`responses_v1`/
+`responses_v2` enum is premature for a single working provider; start with a
+plain capability flag and widen it in Phase 6 alongside the code that
+actually needs a second variant:
 
 ```cpp
-enum class RemoteCompactionSupport {
-  unsupported,
-  responses_v1,
-  responses_v2,
-};
+bool supports_remote_compaction(const Model &model);
 ```
 
-The first implementation should resolve `responses_v1` only for the existing
-Codex Responses API. Unknown APIs and ordinary OpenAI-compatible completion
-providers remain `unsupported`.
+The first implementation should return `true` only for the existing Codex
+Responses API. Unknown APIs and ordinary OpenAI-compatible completion
+providers remain `false`, routing to local fallback.
 
 Add a provider-neutral result type containing:
 
@@ -254,23 +303,34 @@ Implement a `filter_compacted_history` function modeled on Codex's
 The filter must operate on typed items after parsing, not on JSON string matching.
 
 Codex's filter operates on a flat `ResponseItem` list, where tool calls, tool
-outputs, and reasoning are independent items. Pici's `Message` variant is not
+outputs, and reasoning are independent items, and
+`should_keep_compacted_history_item` (`compact_remote.rs:370`) drops *all*
+`FunctionCall`, `FunctionCallOutput`, and `Reasoning` items unconditionally —
+retained assistant content is text only. Pici's `Message` variant is not
 flat: `AssistantMessage::content` is a `std::vector<ContentBlock>` that mixes
 `TextContent`, `ThinkingContent`, and `ToolCall` in one message
-(`src/core/message_types.h`). A message-level "keep or drop" decision is
-therefore insufficient. `filter_compacted_history` must scrub at the content-block
-level within retained assistant messages:
+(`src/core/message_types.h`), but the V1 filtering rule is simple, not
+conditional: **project every retained assistant message to its `TextContent`
+blocks only**, dropping `ThinkingContent` and `ToolCall` blocks
+unconditionally, and drop the message entirely if that leaves it empty. Do
+not build a "drop the ToolCall only if its paired result was dropped"
+conditional — the pairing is never mixed for V1, so a conditional rule is
+unneeded complexity that codex itself does not implement.
 
-- if a `ToolCall` block's paired `ToolResultMessage` is dropped by policy, the
-  `ToolCall` block itself must also be stripped from the retained assistant
-  message; a retained tool call with no corresponding result is an invalid
-  transcript for the next request, not merely an unwanted one;
-- `ThinkingContent`/encrypted reasoning blocks follow the same drop policy as
-  standalone reasoning items unless the provider contract says otherwise;
-- an assistant message that becomes empty after block-level scrubbing is
-  dropped entirely rather than sent as a content-less message;
-- add a test asserting that no retained `ToolCall` block ever survives without
-  a retained `ToolResultMessage`, and vice versa.
+The pairing hazard that does matter is the mirror image, and it is not
+specific to compaction: a retained `ToolResultMessage` with no preceding
+`ToolCall` (e.g. one whose call was in a dropped assistant message) becomes a
+bare `function_call_output` with no matching `function_call`, which the
+Responses API rejects with a 400 (`openai_codex_responses.cpp:206-210`).
+Pici already handles the opposite case — an orphaned `ToolCall` with no
+result gets a synthesized `"No result provided"` result in
+`transform_messages.cpp:169` — so fix this the same way, in
+`transform_messages.cpp`, so every provider benefits, not just the
+compaction path: drop (or synthesize a placeholder for) any
+`ToolResultMessage` whose `ToolCall` is not present in the transcript being
+sent. Add a compaction-specific test asserting the general invariant holds
+after filtering (no orphaned `ToolResultMessage` survives), but implement the
+fix once, upstream of compaction.
 
 ### 5. Compaction transaction and orchestration
 
@@ -305,37 +365,72 @@ post-compaction state — consistent, if not what was in memory at the instant o
 the crash. If the durable write itself fails, abort before installing anything
 in memory and report the error (see "Durable session journal").
 
+**Do not write the compaction journal record from the compaction worker
+thread.** `Agent::prompt()` streams events through an `EventStream` that the
+*caller* drains; `AgentSession` today persists ordinary messages from
+`MessageEndEvent` observed on that drain thread, not from the worker
+(`agent_session.cpp:240-256`). If a compaction record is appended directly by
+the worker, it can land in the JSONL file interleaved before a
+`MessageEndEvent` that logically precedes it — on replay, the "old" message
+gets appended *after* the replacement record, resurrecting content the
+compaction removed. Route compaction the same way ordinary messages go:
+introduce a `CompactionEvent` (or reuse `MessageEndEvent` with a payload
+tag) carrying the replacement transcript, and have the existing
+drain-thread persistence handler write the compaction journal record in
+stream order alongside message records. This also gives Phase 4 (manual
+compaction) its event pump for free (see "Manual command" below) instead of
+needing a separate synchronous result path.
+
 The state installation must not mutate the live transcript incrementally while
 the request is in flight. On any failure, retain the original transcript and
 report the error; do not persist a half-compacted state.
 
-Use a single operation mutex or generation counter to prevent concurrent manual
-and automatic compaction. A request that starts after a snapshot but before
-installation must either wait or fail with a stale-snapshot error and retry from
-fresh state.
+**Guard against a concurrent prompt, not only a concurrent compaction.** A
+single operation mutex prevents two compactions from racing each other, but
+does nothing to stop `Agent::prompt()` starting *after* step 1's idle check
+and appending a user+assistant turn before step 9 replaces the whole message
+vector — those messages would be silently discarded, and if the durable
+compaction record was already written (per the ordering above), memory and
+disk now permanently disagree. Reuse the exact mechanism `Agent::set_model`
+already uses for the equivalent problem (`agent.cpp:241-254`): take
+`worker_mutex_` for the full snapshot→journal→install critical section (not
+just around the install), add a monotonic `transcript_epoch` to
+`AgentState` bumped on every message append, and recheck the epoch after
+acquiring the lock and before installing. A request that finds the epoch
+changed since its snapshot fails with a stale-snapshot error and the caller
+retries from fresh state. See "Risks" below — extracting
+`Agent::with_idle_transition()` from `set_model`'s guard lets both features
+share one implementation instead of two independently-maintained locks.
 
-This in-process mutex only guards one process's own compaction attempts. It
-does not protect against a second process (a resumed CLI, an attached ACP/RPC
-client) appending an ordinary message to the same session file between this
-process's snapshot and its journal write. `SessionStore` has no generation or
-version marker on the journal today, so a replacement record written by one
-process can silently strand or misorder a message appended concurrently by
-another. Add a lightweight generation check (e.g. record the journal's last
-known length/offset at snapshot time and fail the compaction if the file has
-grown by the time the durable write happens) rather than assuming single-writer
-access. This is a pre-existing gap for `append_truncate` too, but a replacement
-record makes the failure mode silent data loss instead of a merely confusing
-truncate.
+This process-local lock only guards one process's own compaction attempts
+against its own prompts. It does not protect against a second process (a
+resumed CLI, an attached ACP/RPC client) appending an ordinary message to the
+same session file between this process's snapshot and its journal write.
+`SessionStore` holds long-lived append `ofstream`s and exposes no offset API
+(`session_store.h:47`), so a `file_size`-then-write generation check is a
+TOCTOU race, not a real guard. For V1, either (a) take an advisory
+`flock`/`fcntl` lock on the session file for the check-and-write span, or (b)
+explicitly scope out cross-process concurrent writers for V1, document the
+residual window, and fail closed (abort the compaction, do not install) if
+the file's size at write time differs from the size at snapshot time. Do not
+ship a check that looks like a guard but is actually racy — that is worse
+than no check, because it hides the gap. This is a pre-existing issue for
+`append_truncate` too, but a replacement record makes the failure mode
+silent data loss instead of a merely confusing truncate.
 
 ### 6. Durable session journal
 
-Extend `SessionStore` with a replayable replacement operation, for example:
+Extend `SessionStore` with a replayable replacement operation carrying the
+**full typed replacement transcript only** — no offset field. The original
+draft of this record carried both a `through` offset and a full `messages`
+replacement, which is self-contradictory (the surrounding prose already says
+"do not rely on a byte offset into a prior JSONL file," since forks and prior
+truncation records make offsets ambiguous). Drop `through` entirely:
 
 ```json
 {
   "type": "compaction",
-  "through": 42,
-  "messages": [ ... replacement messages ... ],
+  "messages": [ ... full replacement transcript ... ],
   "provider": "openai-codex",
   "model": "...",
   "summary": "server",
@@ -343,27 +438,62 @@ Extend `SessionStore` with a replayable replacement operation, for example:
 }
 ```
 
-A better long-term form is a replacement record containing the full typed
-replacement transcript. Do not rely on a byte offset into a prior JSONL file:
-forks and prior truncation records make offsets ambiguous.
-
 Replay rules:
 
 - load the parent session first, as today;
 - apply ordinary message and truncate records in order;
-- when a compaction record is encountered, replace the current message vector;
+- when a compaction record is encountered, replace the current message vector
+  wholesale with its `messages`;
 - subsequent messages append after the replacement;
-- malformed compaction records are reported as a corrupted session rather than
-  silently skipped;
-- old sessions without compaction records remain fully compatible.
+- **malformed compaction records must throw, not be silently skipped.** Today
+  `load_recursive` silently `continue`s past both JSON parse failures and
+  unknown `type` values (`session_store.cpp:76`, `92-105`). Under that
+  behavior a malformed compaction record does not fail loudly — it silently
+  restores the pre-compaction transcript, exactly the "corrupted session"
+  outcome this plan already says must not happen silently. Add explicit
+  `type == "compaction"` handling that throws on a malformed record, and add
+  a regression test for it; do not rely on the existing fallthrough;
+- old sessions without compaction records remain fully compatible; add a
+  session-header `minVersion` (or equivalent) so an older pici binary that
+  does not understand the `compaction` record type fails closed instead of
+  silently replaying the pre-compaction transcript as if it were current.
+
+Extend the JSONL record model from its current
+`std::variant<Message, std::size_t>` (message vs. truncate-through) to a
+third alternative for the compaction record, rather than overloading either
+existing arm.
 
 Add `append_compaction` and a corresponding `AgentSession::install_compaction`
-(or equivalent) that updates memory and persistence as one coordinated action.
-If persistence fails, keep the in-memory state marked dirty and surface the error;
-do not claim durable success.
+(or equivalent) that updates memory and persistence as one coordinated action
+through the event-drain path described in "Compaction transaction and
+orchestration" above — not a direct worker-thread write. If persistence
+fails, keep the in-memory state marked dirty and surface the error; do not
+claim durable success.
 
-For forked sessions, compaction belongs to the child journal only. A child may
-compact inherited history without modifying the parent file.
+**Forked sessions: handle both directions, not just child-compacts-child.**
+The original draft only addressed a child compacting its own inherited
+history ("compaction belongs to the child journal only... does not modify
+the parent file") — that direction is fine as stated. But `parent_offset` is
+a raw message-count index into the parent's fully replayed vector
+(`session_store.cpp:114`, set at fork time from `state().messages().size()`
+in `main.cpp:2191`), and nothing invalidates that index if the *parent*
+later compacts. After a parent compaction, `parent_offset` either exceeds the
+parent's new (shorter) message count — `session_store.cpp`'s loader already
+throws `"corrupted fork"` in that case, so every existing child becomes
+permanently unloadable — or it stays in range but now points at a different
+logical position, so the child silently splices the wrong prefix. Pick one
+before Phase 1 (it changes the header schema either way):
+
+- **(a) Refuse:** reject compaction on any session that has children on
+  disk, and require "fork, then compact the fork" as the supported flow; or
+- **(b) Version it:** add a `parentCompactionEpoch` field to the child
+  header, bump a matching epoch on the parent whenever it compacts, and fail
+  loudly with an actionable error at load time on a mismatch instead of
+  either throwing an opaque "corrupted fork" or silently misloading.
+
+Option (a) is simpler and should be the V1 default; note (b) as the
+follow-up if compacting a session with live children turns out to be a
+common operator workflow.
 
 ### 7. Automatic trigger and token accounting
 
@@ -406,9 +536,20 @@ Automatic compaction should happen at a safe boundary:
 - never while an assistant stream is active;
 - never while tool calls from that response are pending.
 
-The first implementation can use a pre-turn trigger. Mid-turn compaction should
-be a separate milestone because it requires preserving the final user message,
-active tool state, and cancellation semantics.
+The first implementation can use a pre-turn trigger, but "pre-turn" needs a
+precise definition: `Agent::prompt()` appends the new user message before the
+turn's LLM call begins, so a trigger that fires "before starting a new LLM
+request" already has that pending user message sitting in the transcript
+being compacted — it must not be summarized away. Codex resolves the
+equivalent case with `insert_initial_context_before_last_real_user_or_summary`;
+pici has no analogous seam yet. Rather than build one, define the V1 trigger
+point as **after a completed assistant/tool turn and before the next
+prompt's user message is appended** — i.e. compact `messages[0..n]` as they
+stand at turn-end, not mid-append. This is already one of the two safe
+boundaries this section lists, so it requires no new logic, only picking it
+over the other. Mid-turn compaction should be a separate milestone because it
+requires preserving the final user message, active tool state, and
+cancellation semantics.
 
 ### 8. Manual command and UI behavior
 
@@ -469,9 +610,17 @@ request as a distinct operation and redact payload contents by default.
   Codex implementation.
 - Add representative JSON fixtures for a normal transcript, a compact response,
   malformed output, empty output, and opaque compaction content.
-- Decide whether the opaque item is public in `Message` or an internal session
-  record type; prefer the public typed variant if it must be sent on follow-up
-  requests.
+- **Decided:** the opaque item is a public 4th `Message` variant,
+  `ContextCompactionMessage{api, provider, model, encrypted_content, item_id,
+  response_id, timestamp}`. This is not deferrable — Phase 1 ("add the
+  compaction message/item type") cannot start without it, and Phase 1 depends
+  on this decision, so it is made here rather than left as a Phase 1 task.
+  Carrying `api`/`provider`/`model` on the item lets it reuse the *existing*
+  same-model gate in `transform_messages.cpp:102` (which already restricts
+  redacted/encrypted reasoning content to the exact provider/api/model that
+  produced it) to satisfy the "never send opaque payload to a provider that
+  did not create it" requirement in "Retry and fallback policy" below, with
+  no new policy layer needed.
 - Add a feature/config flag, defaulting to automatic remote compaction off until
   the end-to-end path is complete.
 
@@ -490,7 +639,17 @@ request as a distinct operation and redact payload contents by default.
 - Refactor shared Responses input conversion.
 - Implement the Codex Responses `/compact` URL and JSON POST.
 - Parse usage, response ID, output items, HTTP errors, timeout, and cancellation.
+  Codex scales the compact request's timeout relative to the normal idle
+  timeout (`COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER = 4` in `client.rs:165`)
+  rather than inventing a new constant; use the same multiplier so the
+  timeout has a documented origin instead of a guessed value.
 - Add a fake LLM client and HTTP mock coverage.
+- **Phase exit gate:** before starting Phase 3, prove the seam works
+  end-to-end at the fixture level — a faux/fake client round-trips a
+  canned compact-response fixture through typed parsing → filtering →
+  journal write → reload, without a real `CompactionManager` yet. Phases 1–2
+  are otherwise dead code until Phase 3 lands; this gate is what makes that
+  acceptable instead of accumulating unverified layers.
 
 ### Phase 3 — replacement transaction
 
@@ -626,21 +785,30 @@ The first milestone is complete when:
   active, sibling plan for the same codebase, and it already establishes a
   concrete precedent for exactly this problem — e.g. "images become
   placeholders when switching to a text-only model" and a "safe live switching
-  contract" that locks out switching while a turn/tool-use is active. The
-  compaction feature should extend that same contract rather than inventing a
-  parallel one:
+  contract" that locks out switching while a turn/tool-use is active. Unlike
+  the original draft of this section, this is **not** an aspirational
+  parallel to build toward — the mechanism already exists and should be reused
+  directly, not merely "shared in spirit":
+  - `Agent::set_model` (`agent.cpp:241-254`) already takes `worker_mutex_` and
+    rejects a switch while streaming, while tool calls are pending, or while
+    steering/follow-up work is queued. That is the exact same guard
+    compaction needs (see "Compaction transaction and orchestration" above,
+    which now specifies taking `worker_mutex_` for the
+    snapshot→journal→install critical section). Extract the guard as
+    `Agent::with_idle_transition()` and have both `set_model` and the
+    `CompactionManager` call it, rather than maintaining two copies of the
+    same four-condition check;
   - a switch away from the provider that produced an opaque compaction item
     should, per that plan's placeholder precedent, replace the opaque item with
     a textual placeholder/marker (or trigger a fresh local/remote compaction
     against the destination provider) rather than forwarding provider-A opaque
-    bytes to provider B;
-  - the live-switching contract's "reject switching while streaming/tool
-    execution is active" rule and this plan's "compaction cannot race
-    streaming or tool execution" rule are the same invariant and should share
-    one lock/check, not two independently maintained ones;
-  - this needs resolving before Phase 5 (automatic compaction), since
-    automatic triggers make the provider-switch-with-opaque-history case
-    routine rather than rare.
+    bytes to provider B. The `api`/`provider`/`model` fields committed on
+    `ContextCompactionMessage` (Phase 0, above) are what make this check
+    possible, via the same gate `transform_messages.cpp:102` already applies
+    to redacted reasoning content;
+  - because the shared mechanism already exists, this plan has no hard
+    ordering dependency on the live-switching plan landing first — extracting
+    `with_idle_transition()` is within this plan's own scope.
 - **Message model expansion:** Adding a fourth/fifth variant touches many
   visitors. This is preferable to an untyped side channel, but should be done
   in one deliberate change with compiler errors guiding every visitor.

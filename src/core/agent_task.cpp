@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -36,11 +37,15 @@ namespace {
 
 std::string message_text(const Message &message) {
   return std::visit(
-      [](const auto &value) {
+      []<typename T>(const T &value) {
         std::string result;
-        for (const auto &block : value.content) {
-          if (const auto *text = std::get_if<TextContent>(&block))
-            result += text->text;
+        if constexpr (std::same_as<T, ContextCompactionMessage>) {
+          // Opaque server-side content; never surfaced as plain text.
+        } else {
+          for (const auto &block : value.content) {
+            if (const auto *text = std::get_if<TextContent>(&block))
+              result += text->text;
+          }
         }
         return result;
       },

@@ -147,6 +147,15 @@ transform_messages(const std::vector<Message> &messages, const Model &model,
       AssistantMessage copy = am;
       copy.content = std::move(transformed_content);
       first_pass.emplace_back(std::move(copy));
+    } else if (std::holds_alternative<ContextCompactionMessage>(msg)) {
+      // Opaque, provider-encrypted payload: only forward it to the exact
+      // api/provider/model that produced it. A model/provider switch drops
+      // it rather than sending provider-A bytes to provider B.
+      const auto &cm = std::get<ContextCompactionMessage>(msg);
+      const bool same_model = cm.provider == model.provider &&
+                              cm.api == model.api && cm.model == model.id;
+      if (same_model)
+        first_pass.push_back(msg);
     } else {
       first_pass.push_back(msg);
     }
@@ -154,6 +163,21 @@ transform_messages(const std::vector<Message> &messages, const Model &model,
 
   std::vector<Message> result;
   result.reserve(first_pass.size());
+
+  // Every ToolCall id that appears anywhere in the (already remapped)
+  // transcript. A ToolResultMessage whose call is not in this set (e.g. its
+  // owning AssistantMessage was dropped by compaction filtering) would
+  // become a bare function_call_output with no matching function_call,
+  // which providers reject outright. This invariant is general — it is not
+  // specific to the compaction path, so every provider benefits.
+  std::set<std::string> all_tool_call_ids;
+  for (const auto &msg : first_pass) {
+    if (const auto *am = std::get_if<AssistantMessage>(&msg)) {
+      for (const auto &block : am->content)
+        if (const auto *tc = std::get_if<ToolCall>(&block))
+          all_tool_call_ids.insert(tc->id);
+    }
+  }
 
   std::vector<ToolCall> pending_tool_calls;
   std::set<std::string> existing_tool_result_ids;
@@ -194,9 +218,16 @@ transform_messages(const std::vector<Message> &messages, const Model &model,
       result.push_back(msg);
     } else if (std::holds_alternative<ToolResultMessage>(msg)) {
       const auto &trm = std::get<ToolResultMessage>(msg);
+      if (!all_tool_call_ids.contains(trm.tool_call_id)) {
+        // Orphaned result: its ToolCall is not present in this transcript
+        // (dropped by compaction filtering, or never existed). Drop it
+        // rather than emit a function_call_output with no matching call.
+        continue;
+      }
       existing_tool_result_ids.insert(trm.tool_call_id);
       result.push_back(msg);
-    } else if (std::holds_alternative<UserMessage>(msg)) {
+    } else if (std::holds_alternative<UserMessage>(msg) ||
+               std::holds_alternative<ContextCompactionMessage>(msg)) {
       insert_synthetic();
       result.push_back(msg);
     } else {

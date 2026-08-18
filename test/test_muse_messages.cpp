@@ -297,6 +297,10 @@ int main() {
         .id = "call-1",
         .name = "lookup_city",
         .arguments = nlohmann::json{{"city", "Paris"}}});
+    assistant.content.emplace_back(ToolCall{
+        .id = "call-2",
+        .name = "lookup_city",
+        .arguments = nlohmann::json{{"city", "Berlin"}}});
     context.messages.emplace_back(std::move(assistant));
 
     ToolResultMessage first;

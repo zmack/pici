@@ -77,6 +77,11 @@ struct Args {
   bool mailbox_enabled{false};
   bool mailbox_enabled_explicit{false};
 
+  // Server-side conversation compaction. Off by default: automatic
+  // pre-turn compaction only fires when this is explicitly enabled. Manual
+  // compaction (once implemented) is not gated by this flag.
+  bool remote_compaction_enabled{false};
+
   // Config file
   std::string config_path; // Resolved config path selected by CLI/env/defaults.
 

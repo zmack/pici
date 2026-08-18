@@ -271,6 +271,21 @@ json message_to_json_obj(const Message &msg) {
             j["details"] = *m.details;
           }
           return j;
+        } else if constexpr (std::same_as<T, ContextCompactionMessage>) {
+          json j = json::object();
+          j["role"] = "contextCompaction";
+          j["api"] = m.api;
+          j["provider"] = m.provider;
+          j["model"] = m.model;
+          j["encryptedContent"] = m.encrypted_content;
+          if (m.item_id.has_value()) {
+            j["itemId"] = *m.item_id;
+          }
+          if (m.response_id.has_value()) {
+            j["responseId"] = *m.response_id;
+          }
+          j["timestamp"] = m.timestamp;
+          return j;
         }
         return json{};
       },
@@ -388,6 +403,21 @@ Message from_json_message(const json &j) {
     if (j.contains("details") && j["details"].is_string()) {
       msg.details = j["details"].get<std::string>();
     }
+    return msg;
+  }
+  if (role == "contextCompaction") {
+    ContextCompactionMessage msg;
+    msg.api = j.value("api", "");
+    msg.provider = j.value("provider", "");
+    msg.model = j.value("model", "");
+    msg.encrypted_content = j.value("encryptedContent", "");
+    if (j.contains("itemId") && j["itemId"].is_string()) {
+      msg.item_id = j["itemId"].get<std::string>();
+    }
+    if (j.contains("responseId") && j["responseId"].is_string()) {
+      msg.response_id = j["responseId"].get<std::string>();
+    }
+    msg.timestamp = j.value("timestamp", std::int64_t{0});
     return msg;
   }
   throw std::runtime_error("Unknown message role: " + role);

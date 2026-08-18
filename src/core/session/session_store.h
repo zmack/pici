@@ -33,6 +33,16 @@ public:
                  std::string model);
   void set_sandbox_mode(const std::string &session_id, std::string mode);
 
+  // Appends a replayable full-transcript-replacement record. Throws if
+  // `session_id` has children on disk (a session with live forks must be
+  // forked-then-compacted rather than compacted directly — compacting it
+  // in place would silently invalidate every child's parentOffset).
+  void append_compaction(const std::string &session_id,
+                         const SessionCompactionRecord &record);
+
+  // True if any session file in this store has `parentId == session_id`.
+  bool has_children(const std::string &session_id) const;
+
   std::optional<SessionRecord> load(const std::string &session_id) const;
   std::optional<std::string> latest_session_id() const;
   std::vector<SessionHeader> list() const;

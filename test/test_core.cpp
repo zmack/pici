@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -20,10 +21,20 @@
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/models.h"
+#include "core/providers/transform_messages.h"
 #include "core/session/session_store.h"
 #include "core/stream.h"
+#include "core/stream_renderer.h"
 
 using namespace pi::core;
+
+namespace {
+Message make_user_message(std::string text) {
+    UserMessage message;
+    message.content.emplace_back(TextContent{.text = std::move(text)});
+    return Message{std::move(message)};
+}
+} // namespace
 
 // ─── Simple test harness ──────────────────────────────────────────────────
 
@@ -244,6 +255,175 @@ void test_tool_result_message_json() {
         CHECK_EQ(parsed_msg.tool_call_id, "call_abc123");
         CHECK_EQ(parsed_msg.tool_name, "bash");
         CHECK(!parsed_msg.is_error);
+    });
+}
+
+void test_context_compaction_message_json() {
+    tests::register_test("Message: ContextCompactionMessage JSON round-trip", []() {
+        ContextCompactionMessage msg;
+        msg.api = "openai-codex-responses";
+        msg.provider = "openai-codex";
+        msg.model = "gpt-5.3-codex";
+        msg.encrypted_content = "opaque-server-bytes-not-plaintext";
+        msg.item_id = "cmp_123";
+        msg.response_id = "resp_456";
+        msg.timestamp = 42;
+
+        std::string json_str = json::to_json(msg);
+        // The opaque payload must round-trip byte-for-byte and must never be
+        // silently dropped, truncated, or reinterpreted.
+        CHECK(json_str.find("opaque-server-bytes-not-plaintext") !=
+              std::string::npos);
+
+        auto parsed = json::from_json(json_str);
+        CHECK(parsed.has_value());
+        CHECK(std::holds_alternative<ContextCompactionMessage>(*parsed));
+
+        auto& parsed_msg = std::get<ContextCompactionMessage>(*parsed);
+        CHECK_STR(parsed_msg.api, "openai-codex-responses");
+        CHECK_STR(parsed_msg.provider, "openai-codex");
+        CHECK_STR(parsed_msg.model, "gpt-5.3-codex");
+        CHECK_STR(parsed_msg.encrypted_content,
+                  "opaque-server-bytes-not-plaintext");
+        CHECK(parsed_msg.item_id.has_value());
+        CHECK_STR(*parsed_msg.item_id, "cmp_123");
+        CHECK(parsed_msg.response_id.has_value());
+        CHECK_STR(*parsed_msg.response_id, "resp_456");
+        CHECK_EQ(parsed_msg.timestamp, std::int64_t(42));
+
+        // Also verify the compact jsonl form used for session persistence.
+        auto line = json::to_jsonl_line(msg);
+        auto parsed_line = json::from_json(line);
+        CHECK(parsed_line.has_value());
+        CHECK(std::holds_alternative<ContextCompactionMessage>(*parsed_line));
+    });
+}
+
+void test_transform_messages_drops_orphan_tool_result() {
+    tests::register_test("transform_messages: drops ToolResultMessage with no matching ToolCall", []() {
+        // Simulates the state after compaction filtering has dropped the
+        // AssistantMessage that owned this tool call: the orphaned result
+        // must not survive, since sending it produces a bare
+        // function_call_output with no matching function_call (rejected by
+        // the Responses API).
+        std::vector<Message> messages;
+        messages.push_back(make_user_message("hello"));
+        ToolResultMessage orphan;
+        orphan.tool_call_id = "call_missing";
+        orphan.tool_name = "bash";
+        orphan.content = {TextContent{.text = "leftover output"}};
+        messages.push_back(Message{orphan});
+        messages.push_back(make_user_message("world"));
+
+        Model model{.id = "gpt-5.3-codex",
+                    .api = "openai-codex-responses",
+                    .provider = "openai-codex"};
+        auto result = transform_messages(messages, model);
+
+        for (const auto& msg : result)
+            CHECK(!std::holds_alternative<ToolResultMessage>(msg));
+        CHECK_EQ(result.size(), std::size_t(2));
+    });
+}
+
+void test_transform_messages_keeps_paired_tool_result() {
+    tests::register_test("transform_messages: keeps ToolResultMessage paired with its ToolCall", []() {
+        std::vector<Message> messages;
+        messages.push_back(make_user_message("hello"));
+        AssistantMessage am;
+        am.api = "openai-codex-responses";
+        am.provider = "openai-codex";
+        am.model = "gpt-5.3-codex";
+        am.stop_reason = StopReason::tool_use;
+        ToolCall call;
+        call.id = "call_1";
+        call.name = "bash";
+        am.content.emplace_back(std::move(call));
+        messages.push_back(Message{am});
+        ToolResultMessage result_msg;
+        result_msg.tool_call_id = "call_1";
+        result_msg.tool_name = "bash";
+        result_msg.content = {TextContent{.text = "ok"}};
+        messages.push_back(Message{result_msg});
+
+        Model model{.id = "gpt-5.3-codex",
+                    .api = "openai-codex-responses",
+                    .provider = "openai-codex"};
+        auto result = transform_messages(messages, model);
+
+        bool found = false;
+        for (const auto& msg : result) {
+            if (const auto* trm = std::get_if<ToolResultMessage>(&msg)) {
+                CHECK_STR(trm->tool_call_id, "call_1");
+                found = true;
+            }
+        }
+        CHECK(found);
+    });
+}
+
+void test_transform_messages_compaction_same_model_gate() {
+    tests::register_test("transform_messages: drops ContextCompactionMessage for a different model", []() {
+        ContextCompactionMessage opaque;
+        opaque.api = "openai-codex-responses";
+        opaque.provider = "openai-codex";
+        opaque.model = "gpt-5.3-codex";
+        opaque.encrypted_content = "opaque-bytes";
+        std::vector<Message> messages{Message{opaque}};
+
+        Model same_model{.id = "gpt-5.3-codex",
+                         .api = "openai-codex-responses",
+                         .provider = "openai-codex"};
+        auto kept = transform_messages(messages, same_model);
+        CHECK_EQ(kept.size(), std::size_t(1));
+        CHECK(std::holds_alternative<ContextCompactionMessage>(kept[0]));
+
+        Model other_model{.id = "gpt-4",
+                          .api = "openai-completions",
+                          .provider = "openai"};
+        auto dropped = transform_messages(messages, other_model);
+        CHECK_EQ(dropped.size(), std::size_t(0));
+    });
+}
+
+namespace {
+// Minimal recording Renderer used to prove opaque compaction content is
+// never surfaced through the renderer dispatch path.
+class RecordingRenderer : public Renderer {
+public:
+    std::string text_deltas;
+    std::vector<std::string> requests_text;
+    int message_end_count{0};
+
+    void on_text_delta(std::string_view delta) override {
+        text_deltas += delta;
+    }
+    void on_request(const RendererRequest& request) override {
+        requests_text.push_back(request.text);
+    }
+    void on_message_end(const TokenUsage&) override { ++message_end_count; }
+};
+} // namespace
+
+void test_compaction_message_never_rendered() {
+    tests::register_test("Renderer: ContextCompactionMessage is never rendered", []() {
+        ContextCompactionMessage opaque;
+        opaque.api = "openai-codex-responses";
+        opaque.provider = "openai-codex";
+        opaque.model = "gpt-5.3-codex";
+        opaque.encrypted_content = "top-secret-opaque-bytes";
+
+        RecordingRenderer renderer;
+        MessageStartEvent start(Message{opaque});
+        dispatch_event(AgentEvent{start}, renderer);
+        MessageEndEvent end(Message{opaque});
+        dispatch_event(AgentEvent{end}, renderer);
+
+        CHECK(renderer.text_deltas.empty());
+        CHECK(renderer.requests_text.empty());
+        // MessageEndEvent only calls on_message_end_presentation for
+        // AssistantMessage; a compaction item must not trigger it either.
+        CHECK_EQ(renderer.message_end_count, 0);
     });
 }
 
@@ -715,6 +895,168 @@ void test_session_journal_replay() {
     });
 }
 
+void test_session_compaction_replay() {
+    tests::register_test("SessionStore: compaction record replaces transcript wholesale", []() {
+        const auto dir = std::filesystem::temp_directory_path() /
+                         "pici-session-compaction-test";
+        std::filesystem::remove_all(dir);
+
+        SessionStore store(dir);
+        SessionHeader header{.id = "session-compact-1"};
+        const auto id = store.create(header);
+
+        store.append_message(id, make_user_message("one"));
+        store.append_message(id, make_user_message("two"));
+        store.append_message(id, make_user_message("three"));
+
+        SessionCompactionRecord compaction;
+        compaction.messages.push_back(make_user_message("retained summary"));
+        ContextCompactionMessage opaque;
+        opaque.api = "openai-codex-responses";
+        opaque.provider = "openai-codex";
+        opaque.model = "gpt-5.3-codex";
+        opaque.encrypted_content = "opaque-bytes";
+        compaction.messages.push_back(Message{opaque});
+        compaction.provider = "openai-codex";
+        compaction.model = "gpt-5.3-codex";
+        compaction.summary = "server";
+        compaction.timestamp = 100;
+        store.append_compaction(id, compaction);
+
+        store.append_message(id, make_user_message("after compaction"));
+
+        auto record = store.load(id);
+        CHECK(record.has_value());
+        CHECK_EQ(record->messages.size(), std::size_t(3));
+        CHECK_STR(std::get<TextContent>(
+                      std::get<UserMessage>(record->messages[0]).content[0])
+                      .text,
+                  "retained summary");
+        CHECK(std::holds_alternative<ContextCompactionMessage>(
+            record->messages[1]));
+        CHECK_STR(std::get<ContextCompactionMessage>(record->messages[1])
+                      .encrypted_content,
+                  "opaque-bytes");
+        CHECK_STR(std::get<TextContent>(
+                      std::get<UserMessage>(record->messages[2]).content[0])
+                      .text,
+                  "after compaction");
+        CHECK_EQ(record->header.min_schema_version, 2);
+
+        std::filesystem::remove_all(dir);
+    });
+}
+
+void test_session_compaction_malformed_throws() {
+    tests::register_test("SessionStore: malformed compaction record fails loudly", []() {
+        const auto dir = std::filesystem::temp_directory_path() /
+                         "pici-session-compaction-malformed-test";
+        std::filesystem::remove_all(dir);
+
+        SessionStore store(dir);
+        SessionHeader header{.id = "session-compact-bad"};
+        const auto id = store.create(header);
+        store.append_message(id, make_user_message("one"));
+
+        // Hand-write a malformed compaction record directly (missing
+        // "messages"), bypassing append_compaction's validation, to
+        // simulate a corrupted file on disk.
+        {
+            std::ofstream f(dir / (id + ".jsonl"), std::ios::app);
+            f << "{\"type\":\"compaction\",\"minVersion\":2}\n";
+        }
+
+        bool threw = false;
+        try {
+            (void)store.load(id);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw);
+
+        std::filesystem::remove_all(dir);
+    });
+}
+
+void test_session_compaction_future_version_throws() {
+    tests::register_test("SessionStore: compaction record from a newer schema fails closed", []() {
+        const auto dir = std::filesystem::temp_directory_path() /
+                         "pici-session-compaction-future-test";
+        std::filesystem::remove_all(dir);
+
+        SessionStore store(dir);
+        SessionHeader header{.id = "session-compact-future"};
+        const auto id = store.create(header);
+
+        {
+            std::ofstream f(dir / (id + ".jsonl"), std::ios::app);
+            f << "{\"type\":\"compaction\",\"minVersion\":99,\"messages\":[]}\n";
+        }
+
+        bool threw = false;
+        std::string what;
+        try {
+            (void)store.load(id);
+        } catch (const std::exception& e) {
+            threw = true;
+            what = e.what();
+        }
+        CHECK(threw);
+        CHECK(what.find("99") != std::string::npos);
+
+        std::filesystem::remove_all(dir);
+    });
+}
+
+void test_session_compaction_refuses_with_children() {
+    tests::register_test("SessionStore: refuses to compact a session with forked children", []() {
+        const auto dir = std::filesystem::temp_directory_path() /
+                         "pici-session-compaction-fork-test";
+        std::filesystem::remove_all(dir);
+
+        SessionStore store(dir);
+        SessionHeader parent_header{.id = "session-parent"};
+        const auto parent_id = store.create(parent_header);
+        store.append_message(parent_id, make_user_message("parent msg"));
+
+        CHECK(!store.has_children(parent_id));
+
+        SessionHeader child_header{.id = "session-child",
+                                   .parent_id = parent_id,
+                                   .parent_offset = std::size_t(1)};
+        const auto child_id = store.create(child_header);
+        (void)child_id;
+
+        CHECK(store.has_children(parent_id));
+
+        SessionCompactionRecord compaction;
+        compaction.messages.push_back(make_user_message("summary"));
+        bool threw = false;
+        try {
+            store.append_compaction(parent_id, compaction);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw);
+
+        // The child itself has no children of its own, so compacting it
+        // (the supported "fork, then compact the fork" flow) succeeds and
+        // does not touch the parent's file.
+        auto parent_before = store.load(parent_id);
+        store.append_compaction(child_id, compaction);
+        auto parent_after = store.load(parent_id);
+        CHECK(parent_before.has_value());
+        CHECK(parent_after.has_value());
+        CHECK_EQ(parent_before->messages.size(), parent_after->messages.size());
+
+        auto child_record = store.load(child_id);
+        CHECK(child_record.has_value());
+        CHECK_EQ(child_record->messages.size(), std::size_t(1));
+
+        std::filesystem::remove_all(dir);
+    });
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 int main() {
@@ -729,12 +1071,21 @@ int main() {
     test_user_message_json();
     test_assistant_message_json();
     test_tool_result_message_json();
+    test_context_compaction_message_json();
+    test_transform_messages_drops_orphan_tool_result();
+    test_transform_messages_keeps_paired_tool_result();
+    test_transform_messages_compaction_same_model_gate();
+    test_compaction_message_never_rendered();
     test_token_usage_json();
     test_find_model();
     test_model_registry();
     test_model_json();
     test_event_json();
     test_session_journal_replay();
+    test_session_compaction_replay();
+    test_session_compaction_malformed_throws();
+    test_session_compaction_future_version_throws();
+    test_session_compaction_refuses_with_children();
 
     // Stream tests
     test_event_stream_push_consume();

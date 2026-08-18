@@ -251,6 +251,8 @@ Args parse_args(int argc, char **argv) {
         result.messages.emplace_back(v);
     } else if (arg == "--no-context-files" || arg == "-nc") {
       result.no_context_files = true;
+    } else if (arg == "--remote-compaction") {
+      result.remote_compaction_enabled = true;
     } else if (arg == "--config") {
       result.config_path = std::string(need("--config"));
     } else if (arg == "--list-tools") {

@@ -1,6 +1,7 @@
 #include "core/providers/openai_codex_responses.h"
 
 #include "core/event_types.h"
+#include "core/llm_client.h"
 #include "core/message_types.h"
 #include "core/providers/transform_messages.h"
 #include "http/http_client.h"
@@ -11,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -21,6 +23,7 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace pi::core {
 
@@ -187,6 +190,18 @@ Json convert_input(const Model &model, const AgentContext &context) {
       }
       continue;
     }
+    if (const auto *compaction =
+            std::get_if<ContextCompactionMessage>(&message)) {
+      // transform_messages already dropped this item unless it was produced
+      // by this exact api/provider/model, so it is always safe to forward
+      // here.
+      Json item = {{"type", "compaction"},
+                   {"encrypted_content", compaction->encrypted_content}};
+      if (compaction->item_id && !compaction->item_id->empty())
+        item["id"] = *compaction->item_id;
+      input.push_back(std::move(item));
+      continue;
+    }
     if (const auto *tool = std::get_if<ToolResultMessage>(&message)) {
       std::string output;
       for (const auto &block : tool->content) {
@@ -213,6 +228,43 @@ Json convert_input(const Model &model, const AgentContext &context) {
   return input;
 }
 
+// Codex scales the compact request's timeout relative to the normal idle
+// timeout (COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER = 4 in the reference
+// client.rs) rather than inventing a new constant. Pici's HttpClient
+// timeout is already a total-duration timeout (CURLOPT_TIMEOUT_MS), not an
+// idle one, but the same multiplier is applied for the same reason Codex
+// gives: a unary request has no incremental progress signal to reset an
+// idle clock against, so it needs more total headroom than a streaming
+// request configured for the same nominal timeout.
+constexpr std::uint32_t kCompactTimeoutIdleMultiplier = 4;
+// Mirrors the hardcoded fallback in HttpClient's post_* helpers
+// (src/http/http_client.cpp) so an unset timeout scales consistently
+// instead of silently falling back to the unscaled default.
+constexpr std::uint32_t kDefaultRequestTimeoutMs = 600000;
+
+std::uint32_t
+compact_request_timeout_ms(std::optional<std::uint32_t> configured) {
+  const auto base =
+      static_cast<std::uint64_t>(configured.value_or(kDefaultRequestTimeoutMs));
+  const auto scaled =
+      base * static_cast<std::uint64_t>(kCompactTimeoutIdleMultiplier);
+  constexpr auto max_u32 =
+      static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max());
+  return static_cast<std::uint32_t>(std::min(scaled, max_u32));
+}
+
+// Shared by build_request_json and build_compact_request_json so the two
+// request builders cannot drift on how a model's thinking level maps to its
+// provider-specific reasoning effort string.
+std::string resolve_reasoning_effort(const Model &model, ThinkingLevel level) {
+  auto effort = std::string(thinking_level_to_string(level));
+  if (auto it = model.thinking_level_map.find(effort);
+      it != model.thinking_level_map.end() && it->second.has_value()) {
+    effort = *it->second;
+  }
+  return effort;
+}
+
 } // namespace
 
 std::string OpenAICodexResponsesClient::endpoint_url(std::string base_url) {
@@ -225,6 +277,19 @@ std::string OpenAICodexResponsesClient::endpoint_url(std::string base_url) {
   if (base_url.empty())
     base_url = "https://chatgpt.com/backend-api";
   return base_url + "/codex/responses";
+}
+
+std::string
+OpenAICodexResponsesClient::compact_endpoint_url(std::string base_url) {
+  while (!base_url.empty() && base_url.back() == '/')
+    base_url.pop_back();
+  // Guard against double-appending if a caller already passed the compact
+  // URL itself (checked before endpoint_url normalization, which does not
+  // recognize a "/compact" suffix and would otherwise append a second
+  // "/codex/responses").
+  if (base_url.ends_with("/responses/compact"))
+    return base_url;
+  return endpoint_url(std::move(base_url)) + "/compact";
 }
 
 nlohmann::json
@@ -250,12 +315,7 @@ OpenAICodexResponsesClient::build_request_json(const Model &model,
   if (options.temperature)
     request["temperature"] = *options.temperature;
   if (model.reasoning && options.reasoning != ThinkingLevel::off) {
-    auto effort = thinking_level_to_string(options.reasoning);
-    if (auto it = model.thinking_level_map.find(std::string(effort));
-        it != model.thinking_level_map.end()) {
-      if (it->second.has_value())
-        effort = *it->second;
-    }
+    auto effort = resolve_reasoning_effort(model, options.reasoning);
     request["reasoning"] = {{"effort", effort}, {"summary", "auto"}};
   }
   if (!context.tools.empty()) {
@@ -274,6 +334,52 @@ OpenAICodexResponsesClient::build_request_json(const Model &model,
       if (!next->is_object())
         throw std::runtime_error(
             "openai-codex payload hook must return an object");
+      request = *next;
+    }
+  }
+  return request;
+}
+
+// Mirrors the reference client's ApiCompactionInput: model, input,
+// instructions, tools, parallel_tool_calls, reasoning, prompt_cache_key,
+// text. Unlike build_request_json, this omits "stream"/"store"/"include"/
+// "tool_choice" — the compact endpoint is unary JSON, not SSE, and does not
+// document those fields.
+nlohmann::json OpenAICodexResponsesClient::build_compact_request_json(
+    const Model &model, const AgentContext &context,
+    const CompactionOptions &options) {
+  Json request = {
+      {"model", model.id},
+      {"instructions", context.system_prompt.empty()
+                           ? "You are a helpful assistant."
+                           : context.system_prompt},
+      {"input", convert_input(model, context)},
+      {"text", {{"verbosity", "low"}}},
+      {"parallel_tool_calls", true},
+  };
+  if (options.session_id) {
+    request["prompt_cache_key"] = *options.session_id;
+  }
+  if (model.reasoning && options.reasoning != ThinkingLevel::off) {
+    auto effort = resolve_reasoning_effort(model, options.reasoning);
+    request["reasoning"] = {{"effort", effort}, {"summary", "auto"}};
+  }
+  if (!context.tools.empty()) {
+    request["tools"] = Json::array();
+    for (const auto &tool : context.tools) {
+      request["tools"].push_back({{"type", "function"},
+                                  {"name", tool->name()},
+                                  {"description", tool->description()},
+                                  {"parameters", tool_schema(*tool)},
+                                  {"strict", false}});
+    }
+  }
+  if (options.on_payload) {
+    auto next = options.on_payload(request, model);
+    if (next) {
+      if (!next->is_object())
+        throw std::runtime_error(
+            "openai-codex compact payload hook must return an object");
       request = *next;
     }
   }
@@ -719,6 +825,173 @@ std::shared_ptr<AssistantMessage> OpenAICodexResponsesClient::stream(
   } else if (!ok && !result->error_message) {
     result->stop_reason = StopReason::error;
     result->error_message = "OpenAI Codex request failed";
+  }
+  return result;
+}
+
+CompactionResult parse_compact_response(const Model &model,
+                                        const nlohmann::json &body) {
+  if (!body.is_object() || !body.contains("output") ||
+      !body["output"].is_array())
+    throw std::runtime_error(
+        "OpenAI Codex compact response missing \"output\" array");
+
+  CompactionResult result;
+  for (const auto &item : body["output"]) {
+    if (!item.is_object())
+      continue;
+    const auto type = item.value("type", std::string{});
+    if (type == "compaction") {
+      // The compaction item is the load-bearing part of the response; a
+      // malformed one fails the whole compaction rather than silently
+      // installing a transcript missing its own summary.
+      if (!item.contains("encrypted_content") ||
+          !item["encrypted_content"].is_string())
+        throw std::runtime_error("OpenAI Codex compact response \"compaction\" "
+                                 "item missing encrypted_content");
+      ContextCompactionMessage msg;
+      msg.api = model.api;
+      msg.provider = model.provider;
+      msg.model = model.id;
+      msg.encrypted_content = item["encrypted_content"].get<std::string>();
+      if (item.contains("id") && item["id"].is_string())
+        msg.item_id = item["id"].get<std::string>();
+      msg.timestamp = now_ms();
+      result.messages.emplace_back(std::move(msg));
+      continue;
+    }
+    if (type != "message")
+      // function_call/function_call_output/reasoning/compaction_trigger and
+      // any other item type: the documented V1 contract drops these
+      // unconditionally regardless of retention policy (see
+      // should_keep_compacted_history_item in the reference implementation),
+      // and the production endpoint does not emit them in compact output.
+      // Ignoring them here rather than round-tripping through a type pici's
+      // Message model cannot represent flatly keeps this parser exact for
+      // what V1 actually returns.
+      continue;
+    const auto role = item.value("role", std::string{});
+    if (role != "user" && role != "assistant")
+      // "developer" wrappers and anything else: always dropped by policy,
+      // and pici has no Message variant to represent a bare developer role.
+      continue;
+    auto content_it = item.find("content");
+    if (content_it == item.end() || !content_it->is_array())
+      continue; // Malformed individual item; skip rather than abort.
+    std::vector<ContentBlock> blocks;
+    for (const auto &part : *content_it) {
+      if (!part.is_object())
+        continue;
+      const auto part_type = part.value("type", std::string{});
+      if (part_type == "input_text" || part_type == "output_text" ||
+          part_type == "text") {
+        auto text = part.value("text", std::string{});
+        if (!text.empty())
+          blocks.emplace_back(TextContent{.text = std::move(text)});
+      }
+    }
+    if (blocks.empty())
+      continue;
+    if (role == "user") {
+      UserMessage msg;
+      msg.content = std::move(blocks);
+      msg.timestamp = now_ms();
+      result.messages.emplace_back(std::move(msg));
+    } else {
+      AssistantMessage msg;
+      msg.api = model.api;
+      msg.provider = model.provider;
+      msg.model = model.id;
+      msg.stop_reason = StopReason::stop;
+      msg.content = std::move(blocks);
+      msg.timestamp = now_ms();
+      result.messages.emplace_back(std::move(msg));
+    }
+  }
+  return result;
+}
+
+CompactionResult OpenAICodexResponsesClient::compact(
+    const Model &model, const AgentContext &context,
+    const CompactionOptions &options, std::stop_token stop_tok) {
+  CompactionResult result;
+
+  Json request;
+  try {
+    request = build_compact_request_json(model, context, options);
+  } catch (const std::exception &error) {
+    result.error_message = error.what();
+    return result;
+  }
+
+  std::map<std::string, std::string> headers = model.headers;
+  merge_headers_case_insensitive(headers, options.headers);
+  std::map<std::string, std::string> required_headers{
+      {"Accept", "application/json"},
+      {"Content-Type", "application/json"},
+      {"OpenAI-Beta", "responses=experimental"},
+      {"originator", "pi"},
+      {"User-Agent", user_agent()}};
+  if (options.session_id) {
+    required_headers["session-id"] = *options.session_id;
+    required_headers["x-client-request-id"] = *options.session_id;
+  }
+  merge_headers_case_insensitive(headers, required_headers);
+  auto auth = options.auth;
+  if (!auth && options.api_key)
+    auth = RequestAuth{.kind = AuthKind::api_key,
+                       .bearer_token = options.api_key,
+                       .source = "legacy-api-key"};
+
+  const auto timeout_ms = compact_request_timeout_ms(options.timeout_ms);
+  auto response = HttpClient::post_authenticated(
+      compact_endpoint_url(model.base_url), request.dump(), headers, auth,
+      timeout_ms, stop_tok);
+
+  if (stop_tok.stop_requested()) {
+    result.cancelled = true;
+    result.error_message = "Request was aborted";
+    return result;
+  }
+  if (!response) {
+    result.error_message = "OpenAI Codex compact request failed (no response)";
+    return result;
+  }
+  if (options.on_response)
+    options.on_response(response->status_code, response->headers, model);
+  if (response->status_code < 200 || response->status_code >= 300) {
+    std::string message = "OpenAI Codex compact request failed with status " +
+                          std::to_string(response->status_code);
+    auto err = Json::parse(response->body, nullptr, false);
+    if (!err.is_discarded() && err.contains("error")) {
+      auto text = safe_text(err.value("error", Json::object()), "");
+      if (!text.empty())
+        message += ": " + text;
+    }
+    result.error_message = message;
+    return result;
+  }
+
+  auto body = Json::parse(response->body, nullptr, false);
+  if (body.is_discarded()) {
+    result.error_message = "OpenAI Codex compact response was not valid JSON";
+    return result;
+  }
+  try {
+    result = parse_compact_response(model, body);
+  } catch (const std::exception &error) {
+    result = CompactionResult{};
+    result.error_message = error.what();
+    return result;
+  }
+  if (body.contains("id") && body["id"].is_string())
+    result.response_id = body["id"].get<std::string>();
+  if (body.contains("usage") && body["usage"].is_object()) {
+    const auto &usage = body["usage"];
+    result.usage.input = usage.value("input_tokens", std::uint64_t{0});
+    result.usage.output = usage.value("output_tokens", std::uint64_t{0});
+    result.usage.total_tokens =
+        usage.value("total_tokens", result.usage.input + result.usage.output);
   }
   return result;
 }

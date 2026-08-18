@@ -529,6 +529,9 @@ static void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
 
   cfg.mailbox_path = str("mailbox", "path");
   cfg.mailbox_enabled = boolean("mailbox", "enabled");
+
+  // [compaction]
+  cfg.remote_compaction_enabled = boolean("compaction", "remote_enabled");
 }
 
 bool Config::has_errors() const {
@@ -688,6 +691,8 @@ Args merge_args(const Args &config, const Args &cli) {
   out.faux_control_socket = cli.faux_control_socket;
   out.verbose = config.verbose || cli.verbose;
   out.no_context_files = config.no_context_files || cli.no_context_files;
+  out.remote_compaction_enabled =
+      config.remote_compaction_enabled || cli.remote_compaction_enabled;
 
   // Session: CLI --session-dir wins over config
   out.session_dir = merge_str(config.session_dir, cli.session_dir);

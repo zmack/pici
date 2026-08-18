@@ -177,7 +177,9 @@ Json convert_messages(const Model &model, const AgentContext &context) {
     }
 
     // Unsupported history blocks are omitted rather than serialized into an
-    // invalid partial Messages conversation.
+    // invalid partial Messages conversation. This also covers
+    // ContextCompactionMessage, which is Codex-specific and already dropped
+    // by transform_messages for any model that did not produce it.
   }
 
   flush_tool_results();

@@ -463,6 +463,12 @@ void push_messages_to_lua(lua_State *L, const std::vector<Message> &messages) {
             lua_setfield(L, -2, "content");
             lua_pushboolean(L, msg.is_error ? 1 : 0);
             lua_setfield(L, -2, "is_error");
+          } else if constexpr (std::is_same_v<T, ContextCompactionMessage>) {
+            lua_pushstring(L, "contextCompaction");
+            lua_setfield(L, -2, "role");
+            // Opaque server-encrypted content; never exposed to scripts.
+            lua_pushstring(L, "(context compaction)");
+            lua_setfield(L, -2, "content");
           }
         },
         messages[i]);

@@ -52,6 +52,51 @@ struct StreamOptions {
   bool verbose{false};
 };
 
+// Request concerns for a unary provider-owned compaction call. Mirrors
+// StreamOptions' request-shaping fields; a compact request is not a stream,
+// so transport/cache_retention/max_tokens/temperature do not apply.
+struct CompactionOptions {
+  std::optional<RequestAuth> auth;
+  // Kept for source compatibility with providers that have not migrated to
+  // RequestAuth yet. New clients should consume auth.
+  std::optional<std::string> api_key;
+  ThinkingLevel reasoning{ThinkingLevel::off};
+  std::optional<std::string> session_id;
+  std::map<std::string, std::string> headers;
+  std::optional<std::uint32_t> timeout_ms;
+  nlohmann::json metadata;
+  std::function<std::optional<nlohmann::json>(const nlohmann::json &payload,
+                                              const Model &)>
+      on_payload;
+  std::function<void(int status, const std::map<std::string, std::string> &,
+                     const Model &)>
+      on_response;
+  std::shared_ptr<StreamDiagnostics> diagnostics;
+  bool verbose{false};
+};
+
+// Provider-neutral result of a unary compaction request. The replacement
+// transcript is already typed `Message`s (including any opaque
+// ContextCompactionMessage the provider returned) — callers should not need
+// to touch provider-specific JSON. `messages` is the raw, parsed output in
+// provider order; retention filtering (which items to keep) is a separate
+// concern (see CompactionManager) so a client implementation is not
+// responsible for applying that policy.
+struct CompactionResult {
+  // False only for the default LLMClient implementation (provider does not
+  // expose a remote compaction endpoint at all). A provider that supports
+  // compaction but fails a particular request should leave this true and
+  // set error_message instead, mirroring how stream() reports failure via
+  // AssistantMessage::error_message rather than a distinct "unsupported"
+  // signal.
+  bool supported{true};
+  std::vector<Message> messages;
+  std::optional<std::string> response_id;
+  TokenUsage usage;
+  std::optional<std::string> error_message;
+  bool cancelled{false};
+};
+
 // Each provider (OpenAI, Anthropic, etc.) implements this interface.
 // The actual implementation is in src/http/http_client.h for HTTP providers.
 
@@ -65,6 +110,29 @@ public:
   stream(const Model &model, const AgentContext &context,
          const StreamOptions &options, AssistantEventCallback on_event,
          std::stop_token stop_tok = std::stop_token{}) = 0;
+
+  // Send the current transcript to a provider-owned compaction endpoint and
+  // return the replacement transcript it proposes. The default
+  // implementation reports the operation as unsupported rather than
+  // throwing, so callers can route to a local fallback uniformly.
+  // stop_tok is by value to match stream()'s override signature convention
+  // (every LLMClient override takes std::stop_token by value); this default
+  // body just discards it.
+  virtual CompactionResult compact(
+      const Model &model, const AgentContext &context,
+      const CompactionOptions &options,
+      std::stop_token stop_tok = // NOLINT(performance-unnecessary-value-param)
+      std::stop_token{}) {
+    (void)model;
+    (void)context;
+    (void)options;
+    (void)stop_tok;
+    CompactionResult result;
+    result.supported = false;
+    result.error_message =
+        "remote compaction is not supported by this provider";
+    return result;
+  }
 
   // Get the provider name (e.g., "openai", "anthropic")
   virtual std::string_view provider_name() const = 0;

@@ -48,6 +48,42 @@ parse_header_line(const nlohmann::json &j, // NOLINT(misc-include-cleaner)
   return hdr;
 }
 
+SessionCompactionRecord
+parse_compaction_record(const nlohmann::json &j,
+                        const std::filesystem::path &path) {
+  if (!j.contains("messages") || !j["messages"].is_array())
+    throw std::runtime_error(
+        "malformed compaction record (missing \"messages\" array) in " +
+        path.string());
+  if (!j.contains("minVersion") || !j["minVersion"].is_number_integer())
+    throw std::runtime_error(
+        "malformed compaction record (missing \"minVersion\") in " +
+        path.string());
+  const auto required_version = j["minVersion"].get<int>();
+  if (required_version > kSessionSchemaVersion)
+    throw std::runtime_error(
+        "session \"" + path.string() + "\" requires schema version " +
+        std::to_string(required_version) + "; this pici build supports up to " +
+        std::to_string(kSessionSchemaVersion) +
+        " — upgrade pici to open this session");
+
+  SessionCompactionRecord record;
+  record.provider = j.value("provider", std::string{});
+  record.model = j.value("model", std::string{});
+  record.summary = j.value("summary", std::string{});
+  record.timestamp = j.value("timestamp", std::int64_t{0});
+  record.messages.reserve(j["messages"].size());
+  for (const auto &raw : j["messages"]) {
+    auto msg = json::from_json(raw.dump());
+    if (!msg)
+      throw std::runtime_error(
+          "malformed compaction record (unparseable message) in " +
+          path.string());
+    record.messages.push_back(std::move(*msg));
+  }
+  return record;
+}
+
 // NOLINTNEXTLINE(misc-no-recursion)
 SessionRecord load_recursive(const std::filesystem::path &base_dir,
                              const std::string &session_id,
@@ -62,7 +98,8 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
 
   SessionHeader header;
   std::vector<Message> messages;
-  std::vector<std::variant<Message, std::size_t>> records;
+  std::vector<std::variant<Message, std::size_t, SessionCompactionRecord>>
+      records;
   bool first = true;
   std::string line;
 
@@ -86,7 +123,16 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
       continue;
     }
 
-    if (j.contains("role")) {
+    if (j.value("type", std::string{}) == "compaction") {
+      // Malformed compaction records must throw, not be silently skipped:
+      // falling through here would silently restore the pre-compaction
+      // transcript, which is exactly the "corrupted session" outcome this
+      // format must not produce without telling the caller.
+      auto record = parse_compaction_record(j, path);
+      header.min_schema_version =
+          std::max(header.min_schema_version, j["minVersion"].get<int>());
+      records.emplace_back(std::move(record));
+    } else if (j.contains("role")) {
       if (auto msg = json::from_json(line))
         records.emplace_back(std::move(*msg));
     } else if (j.value("type", std::string{}) == "truncate" &&
@@ -126,8 +172,13 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
   for (auto &record : records) {
     if (std::holds_alternative<Message>(record)) {
       messages.push_back(std::move(std::get<Message>(record)));
-    } else {
+    } else if (std::holds_alternative<std::size_t>(record)) {
       messages.resize(std::min(std::get<std::size_t>(record), messages.size()));
+    } else {
+      // Compaction record: wholesale replace, discarding everything before
+      // it (including any parent-inherited prefix). Subsequent records
+      // append after the replacement.
+      messages = std::move(std::get<SessionCompactionRecord>(record).messages);
     }
   }
 
@@ -251,6 +302,61 @@ void SessionStore::set_model(const std::string &session_id,
 
   std::scoped_lock lock(mutex_);
   write_line_locked(session_id, j);
+}
+
+void SessionStore::append_compaction(const std::string &session_id,
+                                     const SessionCompactionRecord &record) {
+  // V1 concurrency policy: refuse compaction on any session that has
+  // children on disk rather than silently invalidating every child's
+  // parentOffset (which is a raw message-count index into this session's
+  // replayed vector — a wholesale replacement changes what that index
+  // means). Fork the session first, then compact the fork.
+  if (has_children(session_id))
+    throw std::runtime_error(
+        "cannot compact session \"" + session_id +
+        "\": it has forked children on disk; fork first, then compact the "
+        "fork");
+
+  nlohmann::json j = nlohmann::json::object();
+  j["type"] = "compaction";
+  j["minVersion"] = kSessionSchemaVersion;
+  j["provider"] = record.provider;
+  j["model"] = record.model;
+  j["summary"] = record.summary;
+  j["timestamp"] = record.timestamp;
+  nlohmann::json messages = nlohmann::json::array();
+  for (const auto &msg : record.messages)
+    messages.push_back(nlohmann::json::parse(json::to_jsonl_line(msg)));
+  j["messages"] = std::move(messages);
+
+  std::scoped_lock lock(mutex_);
+  write_line_locked(session_id, j);
+}
+
+bool SessionStore::has_children(const std::string &session_id) const {
+  std::scoped_lock lock(mutex_);
+  std::error_code ec;
+  for (const auto &entry : std::filesystem::directory_iterator(base_dir_, ec)) {
+    if (ec)
+      break;
+    if (entry.path().extension() != ".jsonl")
+      continue;
+    if (entry.path().stem().string() == session_id)
+      continue;
+    std::ifstream f(entry.path());
+    if (!f)
+      continue;
+    std::string line;
+    if (!std::getline(f, line) || line.empty())
+      continue;
+    auto j = nlohmann::json::parse(line, nullptr, false);
+    if (j.is_discarded() || j.value("type", std::string{}) != "session")
+      continue;
+    if (j.contains("parentId") && j["parentId"].is_string() &&
+        j["parentId"].get<std::string>() == session_id)
+      return true;
+  }
+  return false;
 }
 
 void SessionStore::set_sandbox_mode(const std::string &session_id,

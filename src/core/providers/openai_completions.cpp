@@ -190,6 +190,10 @@ nlohmann::json convert_messages(const Model &model, const AgentContext &context,
       }
       params.push_back(std::move(tool_msg));
     }
+    // ContextCompactionMessage is Codex-specific and is already dropped by
+    // transform_messages for any model that did not produce it, so no
+    // explicit branch is needed here: it is intentionally never converted
+    // for this API.
   }
 
   return params;
