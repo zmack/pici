@@ -91,6 +91,28 @@ public:
       ::write(fd_, "\n", 1);
   }
 
+  // Concise plain text only: never the replacement transcript's opaque
+  // server payload, which these hooks never carry in the first place.
+  void on_compaction_start() override {
+    static constexpr std::string_view msg = "[compacting context...]\n";
+    ::write(fd_, msg.data(), msg.size());
+  }
+
+  void on_compaction_complete(std::size_t retained_message_count,
+                              const TokenUsage &, const TokenUsage &) override {
+    const std::string msg =
+        "[context compacted: " + std::to_string(retained_message_count) +
+        " message(s) retained]\n";
+    ::write(fd_, msg.data(), msg.size());
+  }
+
+  void on_compaction_error(std::string_view message, bool cancelled) override {
+    const std::string msg =
+        cancelled ? "[compaction cancelled]\n"
+                  : "[compaction failed: " + std::string(message) + "]\n";
+    ::write(fd_, msg.data(), msg.size());
+  }
+
 private:
   int fd_;
 };
@@ -226,6 +248,28 @@ public:
     ::write(fd_, text.data(), text.size());
     if (text.empty() || text.back() != '\n')
       ::write(fd_, "\n", 1);
+  }
+
+  // Plain text status, matching on_command_output — never the replacement
+  // transcript's opaque server payload, which these hooks never carry.
+  void on_compaction_start() override {
+    static constexpr std::string_view msg = "[compacting context...]\n";
+    ::write(fd_, msg.data(), msg.size());
+  }
+
+  void on_compaction_complete(std::size_t retained_message_count,
+                              const TokenUsage &, const TokenUsage &) override {
+    const std::string msg =
+        "[context compacted: " + std::to_string(retained_message_count) +
+        " message(s) retained]\n";
+    ::write(fd_, msg.data(), msg.size());
+  }
+
+  void on_compaction_error(std::string_view message, bool cancelled) override {
+    const std::string msg =
+        cancelled ? "[compaction cancelled]\n"
+                  : "[compaction failed: " + std::string(message) + "]\n";
+    ::write(fd_, msg.data(), msg.size());
   }
 
   void on_turn_start() override { clear_state(); }
@@ -423,6 +467,30 @@ public:
     status_text_.append(msg.substr(0, 60));
     paint_status();
     write_seq("\033[?25h");
+  }
+
+  // Status-line only: never render the replacement transcript's opaque
+  // server payload, which these hooks never carry in the first place.
+  void on_compaction_start() override {
+    status_text_ = "compacting context\xe2\x80\xa6";
+    paint_status();
+  }
+
+  void on_compaction_complete(std::size_t retained_message_count,
+                              const TokenUsage &, const TokenUsage &) override {
+    status_text_ = "context compacted (" +
+                   std::to_string(retained_message_count) + " retained)";
+    paint_status();
+  }
+
+  void on_compaction_error(std::string_view message, bool cancelled) override {
+    if (cancelled) {
+      status_text_ = "compaction cancelled";
+    } else {
+      status_text_ = "compaction failed: ";
+      status_text_.append(message.substr(0, 60));
+    }
+    paint_status();
   }
 
 private:

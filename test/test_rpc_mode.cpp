@@ -44,17 +44,32 @@ int main() {
       core::AssistantMessageEvent{core::AssistantMessageDoneEvent{
           core::StopReason::stop, final_message}},
   };
-  core::LLMClientRegistry::instance().register_client("rpc-faux", [script] {
-    return std::make_shared<core::FauxClient>(std::vector{script});
-  });
+  core::UserMessage compact_summary;
+  compact_summary.content.emplace_back(
+      core::TextContent{.text = "compacted summary"});
+  core::CompactionResult compact_success;
+  compact_success.messages.emplace_back(compact_summary);
+
+  core::LLMClientRegistry::instance().register_client(
+      "rpc-faux", [script, compact_success] {
+        return std::make_shared<core::FauxClient>(
+            std::vector{script},
+            std::vector<core::CompactionResult>{compact_success});
+      });
 
   core::Model model;
   model.id = "faux";
   model.name = "faux";
   model.api = "rpc-faux";
   model.provider = "faux";
-  auto store = std::make_shared<core::SessionStore>(
-      std::filesystem::temp_directory_path() / "pici-rpc-mode-test");
+  const auto session_dir =
+      std::filesystem::temp_directory_path() / "pici-rpc-mode-test";
+  // Stale files from a prior run would make SessionStore::create() silently
+  // mint a different id than "rpc-test" (it avoids colliding with an
+  // existing file), which would make the reload check below load the wrong
+  // (stale) session.
+  std::filesystem::remove_all(session_dir);
+  auto store = std::make_shared<core::SessionStore>(session_dir);
   core::ProviderConfig provider;
   provider.id = "faux";
   provider.api = "rpc-faux";
@@ -76,7 +91,7 @@ int main() {
                               .model_registry = registry,
                               .session_store = store});
   core::SessionHeader header{.id = "rpc-test"};
-  session.create_session(header);
+  const auto session_id = session.create_session(header);
 
   std::mutex mutex;
   std::vector<nlohmann::json> output;
@@ -94,6 +109,8 @@ int main() {
   mode.handle({{"id", "messages"}, {"type", "get_messages"}});
   mode.handle(
       {{"id", "name"}, {"type", "set_session_name"}, {"name", "RPC test"}});
+  mode.handle({{"id", "compact"}, {"type", "compact"}});
+  mode.wait_for_idle();
 
   bool got_state = false;
   bool got_models = false;
@@ -104,6 +121,10 @@ int main() {
   bool got_complete = false;
   bool got_messages = false;
   bool got_name = false;
+  bool got_compact_ack = false;
+  bool got_compact_start_event = false;
+  bool got_compact_complete_event = false;
+  bool got_compact_complete = false;
   std::scoped_lock lock(mutex);
   for (const auto &line : output) {
     got_state = got_state || (line.value("command", "") == "get_state" &&
@@ -132,6 +153,24 @@ int main() {
          line.value("success", false) && line["data"]["messages"].size() == 2);
     got_name = got_name || (line.value("command", "") == "set_session_name" &&
                             line.value("success", false));
+    got_compact_ack = got_compact_ack ||
+                      (line.value("command", "") == "compact" &&
+                       line.value("success", false));
+    got_compact_start_event =
+        got_compact_start_event ||
+        (line.value("type", "") == "event" &&
+         line.value("event", "") == "compaction" &&
+         line["data"].value("kind", "") == "start");
+    got_compact_complete_event =
+        got_compact_complete_event ||
+        (line.value("type", "") == "event" &&
+         line.value("event", "") == "compaction" &&
+         line["data"].value("kind", "") == "complete" &&
+         !line["data"].contains("replacement_messages"));
+    got_compact_complete =
+        got_compact_complete ||
+        (line.value("type", "") == "compact.completed" &&
+         line.value("retained_message_count", 0ULL) == 1ULL);
   }
   CHECK(got_state);
   CHECK(got_models);
@@ -142,6 +181,19 @@ int main() {
   CHECK(got_complete);
   CHECK(got_messages);
   CHECK(got_name);
+  CHECK(got_compact_ack);
+  CHECK(got_compact_start_event);
+  CHECK(got_compact_complete_event);
+  CHECK(got_compact_complete);
+
+  // Verify through the actual RPC entry point (not just AgentSession
+  // directly) that the compaction record is durable and reloads correctly:
+  // the pre-compaction prompt+reply pair must not resurrect.
+  const auto reloaded = store->load(session_id);
+  CHECK(reloaded.has_value());
+  if (reloaded)
+    CHECK(reloaded->messages.size() == 1);
+
   std::cout << "rpc mode: " << tests::passed << " passed, " << tests::failed
             << " failed\n";
   return tests::failed == 0 ? 0 : 1;

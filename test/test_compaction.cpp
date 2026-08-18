@@ -1,19 +1,23 @@
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <source_location>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 #include "core/agent.h"
+#include "core/agent_state.h"
 #include "core/compaction.h"
 #include "core/event_types.h"
 #include "core/llm_client.h"
@@ -56,6 +60,69 @@ Model make_faux_model() {
     m.provider = "faux";
     return m;
 }
+
+// An LLMClient whose compact() blocks until release() is called, giving a
+// test deterministic control over a window during which the compaction's
+// network call is "in flight" — needed to test a Ctrl-C landing mid-flight
+// without a timing-dependent race. stream() delegates to an internal
+// FauxClient so the same instance also serves the prompt that follows.
+// stop_tok is deliberately ignored (mirrors FauxClient, which also does not
+// consult it for compact()): the point of this client is controlling
+// *when* compact() returns, not reacting to cancellation itself.
+class BlockingCompactionClient : public LLMClient {
+public:
+    BlockingCompactionClient(FauxClient::Script stream_script,
+                             CompactionResult result)
+        : stream_client_(std::vector<FauxClient::Script>{std::move(stream_script)}),
+          result_(std::move(result)) {}
+
+    std::shared_ptr<AssistantMessage>
+    stream(const Model &model, const AgentContext &context,
+          const StreamOptions &options, AssistantEventCallback on_event,
+          std::stop_token stop_tok) override {
+        return stream_client_.stream(model, context, options,
+                                     std::move(on_event), stop_tok);
+    }
+
+    CompactionResult compact(const Model &, const AgentContext &,
+                             const CompactionOptions &,
+                             std::stop_token) override {
+        {
+            std::scoped_lock lock(mutex_);
+            started_ = true;
+        }
+        cv_.notify_all();
+        std::unique_lock lock(mutex_);
+        cv_.wait(lock, [this] { return release_; });
+        return result_;
+    }
+
+    // Blocks until compact() has been entered (and is now waiting on
+    // release()).
+    void wait_until_started() {
+        std::unique_lock lock(mutex_);
+        cv_.wait(lock, [this] { return started_; });
+    }
+
+    void release() {
+        {
+            std::scoped_lock lock(mutex_);
+            release_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    std::string_view provider_name() const override { return "faux"; }
+    std::string_view api_id() const override { return "faux"; }
+
+private:
+    FauxClient stream_client_;
+    CompactionResult result_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool started_{false};
+    bool release_{false};
+};
 
 } // namespace
 
@@ -338,6 +405,206 @@ void test_compact_rejects_with_queued_steering() {
     });
 }
 
+void test_compact_resets_stale_stop_source() {
+    tests::register_test(
+        "Agent::compact resets a stop_source left stopped by a prior "
+        "mid-stream-aborted turn",
+        []() {
+            Agent::Options opts;
+            opts.model = make_faux_model();
+            Agent agent(opts);
+            agent.state().append_message(Message{make_user_message("original")});
+
+            // Simulate a prior prompt that was interrupted mid-stream: while
+            // is_streaming() is true, interrupt() stops the shared
+            // stop_source and records interrupt_reason_ (NOT
+            // pending_interrupt_ — that is the idle-Ctrl-C case exercised by
+            // test_compact_honors_pending_interrupt_at_start below). A
+            // std::stop_source can never be un-stopped once stopped, and the
+            // turn ending (set_streaming(false), as run_with_lifecycle does
+            // on completion) does not replace it — only the next
+            // begin_run_locked() or, after this fix, compact() does.
+            agent.state().set_streaming(true);
+            agent.interrupt(TurnAbortReason::user_interrupt);
+            agent.state().set_streaming(false);
+            CHECK(agent.state().stop_token().stop_requested());
+
+            // compact()'s idle-transition snapshot runs synchronously on this
+            // thread before the worker is launched, so a reset stop_source is
+            // observable immediately after the call returns. Without the
+            // reset, a subsequent compaction request built on this token
+            // would be born already-cancelled even though nothing about
+            // *this* compaction was ever interrupted (a real HTTP client
+            // checks stop_requested() before/around the request; a faux
+            // client that ignores stop_tok would not expose this, hence
+            // asserting on the token directly rather than the outcome).
+            auto stream = agent.compact();
+            CHECK(!agent.state().stop_token().stop_requested());
+
+            // Drain to let the worker finish so the test does not leak a
+            // detached compaction attempt past this test's scope.
+            stream.wait();
+        });
+}
+
+void test_compact_honors_pending_interrupt_at_start() {
+    tests::register_test(
+        "Agent::compact honors a pending interrupt requested just before it "
+        "started",
+        []() {
+            Agent::Options opts;
+            opts.model = make_faux_model();
+            Agent agent(opts);
+            agent.state().append_message(Message{make_user_message("original")});
+
+            // interrupt() called while idle (no active turn) sets
+            // pending_interrupt_, the same flag begin_run_locked() applies
+            // to whatever prompt starts next. compact() mirrors that exact
+            // begin_run_locked() dance, so a Ctrl-C that lands in the window
+            // right before a compaction starts is honored as "cancel this
+            // compaction" instead of being silently dropped.
+            agent.interrupt(TurnAbortReason::user_interrupt);
+
+            // compact()'s idle-transition (which applies the pending
+            // interrupt to the freshly-reset stop_source) runs synchronously
+            // before the worker launches, so this is observable immediately
+            // — checked on the token directly rather than the eventual
+            // outcome because FauxClient::compact() (unlike a real HTTP
+            // client) does not itself consult stop_tok.
+            auto stream = agent.compact();
+            CHECK(agent.state().stop_token().stop_requested());
+            stream.wait();
+        });
+}
+
+void test_compact_interrupt_does_not_poison_next_prompt() {
+    tests::register_test(
+        "a cancelled compaction's pending interrupt does not abort the next "
+        "prompt",
+        []() {
+            AssistantMessage reply = make_assistant_message(
+                "hello again", "compaction-interrupt-leak-test", "faux",
+                "faux-model");
+            FauxClient::Script script;
+            script.events = {
+                AssistantMessageEvent{AssistantMessageStartEvent{}},
+                AssistantMessageEvent{
+                    AssistantMessageDoneEvent{StopReason::stop, reply}},
+            };
+            CompactionResult compact_success;
+            compact_success.messages.emplace_back(
+                make_user_message("summary"));
+            LLMClientRegistry::instance().register_client(
+                "compaction-interrupt-leak-test", [script, compact_success] {
+                    return std::make_shared<FauxClient>(
+                        std::vector<FauxClient::Script>{script},
+                        std::vector<CompactionResult>{compact_success});
+                });
+
+            Agent::Options opts;
+            opts.model.id = "faux-model";
+            opts.model.api = "compaction-interrupt-leak-test";
+            opts.model.provider = "faux";
+            Agent agent(opts);
+            agent.state().append_message(Message{make_user_message("original")});
+
+            // A Ctrl-C that arrives before compact() starts is applied to
+            // *this* compaction's freshly-reset stop_source (see
+            // test_compact_honors_pending_interrupt_at_start above) via
+            // pending_interrupt_ — confirmed on the token directly since
+            // FauxClient::compact() does not itself consult stop_tok, so it
+            // reports success regardless. The real point of this test is
+            // what happens *after*: without clearing pending_interrupt_ once
+            // consumed, begin_run_locked() would treat it as still pending
+            // and immediately abort the very next, unrelated prompt.
+            agent.interrupt(TurnAbortReason::user_interrupt);
+            auto compact_stream = agent.compact();
+            CHECK(agent.state().stop_token().stop_requested());
+            compact_stream.wait();
+
+            auto prompt_stream = agent.prompt("hi again");
+            auto [messages, prompt_error] = prompt_stream.wait();
+            CHECK(!prompt_error.has_value());
+            CHECK(messages.has_value());
+            if (messages) {
+                bool found_reply = false;
+                for (const auto &msg : *messages) {
+                    if (const auto *am = std::get_if<AssistantMessage>(&msg)) {
+                        if (am->stop_reason == StopReason::stop &&
+                            !am->content.empty()) {
+                            found_reply = true;
+                        }
+                        CHECK(am->stop_reason != StopReason::aborted);
+                    }
+                }
+                CHECK(found_reply);
+            }
+        });
+}
+
+void test_compact_mid_flight_interrupt_does_not_poison_next_prompt() {
+    tests::register_test(
+        "a Ctrl-C landing during compaction's in-flight network call does "
+        "not abort the next prompt",
+        []() {
+            AssistantMessage reply = make_assistant_message(
+                "hello again", "compaction-mid-flight-test", "faux",
+                "faux-model");
+            FauxClient::Script script;
+            script.events = {
+                AssistantMessageEvent{AssistantMessageStartEvent{}},
+                AssistantMessageEvent{
+                    AssistantMessageDoneEvent{StopReason::stop, reply}},
+            };
+            CompactionResult compact_success;
+            compact_success.messages.emplace_back(
+                make_user_message("summary"));
+
+            auto blocking_client = std::make_shared<BlockingCompactionClient>(
+                std::move(script), std::move(compact_success));
+            LLMClientRegistry::instance().register_client(
+                "compaction-mid-flight-test",
+                [blocking_client] { return blocking_client; });
+
+            Agent::Options opts;
+            opts.model.id = "faux-model";
+            opts.model.api = "compaction-mid-flight-test";
+            opts.model.provider = "faux";
+            Agent agent(opts);
+            agent.state().append_message(Message{make_user_message("original")});
+
+            auto compact_stream = agent.compact();
+            // Deterministically wait for the worker thread to be inside
+            // compact()'s network call (as opposed to
+            // test_compact_interrupt_does_not_poison_next_prompt above,
+            // where the interrupt lands before compact() starts and is
+            // fully consumed by compact()'s own begin_run_locked()-style
+            // dance before the worker ever launches).
+            blocking_client->wait_until_started();
+            agent.interrupt(TurnAbortReason::user_interrupt);
+            blocking_client->release();
+            compact_stream.wait();
+
+            auto prompt_stream = agent.prompt("hi again");
+            auto [messages, prompt_error] = prompt_stream.wait();
+            CHECK(!prompt_error.has_value());
+            CHECK(messages.has_value());
+            if (messages) {
+                bool found_reply = false;
+                for (const auto &msg : *messages) {
+                    if (const auto *am = std::get_if<AssistantMessage>(&msg)) {
+                        if (am->stop_reason == StopReason::stop &&
+                            !am->content.empty()) {
+                            found_reply = true;
+                        }
+                        CHECK(am->stop_reason != StopReason::aborted);
+                    }
+                }
+                CHECK(found_reply);
+            }
+        });
+}
+
 void test_commit_compaction_rejects_stale_snapshot() {
     tests::register_test("Agent::commit_compaction rejects a stale snapshot", []() {
         Agent::Options opts;
@@ -532,6 +799,10 @@ int main() {
     test_compact_rejects_while_streaming();
     test_compact_rejects_with_pending_tool_calls();
     test_compact_rejects_with_queued_steering();
+    test_compact_resets_stale_stop_source();
+    test_compact_honors_pending_interrupt_at_start();
+    test_compact_interrupt_does_not_poison_next_prompt();
+    test_compact_mid_flight_interrupt_does_not_poison_next_prompt();
     test_commit_compaction_rejects_stale_snapshot();
     test_commit_compaction_installs_on_matching_epoch();
     test_commit_compaction_persist_runs_before_install_and_blocks_on_failure();

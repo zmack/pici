@@ -631,6 +631,32 @@ Agent::compact(CompactionTrigger trigger) {
   // the drain-side commit_compaction() re-acquires it, rechecking the
   // transcript epoch captured here before installing anything.
   with_idle_transition("compaction", [&] {
+    // Mirrors begin_run_locked()'s exact pending-interrupt dance (see
+    // Agent::begin_run_locked above) rather than a bare stop_source reset:
+    // a std::stop_source, once stopped, cannot be un-stopped, so without
+    // this a manual /compact issued right after an aborted prompt would
+    // silently reuse the already-stopped token and report "cancelled"
+    // without ever attempting the request. Consuming any pending_interrupt_
+    // the same way begin_run_locked() does also means a Ctrl-C that lands
+    // in the brief window between an interrupt-watcher starting and this
+    // call reaching the lock is honored as "cancel the compaction that is
+    // about to start" instead of being silently dropped here and only
+    // resurfacing later against an unrelated operation (see the matching
+    // cleanup after run_compaction() below, which prevents the reverse
+    // leak: a Ctrl-C that cancels *this* compaction must not also abort
+    // whatever prompt the user runs next).
+    std::optional<TurnAbortReason> pending_interrupt;
+    {
+      std::scoped_lock interrupt_lock(interrupt_mutex_);
+      pending_interrupt = pending_interrupt_;
+      pending_interrupt_.reset();
+      interrupt_reason_.reset();
+      if (pending_interrupt)
+        interrupt_reason_ = pending_interrupt;
+    }
+    state_.reset_stop_source();
+    if (pending_interrupt)
+      state_.stop_source().request_stop();
     request.context = create_context_snapshot();
     request.snapshot_epoch = state_.transcript_epoch();
     request.llm_client = LLMClient::create(state_.model());
@@ -660,6 +686,18 @@ Agent::compact(CompactionTrigger trigger) {
             error_event.snapshot_epoch = epoch;
             error_event.error_message = "Unknown compaction error";
             stream.push(AgentEvent{std::move(error_event)});
+          }
+          // A Ctrl-C during the network call above (compact() never marks
+          // is_streaming(), so Agent::interrupt() takes the "idle" branch
+          // and sets pending_interrupt_, not interrupt_reason_) has already
+          // been consumed by stopping this compaction's stop_source. Clear
+          // it now so it does not also apply to whatever the caller runs
+          // next: begin_run_locked() would otherwise treat this leftover
+          // flag as "abort the next prompt immediately," silently killing
+          // an unrelated, freshly-started turn.
+          {
+            std::scoped_lock interrupt_lock(interrupt_mutex_);
+            pending_interrupt_.reset();
           }
         });
   }

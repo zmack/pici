@@ -47,6 +47,7 @@
 #include "core/auth/openai_codex_oauth.h"
 #include "core/auth_types.h"
 #include "core/builtin_tools.h"
+#include "core/compaction.h"
 #include "core/env_api_keys.h"
 #include "core/event_types.h"
 #include "core/lua_tool.h"
@@ -697,6 +698,27 @@ public:
       std::cerr << "\nerror: " << msg << "\n";
   }
 
+  void on_compaction_start() override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("compaction_start");
+    base_.on_compaction_start();
+  }
+
+  void on_compaction_complete(std::size_t retained_message_count,
+                              const core::TokenUsage &usage_before,
+                              const core::TokenUsage &usage_after) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("compaction_complete");
+    base_.on_compaction_complete(retained_message_count, usage_before,
+                                 usage_after);
+  }
+
+  void on_compaction_error(std::string_view message, bool cancelled) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("compaction_error", message.size());
+    base_.on_compaction_error(message, cancelled);
+  }
+
   void on_scroll(core::RendererScrollCommand command) override {
     base_.on_scroll(command);
   }
@@ -783,6 +805,38 @@ run_message_turn(core::AgentSession &session,
       [&session, messages = std::move(messages)](const auto &callback) mutable {
         return session.run_messages(std::move(messages), callback);
       });
+}
+
+// Drives AgentSession::compact_active_session to completion, reusing the
+// exact interrupt-watcher pattern run_turn_impl uses for prompts: Ctrl-C is
+// polled on a jthread and forwarded to Agent::interrupt(), which stops the
+// shared stop_token a running compaction request observes. Unlike
+// run_turn_impl, the result type here (CompactionRunResult) carries
+// success/unsupported/cancelled/error directly, so callers do not need to
+// re-derive status from renderer state.
+core::AgentSession::CompactionRunResult
+run_compaction_command(core::AgentSession &session, core::Renderer &renderer,
+                       bool verbose,
+                       std::shared_ptr<core::StreamDiagnostics> diagnostics,
+                       std::shared_ptr<HookRuntime> hook_runtime,
+                       core::CompactionTrigger trigger) {
+  VerboseRenderer vr(renderer, verbose, std::move(diagnostics),
+                     std::move(hook_runtime));
+  std::jthread interrupt_watcher([&session](const std::stop_token &stop_token) {
+    while (!stop_token.stop_requested()) {
+      if (core::consume_sigint()) {
+        session.agent().interrupt(core::TurnAbortReason::user_interrupt);
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  });
+  auto result = session.compact_active_session(
+      trigger, [&vr](const core::AgentEvent &event) {
+        core::dispatch_event(event, vr);
+      });
+  interrupt_watcher.request_stop();
+  return result;
 }
 
 struct CostAccumulator {
@@ -1773,7 +1827,7 @@ int cmd_run(const cli::Args &args,
             std::string_view("/reload-addons"), std::string_view("/usage"),
             std::string_view("/model"), std::string_view("/models"),
             std::string_view("/name"), std::string_view("/fork"),
-            std::string_view("/tree")}) {
+            std::string_view("/tree"), std::string_view("/compact")}) {
         if (b.starts_with(partial))
           result.emplace_back(b);
       }
@@ -2018,6 +2072,40 @@ int cmd_run(const cli::Args &args,
       } catch (const std::exception &e) {
         renderer->on_command_output("add-on reload failed: " +
                                     std::string(e.what()));
+      }
+      continue;
+    }
+    if (line == "/compact") {
+      // Manual compaction is interactive-only: it drives a live status
+      // hook and an interruptible network request, neither of which has a
+      // meaningful non-TTY/piped equivalent. The interactive command loop
+      // (this while(true) loop) does run with piped stdin — see /model's
+      // isatty() branch above for the established pattern of a slash
+      // command explicitly degrading for non-interactive input rather than
+      // silently misbehaving — so this guard is reachable and load-bearing,
+      // not defensive dead code.
+      if (isatty(STDIN_FILENO) == 0) {
+        renderer->on_command_output(
+            "/compact is only available in an interactive terminal session");
+        continue;
+      }
+      core::TerminalTitleActivityGuard activity(title_controller);
+      auto result = run_compaction_command(runtime, *renderer, args.verbose,
+                                           stream_diagnostics, hook_runtime,
+                                           core::CompactionTrigger::manual);
+      if (result.success) {
+        renderer->on_command_output(
+            "compacted context: " +
+            std::to_string(result.retained_message_count) +
+            " message(s) retained");
+      } else if (result.unsupported) {
+        renderer->on_command_output(
+            "compaction is not supported by the active provider/model");
+      } else if (result.cancelled) {
+        renderer->on_command_output("compaction cancelled");
+      } else {
+        renderer->on_command_output("compaction failed: " +
+                                    result.error.value_or("unknown error"));
       }
       continue;
     }

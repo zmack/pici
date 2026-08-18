@@ -2,6 +2,7 @@
 
 #include "core/agent_task.h"
 #include "core/auth/auth_resolver.h"
+#include "core/compaction.h"
 #include "core/session/agent_session.h"
 
 #include <atomic>
@@ -38,6 +39,8 @@ private:
                 nlohmann::json data = nullptr, std::string error = {}) const;
   void start_prompt(const nlohmann::json &command, std::string message);
   void start_wait(const nlohmann::json &command);
+  void start_compact(const nlohmann::json &command,
+                     core::CompactionTrigger trigger);
 
   core::AgentSession &session_;
   core::AgentTaskManager *task_manager_{nullptr};

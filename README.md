@@ -107,6 +107,17 @@ selection restore the correct next-turn model. Historical assistant messages
 remain tagged with the model that produced them and are transformed for the
 next provider.
 
+The interactive `/compact` command manually triggers server-side conversation
+compaction for the active session (only providers that advertise a remote
+compaction endpoint support it today; unsupported providers report
+`compaction is not supported by the active provider/model` rather than
+mutating the transcript). It requires an interactive TTY session — it is not
+available with piped stdin or `-p` one-shot invocations. Like `/model`, it
+requires an idle agent and can be interrupted with Ctrl-C; on failure or
+cancellation the transcript is left exactly as it was. See
+`plans/server-side-compaction.md` for the full design, and the JSONL RPC mode
+section below for the `compact` RPC command.
+
 ## Bash sandbox
 
 The `bash` tool supports per-session process isolation on Linux through
@@ -327,10 +338,20 @@ client-supplied `id`.
 
 The initial command set is `prompt`, `steer`, `follow_up`, `abort`,
 `get_state`, `get_messages`, `set_thinking_level`, `new_session`,
-`switch_session`, `fork`, and `set_session_name`. Prompt events use
+`switch_session`, `fork`, `set_session_name`, and `compact`. Prompt events use
 `{"type":"event","event":"message_update",...}` and expose text,
 thinking, tool-call, and tool-execution updates. A run ends with either
 `run.completed` or `run.failed`.
+
+`compact` triggers manual server-side compaction of the active session's
+transcript (only supported providers/models honor it; see
+`plans/server-side-compaction.md`). It shares the same idle-agent
+requirement as `prompt` — it is rejected while a prompt is running. Progress
+streams as `{"type":"event","event":"compaction",...}` with
+`data.kind` of `start`, `complete`, or `error` (never the replacement
+transcript itself), and the run ends with either
+`{"type":"compact.completed","retained_message_count":N}` or
+`{"type":"compact.failed","error":"...","cancelled":bool,"unsupported":bool}`.
 
 ### ACP task control
 

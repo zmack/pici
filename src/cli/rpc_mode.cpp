@@ -2,6 +2,7 @@
 
 #include "core/agent_task.h"
 #include "core/auth/auth_resolver.h"
+#include "core/compaction.h"
 #include "core/event_json.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
@@ -217,6 +218,40 @@ void RpcMode::start_prompt(const nlohmann::json &command, std::string message) {
   });
 }
 
+void RpcMode::start_compact(const nlohmann::json &command,
+                            core::CompactionTrigger trigger) {
+  // Shares run_active_/run_thread_ with start_prompt: compaction and a
+  // prompt turn must never be launched concurrently on this RPC connection,
+  // and Agent::compact()'s own idle-transition guard (streaming/pending
+  // tools/queued steering) would reject the request anyway once it reached
+  // the agent, so failing fast here just gives a clearer RPC-level error.
+  if (run_active_.exchange(true) || session_.agent().is_streaming()) {
+    response(command, false, nullptr,
+             "agent is already processing; wait for it to become idle "
+             "before compacting");
+    return;
+  }
+  if (run_thread_.joinable())
+    run_thread_.join();
+  response(command, true);
+  run_thread_ = std::jthread([this, trigger] {
+    const auto result = session_.compact_active_session(
+        trigger, [this](const core::AgentEvent &event) {
+          emit(core::event_to_json(event));
+        });
+    if (result.success) {
+      emit({{"type", "compact.completed"},
+            {"retained_message_count", result.retained_message_count}});
+    } else {
+      emit({{"type", "compact.failed"},
+            {"unsupported", result.unsupported},
+            {"cancelled", result.cancelled},
+            {"error", result.error.value_or("compaction failed")}});
+    }
+    run_active_ = false;
+  });
+}
+
 void RpcMode::start_wait(const nlohmann::json &command) {
   if (task_manager_ == nullptr) {
     response(command, false, nullptr, "agent task manager is unavailable");
@@ -285,6 +320,11 @@ void RpcMode::handle(const nlohmann::json &command) {
           rpc_abort_reason(command.value("reason", std::string("user"))));
       response(command, true,
                {{"reason", command.value("reason", std::string("user"))}});
+    } else if (type == "compact") {
+      // Only manual compaction is exposed over RPC in this phase; automatic
+      // pre-turn/context-window-retry triggers are the agent loop's own
+      // decision (plan Phase 5), not something an external client requests.
+      start_compact(command, core::CompactionTrigger::manual);
     } else if (type == "spawn_agent") {
       if (task_manager_ == nullptr) {
         response(command, false, nullptr, "agent task manager is unavailable");
