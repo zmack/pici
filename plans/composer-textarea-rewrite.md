@@ -327,23 +327,39 @@ the dropped range.
 - **Open question resolved** (see "Decisions resolved" below): continuation
   rows start at column 0, not hang-indented under the prompt.
 
-### M3 — Standard line-editing bindings + key remap + shared primitives
-- Decide and implement the scroll-vs-cursor remap from design decision 6.
-  No history-recall fallback needs designing around (there is none).
-- Add: Home/End (line), Ctrl+A/Ctrl+E, word-left/word-right (Alt+B/Alt+F or
-  Ctrl+Left/Ctrl+Right — pick one, confirm terminal compatibility), Ctrl+W
-  (delete word back), Ctrl+U (kill to line start), Ctrl+K (kill to line
-  end), Ctrl+Y (yank last kill — needs the kill ring living in
-  `ReadlineState` from M1), Up/Down for cursor row movement within a
-  multi-line draft.
-- Implement these as a shared primitive API (word-boundary detection,
-  line-start/end, kill-region) rather than inline key handlers — M5
-  consumes this directly (design decision 9).
-- Files: `src/cli/readline.cpp` (`handle_escape_sequence`, main key loop,
-  new primitives), `src/cli/readline.h` (`ControlAction` if scroll bindings
-  move — currently `readline.h:15-24`, one consumer at `main.cpp:1877`).
-- Acceptance: each binding above works and doesn't regress transcript
-  scrolling or tab completion.
+### M3 — Standard line-editing bindings + key remap + shared primitives [DONE]
+
+Implemented entirely in `readline.cpp` (no `readline.h`/`main.cpp` changes
+needed — `ControlAction` already had all six values the remap required;
+only which key fires which changed). Shared primitives added as free
+functions next to `previous_utf8_offset`/`next_utf8_offset`: `line_start`,
+`line_end`, `previous_word_boundary`, `next_word_boundary`,
+`previous_line_offset`/`next_line_offset` (logical-`\n`-line, column-
+preserving, deliberately not wrap-plan-aware — visual-row movement would
+couple buffer navigation to `plan_word_wrap` unnecessarily). M5 will
+consume these directly.
+
+Key remap: plain Up/Down/Home/End now move the cursor
+(`previous_line_offset`/`next_line_offset`/`line_start`/`line_end`)
+instead of scrolling. Ctrl+Up/Down and Ctrl+Home/End
+(`[1;5A`/`[1;5B`/`[1;5H`/`[1;5~`/`[1;5F`/`[4;5~`) took over the transcript
+scroll actions those keys used to fire. PageUp/PageDown untouched. Added
+Ctrl+A/Ctrl+E (line start/end), Ctrl+Left/Right and Alt+B/Alt+F (word
+motion, two bindings for terminals/multiplexers that don't pass the CSI
+modifier form through), and Ctrl+W/U/K/Y (kill word-back / kill-to-line-
+start / kill-to-line-end / yank) against a single most-recent-kill string
+scoped locally inside `readline()` — not `ReadlineState`, since nothing
+needs it to outlive one prompt (M1's premature-abstraction call holds
+here too).
+
+- Test: 44 `forkpty`-based tests in `test/test_readline.cpp`, covering
+  every binding above including clamping/column-preservation for Up/Down,
+  the scroll-vs-buffer-navigation split for the Ctrl-modified keys, and
+  last-kill-wins overwrite semantics for Ctrl+W/U/K/Y. Verified against
+  the M2 baseline (stash/restore) that each new test fails without its
+  corresponding code change.
+- Acceptance met: every binding above works; transcript scrolling and tab
+  completion unregressed.
 
 ### M4 — Shift+Enter via Kitty keyboard protocol
 Under-scoped in the original draft; five concrete gaps folded in below.

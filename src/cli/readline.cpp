@@ -567,6 +567,108 @@ std::size_t next_utf8_offset(std::string_view buf, std::size_t cursor) {
   return std::min(buf.size(), cursor + utf8_length(buf, cursor));
 }
 
+// --- Shared editing primitives -------------------------------------------
+//
+// Line-boundary, word-boundary, and logical-row primitives used by the M3
+// key bindings below (Home/End/Ctrl+A/Ctrl+E, word-left/right, Ctrl+W/U/K/Y,
+// Up/Down). Kept as free functions on (buf, cursor) rather than inlined into
+// the key-dispatch chain so M5's vim mode can reuse them directly instead of
+// re-deriving the same logic.
+
+// Start offset of the '\n'-delimited logical line containing `cursor` (the
+// buffer index right after the preceding '\n', or 0 if there is none).
+std::size_t line_start(std::string_view buf, std::size_t cursor) {
+  if (cursor == 0)
+    return 0;
+  const auto newline = buf.rfind('\n', cursor - 1);
+  return newline == std::string_view::npos ? 0 : newline + 1;
+}
+
+// End offset of the '\n'-delimited logical line containing `cursor` (the
+// index of the next '\n', or buf.size() if this is the last line).
+std::size_t line_end(std::string_view buf, std::size_t cursor) {
+  const auto newline = buf.find('\n', cursor);
+  return newline == std::string_view::npos ? buf.size() : newline;
+}
+
+// Boundary classification for word motion: is_wrap_space (cli/wrap.h)
+// supplies the same whitespace definition write_wrapped uses for word-wrap,
+// plus '\n' -- which is_wrap_space deliberately excludes, since every other
+// caller of it treats '\n' as its own hard control character rather than
+// whitespace -- so word motion stops at a line break instead of splicing
+// the last word of one logical line onto the first word of the next.
+bool is_word_boundary_byte(char c) { return is_wrap_space(c) || c == '\n'; }
+
+// Start of the word behind the cursor: skip any boundary bytes immediately
+// before the cursor, then skip back over the word itself. Standard
+// "backward-word" (bash's M-b / most editors' Ctrl+Left); also the
+// deletion span for Ctrl+W (unix-word-rubout), which erases exactly this
+// range.
+std::size_t previous_word_boundary(std::string_view buf, std::size_t cursor) {
+  auto offset = cursor;
+  while (offset > 0 &&
+         is_word_boundary_byte(buf[previous_utf8_offset(buf, offset)]))
+    offset = previous_utf8_offset(buf, offset);
+  while (offset > 0 &&
+         !is_word_boundary_byte(buf[previous_utf8_offset(buf, offset)]))
+    offset = previous_utf8_offset(buf, offset);
+  return offset;
+}
+
+// End of the word ahead of the cursor: skip any boundary bytes at the
+// cursor, then skip forward over the word itself. Standard "forward-word"
+// (bash's M-f / most editors' Ctrl+Right).
+std::size_t next_word_boundary(std::string_view buf, std::size_t cursor) {
+  auto offset = cursor;
+  while (offset < buf.size() && is_word_boundary_byte(buf[offset]))
+    offset = next_utf8_offset(buf, offset);
+  while (offset < buf.size() && !is_word_boundary_byte(buf[offset]))
+    offset = next_utf8_offset(buf, offset);
+  return offset;
+}
+
+// Equivalent offset one logical line up, preserving column (measured in
+// codepoints from the line start) where possible and clamping to the
+// target line's length when it is shorter. Deliberately not wrap-plan
+// aware -- this is logical-\n-delimited-line movement only, matching the
+// M3 scope decision in composer-textarea-rewrite.md (visual/wrapped-row
+// movement would couple buffer navigation to plan_word_wrap unnecessarily).
+// A cursor already on the first line is left unchanged.
+std::size_t previous_line_offset(std::string_view buf, std::size_t cursor) {
+  const auto current_start = line_start(buf, cursor);
+  if (current_start == 0)
+    return cursor;
+  std::size_t column = 0;
+  for (std::size_t offset = current_start; offset < cursor;
+       offset = next_utf8_offset(buf, offset))
+    ++column;
+  const auto previous_end = current_start - 1; // the '\n' ending that line
+  const auto previous_start = line_start(buf, previous_end);
+  auto offset = previous_start;
+  for (std::size_t taken = 0; taken < column && offset < previous_end; ++taken)
+    offset = next_utf8_offset(buf, offset);
+  return offset;
+}
+
+// Equivalent offset one logical line down; see previous_line_offset above.
+// A cursor already on the last line is left unchanged.
+std::size_t next_line_offset(std::string_view buf, std::size_t cursor) {
+  const auto current_start = line_start(buf, cursor);
+  const auto current_end = line_end(buf, cursor);
+  if (current_end >= buf.size())
+    return cursor;
+  std::size_t column = 0;
+  for (std::size_t offset = current_start; offset < cursor;
+       offset = next_utf8_offset(buf, offset))
+    ++column;
+  const auto next_start = current_end + 1; // skip the '\n'
+  const auto next_end = line_end(buf, next_start);
+  auto offset = next_start;
+  for (std::size_t taken = 0; taken < column && offset < next_end; ++taken)
+    offset = next_utf8_offset(buf, offset);
+  return offset;
+}
+
 // Apply completions to buf, redrawing the line as needed.
 void apply_completions(InputRenderer &renderer, std::string &buf,
                        std::vector<std::string> completions) {
@@ -735,6 +837,41 @@ bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn,
     cursor = next_utf8_offset(buf, cursor);
     return true;
   }
+  // Ctrl+Left / Ctrl+Right: word-left / word-right. xterm-compatible
+  // terminals always report a modifier on an arrow key in the CSI
+  // "1;<mod>" form (never the unmodified SS3 "O" form), so there's no
+  // "O"-prefixed equivalent to add alongside this.
+  if (seq == "[1;5D") {
+    cursor = previous_word_boundary(buf, cursor);
+    return true;
+  }
+  if (seq == "[1;5C") {
+    cursor = next_word_boundary(buf, cursor);
+    return true;
+  }
+  // Plain Up/Down: move the cursor one logical line within the buffer
+  // (previous_line_offset/next_line_offset), preserving column where
+  // possible. This supersedes the old scroll_line_up/down binding here --
+  // see the Ctrl+Up/Ctrl+Down bindings below, which took it over.
+  if (seq == "[A") {
+    cursor = previous_line_offset(buf, cursor);
+    return true;
+  }
+  if (seq == "[B") {
+    cursor = next_line_offset(buf, cursor);
+    return true;
+  }
+  // Plain Home/End: current logical line's start/end, not the whole
+  // buffer. Ctrl+Home/Ctrl+End below took over the old scroll_top/
+  // scroll_bottom binding this used to have.
+  if (seq == "[H" || seq == "OH" || seq == "[1~") {
+    cursor = line_start(buf, cursor);
+    return true;
+  }
+  if (seq == "[F" || seq == "OF" || seq == "[4~") {
+    cursor = line_end(buf, cursor);
+    return true;
+  }
 
   if (!control_fn)
     return false;
@@ -776,11 +913,13 @@ bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn,
     return true;
   }
 
-  if (seq == "[A") {
+  // Ctrl+Up / Ctrl+Down: transcript line-scroll -- what plain Up/Down did
+  // before Up/Down became buffer cursor movement above.
+  if (seq == "[1;5A") {
     control_fn(ControlAction::scroll_line_up);
     return true;
   }
-  if (seq == "[B") {
+  if (seq == "[1;5B") {
     control_fn(ControlAction::scroll_line_down);
     return true;
   }
@@ -792,11 +931,15 @@ bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn,
     control_fn(ControlAction::scroll_page_down);
     return true;
   }
-  if (seq == "[H" || seq == "OH" || seq == "[1~") {
+  // Ctrl+Home / Ctrl+End: transcript top/bottom -- what plain Home/End did
+  // before. Cover the same variant families as the plain bindings above
+  // ("H"/"F"-style and "~"-style), since terminals aren't consistent about
+  // which unmodified form they use either.
+  if (seq == "[1;5H" || seq == "[1;5~") {
     control_fn(ControlAction::scroll_top);
     return true;
   }
-  if (seq == "[F" || seq == "OF" || seq == "[4~") {
+  if (seq == "[1;5F" || seq == "[4;5~") {
     control_fn(ControlAction::scroll_bottom);
     return true;
   }
@@ -845,6 +988,13 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
   while (cursor > 0 &&
          (static_cast<unsigned char>(buf[cursor]) & 0xC0U) == 0x80U)
     --cursor;
+
+  // Single most-recent-kill slot for Ctrl+W/Ctrl+U/Ctrl+K/Ctrl+Y. Scoped to
+  // this call, matching M1's decision not to introduce a ReadlineState that
+  // persists across readline() calls -- nothing needs the kill buffer to
+  // outlive one prompt. Each kill overwrites it (last-kill-wins); this is
+  // not a ring of multiple kills.
+  std::string kill_buffer;
 
   InputRenderer renderer(prompt, status_line);
   renderer.redraw(buf, cursor);
@@ -956,6 +1106,17 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
           if (paste.wake)
             return finish(ReadlineExit::mailbox_wake);
           renderer.redraw(buf, cursor);
+        } else if (escape.sequence == "b") {
+          // Alt+B (legacy ESC + 'b', same encoding family as Alt+Enter
+          // above): word-left. Second binding for the same operation as
+          // Ctrl+Left, for terminals/multiplexers that don't pass the CSI
+          // modifier form through cleanly.
+          cursor = previous_word_boundary(buf, cursor);
+          renderer.redraw(buf, cursor);
+        } else if (escape.sequence == "f") {
+          // Alt+F: word-right, mirroring Alt+B above.
+          cursor = next_word_boundary(buf, cursor);
+          renderer.redraw(buf, cursor);
         } else if (handle_escape_sequence(escape.sequence, control_fn, buf,
                                           cursor)) {
           renderer.redraw(buf, cursor);
@@ -971,6 +1132,41 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
           const auto start = previous_utf8_offset(buf, cursor);
           buf.erase(start, cursor - start);
           cursor = start;
+          renderer.redraw(buf, cursor);
+        }
+      } else if (c == '\x01') { // Ctrl+A — line start (same as Home)
+        cursor = line_start(buf, cursor);
+        renderer.redraw(buf, cursor);
+      } else if (c == '\x05') { // Ctrl+E — line end (same as End)
+        cursor = line_end(buf, cursor);
+        renderer.redraw(buf, cursor);
+      } else if (c == '\x17') { // Ctrl+W — delete word behind cursor
+        const auto start = previous_word_boundary(buf, cursor);
+        if (start < cursor) {
+          kill_buffer.assign(buf, start, cursor - start);
+          buf.erase(start, cursor - start);
+          cursor = start;
+          renderer.redraw(buf, cursor);
+        }
+      } else if (c == '\x15') { // Ctrl+U — kill to line start
+        const auto start = line_start(buf, cursor);
+        if (start < cursor) {
+          kill_buffer.assign(buf, start, cursor - start);
+          buf.erase(start, cursor - start);
+          cursor = start;
+          renderer.redraw(buf, cursor);
+        }
+      } else if (c == '\x0b') { // Ctrl+K — kill to line end
+        const auto end = line_end(buf, cursor);
+        if (end > cursor) {
+          kill_buffer.assign(buf, cursor, end - cursor);
+          buf.erase(cursor, end - cursor);
+          renderer.redraw(buf, cursor);
+        }
+      } else if (c == '\x19') { // Ctrl+Y — yank last kill
+        if (!kill_buffer.empty()) {
+          buf.insert(cursor, kill_buffer);
+          cursor += kill_buffer.size();
           renderer.redraw(buf, cursor);
         }
       } else if (c >= 0x20 || (c & 0x80U) != 0U) {
