@@ -198,7 +198,7 @@ terminal-background query (no OSC 11 anywhere in `core/terminal.cpp`).
 
 ## Milestones
 
-### M0 — Fix the wrap-boundary clip bug (standalone, ships first)
+### M0 — Fix the wrap-boundary clip bug (standalone, ships first) [DONE]
 - Fix, stated as an invariant: the recorded cursor position must always
   satisfy `column + width_of_char_at_cursor <= columns` (equivalently
   `column < columns`); any capture that would violate it normalizes to
