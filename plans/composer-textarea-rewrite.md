@@ -361,8 +361,47 @@ here too).
 - Acceptance met: every binding above works; transcript scrolling and tab
   completion unregressed.
 
-### M4 — Shift+Enter via Kitty keyboard protocol
-Under-scoped in the original draft; five concrete gaps folded in below.
+### M4 — Shift+Enter via Kitty keyboard protocol [DONE]
+Under-scoped in the original draft; five concrete gaps folded in below,
+all addressed in the implementation.
+
+Implemented: `core::probe_terminal_capability` (`terminal.h`/`.cpp`) is a
+reusable DA1-sentinel-bounded probe — reads until a complete DA1 reply or
+a timeout, classifies via a caller-supplied matcher whether a capability
+reply arrived first, and returns any unconsumed bytes as `leftover` for
+replay. `cli/readline.cpp`'s `kitty_keyboard_enabled()` is the Kitty-
+specific caller: a function-local `static`, so the query/DA1 round trip
+runs exactly once per process despite `RawMode::enter()` running on every
+`readline()` call; `PICI_DISABLE_KITTY_KEYBOARD` skips it outright for
+tmux/screen setups where a positive probe result can't be trusted.
+Type-ahead read during the probe is queued in a process-wide deque
+(`g_pending_stdin_bytes`) drained ahead of every real stdin read in the
+file (main loop, `read_escape_sequence`, `read_bracketed_paste`), so
+nothing typed during startup is lost or reordered. The "disambiguate
+escape codes" flag (`CSI > 1 u`) is pushed on raw-mode entry and popped in
+`leave()` — sharing exactly the same signal-safety level as the rest of
+`RawMode`'s state (no new SIGINT handling added; see the follow-up note
+below). `classify_csi_u_enter` decodes the `CSI <codepoint>[;<mod>]u`
+key-report form for Enter specifically (codepoint 13): the Shift bit in
+the 1-biased modifier field routes to the same newline-insert path as
+Alt+Enter; anything else submits, matching a raw `\r`.
+
+- Files: `src/core/terminal.h`/`.cpp` (shared probe, reusable by M6's OSC
+  11 query), `src/cli/readline.cpp` (`RawMode`, `kitty_keyboard_enabled`,
+  `parse_csi_u_key`/`classify_csi_u_enter`, stdin-replay plumbing).
+- Test: 5 new `forkpty` tests in `test/test_readline.cpp` (49 total) —
+  unsupported (DA1-only reply) behaves exactly like M1-M3; supported
+  (flags reply before DA1) makes Shift+Enter insert and CSI-encoded plain
+  Enter submit; probe-window type-ahead survives; the env-var override
+  skips the probe outright; existing bindings (arrows, Ctrl+Left/Right,
+  mouse wheel, bracketed paste) are unaffected once the flag is active.
+  Verified against a stash of the implementation that each new test fails
+  without it.
+- **Follow-up noted, not fixed here** (pre-existing, out of this
+  milestone's scope): `RawMode` has no SIGINT handler and `ISIG` stays
+  enabled, so an abnormal Ctrl+C exit already leaves termios/bracketed-
+  paste state unrestored; the Kitty flag now shares that same fate rather
+  than being either better or worse-protected than the rest of `RawMode`.
 
 - Probe once per process (not per `readline()` call — see "surrounding
   plumbing" above), on first raw-mode entry: `CSI > 1 u` followed

@@ -6,8 +6,12 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <deque>
 #include <fcntl.h>
 #include <functional>
 #include <iostream>
@@ -16,6 +20,7 @@
 #include <sys/fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/types.h>
 #include <system_error>
 #include <termios.h>
 #include <unistd.h>
@@ -127,12 +132,122 @@ void ReadlineWake::drain() const noexcept { drain_nonblocking_fd(read_fd_); }
 
 namespace {
 
+// Process-wide leftover bytes from the Kitty-keyboard capability probe (see
+// kitty_keyboard_enabled below): whatever the probe's bounded read window
+// swallowed that wasn't part of either reply it was looking for -- a fast
+// typist's keystrokes, or stray bytes from a terminal/multiplexer that
+// doesn't understand the query. Drained by read_stdin_byte/poll_stdin_retry
+// before any real read of stdin, so it's never lost and never reordered
+// relative to bytes actually typed afterward. The probe only ever runs
+// once per process (see kitty_keyboard_enabled), so this is populated at
+// most once, during the very first RawMode::enter() call.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::deque<char> g_pending_stdin_bytes;
+
+// Every raw-byte read of stdin in this file (the main dispatch loop,
+// read_escape_sequence, read_bracketed_paste) goes through this instead of
+// calling ::read() directly, so bytes queued in g_pending_stdin_bytes are
+// replayed before any new byte is actually read from the fd. Return value
+// matches ::read(fd, &out, 1): 1 on success, 0 on EOF, -1 on error (errno
+// set).
+ssize_t read_stdin_byte(unsigned char &out) {
+  if (!g_pending_stdin_bytes.empty()) {
+    out = static_cast<unsigned char>(g_pending_stdin_bytes.front());
+    g_pending_stdin_bytes.pop_front();
+    return 1;
+  }
+  return ::read(STDIN_FILENO, &out, 1);
+}
+
+// Companion to read_stdin_byte: reports stdin as immediately readable
+// without actually calling poll() whenever bytes are already queued, so
+// replaying them never waits out the timeout that governed the original
+// blocking read. Falls back to a real poll_retry() otherwise.
+int poll_stdin_retry(struct pollfd *descriptors, nfds_t count, int timeout_ms) {
+  if (!g_pending_stdin_bytes.empty()) {
+    descriptors->revents = static_cast<short>(POLLIN);
+    // count is always 1 or 2 (stdin, optionally the wake fd) at every call
+    // site in this file, and descriptors always points at an array with at
+    // least `count` elements -- the +1 stays in bounds.
+    if (count > 1)
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      (descriptors + 1)->revents = 0;
+    return 1;
+  }
+  return poll_retry(descriptors, count, timeout_ms);
+}
+
+// How long the Kitty-keyboard-protocol probe below will wait for a DA1
+// reply before giving up and assuming the protocol isn't supported. DA1
+// replies are near-instant on a real terminal; this only matters for a
+// terminal that answers neither query, where it bounds startup latency
+// instead of hanging indefinitely.
+constexpr std::chrono::milliseconds kKittyProbeTimeout{300};
+
+// Probes for Kitty keyboard protocol support (the "disambiguate escape
+// codes" progressive-enhancement flag -- see
+// https://sw.kovidgoyal.net/kitty/keyboard-protocol/) once per process: the
+// result is a function-local static, computed on the first call and simply
+// read back on every later one, so raw mode being entered on every
+// readline() call and every mailbox wake never repeats the query/DA1 round
+// trip -- see composer-textarea-rewrite.md's M4 section for why that
+// matters. Must only be called once raw mode (no ECHO/ICANON, ICRNL
+// cleared) is already active on stdin, so the reply can be read back
+// cleanly.
+bool kitty_keyboard_enabled() {
+  static const bool supported = [] {
+    // Explicit escape hatch: tmux only forwards Kitty-protocol key reports
+    // with `set -g extended-keys on` (tmux >= 3.4); older tmux, screen, and
+    // other multiplexer/terminfo shims may swallow the query outright (the
+    // probe below already concludes "unsupported" for that case, which is
+    // fine) or answer on the real terminal's behalf in a way that looks
+    // like support without key reports actually being forwarded end-to-end.
+    // This override skips the probe entirely and forces the permanent
+    // plain-Enter-submits/Alt+Enter-inserts fallback regardless of what it
+    // would otherwise conclude.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe)
+    if (const char *disable = std::getenv("PICI_DISABLE_KITTY_KEYBOARD");
+        disable != nullptr && *disable != '\0' &&
+        std::string_view(disable) != "0")
+      return false;
+
+    // Query support ("CSI ?u", asking the terminal to report its current
+    // progressive-enhancement flags) followed immediately by a DA1 query
+    // ("CSI c") as a sentinel: virtually every terminal answers DA1 even if
+    // it has no idea what "CSI ?u" means, so DA1's reply is the signal to
+    // stop waiting rather than always paying a fixed timeout. Written
+    // directly to the fd rather than through std::cout, so it can't be left
+    // sitting in an iostream buffer while probe_terminal_capability blocks
+    // waiting for the reply.
+    static constexpr std::string_view kQuery = "\033[?u\033[c";
+    if (::write(STDOUT_FILENO, kQuery.data(), kQuery.size()) !=
+        static_cast<ssize_t>(kQuery.size()))
+      return false;
+
+    auto result = core::probe_terminal_capability(
+        STDIN_FILENO,
+        [](std::string_view buf, std::size_t i) {
+          return core::match_dec_private_reply(buf, i, 'u');
+        },
+        kKittyProbeTimeout);
+
+    // Whatever wasn't consumed by either reply must not be lost -- queue it
+    // for read_stdin_byte to hand back to the normal input path.
+    g_pending_stdin_bytes.insert(g_pending_stdin_bytes.end(),
+                                 result.leftover.begin(),
+                                 result.leftover.end());
+    return result.supported;
+  }();
+  return supported;
+}
+
 // RAII guard: put terminal into raw mode while alive.
 // ISIG is kept enabled so Ctrl+C still delivers SIGINT.
 struct RawMode {
   int fd{-1};
   struct termios saved {};
   bool active{false};
+  bool kitty_pushed{false};
 
   RawMode() = default;
   RawMode(const RawMode &) = delete;
@@ -164,11 +279,30 @@ struct RawMode {
     // ESC[201~ markers so it can be read as one block instead of being
     // indistinguishable from typed keystrokes.
     std::cout << "\033[?2004h" << std::flush;
+    // Kitty keyboard protocol: push just the "disambiguate escape codes"
+    // flag (value 1) so Enter and Shift+Enter arrive as distinguishable
+    // "CSI u" key reports instead of the same '\r' byte -- see
+    // kitty_keyboard_enabled() above for the once-per-process probe this is
+    // gated on, and classify_csi_u_enter() below for the decode side.
+    // Popped in leave() below, which runs on every exit path (a normal
+    // return and ~RawMode() alike) -- matched to exactly the same
+    // signal-safety level as the rest of this struct's state: ISIG is left
+    // enabled (see the comment on this struct), so an abnormal Ctrl+C exit
+    // leaves the termios/bracketed-paste/kitty-flag state exactly as
+    // unrestored as each other, no better and no worse.
+    if (kitty_keyboard_enabled()) {
+      std::cout << "\033[>1u" << std::flush;
+      kitty_pushed = true;
+    }
     return true;
   }
 
   void leave() {
     if (active) {
+      if (kitty_pushed) {
+        std::cout << "\033[<u" << std::flush;
+        kitty_pushed = false;
+      }
       std::cout << "\033[?2004l" << std::flush;
       tcsetattr(fd, TCSAFLUSH, &saved);
       active = false;
@@ -728,7 +862,7 @@ EscapeSequenceResult read_escape_sequence(int wake_fd) {
   if (wake_fd >= 0)
     descriptors[1] = {.fd = wake_fd, .events = POLLIN};
 
-  auto poll_result = poll_retry(descriptors.data(), descriptor_count, 25);
+  auto poll_result = poll_stdin_retry(descriptors.data(), descriptor_count, 25);
   if (poll_result <= 0)
     return {.sequence = std::move(seq)};
   const bool wake_ready = wake_fd >= 0 && (descriptors[1].revents &
@@ -739,7 +873,7 @@ EscapeSequenceResult read_escape_sequence(int wake_fd) {
     return wake_ready ? EscapeSequenceResult{.wake = true}
                       : EscapeSequenceResult{.sequence = std::move(seq)};
   }
-  if (::read(STDIN_FILENO, &c, 1) <= 0)
+  if (read_stdin_byte(c) <= 0)
     return {.sequence = std::move(seq)};
   seq += static_cast<char>(c);
 
@@ -753,7 +887,7 @@ EscapeSequenceResult read_escape_sequence(int wake_fd) {
     descriptors[0].revents = 0;
     if (descriptor_count > 1)
       descriptors[1].revents = 0;
-    poll_result = poll_retry(descriptors.data(), descriptor_count, 25);
+    poll_result = poll_stdin_retry(descriptors.data(), descriptor_count, 25);
     if (poll_result <= 0)
       break;
     const bool wake_ready = wake_fd >= 0 && (descriptors[1].revents &
@@ -764,7 +898,7 @@ EscapeSequenceResult read_escape_sequence(int wake_fd) {
       return wake_ready ? EscapeSequenceResult{.wake = true}
                         : EscapeSequenceResult{.sequence = std::move(seq)};
     }
-    if (::read(STDIN_FILENO, &c, 1) <= 0)
+    if (read_stdin_byte(c) <= 0)
       break;
     seq += static_cast<char>(c);
     if ((c >= '@' && c <= '~'))
@@ -805,7 +939,7 @@ BracketedPasteResult read_bracketed_paste(int wake_fd) {
     // Unlike read_escape_sequence's short probe window, a paste has no
     // fixed size and the terminal may deliver it in several chunks — block
     // until more input (or a wake) actually arrives instead of timing out.
-    if (poll_retry(descriptors.data(), descriptor_count, -1) <= 0)
+    if (poll_stdin_retry(descriptors.data(), descriptor_count, -1) <= 0)
       continue;
     const bool wake_ready = wake_fd >= 0 && (descriptors[1].revents &
                                              (POLLIN | POLLHUP | POLLERR)) != 0;
@@ -817,7 +951,7 @@ BracketedPasteResult read_bracketed_paste(int wake_fd) {
       continue;
     }
     unsigned char c = 0;
-    const auto n = ::read(STDIN_FILENO, &c, 1);
+    const auto n = read_stdin_byte(c);
     if (n <= 0) {
       if (n < 0 && (errno == EINTR || errno == EAGAIN))
         continue;
@@ -825,6 +959,70 @@ BracketedPasteResult read_bracketed_paste(int wake_fd) {
     }
     result.content += static_cast<char>(c);
   }
+}
+
+// Parses a Kitty "CSI u" key-report body -- what read_escape_sequence
+// returns after the leading ESC once the "disambiguate escape codes" flag
+// is active, e.g. "[13u" or "[13;2u" for Enter/Shift+Enter -- into its
+// codepoint and modifier fields. Only the shape this milestone needs is
+// recognized: "[<codepoint>[;<modifiers>]u"; a missing modifier section
+// defaults to 1 (no modifiers held), matching the protocol allowing it to
+// be omitted entirely when no modifiers are held. Returns false for
+// anything that doesn't have exactly this shape -- a different escape
+// sequence altogether, or a CSI u report with fields (an event-type suffix,
+// alternate-key encoding, associated text) this milestone doesn't decode.
+bool parse_csi_u_key(std::string_view seq, std::uint32_t &codepoint,
+                     int &modifiers) {
+  if (seq.size() < 3 || seq.front() != '[' || seq.back() != 'u')
+    return false;
+  std::size_t pos = 1;
+  const auto read_number = [&](long &out) {
+    const auto start = pos;
+    long value = 0;
+    while (pos < seq.size() && seq[pos] >= '0' && seq[pos] <= '9') {
+      value = (value * 10) + (seq[pos] - '0');
+      ++pos;
+    }
+    if (pos == start)
+      return false;
+    out = value;
+    return true;
+  };
+  long cp = 0;
+  if (!read_number(cp))
+    return false;
+  long mod = 1;
+  if (pos < seq.size() && seq[pos] == ';') {
+    ++pos;
+    if (!read_number(mod))
+      return false;
+  }
+  if (pos + 1 != seq.size()) // trailing content before 'u' this parse skips
+    return false;
+  codepoint = static_cast<std::uint32_t>(cp);
+  modifiers = static_cast<int>(mod);
+  return true;
+}
+
+enum class CsiUEnterKind { none, plain, shift };
+
+// Classifies a CSI-u escape body (see parse_csi_u_key above) as an Enter
+// key report, if it is one -- the only key this milestone needs to decode
+// from the new encoding.
+CsiUEnterKind classify_csi_u_enter(std::string_view seq) {
+  std::uint32_t codepoint = 0;
+  int modifiers = 1;
+  constexpr std::uint32_t kEnterCodepoint = 13;
+  if (!parse_csi_u_key(seq, codepoint, modifiers) ||
+      codepoint != kEnterCodepoint)
+    return CsiUEnterKind::none;
+  // Kitty's modifier encoding is 1 + a bitmask (Shift is bit 0, value 1);
+  // the field is 1-biased so "no modifiers held" is representable as a
+  // plain 1 rather than 0. Shift held -- alone or combined with any other
+  // modifier -- is therefore any value >= 2 with that bit set once the bias
+  // is removed.
+  const bool shift = modifiers >= 2 && (((modifiers - 1) & 0x1) != 0);
+  return shift ? CsiUEnterKind::shift : CsiUEnterKind::plain;
 }
 
 bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn,
@@ -1031,22 +1229,34 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
     }
 
     int poll_result = 0;
-    while (true) {
-      poll_result = ::poll(descriptors.data(), descriptor_count, -1);
-      if (poll_result >= 0)
-        break;
-      if (errno != EINTR)
-        break;
-      // A signal (SIGWINCH among others) interrupted the blocking poll.
-      // Notice a genuine resize here rather than silently retrying, since
-      // nothing else observes it while this thread sits idle in readline().
-      const auto generation = core::resize_generation();
-      if (generation != last_resize_generation) {
-        last_resize_generation = generation;
-        if (on_resize)
-          on_resize();
-        renderer.reanchor();
-        renderer.redraw(buf, cursor);
+    if (!g_pending_stdin_bytes.empty()) {
+      // Replay bytes queued by the Kitty-keyboard-protocol startup probe
+      // (see kitty_keyboard_enabled) ahead of any real poll/read: report
+      // stdin as already readable instead of blocking, so queued type-ahead
+      // is processed immediately rather than waiting on a real event.
+      poll_result = 1;
+      descriptors[0].revents = POLLIN;
+      if (descriptor_count > 1)
+        descriptors[1].revents = 0;
+    } else {
+      while (true) {
+        poll_result = ::poll(descriptors.data(), descriptor_count, -1);
+        if (poll_result >= 0)
+          break;
+        if (errno != EINTR)
+          break;
+        // A signal (SIGWINCH among others) interrupted the blocking poll.
+        // Notice a genuine resize here rather than silently retrying, since
+        // nothing else observes it while this thread sits idle in
+        // readline().
+        const auto generation = core::resize_generation();
+        if (generation != last_resize_generation) {
+          last_resize_generation = generation;
+          if (on_resize)
+            on_resize();
+          renderer.reanchor();
+          renderer.redraw(buf, cursor);
+        }
       }
     }
     if (poll_result < 0)
@@ -1065,7 +1275,7 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
     }
     if ((descriptors[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
       unsigned char c = 0;
-      const auto n = ::read(STDIN_FILENO, &c, 1);
+      const auto n = read_stdin_byte(c);
       if (n < 0 && (errno == EINTR || errno == EAGAIN))
         continue;
       if (n == 0) {
@@ -1094,6 +1304,24 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
           buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor), '\n');
           ++cursor;
           renderer.redraw(buf, cursor);
+        } else if (const auto enter_kind =
+                       classify_csi_u_enter(escape.sequence);
+                   enter_kind != CsiUEnterKind::none) {
+          // Enter via the Kitty keyboard protocol's "CSI u" key-report
+          // encoding (active once RawMode::enter has confirmed support and
+          // pushed the "disambiguate escape codes" flag): codepoint 13 with
+          // the Shift modifier bit set means Shift+Enter, handled exactly
+          // like Alt+Enter above; without it -- or with no modifier section
+          // at all, which the protocol allows omitting when nothing is
+          // held -- it's plain Enter and submits exactly like a raw '\r'
+          // does.
+          if (enter_kind == CsiUEnterKind::shift) {
+            buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor), '\n');
+            ++cursor;
+            renderer.redraw(buf, cursor);
+          } else {
+            return finish(ReadlineExit::submitted);
+          }
         } else if (escape.sequence == "[200~") {
           // Bracketed paste: the block between start/end markers is always
           // an inert insert, regardless of embedded \n/\r — it must never

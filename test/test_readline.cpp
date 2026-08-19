@@ -4,6 +4,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <fcntl.h>
 #include <functional>
 #include <iostream>
@@ -1102,7 +1103,325 @@ void test_ctrl_y_yanks_last_kill_only() {
       });
 }
 
+// --- M4: Kitty keyboard protocol probe --------------------------------
+//
+// Every readline() call sent through a plain forkpty() pty behaves exactly
+// like a terminal that never answers the Kitty-protocol query at all: the
+// probe (see kitty_keyboard_enabled() in readline.cpp) sends
+// "\033[?u\033[c" on the very first RawMode::enter() and, unless a test
+// below scripts a reply, simply times out (kKittyProbeTimeout, 300ms)
+// having received nothing. To keep the tests above this section fast and
+// free of that latency/raciness -- they aren't testing M4 at all -- main()
+// sets PICI_DISABLE_KITTY_KEYBOARD=1 for the whole process before running
+// any test, which every forked child inherits and which skips the probe
+// entirely (see kitty_keyboard_enabled()'s escape-hatch check). The tests
+// below undo that in their own forked child, since they specifically want
+// to exercise the probe.
+//
+// The query bytes themselves ("\033[?u\033[c") are only safe to write a
+// reply after -- writing anything to the pty before the child's
+// RawMode::enter() calls tcsetattr(TCSAFLUSH, ...) risks that call
+// discarding it, since TCSAFLUSH flushes unread input. Waiting for the
+// query to arrive at the master side guarantees raw mode (and thus
+// TCSAFLUSH) has already happened, since RawMode::enter() writes the query
+// immediately after tcsetattr succeeds.
+constexpr std::string_view kKittyProbeQuery = "\033[?u\033[c";
+
+// Waits for the probe's query bytes to appear in `output`, asserting they
+// actually did -- rather than only relying on read_until's own internal
+// timeout, which would let a test that scripts a reply to a query that
+// never arrives pass vacuously (e.g. against a build that hasn't
+// implemented the probe at all yet).
+void await_kitty_probe_query(int master, std::string &output) {
+  output = read_until(master, std::move(output), kKittyProbeQuery);
+  CHECK(output.find(kKittyProbeQuery) != std::string::npos);
+}
+
+void test_kitty_probe_unsupported_replays_alt_enter_and_plain_submit() {
+  tests::run(
+      "readline: Kitty probe with only a DA1 reply concludes unsupported "
+      "and behaves exactly like M1-M3 (Alt+Enter newline, plain Enter "
+      "submits, no hang)",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("> ", {}, {}, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        await_kitty_probe_query(master, output);
+        // Answer only the DA1 sentinel -- a plausible xterm-style DA1
+        // reply -- never the Kitty flags query itself.
+        static constexpr std::string_view kDa1Reply = "\033[?62;1;2;6c";
+        CHECK_EQ(::write(master, kDa1Reply.data(), kDa1Reply.size()),
+                 static_cast<ssize_t>(kDa1Reply.size()));
+        output = read_new_output(master, std::move(output));
+
+        CHECK_EQ(::write(master, "ab", 2), 2);
+        output = read_new_output(master, std::move(output));
+        // ESC immediately followed by \r -- the legacy Alt+Enter encoding,
+        // still the only newline binding when the protocol isn't supported.
+        CHECK_EQ(::write(master, "\033\r", 2), 2);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "cd", 2), 2);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":5:ab\r\ncd";
+        CHECK(output.find(expected) != std::string::npos);
+        // Unsupported means the "disambiguate escape codes" flag is never
+        // pushed.
+        CHECK(output.find("\033[>1u") == std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_kitty_probe_supported_shift_enter_inserts_newline() {
+  tests::run(
+      "readline: Kitty probe with a flags reply before DA1 concludes "
+      "supported -- Shift+Enter inserts a newline, CSI-encoded plain Enter "
+      "still submits",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("> ", {}, {}, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        await_kitty_probe_query(master, output);
+        // Flags reply (progressive-enhancement flag 1, "disambiguate
+        // escape codes") followed by the DA1 sentinel, in that order --
+        // this is what makes the probe conclude "supported".
+        static constexpr std::string_view kSupportedReply = "\033[?1u\033[?62c";
+        CHECK_EQ(
+            ::write(master, kSupportedReply.data(), kSupportedReply.size()),
+            static_cast<ssize_t>(kSupportedReply.size()));
+        output = read_new_output(master, std::move(output));
+        // Supported means the flag actually gets pushed on raw-mode entry.
+        CHECK(output.find("\033[>1u") != std::string::npos);
+
+        CHECK_EQ(::write(master, "ab", 2), 2);
+        output = read_new_output(master, std::move(output));
+        // Shift+Enter: codepoint 13, modifier field 2 (Shift, 1-biased).
+        static constexpr std::string_view kShiftEnter = "\033[13;2u";
+        CHECK_EQ(::write(master, kShiftEnter.data(), kShiftEnter.size()),
+                 static_cast<ssize_t>(kShiftEnter.size()));
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "cd", 2), 2);
+        output = read_new_output(master, std::move(output));
+        // Plain Enter via the CSI-u encoding (no modifier section) --
+        // exercises the same submit path a bare '\r' would, but through the
+        // new decode.
+        static constexpr std::string_view kPlainEnter = "\033[13u";
+        CHECK_EQ(::write(master, kPlainEnter.data(), kPlainEnter.size()),
+                 static_cast<ssize_t>(kPlainEnter.size()));
+        output = read_until(master, std::move(output), "RESULT:");
+
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":5:ab\r\ncd";
+        CHECK(output.find(expected) != std::string::npos);
+        // The flag is popped again on the way out (raw.leave(), called from
+        // finish()).
+        CHECK(output.find("\033[<u") != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_kitty_probe_typeahead_survives_probe_window() {
+  tests::run("readline: type-ahead read during the Kitty probe's window is "
+             "replayed, not dropped",
+             [] {
+               int master = -1;
+               const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+               CHECK(child >= 0);
+               if (child == 0) {
+                 ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
+                 dprintf(STDOUT_FILENO, "READY\n");
+                 const auto result = readline("> ", {}, {}, {}, "", 0);
+                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                         static_cast<int>(result.reason), result.cursor,
+                         result.text.c_str());
+                 _exit(0);
+               }
+
+               auto output = read_until(master, {}, "READY");
+               await_kitty_probe_query(master, output);
+               // A fast typist's keystrokes, arriving while the probe is still
+               // reading, before either reply is sent.
+               CHECK_EQ(::write(master, "hi", 2), 2);
+               // Now let the probe conclude (unsupported is enough to prove
+               // replay -- the DA1 reply on its own already exercises the "give
+               // up waiting" path).
+               static constexpr std::string_view kDa1Reply = "\033[?62c";
+               CHECK_EQ(::write(master, kDa1Reply.data(), kDa1Reply.size()),
+                        static_cast<ssize_t>(kDa1Reply.size()));
+               output = read_new_output(master, std::move(output));
+
+               CHECK_EQ(::write(master, "cd", 2), 2);
+               output = read_new_output(master, std::move(output));
+               CHECK_EQ(::write(master, "\r", 1), 1);
+               output = read_until(master, std::move(output), "RESULT:");
+
+               const auto expected =
+                   "RESULT:" +
+                   std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                   ":4:hicd";
+               CHECK(output.find(expected) != std::string::npos);
+               CHECK_EQ(wait_for_child(child), 0);
+               ::close(master);
+             });
+}
+
+void test_kitty_disable_env_var_skips_probe_and_forces_fallback() {
+  tests::run(
+      "readline: PICI_DISABLE_KITTY_KEYBOARD forces the Alt+Enter fallback "
+      "and skips the probe outright, even though nothing here proves the "
+      "probe would otherwise have concluded supported",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          // Explicit for this test's own documentation, even though
+          // main() already sets this process-wide by default.
+          ::setenv("PICI_DISABLE_KITTY_KEYBOARD", "1", 1);
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("> ", {}, {}, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        CHECK_EQ(::write(master, "ab", 2), 2);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "\033\r", 2), 2);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "cd", 2), 2);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":5:ab\r\ncd";
+        CHECK(output.find(expected) != std::string::npos);
+        // The override skips the probe outright -- no query is ever sent --
+        // and the flag is never pushed either.
+        CHECK(output.find(kKittyProbeQuery) == std::string::npos);
+        CHECK(output.find("\033[>1u") == std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_kitty_supported_existing_bindings_unaffected() {
+  tests::run(
+      "readline: arrow keys, Ctrl+Left/Right, mouse wheel, and bracketed "
+      "paste all still work identically once the Kitty flag is active",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
+          dprintf(STDOUT_FILENO, "READY\n");
+          ControlFn control_fn = [](ControlAction action) {
+            dprintf(STDOUT_FILENO, "ACTION:%d\n", static_cast<int>(action));
+          };
+          const auto result = readline("> ", {}, control_fn, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        await_kitty_probe_query(master, output);
+        static constexpr std::string_view kSupportedReply = "\033[?1u\033[?62c";
+        CHECK_EQ(
+            ::write(master, kSupportedReply.data(), kSupportedReply.size()),
+            static_cast<ssize_t>(kSupportedReply.size()));
+        output = read_new_output(master, std::move(output));
+        CHECK(output.find("\033[>1u") != std::string::npos);
+
+        CHECK_EQ(::write(master, "ab", 2), 2);
+        output = read_new_output(master, std::move(output));
+        // Plain Left, then Ctrl+Left: still character-left then word-left,
+        // exactly as when the flag is inactive -- "ab" is cursor 1 then 0.
+        CHECK_EQ(::write(master, "\033[D", 3), 3);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "\033[1;5D", 6), 6);
+        output = read_new_output(master, std::move(output));
+        // Plain Right, then Ctrl+Right: back to cursor 1 then 2.
+        CHECK_EQ(::write(master, "\033[C", 3), 3);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "\033[1;5C", 6), 6);
+        output = read_new_output(master, std::move(output));
+        // SGR mouse wheel-up: three scroll_line_up actions, no buffer
+        // change.
+        CHECK_EQ(::write(master, "\033[<64;10;5M", 11), 11);
+        output = read_new_output(master, std::move(output));
+        // Bracketed paste: still an inert block insert.
+        static constexpr std::string_view kPaste = "\033[200~XY\033[201~";
+        CHECK_EQ(::write(master, kPaste.data(), kPaste.size()),
+                 static_cast<ssize_t>(kPaste.size()));
+        output = read_new_output(master, std::move(output));
+
+        static constexpr std::string_view kPlainEnter = "\033[13u";
+        CHECK_EQ(::write(master, kPlainEnter.data(), kPlainEnter.size()),
+                 static_cast<ssize_t>(kPlainEnter.size()));
+        output = read_until(master, std::move(output), "RESULT:");
+
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":4:abXY";
+        CHECK(output.find(expected) != std::string::npos);
+        const auto up_marker =
+            "ACTION:" +
+            std::to_string(static_cast<int>(ControlAction::scroll_line_up));
+        CHECK_EQ(count_occurrences(output, up_marker), 3U);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
 int main() {
+  // Every test above the "M4: Kitty keyboard protocol probe" section is
+  // exercising M1-M3 behavior, not the probe itself -- disable it
+  // process-wide (inherited by every forkpty() child below) so those tests
+  // stay exactly as fast and deterministic as before M4, skipping the
+  // probe's query/DA1 round trip entirely. The Kitty-probe-specific tests
+  // undo this in their own forked child.
+  ::setenv("PICI_DISABLE_KITTY_KEYBOARD", "1", 1);
+
   test_wake_channel();
   test_non_tty_paths();
   test_tty_wake_and_reentry();
@@ -1123,6 +1442,11 @@ int main() {
   test_ctrl_w_deletes_word_and_leading_whitespace();
   test_ctrl_u_and_ctrl_k_kill_to_line_boundaries();
   test_ctrl_y_yanks_last_kill_only();
+  test_kitty_probe_unsupported_replays_alt_enter_and_plain_submit();
+  test_kitty_probe_supported_shift_enter_inserts_newline();
+  test_kitty_probe_typeahead_survives_probe_window();
+  test_kitty_disable_env_var_skips_probe_and_forces_fallback();
+  test_kitty_supported_existing_bindings_unaffected();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
             << " passed, " << tests::failed << " failed\n";
   return tests::failed == 0 ? 0 : 1;

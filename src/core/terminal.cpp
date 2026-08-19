@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -15,6 +16,8 @@
 #include <string>
 #include <string_view>
 #include <sys/ioctl.h>
+// NOLINTNEXTLINE(misc-include-cleaner): poll() declarations vary by platform.
+#include <sys/poll.h>
 #include <sys/types.h>
 #include <system_error>
 #include <thread>
@@ -264,6 +267,119 @@ bool is_combining(char32_t cp) {
 }
 
 } // namespace
+
+std::size_t match_dec_private_reply(std::string_view s, std::size_t i,
+                                    char final_byte) {
+  if (i + 2 >= s.size())
+    return 0;
+  if (s[i] != '\033' || s[i + 1] != '[' || s[i + 2] != '?')
+    return 0;
+  std::size_t j = i + 3;
+  while (j < s.size() && ((s[j] >= '0' && s[j] <= '9') || s[j] == ';'))
+    ++j;
+  if (j >= s.size())
+    return 0; // sequence hasn't finished arriving yet
+  return s[j] == final_byte ? j - i + 1 : 0;
+}
+
+TerminalProbeResult
+probe_terminal_capability(int read_fd, const TerminalProbeMatcher &is_reply,
+                          std::chrono::milliseconds timeout) {
+  TerminalProbeResult result;
+  std::string raw;
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+  const auto has_complete_da1 = [&] {
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+      if (match_dec_private_reply(raw, i, 'c') > 0)
+        return true;
+    }
+    return false;
+  };
+
+  // Read raw bytes until a complete DA1 reply has been seen (the common
+  // case on any real terminal) or the overall deadline passes -- whichever
+  // comes first, so a terminal that answers neither query never hangs this
+  // call.
+  while (!has_complete_da1()) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline)
+      break;
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    struct pollfd descriptor {
+      .fd = read_fd, .events = POLLIN, .revents = 0
+    };
+    const auto poll_result =
+        ::poll(&descriptor, 1,
+               static_cast<int>(
+                   std::max<decltype(remaining)::rep>(remaining.count(), 0)));
+    if (poll_result < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    if (poll_result == 0)
+      break; // overall timeout
+    if ((descriptor.revents & (POLLIN | POLLHUP | POLLERR)) == 0)
+      break;
+    std::array<char, 256> chunk{};
+    const auto n = ::read(read_fd, chunk.data(), chunk.size());
+    if (n <= 0) {
+      if (n < 0 && (errno == EINTR || errno == EAGAIN))
+        continue;
+      break;
+    }
+    raw.append(chunk.data(), static_cast<std::size_t>(n));
+  }
+
+  // Classify every byte read via a single left-to-right scan: the first
+  // complete DA1 reply and, independently, the first reply recognized by
+  // `is_reply`. Matched spans can't overlap since the scan only advances
+  // past a match once one is found at the current position.
+  std::size_t da1_start = std::string::npos;
+  std::size_t da1_len = 0;
+  std::size_t reply_start = std::string::npos;
+  std::size_t reply_len = 0;
+  for (std::size_t i = 0; i < raw.size();) {
+    if (da1_start == std::string::npos) {
+      if (const auto len = match_dec_private_reply(raw, i, 'c'); len > 0) {
+        da1_start = i;
+        da1_len = len;
+        i += len;
+        continue;
+      }
+    }
+    if (reply_start == std::string::npos && is_reply) {
+      if (const auto len = is_reply(raw, i); len > 0) {
+        reply_start = i;
+        reply_len = len;
+        i += len;
+        continue;
+      }
+    }
+    ++i;
+  }
+
+  result.supported =
+      reply_start != std::string::npos &&
+      (da1_start == std::string::npos || reply_start < da1_start);
+
+  result.leftover.reserve(raw.size());
+  for (std::size_t i = 0; i < raw.size();) {
+    if (i == da1_start) {
+      i += da1_len;
+      continue;
+    }
+    if (result.supported && i == reply_start) {
+      i += reply_len;
+      continue;
+    }
+    result.leftover.push_back(raw[i]);
+    ++i;
+  }
+  return result;
+}
 
 std::size_t skip_ansi_sequence(std::string_view s, std::size_t i) {
   if (i >= s.size() || s[i] != '\033')

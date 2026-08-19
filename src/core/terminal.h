@@ -160,6 +160,60 @@ private:
   TerminalTitleController &controller_;
 };
 
+// One "\033[?" + digits/semicolons + `final_byte` DEC-private-mode CSI
+// reply, e.g. the Kitty keyboard protocol's flags-query response
+// ("\033[?<flags>u") or a primary-device-attributes reply
+// ("\033[?<attrs>c"). Returns the reply's length in bytes if a complete one
+// starting at s[i] is found ending in `final_byte`, or 0 if s[i] doesn't
+// start one, the terminating byte isn't `final_byte`, or the sequence
+// hasn't finished arriving yet (more bytes may still be coming -- telling
+// this apart from "not a match at all" matters for a live,
+// incrementally-arriving byte stream; see probe_terminal_capability below,
+// which needs to know whether to keep reading).
+std::size_t match_dec_private_reply(std::string_view s, std::size_t i,
+                                    char final_byte);
+
+// Result of probe_terminal_capability below.
+struct TerminalProbeResult {
+  // Whether a reply recognized by the probe's `is_reply` matcher arrived
+  // strictly before the DA1 sentinel reply in the byte stream.
+  bool supported{false};
+  // Every byte read during the probe that wasn't part of the matched
+  // capability reply (only stripped when `supported` is true) or the DA1
+  // sentinel reply itself, in original order -- type-ahead, unrelated
+  // escape sequences, or a capability reply that arrived too late to count.
+  // Callers must feed this back into their own input path rather than
+  // discarding it.
+  std::string leftover;
+};
+
+// Matches one candidate reply starting at `buffer[offset]`; returns the
+// matched length in bytes, or 0 if `buffer[offset]` isn't the start of one
+// (including "not finished arriving yet" -- see match_dec_private_reply).
+using TerminalProbeMatcher =
+    std::function<std::size_t(std::string_view buffer, std::size_t offset)>;
+
+// Probes an optional terminal capability using a DA1 sentinel. The caller
+// must already have written its query sequence to the terminal, immediately
+// followed by a DA1 (primary device attributes, "\033[c") query, before
+// calling this -- it only performs the read side. Reads raw bytes from
+// `read_fd`, bounded by `timeout` overall (not per-byte), looking for two
+// possible replies: the DA1 sentinel itself (via match_dec_private_reply
+// with final_byte 'c') and, separately, a capability reply recognized by
+// `is_reply`. If the capability reply is found at an earlier byte offset
+// than the DA1 reply, the capability is reported supported.
+//
+// Reading stops as soon as a complete DA1 reply has been seen -- virtually
+// every terminal answers DA1, so this is the common case -- or `timeout`
+// elapses, whichever comes first, so a terminal that answers neither query
+// never hangs the caller. Shared by any terminal-capability probe that
+// wants this DA1-sentinel-bounded shape (the Kitty keyboard protocol probe
+// in cli/readline.cpp is the first; a future OSC 11 background-color probe
+// can reuse it with a different `is_reply` matcher).
+TerminalProbeResult
+probe_terminal_capability(int read_fd, const TerminalProbeMatcher &is_reply,
+                          std::chrono::milliseconds timeout);
+
 // Skip one ANSI/VT escape sequence starting at s[i].
 //
 // Handles:
