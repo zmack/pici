@@ -122,6 +122,12 @@ public:
   virtual bool owns_status_line() const { return false; }
   virtual void set_status_line(const std::optional<std::string> &text) {}
 
+  // The controlling terminal's dimensions changed. Renderers that paint a
+  // fixed layout (status lines, alt-screen content) should recompute and
+  // repaint here. Called synchronously, between turns, on the same thread
+  // that drives the interactive prompt loop; implementations must not block.
+  virtual void on_resize() {}
+
   // True if this renderer draws its own tool call/result presentation.
   virtual bool owns_tool_output() const { return false; }
   virtual void on_tool_output_text(std::string_view call_id,

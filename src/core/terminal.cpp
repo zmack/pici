@@ -9,7 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
-#include <ranges> // NOLINT(misc-include-cleaner)
+#include <ranges>   // NOLINT(misc-include-cleaner)
 #include <signal.h> // NOLINT(modernize-deprecated-headers)
 #include <string>
 #include <string_view>
@@ -25,6 +25,13 @@ namespace {
 
 volatile std::sig_atomic_t g_sigint_pending =
     0; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+volatile std::sig_atomic_t g_resize_generation =
+    0; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+void resize_sig_handler(int /*sig*/) {
+  g_resize_generation = static_cast<std::sig_atomic_t>(g_resize_generation + 1);
+}
 
 } // namespace
 
@@ -62,7 +69,7 @@ void AltScreenSession::enter() {
     atexit_registered_ = true;
   }
 
-  struct sigaction sa{};       // NOLINT(misc-include-cleaner)
+  struct sigaction sa {};      // NOLINT(misc-include-cleaner)
   sa.sa_handler = sig_handler; // NOLINT(misc-include-cleaner)
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = 0;
@@ -120,7 +127,7 @@ void AltScreenSession::sig_handler(int sig) {
 
   if (current_ != nullptr)
     current_->restore_terminal();
-  struct sigaction sa{};   // NOLINT(misc-include-cleaner)
+  struct sigaction sa {};  // NOLINT(misc-include-cleaner)
   sa.sa_handler = SIG_DFL; // NOLINT(misc-include-cleaner)
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = 0;
@@ -135,6 +142,24 @@ bool consume_sigint() {
     return false;
   g_sigint_pending = 0;
   return true;
+}
+
+void install_resize_handler() {
+  static bool installed = false; // Only ever set from the main thread.
+  if (installed)
+    return;
+  installed = true;
+
+  struct sigaction sa {};             // NOLINT(misc-include-cleaner)
+  sa.sa_handler = resize_sig_handler; // NOLINT(misc-include-cleaner)
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0; // No SA_RESTART: a blocked poll()/select() must observe
+                   // EINTR so callers can notice the resize promptly.
+  sigaction(SIGWINCH, &sa, nullptr); // NOLINT(misc-include-cleaner)
+}
+
+int resize_generation() noexcept {
+  return static_cast<int>(g_resize_generation);
 }
 
 namespace {

@@ -2038,9 +2038,17 @@ int cmd_run(const cli::Args &args,
     const int readline_wake_fd = mailbox_wake && !autonomous_budget_exhausted
                                      ? mailbox_wake->read_fd()
                                      : -1;
+    // Full-screen renderers (currently only --render region) echo the
+    // submitted request in their own scrolling history, so the readline box
+    // should empty immediately on submit instead of leaving the typed text
+    // on screen — duplicated — for the whole turn. Such renderers also own a
+    // fixed alt-screen layout that needs repainting on a terminal resize.
+    const bool full_screen_prompt = renderer->owns_status_line();
+    const auto on_prompt_resize = [&] { renderer->on_resize(); };
     auto readline_result =
         cli::readline(prompt, complete_fn, control_fn, readline_status,
-                      readline_draft, readline_cursor, readline_wake_fd);
+                      readline_draft, readline_cursor, readline_wake_fd,
+                      full_screen_prompt, on_prompt_resize);
     if (readline_result.reason == cli::ReadlineExit::eof)
       break;
     if (readline_result.reason == cli::ReadlineExit::mailbox_wake) {

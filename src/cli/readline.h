@@ -69,10 +69,24 @@ private:
 // In TTY mode, an optional wake fd interrupts editing and returns the draft
 // without submitting it. The caller can pass the returned text and cursor to
 // the next invocation. Non-TTY input retains blocking getline behavior.
-ReadlineResult
-readline(std::string_view prompt, const CompleteFn &complete_fn = {},
-         const ControlFn &control_fn = {}, std::string_view status_line = {},
-         std::string_view initial_draft = {},
-         std::size_t initial_cursor = std::string_view::npos, int wake_fd = -1);
+//
+// clear_on_submit: when true, a submitted line is erased from the terminal
+// instead of being left in place with a trailing newline. Full-screen
+// renderers that echo the request in their own scrolling history (so the
+// text would otherwise appear twice, and linger for the whole turn) should
+// pass true; renderers with no separate transcript view should pass false so
+// the typed line remains in normal terminal scrollback.
+//
+// on_resize: invoked when a terminal resize is observed while editing, after
+// this function has redrawn its own line but before continuing to poll. Use
+// it to let a full-screen renderer repaint its own fixed layout.
+ReadlineResult readline(std::string_view prompt,
+                        const CompleteFn &complete_fn = {},
+                        const ControlFn &control_fn = {},
+                        std::string_view status_line = {},
+                        std::string_view initial_draft = {},
+                        std::size_t initial_cursor = std::string_view::npos,
+                        int wake_fd = -1, bool clear_on_submit = false,
+                        const std::function<void()> &on_resize = {});
 
 } // namespace pi::cli

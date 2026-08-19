@@ -60,6 +60,18 @@ void notify_sigint() noexcept;
 // renderer. The signal handler itself only flips a sig_atomic_t flag.
 bool consume_sigint();
 
+// Installs a process-wide SIGWINCH handler that bumps a monotonic generation
+// counter (see resize_generation()) on every terminal resize. Idempotent and
+// safe to call from multiple components (readline, full-screen renderers);
+// the handler is installed at most once per process.
+void install_resize_handler();
+
+// Monotonically increasing count of SIGWINCH deliveries observed since
+// install_resize_handler() was first called. Callers that need to notice a
+// resize should snapshot this value and compare it later rather than
+// consuming/resetting it, since multiple independent components poll it.
+int resize_generation() noexcept;
+
 // Return the display-column width of one terminal line, ignoring ANSI/VT
 // escape sequences.
 int display_columns(std::string_view line);

@@ -507,9 +507,16 @@ class RegionRenderer final : public Renderer {
 public:
   explicit RegionRenderer(int fd)
       : fd_(fd), alt_screen_(fd),
+        last_resize_generation_(resize_generation()),
         paint_thread_([this](const std::stop_token &st) { paint_loop(st); }) {
+    install_resize_handler();
     const auto scroll_region = scroll_region_sequence(term_height(fd_));
     write_all(fd_, scroll_region);
+    // Anchor the cursor on the dedicated prompt row before the first turn
+    // starts, matching the position on_turn_end() restores afterward.
+    // Without this, the very first prompt is drawn at the top of the alt
+    // screen instead of the bottom.
+    position_prompt_cursor();
   }
 
   RegionRenderer(const RegionRenderer &) = delete;
@@ -948,15 +955,29 @@ public:
       last_frame_lines_.clear();
       // Keep terminal teardown available after malformed markdown.
     }
-    // Readline's prompt starts with a newline. Leave the cursor on the status
-    // row so that newline advances to the dedicated prompt row.
-    const int prompt_anchor = std::max(1, term_height(fd_) - 1);
-    const auto cursor_sequence =
-        "\033[" + std::to_string(prompt_anchor) + ";1H\033[?25h";
-    write_all(fd_, cursor_sequence);
+    position_prompt_cursor();
   }
 
   bool owns_tool_output() const override { return true; }
+
+  // Between turns, the interactive loop calls this on the terminal resize
+  // notification. Repaint the content/status panes at the new dimensions and
+  // re-anchor the cursor on the (possibly moved) prompt row. Must only be
+  // called while no turn is active — see Renderer::on_resize().
+  void on_resize() override {
+    bool paint_now = false;
+    {
+      std::scoped_lock lock(mutex_);
+      last_resize_generation_ = resize_generation();
+      state_.revision = ++revision_;
+      mark_dirty_locked();
+      paint_now = !turn_active_;
+    }
+    if (paint_now) {
+      paint_idle_synchronously();
+      position_prompt_cursor();
+    }
+  }
 
 private:
   struct State : RegionState {
@@ -977,6 +998,17 @@ private:
   void mark_dirty_locked() {
     state_.dirty = true;
     cv_.notify_one();
+  }
+
+  // Called with mutex_ held, from paint_loop only. Returns true if a resize
+  // was newly observed (and marks state dirty).
+  bool check_resize_locked() {
+    const auto generation = resize_generation();
+    if (generation == last_resize_generation_)
+      return false;
+    last_resize_generation_ = generation;
+    state_.dirty = true;
+    return true;
   }
 
   void paint_idle_synchronously() {
@@ -1006,20 +1038,32 @@ private:
       State snapshot;
       {
         std::unique_lock lock(mutex_);
-        // First wait without a deadline while idle. Keeping an expired
-        // frame deadline in this state would make wait_until return
-        // immediately on every iteration and spin one CPU forever between
-        // turns.
-        cv_.wait(lock, [&] {
-          return stop.stop_requested() || (turn_active_ && state_.dirty);
-        });
+        // Wait for real work. While a turn is active but otherwise quiet
+        // (e.g. a tool call or network request in flight with no streaming
+        // output yet), wake periodically anyway so a terminal resize is
+        // still noticed with nothing else to piggyback on. With no turn
+        // active at all, wait with no deadline — an idle resize is instead
+        // handled synchronously by on_resize(), since this background
+        // thread must never write to fd_ concurrently with the foreground
+        // readline prompt.
+        while (!stop.stop_requested() && !(turn_active_ && state_.dirty)) {
+          if (turn_active_ && check_resize_locked())
+            break;
+          if (turn_active_)
+            cv_.wait_for(lock, std::chrono::milliseconds(100));
+          else
+            cv_.wait(lock,
+                     [&] { return stop.stop_requested() || turn_active_; });
+        }
         if (stop.stop_requested())
           return;
 
         // Updates arriving before the deadline are coalesced. Leaving this
-        // wait when a turn ends returns to the unbounded idle wait above,
-        // while a still-active dirty turn remains gated by next_frame.
+        // wait when a turn ends returns to the loop above, while a still-
+        // active dirty turn remains gated by next_frame.
         cv_.wait_until(lock, next_frame, [&] {
+          if (turn_active_)
+            check_resize_locked();
           return stop.stop_requested() || !turn_active_ || !state_.dirty;
         });
         if (stop.stop_requested())
@@ -1088,6 +1132,16 @@ private:
       if (state_.revision == snapshot.revision)
         state_.hide_cursor_on_frame = false;
     }
+  }
+
+  // Readline's prompt starts with a newline. Leave the cursor on the status
+  // row so that newline advances to the dedicated prompt row at the very
+  // bottom of the terminal.
+  void position_prompt_cursor() const {
+    const int prompt_anchor = std::max(1, term_height(fd_) - 1);
+    const auto cursor_sequence =
+        "\033[" + std::to_string(prompt_anchor) + ";1H\033[?25h";
+    write_all(fd_, cursor_sequence);
   }
 
   static std::string status_sequence(const State &snapshot, int width,
@@ -1160,6 +1214,7 @@ private:
   std::vector<std::string> last_frame_lines_;
   int last_width_{0};
   int last_height_{0};
+  int last_resize_generation_{0};
   std::jthread paint_thread_;
 };
 

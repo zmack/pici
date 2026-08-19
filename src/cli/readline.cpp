@@ -129,7 +129,7 @@ namespace {
 // ISIG is kept enabled so Ctrl+C still delivers SIGINT.
 struct RawMode {
   int fd{-1};
-  struct termios saved{};
+  struct termios saved {};
   bool active{false};
 
   RawMode() = default;
@@ -210,12 +210,22 @@ int codepoint_width(std::uint32_t codepoint) {
 
 std::size_t terminal_columns() {
   // NOLINTNEXTLINE(misc-include-cleaner): ioctl declarations vary by platform.
-  struct winsize size{};
+  struct winsize size {};
   // NOLINTNEXTLINE(misc-include-cleaner): ioctl declarations vary by platform.
   if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0)
     return size.ws_col;
   return 80;
 }
+
+// Applied to the whole prompt/input row so it reads as a distinct box
+// against the surrounding terminal background. An actual background color
+// is required rather than reverse video (SGR 7): terminals fill cells
+// touched by an erase-in-line ("\033[K") using the active background color,
+// but not the reverse-video bit, so reverse video alone would only tint the
+// glyphs actually written, not the rest of the row. SGR 100 (bright-black
+// background) renders as a distinguishable mid-gray under most terminal
+// color themes, dark and light alike.
+constexpr std::string_view kInputAreaBackground = "\033[100m";
 
 std::size_t ansi_escape_length(std::string_view text, std::size_t offset) {
   if (offset + 1 >= text.size() || text[offset] != '\033' ||
@@ -263,17 +273,18 @@ public:
       ++rows;
     }
     std::cout << "\033[?7l";
+    std::cout << kInputAreaBackground;
     write_wrapped(prompt_, columns, rows, column);
     CursorPosition cursor_position;
     write_wrapped(buf, columns, rows, column, cursor, &cursor_position);
 
     if (show_cursor && column == columns) {
-      std::cout << "\r\n";
+      std::cout << "\033[K\r\n";
       ++rows;
       column = 0;
     }
 
-    std::cout << "\033[K";
+    std::cout << "\033[K"; // fill remainder of the final row with the tint
     if (show_cursor) {
       if (rows > cursor_position.row)
         std::cout << "\033[" << rows - cursor_position.row << 'A';
@@ -282,13 +293,16 @@ public:
       std::cout << '\r';
       if (cursor_position.column > 0)
         std::cout << "\033[" << cursor_position.column << 'C';
-      std::cout << "\033[7m \033[0m";
+      // Toggle reverse video (SGR 7/27) for just the cursor cell without
+      // dropping the input area's background tint.
+      std::cout << "\033[7m \033[27m";
       if (cursor_position.column > 0)
         std::cout << "\033[D";
       cursor_row_ = cursor_position.row;
     } else {
       cursor_row_ = rows;
     }
+    std::cout << "\033[0m"; // leave the tinted box before yielding control
     std::cout << "\033[?7h" << std::flush;
     rendered_rows_ = rows;
     rendered_column_ = column;
@@ -296,6 +310,18 @@ public:
 
   // External output (completion candidates) invalidates the cursor anchor.
   void invalidate() { rendered_rows_ = 0; }
+
+  // A full-screen renderer repainted its own layout and repositioned the
+  // real terminal cursor out from under us (e.g. after a resize). Forget the
+  // relative-motion bookkeeping entirely and re-run the first-draw anchoring
+  // (leading newlines) on the next redraw(), exactly as if this were a fresh
+  // prompt.
+  void reanchor() {
+    first_draw_ = true;
+    rendered_rows_ = 0;
+    rendered_column_ = 0;
+    cursor_row_ = 1;
+  }
 
 private:
   struct CursorPosition {
@@ -344,7 +370,9 @@ private:
       }
 
       if (text[offset] == '\n') {
-        std::cout << "\r\n";
+        // Fill the remainder of the row before wrapping so the input area's
+        // background tint covers the whole box, not just the glyphs.
+        std::cout << "\033[K\r\n";
         ++rows;
         column = 0;
         ++offset;
@@ -361,7 +389,7 @@ private:
       const auto width = codepoint_width(
           utf8_codepoint(text, offset, std::min(length, text.size() - offset)));
       if (width > 0 && column > 0 && column + width > columns) {
-        std::cout << "\r\n";
+        std::cout << "\033[K\r\n";
         ++rows;
         column = 0;
       }
@@ -552,7 +580,9 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
                         const ControlFn &control_fn,
                         std::string_view status_line,
                         std::string_view initial_draft,
-                        std::size_t initial_cursor, int wake_fd) {
+                        std::size_t initial_cursor, int wake_fd,
+                        bool clear_on_submit,
+                        const std::function<void()> &on_resize) {
   // Non-TTY fallback: just use getline (pipes, scripts, tests)
   if (isatty(STDIN_FILENO) == 0) {
     std::cout << prompt << std::flush;
@@ -589,10 +619,24 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
   InputRenderer renderer(prompt, status_line);
   renderer.redraw(buf, cursor);
 
+  core::install_resize_handler();
+  auto last_resize_generation = core::resize_generation();
+
   auto finish = [&](ReadlineExit reason) {
-    renderer.redraw(buf, cursor, false);
-    raw.leave();
-    std::cout << "\r\n" << std::flush;
+    if (clear_on_submit && reason == ReadlineExit::submitted) {
+      // The caller's own transcript will echo this line; leaving it drawn
+      // here too would duplicate it and leave stale text on screen for the
+      // whole turn. Clear the box back to an empty, ready-for-next-input
+      // state instead of committing a trailing newline. The submitted text
+      // itself is still returned below — only the on-screen box is emptied.
+      renderer.redraw(std::string{}, 0, false);
+      raw.leave();
+      std::cout << std::flush;
+    } else {
+      renderer.redraw(buf, cursor, false);
+      raw.leave();
+      std::cout << "\r\n" << std::flush;
+    }
     return ReadlineResult{
         .reason = reason, .text = std::move(buf), .cursor = cursor};
   };
@@ -606,8 +650,25 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
       descriptor_count = 2;
     }
 
-    const auto poll_result =
-        poll_retry(descriptors.data(), descriptor_count, -1);
+    int poll_result = 0;
+    while (true) {
+      poll_result = ::poll(descriptors.data(), descriptor_count, -1);
+      if (poll_result >= 0)
+        break;
+      if (errno != EINTR)
+        break;
+      // A signal (SIGWINCH among others) interrupted the blocking poll.
+      // Notice a genuine resize here rather than silently retrying, since
+      // nothing else observes it while this thread sits idle in readline().
+      const auto generation = core::resize_generation();
+      if (generation != last_resize_generation) {
+        last_resize_generation = generation;
+        if (on_resize)
+          on_resize();
+        renderer.reanchor();
+        renderer.redraw(buf, cursor);
+      }
+    }
     if (poll_result < 0)
       return finish(ReadlineExit::eof);
 
