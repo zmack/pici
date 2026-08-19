@@ -468,14 +468,23 @@ against the same shared probe utility if genuinely run in parallel.
   continuation row looks the same whether the break was a soft word-wrap
   or a literal `\n` the user typed.
 
+- **M3 scroll-key remap resolved: Ctrl+Up/Ctrl+Down for transcript line
+  scroll, Ctrl+Home/Ctrl+End for transcript top/bottom.** Plain
+  Up/Down/Home/End become buffer cursor movement (row navigation, line
+  home/end); PageUp/PageDown stay bound to page scroll unchanged, since
+  they were never natural candidates for in-buffer navigation. No
+  history-recall fallback to preserve (confirmed absent from the
+  codebase), so this remap has no other binding to conflict with.
+- **M5 vim mode is a config.toml opt-in** (e.g. `input.vim_mode = true`),
+  not a runtime toggle — simplest to implement and test, consistent with
+  how pici's other interactive-input behavior is already configured, and
+  avoids spending more keybinding real estate on a feature most users will
+  set once and leave alone.
+
 ## Open questions (need user decisions before/at listed milestones)
 
-- **M3:** confirm the scroll-key remap (Ctrl+Up/Down for transcript scroll)
-  is acceptable before implementing — it changes existing muscle memory.
-  (No history-recall fallback to design around — confirmed absent from the
-  codebase.)
-- **M5:** is vim mode opt-in via config, a runtime toggle (e.g. `Ctrl+V` or
-  a `:` style command), or always-on with an Insert-mode default?
+None outstanding — see "Decisions resolved" above for M3/M5's former open
+questions.
 
 ## Non-goals
 
