@@ -148,17 +148,28 @@ struct RawMode {
       return false;
     struct termios raw = saved;
     raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON);
+    // Clear ICRNL so \r (Enter) and \n (Ctrl+J) arrive as distinct bytes.
+    // With it set, the line discipline translates \r to \n before pici ever
+    // sees it, making Enter indistinguishable from Ctrl+J — and making
+    // Alt+Enter's second byte (a literal \r) collapse into the same byte as
+    // Alt+Ctrl+J, so a newline-insert binding can't tell the two apart.
+    raw.c_iflag &= ~static_cast<tcflag_t>(ICRNL);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
     if (tcsetattr(fdesc, TCSAFLUSH, &raw) != 0)
       return false;
     fd = fdesc;
     active = true;
+    // Bracketed paste: the terminal wraps pasted content in ESC[200~ /
+    // ESC[201~ markers so it can be read as one block instead of being
+    // indistinguishable from typed keystrokes.
+    std::cout << "\033[?2004h" << std::flush;
     return true;
   }
 
   void leave() {
     if (active) {
+      std::cout << "\033[?2004l" << std::flush;
       tcsetattr(fd, TCSAFLUSH, &saved);
       active = false;
     }
@@ -265,6 +276,52 @@ public:
     }
 
     const auto columns = terminal_columns();
+    const std::size_t status_rows = status_line_.empty() ? 0 : 1;
+
+    // Composer height cap: measure the prompt+buffer layout with all output
+    // suppressed first, so the visible viewport (see below) can be decided
+    // before anything is actually painted. Row numbering here starts at 1
+    // for the prompt's own first row, independent of whether a status line
+    // will additionally be drawn above it in the real pass.
+    std::size_t measured_rows = 1;
+    std::size_t measured_column = 0;
+    CursorPosition measured_cursor;
+    write_wrapped(prompt_, columns, measured_rows, measured_column,
+                  std::string_view::npos, nullptr, 1, 0);
+    write_wrapped(buf, columns, measured_rows, measured_column, cursor,
+                  &measured_cursor, 1, 0);
+    std::size_t composer_total_rows = measured_rows;
+    if (show_cursor && measured_column == columns)
+      ++composer_total_rows;
+
+    // At most kMaxComposerRows of that layout are ever painted, keeping
+    // rendered_rows_ (used by clear_previous()'s relative-motion erase
+    // logic) bounded regardless of draft length — a draft taller than the
+    // terminal would otherwise desync that bookkeeping against the
+    // terminal's own scrolling. The window always keeps the cursor's row
+    // visible (or, with the cursor hidden, stays anchored to the tail);
+    // earlier rows are simply not drawn — the buffer itself is untouched.
+    std::size_t composer_viewport_start = 1;
+    std::size_t composer_viewport_end = composer_total_rows;
+    if (composer_total_rows > core::kMaxComposerRows) {
+      const std::size_t max_start =
+          composer_total_rows - core::kMaxComposerRows + 1;
+      const std::size_t anchor_row =
+          show_cursor ? measured_cursor.row : composer_total_rows;
+      std::size_t preferred_start = 1;
+      if (anchor_row + 1 > core::kMaxComposerRows)
+        preferred_start = anchor_row + 1 - core::kMaxComposerRows;
+      composer_viewport_start = std::min(preferred_start, max_start);
+      if (composer_viewport_start < 1)
+        composer_viewport_start = 1;
+      composer_viewport_end =
+          composer_viewport_start + core::kMaxComposerRows - 1;
+    }
+    // Translate into the absolute row numbering the real pass below uses,
+    // which starts one row later whenever a status line is drawn first.
+    const std::size_t viewport_start = composer_viewport_start + status_rows;
+    const std::size_t viewport_end = composer_viewport_end + status_rows;
+
     std::size_t rows = 1;
     std::size_t column = 0;
     if (!status_line_.empty()) {
@@ -276,22 +333,37 @@ public:
     }
     std::cout << "\033[?7l";
     std::cout << kInputAreaBackground;
-    write_wrapped(prompt_, columns, rows, column);
+    write_wrapped(prompt_, columns, rows, column, std::string_view::npos,
+                  nullptr, viewport_start, viewport_end);
     CursorPosition cursor_position;
-    write_wrapped(buf, columns, rows, column, cursor, &cursor_position);
+    write_wrapped(buf, columns, rows, column, cursor, &cursor_position,
+                  viewport_start, viewport_end);
 
     if (show_cursor && column == columns) {
-      std::cout << "\033[K\r\n";
+      if (rows < viewport_end)
+        std::cout << "\033[K\r\n";
       ++rows;
       column = 0;
     }
 
     std::cout << "\033[K"; // fill remainder of the final row with the tint
+    // rows_relative / cursor_row_relative below re-express the (possibly
+    // very large) absolute row numbers in terms of what's actually on
+    // screen: the status line (if any) plus at most kMaxComposerRows
+    // composer rows, so the vertical-motion math and rendered_rows_ stay in
+    // the same bounded space clear_previous() expects.
+    const std::size_t printed_final_row = std::min(rows, viewport_end);
+    const std::size_t composer_rows_shown =
+        printed_final_row - viewport_start + 1;
+    const std::size_t rows_relative = status_rows + composer_rows_shown;
     if (show_cursor) {
-      if (rows > cursor_position.row)
-        std::cout << "\033[" << rows - cursor_position.row << 'A';
-      else if (cursor_position.row > rows)
-        std::cout << "\033[" << cursor_position.row - rows << 'B';
+      const std::size_t cursor_row_relative =
+          std::clamp(cursor_position.row, viewport_start, viewport_end) -
+          composer_viewport_start + 1;
+      if (rows_relative > cursor_row_relative)
+        std::cout << "\033[" << rows_relative - cursor_row_relative << 'A';
+      else if (cursor_row_relative > rows_relative)
+        std::cout << "\033[" << cursor_row_relative - rows_relative << 'B';
       std::cout << '\r';
       // Guard against ever emitting CUF with n >= columns: CSI n C clamps
       // at the terminal's rightmost cell, so a stray out-of-range position
@@ -307,13 +379,13 @@ public:
       std::cout << "\033[7m \033[27m";
       if (cursor_in_row)
         std::cout << "\033[D";
-      cursor_row_ = cursor_position.row;
+      cursor_row_ = cursor_row_relative;
     } else {
-      cursor_row_ = rows;
+      cursor_row_ = rows_relative;
     }
     std::cout << "\033[0m"; // leave the tinted box before yielding control
     std::cout << "\033[?7h" << std::flush;
-    rendered_rows_ = rows;
+    rendered_rows_ = rows_relative;
     rendered_column_ = column;
   }
 
@@ -362,13 +434,34 @@ private:
 
   static void write_wrapped(std::string_view text, std::size_t columns,
                             std::size_t &rows, std::size_t &column,
-                            std::size_t cursor_offset = std::string_view::npos,
-                            CursorPosition *cursor_position = nullptr) {
+                            std::size_t cursor_offset,
+                            CursorPosition *cursor_position,
+                            std::size_t viewport_start,
+                            std::size_t viewport_end) {
     const auto capture = [&] {
       if (cursor_position != nullptr) {
         cursor_position->row = rows;
         cursor_position->column = column;
       }
+    };
+    // Every terminal write below is gated against the composer's
+    // height-cap viewport (see redraw()): rows outside [viewport_start,
+    // viewport_end] still update rows/column and still get their cursor
+    // captured (so wrap decisions and the recorded cursor position stay
+    // correct regardless of what's actually painted), but nothing reaches
+    // the terminal for them. Passing an empty range (viewport_end <
+    // viewport_start) suppresses all output — used for redraw()'s
+    // measurement-only pass, which decides where the viewport should sit
+    // before anything is drawn for real.
+    const auto row_in_viewport = [&] {
+      return rows >= viewport_start && rows <= viewport_end;
+    };
+    // A row-ending transition (hard \n or a width-triggered wrap) should
+    // only be painted if it moves onto another row still inside the
+    // viewport — printing it while leaving the last visible row would push
+    // the real terminal cursor one row past the cap.
+    const auto transition_in_viewport = [&] {
+      return rows >= viewport_start && rows < viewport_end;
     };
     for (std::size_t offset = 0; offset < text.size();) {
       if (const auto escape_length = ansi_escape_length(text, offset);
@@ -376,18 +469,35 @@ private:
         if (offset == cursor_offset)
           capture();
         const auto escape = text.substr(offset, escape_length);
-        std::cout.write(escape.data(),
-                        static_cast<std::streamsize>(escape.size()));
+        if (row_in_viewport())
+          std::cout.write(escape.data(),
+                          static_cast<std::streamsize>(escape.size()));
         offset += escape_length;
         continue;
       }
 
       if (text[offset] == '\n') {
-        if (offset == cursor_offset)
+        if (offset == cursor_offset) {
           capture();
+          // A hard newline always starts a new row, regardless of how full
+          // the preceding row was — if the pre-break column exactly filled
+          // the row, normalize to the start of the row the newline is
+          // about to create. Without this, a cursor sitting right at an
+          // embedded newline whose preceding row was exactly full would
+          // capture a position one column past that row's last cell,
+          // matching the same class of bug M0 fixed for plain wrapped text
+          // (see the width-triggered branch and the end-of-text tail
+          // below).
+          if (cursor_position != nullptr &&
+              cursor_position->column == columns) {
+            ++cursor_position->row;
+            cursor_position->column = 0;
+          }
+        }
         // Fill the remainder of the row before wrapping so the input area's
         // background tint covers the whole box, not just the glyphs.
-        std::cout << "\033[K\r\n";
+        if (transition_in_viewport())
+          std::cout << "\033[K\r\n";
         ++rows;
         column = 0;
         ++offset;
@@ -396,7 +506,8 @@ private:
       if (text[offset] == '\r') {
         if (offset == cursor_offset)
           capture();
-        std::cout << '\r';
+        if (row_in_viewport())
+          std::cout << '\r';
         column = 0;
         ++offset;
         continue;
@@ -414,7 +525,8 @@ private:
       // capture always lands on the cell this character is about to be
       // painted into.
       if (width > 0 && column > 0 && column + width > columns) {
-        std::cout << "\033[K\r\n";
+        if (transition_in_viewport())
+          std::cout << "\033[K\r\n";
         ++rows;
         column = 0;
       }
@@ -422,8 +534,9 @@ private:
         capture();
 
       const auto character = text.substr(offset, length);
-      std::cout.write(character.data(),
-                      static_cast<std::streamsize>(character.size()));
+      if (row_in_viewport())
+        std::cout.write(character.data(),
+                        static_cast<std::streamsize>(character.size()));
       column += static_cast<std::size_t>(std::max(width, 0));
       offset += length;
     }
@@ -570,6 +683,60 @@ EscapeSequenceResult read_escape_sequence(int wake_fd) {
       break;
   }
   return {.sequence = std::move(seq)};
+}
+
+struct BracketedPasteResult {
+  std::string content;
+  bool wake{false};
+};
+
+// Reads raw bytes following a "[200~" paste-start marker (already consumed
+// by read_escape_sequence) until the "[201~" paste-end marker is seen.
+// Every byte in between — including literal \n/\r from the pasted text — is
+// data, never reinterpreted as Enter, Alt+Enter, or another escape
+// sequence: bracketed paste exists precisely so pasted content can be told
+// apart from typed keystrokes and inserted as one inert block.
+BracketedPasteResult read_bracketed_paste(int wake_fd) {
+  BracketedPasteResult result;
+  static constexpr std::string_view kEndMarker = "\033[201~";
+  std::array<pollfd, 2> descriptors{};
+  descriptors[0] = {.fd = STDIN_FILENO, .events = POLLIN};
+  const nfds_t descriptor_count = wake_fd >= 0 ? 2 : 1;
+  if (wake_fd >= 0)
+    descriptors[1] = {.fd = wake_fd, .events = POLLIN};
+
+  while (true) {
+    if (result.content.size() >= kEndMarker.size() &&
+        std::string_view(result.content).ends_with(kEndMarker)) {
+      result.content.resize(result.content.size() - kEndMarker.size());
+      return result;
+    }
+    descriptors[0].revents = 0;
+    if (descriptor_count > 1)
+      descriptors[1].revents = 0;
+    // Unlike read_escape_sequence's short probe window, a paste has no
+    // fixed size and the terminal may deliver it in several chunks — block
+    // until more input (or a wake) actually arrives instead of timing out.
+    if (poll_retry(descriptors.data(), descriptor_count, -1) <= 0)
+      continue;
+    const bool wake_ready = wake_fd >= 0 && (descriptors[1].revents &
+                                             (POLLIN | POLLHUP | POLLERR)) != 0;
+    if ((descriptors[0].revents & (POLLIN | POLLHUP | POLLERR)) == 0) {
+      if (wake_ready) {
+        result.wake = true;
+        return result;
+      }
+      continue;
+    }
+    unsigned char c = 0;
+    const auto n = ::read(STDIN_FILENO, &c, 1);
+    if (n <= 0) {
+      if (n < 0 && (errno == EINTR || errno == EAGAIN))
+        continue;
+      return result; // EOF/error mid-paste: stop with whatever was read.
+    }
+    result.content += static_cast<char>(c);
+  }
 }
 
 bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn,
@@ -785,8 +952,28 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
         const auto escape = read_escape_sequence(wake_fd);
         if (escape.wake)
           return finish(ReadlineExit::mailbox_wake);
-        if (handle_escape_sequence(escape.sequence, control_fn, buf, cursor))
+        if (escape.sequence == "\r") {
+          // Alt+Enter (legacy ESC + \r, distinguishable now that ICRNL is
+          // cleared): insert a newline instead of submitting.
+          buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor), '\n');
+          ++cursor;
           renderer.redraw(buf, cursor);
+        } else if (escape.sequence == "[200~") {
+          // Bracketed paste: the block between start/end markers is always
+          // an inert insert, regardless of embedded \n/\r — it must never
+          // submit, even if the pasted text ends in a newline.
+          auto paste = read_bracketed_paste(wake_fd);
+          if (!paste.content.empty()) {
+            buf.insert(cursor, paste.content);
+            cursor += paste.content.size();
+          }
+          if (paste.wake)
+            return finish(ReadlineExit::mailbox_wake);
+          renderer.redraw(buf, cursor);
+        } else if (handle_escape_sequence(escape.sequence, control_fn, buf,
+                                          cursor)) {
+          renderer.redraw(buf, cursor);
+        }
       } else if (c == '\t') { // Tab — complete
         if (complete_fn) {
           auto candidates = complete_fn(buf);

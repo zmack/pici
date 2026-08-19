@@ -505,13 +505,62 @@ void test_region_factory_lifecycle() {
          "region enters alternate screen");
   expect(output.find("\033[?1049l") != std::string::npos,
          "region leaves alternate screen");
-  expect(output.find("\033[23;1H\033[?25h") != std::string::npos,
+  // Default (non-tty) terminal height is 24; the composer now reserves
+  // kMaxComposerRows rows at the bottom, so the status row sits
+  // kMaxComposerRows rows above the last line instead of just one.
+  expect(output.find("\033[18;1H\033[?25h") != std::string::npos,
          "turn end leaves cursor on the status row before readline");
   expect(output.find("\033[H\033[J") == std::string::npos,
          "new turns do not clear the alternate screen");
   expect(output.find("ab") != std::string::npos &&
              output.find("short") != std::string::npos,
          "completed transcript remains available across turns");
+}
+
+// M1 (composer-textarea-rewrite plan): the composer now reserves a fixed
+// kMaxComposerRows-row budget at the bottom of the terminal (rather than
+// the old single row) so a multi-line draft has somewhere to grow into
+// without the transcript's scroll region resizing dynamically underneath
+// it. Confirms the transcript's DECSTBM range, the status row, and the
+// transcript content itself all agree on where that reservation starts.
+void test_composer_rows_reserved_in_region_mode() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates composer-reservation capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->on_turn_start();
+    renderer->on_text_delta("distinctive-transcript-content");
+    renderer->on_turn_end();
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+
+  // Default (non-tty) terminal is 24 rows x 80 columns.
+  constexpr int kHeight = 24;
+  const int reserved = static_cast<int>(pi::core::kMaxComposerRows);
+  const auto expected_scroll_region =
+      "\033[1;" + std::to_string(kHeight - 1 - reserved) + "r";
+  const auto expected_status_row =
+      "\033[" + std::to_string(kHeight - reserved) + ";1H";
+  expect(output.find(expected_scroll_region) != std::string::npos,
+         "transcript scroll region leaves room for the reserved composer "
+         "rows");
+  expect(output.find(expected_status_row) != std::string::npos,
+         "status row sits directly above the reserved composer rows");
+  expect(output.find("distinctive-transcript-content") != std::string::npos,
+         "transcript content still renders above the reserved composer "
+         "rows");
 }
 
 // force_full_repaint() exists so a transient full-screen command UI (/tree,
@@ -1076,6 +1125,7 @@ int main() {
   test_tiny_layout_keeps_tool_body_collapsed();
   test_tool_callbacks_route_into_regions();
   test_region_factory_lifecycle();
+  test_composer_rows_reserved_in_region_mode();
   test_force_full_repaint_reissues_every_row();
   test_mailbox_reply_receipt_is_persistent_and_safe();
   test_mailbox_reply_alongside_parallel_unrelated_tools();

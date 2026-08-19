@@ -1,5 +1,7 @@
 #include "cli/readline.h"
 
+#include "core/terminal.h"
+
 #include <cerrno>
 #include <chrono>
 #include <fcntl.h>
@@ -60,6 +62,29 @@ std::string read_until(int fd, std::string output, std::string_view marker) {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while (output.find(marker) == std::string::npos &&
+         std::chrono::steady_clock::now() < deadline) {
+    pollfd descriptor{.fd = fd, .events = POLLIN};
+    const auto ready = ::poll(&descriptor, 1, 100);
+    if (ready <= 0)
+      continue;
+    char buffer[256];
+    const auto count = ::read(fd, buffer, sizeof(buffer));
+    if (count > 0)
+      output.append(buffer, static_cast<std::size_t>(count));
+  }
+  return output;
+}
+
+// Like read_until, but only considers the marker found if it appears at or
+// after byte offset `from` — used to wait for a *second* occurrence of a
+// marker (e.g. a redraw's trailing escape sequence) that already exists
+// earlier in `output` from a prior redraw.
+std::string read_until_from(int fd, std::string output, std::size_t from,
+                            std::string_view marker) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while ((output.size() < from ||
+          output.find(marker, from) == std::string::npos) &&
          std::chrono::steady_clock::now() < deadline) {
     pollfd descriptor{.fd = fd, .events = POLLIN};
     const auto ready = ::poll(&descriptor, 1, 100);
@@ -437,6 +462,275 @@ void test_wrap_boundary_cursor_placement() {
       });
 }
 
+void test_alt_enter_inserts_newline() {
+  tests::run("readline: Alt+Enter inserts a newline, plain Enter still submits",
+             [] {
+               int master = -1;
+               const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+               CHECK(child >= 0);
+               if (child == 0) {
+                 dprintf(STDOUT_FILENO, "READY\n");
+                 const auto result = readline("> ", {}, {}, {}, "", 0);
+                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                         static_cast<int>(result.reason), result.cursor,
+                         result.text.c_str());
+                 _exit(0);
+               }
+
+               auto output = read_until(master, {}, "READY");
+               CHECK_EQ(::write(master, "ab", 2), 2);
+               output = read_new_output(master, std::move(output));
+               // ESC immediately followed by \r — the legacy Alt+Enter
+               // encoding.
+               CHECK_EQ(::write(master, "\033\r", 2), 2);
+               output = read_new_output(master, std::move(output));
+               CHECK_EQ(::write(master, "cd", 2), 2);
+               output = read_new_output(master, std::move(output));
+               // Plain Enter still submits — it must not have been
+               // reinterpreted.
+               CHECK_EQ(::write(master, "\r", 1), 1);
+               output = read_until(master, std::move(output), "RESULT:");
+               // The child's dprintf writes result.text (containing the real \n
+               // Alt+Enter inserted) back through the pty's own *output*
+               // processing, which still has ONLCR enabled (RawMode only
+               // touches input flags) — so the embedded \n is observed here as
+               // \r\n. The 5-byte cursor count below confirms the buffer itself
+               // holds a single \n, not two bytes.
+               const auto expected =
+                   "RESULT:" +
+                   std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                   ":5:ab\r\ncd";
+               CHECK(output.find(expected) != std::string::npos);
+               CHECK_EQ(wait_for_child(child), 0);
+               ::close(master);
+             });
+}
+
+void test_multiline_navigation_and_backspace() {
+  tests::run(
+      "readline: Left/Right cross an embedded newline and Backspace joins "
+      "lines",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("> ", {}, {}, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        // Build "ab\ncd" via Alt+Enter; cursor ends at offset 5 (the end).
+        CHECK_EQ(::write(master, "ab", 2), 2);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "\033\r", 2), 2);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "cd", 2), 2);
+        output = read_new_output(master, std::move(output));
+
+        // Left x3: 5->4->3->2. The third step crosses the embedded \n
+        // backward (from right after it to right before it), landing right
+        // after "ab".
+        for (int i = 0; i < 3; ++i) {
+          CHECK_EQ(::write(master, "\033[D", 3), 3);
+          output = read_new_output(master, std::move(output));
+        }
+        // Right x1: 2->3, crossing the same \n forward again, landing right
+        // after it (right before "cd").
+        CHECK_EQ(::write(master, "\033[C", 3), 3);
+        output = read_new_output(master, std::move(output));
+        // Backspace at offset 3 erases the \n itself (offset 2), rejoining
+        // "ab" and "cd" into "abcd" with the cursor left at offset 2.
+        CHECK_EQ(::write(master, "\x7f", 1), 1);
+        output = read_new_output(master, std::move(output));
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":2:abcd";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_bracketed_paste_is_inert_block_insert() {
+  tests::run(
+      "readline: bracketed paste lands intact and never submits, even with "
+      "a trailing newline",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("> ", {}, {}, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        // A paste with an embedded newline AND a trailing newline: neither
+        // must submit, and both must land in the buffer as literal bytes.
+        const std::string paste = "\033[200~line1\nline2\n\033[201~";
+        CHECK_EQ(::write(master, paste.data(), paste.size()),
+                 static_cast<ssize_t>(paste.size()));
+        output = read_new_output(master, std::move(output));
+        CHECK(output.find("RESULT:") == std::string::npos);
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        // See the Alt+Enter test above: the pty's own output processing
+        // (ONLCR) renders the buffer's real embedded \n bytes as \r\n here.
+        // The :12: cursor count confirms the buffer itself holds 12 bytes
+        // (two single-byte \n, not \r\n pairs).
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":12:line1\r\nline2\r\n";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_embedded_newline_cursor_placement() {
+  constexpr int kColumns = 10;
+
+  tests::run(
+      "readline: cursor right before an embedded newline lands on the next "
+      "row, not the previous one",
+      [] {
+        struct winsize ws {};
+        ws.ws_row = 24;
+        ws.ws_col = kColumns;
+        int master = -1;
+        // "0123456789" exactly fills the first row; cursor sits right at
+        // the embedded \n that follows it (offset 10).
+        const auto child = forkpty(&master, nullptr, nullptr, &ws);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("", {}, {}, {}, "0123456789\nABCDE", 10);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        output = read_until(master, std::move(output), "ABCDE");
+        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+        // The final fill-and-toggle sequence must be a bare "\r" straight
+        // into the reverse-video toggle — no vertical move at all, since
+        // the cursor's normalized row (start of the second row) matches
+        // where painting actually stopped. Before the M1 fix, capturing
+        // the pre-break {row 1, column 10} here produced an extra
+        // "\033[1A" that painted the cursor block back over the first
+        // row's last digit instead.
+        CHECK(output.find("\033[K\r\033[7m") != std::string::npos);
+
+        CHECK_EQ(::write(master, "\n", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+
+  tests::run(
+      "readline: cursor right after an embedded newline lands on the new "
+      "row's start",
+      [] {
+        struct winsize ws {};
+        ws.ws_row = 24;
+        ws.ws_col = kColumns;
+        int master = -1;
+        // Cursor sits at offset 11 — right at 'A', the start of the second
+        // row.
+        const auto child = forkpty(&master, nullptr, nullptr, &ws);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("", {}, {}, {}, "0123456789\nABCDE", 11);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        output = read_until(master, std::move(output), "ABCDE");
+        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+        CHECK(output.find("\033[K\r\033[7m") != std::string::npos);
+
+        CHECK_EQ(::write(master, "\n", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_composer_height_cap() {
+  tests::run("readline: composer height cap bounds rendered row bookkeeping "
+             "regardless of draft length",
+             [] {
+               struct winsize ws {};
+               ws.ws_row = 40;
+               ws.ws_col = 80;
+               int master = -1;
+               std::string draft;
+               constexpr int kLines = 20;
+               for (int i = 0; i < kLines; ++i) {
+                 if (i > 0)
+                   draft += '\n';
+                 draft += "line" + std::to_string(i);
+               }
+               const auto child = forkpty(&master, nullptr, nullptr, &ws);
+               CHECK(child >= 0);
+               if (child == 0) {
+                 dprintf(STDOUT_FILENO, "READY\n");
+                 const auto result =
+                     readline("> ", {}, {}, {}, draft, draft.size());
+                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                         static_cast<int>(result.reason), result.cursor,
+                         result.text.c_str());
+                 _exit(0);
+               }
+
+               auto output = read_until(master, {}, "READY");
+               // Wait for the first redraw to complete in full (its trailing
+               // "\033[?7h", not just the content partway through).
+               output = read_until(master, std::move(output),
+                                   "line" + std::to_string(kLines - 1));
+               output = read_until(master, std::move(output), "\033[?7h");
+               const auto before_size = output.size();
+
+               // One more keystroke triggers a second redraw, whose
+               // clear_previous() erases exactly rendered_rows_ rows (one
+               // "\033[2K" per row) before repainting — direct evidence of what
+               // InputRenderer's own row-count bookkeeping was set to by the
+               // draft's (uncapped, 20-row) first render.
+               CHECK_EQ(::write(master, "X", 1), 1);
+               output = read_until_from(master, std::move(output), before_size,
+                                        "\033[?7h");
+               const auto second_redraw = output.substr(before_size);
+               CHECK_EQ(count_occurrences(second_redraw, "\033[2K"),
+                        pi::core::kMaxComposerRows);
+
+               CHECK_EQ(::write(master, "\r", 1), 1);
+               output = read_until(master, std::move(output), "RESULT:");
+               CHECK_EQ(wait_for_child(child), 0);
+               ::close(master);
+             });
+}
+
 int main() {
   test_wake_channel();
   test_non_tty_paths();
@@ -445,6 +739,11 @@ int main() {
   test_eof_wake_race();
   test_mouse_wheel_scroll();
   test_wrap_boundary_cursor_placement();
+  test_alt_enter_inserts_newline();
+  test_multiline_navigation_and_backspace();
+  test_bracketed_paste_is_inert_block_insert();
+  test_embedded_newline_cursor_placement();
+  test_composer_height_cap();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
             << " passed, " << tests::failed << " failed\n";
   return tests::failed == 0 ? 0 : 1;

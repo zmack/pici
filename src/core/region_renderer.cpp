@@ -32,6 +32,11 @@ namespace {
 constexpr int kFrameIntervalMs = 16;
 constexpr std::size_t kMaxExpandedToolRegions = 6;
 constexpr int kMaxToolBodyLines = 4;
+// Rows reserved at the bottom of the terminal for the composer, fixed up
+// front rather than shrinking the transcript region dynamically as the
+// draft's row count changes — see kMaxComposerRows in core/terminal.h,
+// which readline's own input renderer caps its painted rows to as well.
+constexpr int kComposerRows = static_cast<int>(kMaxComposerRows);
 
 std::string with_sgr_reset(std::string line) {
   if (!line.ends_with("\033[0m"))
@@ -564,9 +569,9 @@ bool write_all(int fd, std::string_view data) {
 }
 
 std::string scroll_region_sequence(int height) {
-  if (height < 3)
+  if (height < kComposerRows + 2)
     return {};
-  return "\033[1;" + std::to_string(height - 2) + "r";
+  return "\033[1;" + std::to_string(height - 1 - kComposerRows) + "r";
 }
 
 class RegionRenderer final : public Renderer {
@@ -941,7 +946,7 @@ public:
     bool paint_now = false;
     {
       std::scoped_lock lock(mutex_);
-      const int page_rows = std::max(1, term_height(fd_) - 3);
+      const int page_rows = std::max(1, term_height(fd_) - 2 - kComposerRows);
       const auto add_scroll = [&](int amount) {
         if (state_.scroll_offset_rows >
             std::numeric_limits<int>::max() - amount) {
@@ -1180,7 +1185,7 @@ private:
     std::scoped_lock output_lock(paint_mutex_);
     const int width = term_width(fd_);
     const int height = term_height(fd_);
-    const int content_rows = std::max(0, height - 2);
+    const int content_rows = std::max(0, height - 1 - kComposerRows);
     if (content_rows < 1)
       return;
 
@@ -1229,7 +1234,7 @@ private:
   // row so that newline advances to the dedicated prompt row at the very
   // bottom of the terminal.
   void position_prompt_cursor() const {
-    const int prompt_anchor = std::max(1, term_height(fd_) - 1);
+    const int prompt_anchor = std::max(1, term_height(fd_) - kComposerRows);
     const auto cursor_sequence =
         "\033[" + std::to_string(prompt_anchor) + ";1H\033[?25h";
     write_all(fd_, cursor_sequence);
@@ -1237,7 +1242,7 @@ private:
 
   static std::string status_sequence(const State &snapshot, int width,
                                      int height, int scroll, int max_scroll) {
-    if (height < 2 || width < 1)
+    if (height < kComposerRows + 1 || width < 1)
       return {};
 
     std::string left;
@@ -1282,7 +1287,8 @@ private:
     if (usage.empty() || gap < 1)
       usage.clear();
 
-    std::string bar = "\033[" + std::to_string(height - 1) + ";1H\033[2K";
+    std::string bar =
+        "\033[" + std::to_string(height - kComposerRows) + ";1H\033[2K";
     // An error status stays visually distinct from routine tool/usage
     // chatter on the same row instead of blending into the same dim gray.
     bar += snapshot.has_error ? "\033[1;31m" : "\033[2m";

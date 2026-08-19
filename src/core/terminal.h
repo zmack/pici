@@ -80,6 +80,14 @@ int display_columns(std::string_view line);
 // multibyte character or escape sequence. Embedded newlines are discarded.
 std::string truncate_ansi_line(std::string_view line, int width);
 
+// Composer height cap shared by readline's own input renderer
+// (cli/readline.cpp) and the --render region layout (region_renderer.cpp):
+// the input box never occupies more than this many terminal rows regardless
+// of how many lines the draft contains. Kept small — enough to be useful
+// for a short multi-line message, not enough to swallow a large fraction of
+// a typical terminal.
+constexpr std::size_t kMaxComposerRows = 6;
+
 constexpr std::size_t kMaxTerminalTitleChars = 240;
 extern const std::array<std::string_view, 10> kTerminalTitleSpinnerFrames;
 constexpr std::chrono::milliseconds kTerminalTitleSpinnerInterval{100};
