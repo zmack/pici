@@ -175,26 +175,42 @@ std::string tool_summary(const RegionToolBlock &tool) {
   return out;
 }
 
+// Tool regions sit two columns in from the margin so they read as nested
+// under their WORK heading rather than flush with ordinary narration —
+// wrapping uses the narrower inner width so no physical row exceeds the
+// terminal, and the indent is applied once at the end via indent_lines().
+constexpr std::string_view kToolIndent = "  ";
+
+std::vector<std::string> indent_lines(std::vector<std::string> lines) {
+  for (auto &line : lines)
+    line.insert(0, kToolIndent);
+  return lines;
+}
+
 std::vector<std::string> tool_lines(const RegionToolBlock &tool, int width,
                                     bool expanded, int content_rows) {
   if (width <= 0)
     return {};
+  const int inner_width =
+      std::max(1, width - static_cast<int>(kToolIndent.size()));
 
   if (!expanded)
-    return split_region_lines(tool_summary(tool), width);
+    return indent_lines(split_region_lines(tool_summary(tool), inner_width));
 
   if (!tool.running && !tool.custom_result_output.empty()) {
-    auto custom_lines = split_region_lines(tool.custom_result_output, width);
+    auto custom_lines =
+        split_region_lines(tool.custom_result_output, inner_width);
     const auto max_custom_lines =
         static_cast<std::size_t>(kMaxToolBodyLines) + 1U;
     if (custom_lines.size() > max_custom_lines)
       custom_lines.resize(kMaxToolBodyLines + 1);
-    return custom_lines;
+    return indent_lines(std::move(custom_lines));
   }
 
   std::string header;
   if (!tool.custom_call_output.empty()) {
-    auto custom_header = split_region_lines(tool.custom_call_output, width);
+    auto custom_header =
+        split_region_lines(tool.custom_call_output, inner_width);
     while (!custom_header.empty() && custom_header.front() == "\033[0m")
       custom_header.erase(custom_header.begin());
     if (custom_header.size() > 1)
@@ -215,23 +231,23 @@ std::vector<std::string> tool_lines(const RegionToolBlock &tool, int width,
     header += "\033[0m";
   }
 
-  auto lines = split_region_lines(header, width);
+  auto lines = split_region_lines(header, inner_width);
   if (lines.size() >= static_cast<std::size_t>(content_rows))
-    return lines;
+    return indent_lines(std::move(lines));
   if (tool.raw_output.empty())
-    return lines;
+    return indent_lines(std::move(lines));
 
   // Failed output stays legible instead of blending into ordinary dim tool
   // output — the error state is otherwise only visible in the header color.
   std::string body(tool.is_error ? "\033[38;5;203m" : "\033[38;5;245m");
   body += truncate_tool_result(tool.raw_output);
   body += "\033[0m";
-  auto body_lines = split_region_lines(body, width);
+  auto body_lines = split_region_lines(body, inner_width);
   if (body_lines.size() > static_cast<std::size_t>(kMaxToolBodyLines))
     body_lines.resize(kMaxToolBodyLines);
   lines.insert(lines.end(), std::make_move_iterator(body_lines.begin()),
                std::make_move_iterator(body_lines.end()));
-  return lines;
+  return indent_lines(std::move(lines));
 }
 
 std::vector<std::string> legacy_region_lines(const RegionState &state,
@@ -245,7 +261,8 @@ std::vector<std::string> legacy_region_lines(const RegionState &state,
       return;
     auto thinking = "\033[3;38;5;245m[thinking]\033[0m\n" +
                     render_visible_markdown(state.thinking);
-    auto thinking_lines = split_region_lines(thinking, width);
+    auto thinking_lines = indent_lines(split_region_lines(
+        thinking, std::max(1, width - static_cast<int>(kToolIndent.size()))));
     lines.insert(lines.end(), std::make_move_iterator(thinking_lines.begin()),
                  std::make_move_iterator(thinking_lines.end()));
   };
@@ -320,7 +337,7 @@ std::string request_sender_label(const RequestPresentation &metadata) {
 }
 
 std::string request_heading(const RegionRequestBlock &request) {
-  std::string heading = "\033[1;36m-- REQUEST";
+  std::string heading = "\033[1;36mREQUEST";
   const auto source = request_source_label(request.metadata.source);
   if (!source.empty()) {
     heading += " | ";
@@ -362,7 +379,7 @@ void append_request_lines(std::vector<std::string> &lines,
                request_sender_label(request.metadata) != first_sender;
       });
   if (mixed)
-    heading = "\033[1;36m-- REQUEST";
+    heading = "\033[1;36mREQUEST";
   // A blank row separates this turn from whatever history precedes it so a
   // scrolling transcript reads as distinct turns instead of one dense wall
   // of text. The very first thing painted needs no leading gap.
@@ -454,9 +471,20 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
     };
     for (const auto &block : turn.blocks) {
       if (const auto *text = std::get_if<RegionTextBlock>(&block)) {
-        append_section_heading(region_section(text->kind));
+        const auto text_section = region_section(text->kind);
+        append_section_heading(text_section);
         auto rendered = render_visible_markdown(text->raw);
-        auto text_lines = split_region_lines(rendered, width);
+        // Narration under WORK (or still-provisional streaming text) nests
+        // at the same indent as the thinking/tool blocks it sits beside;
+        // the terminal ANSWER stays flush with REQUEST at full width.
+        const bool nested = text_section == RegionSection::work ||
+                            text_section == RegionSection::provisional;
+        auto text_lines =
+            nested ? indent_lines(split_region_lines(
+                         rendered,
+                         std::max(1, width - static_cast<int>(
+                                                 kToolIndent.size()))))
+                   : split_region_lines(rendered, width);
         lines.insert(lines.end(), std::make_move_iterator(text_lines.begin()),
                      std::make_move_iterator(text_lines.end()));
         continue;
@@ -465,7 +493,9 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
         append_section_heading(RegionSection::work);
         auto rendered = "\033[3;38;5;245m[thinking]\033[0m\n" +
                         render_visible_markdown(thinking->raw);
-        auto thinking_lines = split_region_lines(rendered, width);
+        auto thinking_lines = indent_lines(split_region_lines(
+            rendered,
+            std::max(1, width - static_cast<int>(kToolIndent.size()))));
         lines.insert(lines.end(),
                      std::make_move_iterator(thinking_lines.begin()),
                      std::make_move_iterator(thinking_lines.end()));

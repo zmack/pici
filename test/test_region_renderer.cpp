@@ -622,7 +622,7 @@ void test_explicit_turn_request_sections() {
   mailbox.complete = true;
   state.turns.push_back(std::move(mailbox));
 
-  const auto frame = pi::core::build_region_frame(state, 24, 40);
+  const auto frame = pi::core::build_region_frame(state, 40, 40);
   std::size_t request_headings = 0;
   std::size_t ordinary_prompt = frame.lines.size();
   std::size_t mailbox_prompt = frame.lines.size();
@@ -631,7 +631,7 @@ void test_explicit_turn_request_sections() {
   std::size_t answer = frame.lines.size();
   for (std::size_t index = 0; index < frame.lines.size(); ++index) {
     const auto &line = frame.lines[index];
-    request_headings += line.find("-- REQUEST") != std::string::npos;
+    request_headings += line.find("REQUEST") != std::string::npos;
     if (line.find("MAILBOX") != std::string::npos)
       mailbox_heading = index;
     if (line.find("ordinary prompt") != std::string::npos)
@@ -644,7 +644,7 @@ void test_explicit_turn_request_sections() {
       answer = index;
   }
   expect(request_headings == 2, "each explicit turn has one request heading");
-  expect(frame.lines[0].find("-- REQUEST") != std::string::npos,
+  expect(frame.lines[0].find("REQUEST") != std::string::npos,
          "ordinary request heading is visible");
   expect(mailbox_prompt < frame.lines.size() &&
              frame.lines[mailbox_prompt].find("MAILBOX") == std::string::npos,
@@ -663,7 +663,7 @@ void test_explicit_turn_request_sections() {
          "completed turn preserves answer text");
 
   state.scroll_offset_rows = frame.max_scroll_rows;
-  const auto top = pi::core::build_region_frame(state, 24, 4);
+  const auto top = pi::core::build_region_frame(state, 40, 4);
   expect(top.total_rows > top.lines.size(),
          "explicit turns expose physical scroll rows");
   expect(top.max_scroll_rows > 0, "explicit turns have a scroll boundary");
@@ -676,7 +676,7 @@ void test_request_audit_behaviors() {
   const auto empty_frame = pi::core::build_region_frame(empty, 40, 20);
   expect(std::all_of(empty_frame.lines.begin(), empty_frame.lines.end(),
                      [](const auto &line) {
-                       return line.find("-- REQUEST") == std::string::npos;
+                       return line.find("REQUEST") == std::string::npos;
                      }),
          "legacy empty ordinary requests do not paint a heading");
 
@@ -691,7 +691,7 @@ void test_request_audit_behaviors() {
       .raw_text = "mailbox"});
   const auto mixed_frame = pi::core::build_region_frame(
       pi::core::RegionState{.turns = {std::move(mixed)}}, 40, 20);
-  expect(mixed_frame.lines[0] == "\033[1;36m-- REQUEST\033[0m",
+  expect(mixed_frame.lines[0] == "\033[1;36mREQUEST\033[0m",
          "mixed request provenance uses a neutral heading");
   expect(std::all_of(mixed_frame.lines.begin(), mixed_frame.lines.end(),
                      [](const auto &line) {
@@ -783,7 +783,7 @@ void test_request_audit_behaviors() {
     if (command_frame.lines[index].find("command output") != std::string::npos)
       command = index;
     if (index > command &&
-        command_frame.lines[index].find("-- REQUEST") != std::string::npos)
+        command_frame.lines[index].find("REQUEST") != std::string::npos)
       second_heading = index;
   }
   expect(before_first_command < first_answer,
