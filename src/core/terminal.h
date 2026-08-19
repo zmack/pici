@@ -96,12 +96,14 @@ TerminalTitleResult clear_terminal_title(int fd);
 
 class TerminalTitleController {
 public:
-  explicit TerminalTitleController(int fd, std::string initial_base_title);
+  explicit TerminalTitleController(int fd,
+                                   const std::string &initial_base_title);
   using Writer = std::function<TerminalTitleResult(std::string_view)>;
-  TerminalTitleController(int fd, std::string initial_base_title, Writer writer,
-                          std::chrono::milliseconds interval);
-  TerminalTitleController(int fd, std::string initial_base_title, Writer writer,
-                          std::chrono::milliseconds interval, bool is_tty);
+  TerminalTitleController(int fd, const std::string &initial_base_title,
+                          Writer writer, std::chrono::milliseconds interval);
+  TerminalTitleController(int fd, const std::string &initial_base_title,
+                          Writer writer, std::chrono::milliseconds interval,
+                          bool is_tty);
   ~TerminalTitleController() noexcept;
 
   TerminalTitleController(const TerminalTitleController &) = delete;
@@ -109,7 +111,7 @@ public:
   TerminalTitleController(TerminalTitleController &&) = delete;
   TerminalTitleController &operator=(TerminalTitleController &&) = delete;
 
-  void set_base_title(std::string title);
+  void set_base_title(const std::string &title);
   void start_activity();
   void stop_activity();
 

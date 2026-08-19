@@ -2,6 +2,7 @@
 
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/request_presentation.h"
 
 #include <nlohmann/json.hpp>
 #include <type_traits>
@@ -21,7 +22,7 @@ nlohmann::json message_json( // NOLINT(misc-include-cleaner)
 namespace {
 
 nlohmann::json request_json(const RequestPresentation &request) {
-  const auto source = [&] {
+  const auto *const source = [&] {
     switch (request.source) {
     case RequestSource::ordinary:
       return "ordinary";

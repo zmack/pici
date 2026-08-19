@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <map>
 #include <optional>
 #include <ranges>
@@ -409,7 +410,7 @@ ModelRegistry::ModelRegistry(
   for (const auto &model : all_models())
     add_or_replace(model);
 
-  for (auto &[key, config] : configured) {
+  for (const auto &[key, config] : configured) {
     const auto canonical_key = lower_ascii(key);
     auto provider_it = providers_.find(canonical_key);
     if (provider_it == providers_.end()) {
@@ -464,10 +465,19 @@ ModelRegistry::ModelRegistry(
       throw std::runtime_error("unknown configured provider: " + key);
 
     for (const auto &[model_id, override] : config.model_overrides) {
-      auto *model = const_cast<Model *>(exact(definition->id, model_id));
-      if (model == nullptr)
-        throw std::runtime_error("providers." + key + ".model_overrides." +
-                                 model_id + ": unknown built-in model");
+      // exact() returns const Model* for external read-only callers, but
+      // this constructor legitimately owns and mutates models_ itself.
+      auto *model =
+          const_cast<Model *>( // NOLINT(cppcoreguidelines-pro-type-const-cast)
+              exact(definition->id, model_id));
+      if (model == nullptr) {
+        std::string message = "providers.";
+        message += key;
+        message += ".model_overrides.";
+        message += model_id;
+        message += ": unknown built-in model";
+        throw std::runtime_error(message);
+      }
       apply_configured_model(*model, override, *definition);
     }
 
@@ -708,7 +718,7 @@ std::optional<Model> find_model(std::string_view spec,
       // part of id if ambiguous Heuristic: if parsed_provider not known as
       // provider, treat full spec as id
       bool known = false;
-      for (auto &km : kModels)
+      for (const auto &km : kModels)
         if (km.provider == parsed_provider) {
           known = true;
           break;
@@ -756,7 +766,7 @@ std::optional<Model> find_model(std::string_view spec,
       generic.api = "openai-codex-responses";
       return true;
     }
-    for (auto &m : kModels) {
+    for (const auto &m : kModels) {
       if (m.provider == want) {
         generic.base_url = m.base_url;
         generic.api = m.api;
@@ -784,7 +794,7 @@ std::vector<const Model *> search_models(std::string_view filter) {
     return s;
   };
   std::string needle = to_lower(std::string(filter));
-  for (auto &m : kModels) {
+  for (const auto &m : kModels) {
     if (needle.empty()) {
       result.push_back(&m);
       continue;

@@ -5,8 +5,10 @@
 #include "acp/types.h"
 #include "core/agent.h"
 #include "core/agent_task.h"
+#include "core/auth/auth_resolver.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
+#include "core/models.h"
 #include "core/session/agent_session.h"
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
@@ -34,6 +36,7 @@ namespace {
 
 // Translates Renderer callbacks into ACP SSE events.
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::mutex durable_run_mutex;
 
 class AcpSseRenderer final : public core::Renderer {

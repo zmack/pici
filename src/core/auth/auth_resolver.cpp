@@ -35,7 +35,10 @@ AuthResolver::AuthResolver(std::shared_ptr<const core::ModelRegistry> registry,
   for (const auto &[id, definition] : registry_->providers()) {
     if (!definition.api_key.env_var)
       continue;
-    const char *value = std::getenv(definition.api_key.env_var->c_str());
+    // Only called from this constructor, during single-threaded startup,
+    // before any worker thread could concurrently call setenv()/putenv().
+    const char *value = std::getenv( // NOLINT(concurrency-mt-unsafe)
+        definition.api_key.env_var->c_str());
     if (value != nullptr && *value != '\0')
       configured_env_keys_[id] = std::string(value);
     else
@@ -93,7 +96,7 @@ AuthAvailability AuthResolver::availability(std::string_view provider) const {
 std::optional<core::RequestAuth>
 AuthResolver::resolve(std::string_view provider,
                       std::string_view explicit_api_key,
-                      std::stop_token stop_tok) const {
+                      const std::stop_token &stop_tok) const {
   const auto canonical = canonical_provider(provider);
   if (canonical == "openai-codex") {
     if (!explicit_api_key.empty())
@@ -118,8 +121,9 @@ AuthResolver::resolve(std::string_view provider,
 
   const core::ProviderDefinition *definition =
       registry_ != nullptr ? registry_->provider(canonical) : nullptr;
-  const auto policy =
-      definition ? definition->auth : core::ProviderAuthPolicy::optional;
+  const auto policy = (definition != nullptr)
+                          ? definition->auth
+                          : core::ProviderAuthPolicy::optional;
   if (policy == core::ProviderAuthPolicy::none)
     return std::nullopt;
 

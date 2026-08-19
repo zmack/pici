@@ -18,6 +18,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <toml++/impl/node.hpp>
+#include <toml++/impl/table.hpp>
 #include <utility>
 #include <vector>
 
@@ -456,7 +458,9 @@ default_mailbox_path(const std::filesystem::path &config_path) {
   return config_path.parent_path() / "mailbox.sqlite3";
 }
 
-static void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
+namespace {
+
+void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
   auto str = [&](std::string_view section,
                  std::string_view key) -> std::string {
     if (const auto *s = tbl[section][key].as_string())
@@ -544,6 +548,8 @@ static void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
       v && *v > 0.0 && *v <= 1.0)
     cfg.compaction_threshold_pct = *v;
 }
+
+} // namespace
 
 bool Config::has_errors() const {
   return std::ranges::any_of(diagnostics,

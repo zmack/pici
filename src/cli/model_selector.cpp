@@ -1,6 +1,6 @@
 #include "cli/model_selector.h"
 
-#include "core/models.h"
+#include "core/message_types.h"
 #include "core/terminal.h"
 
 #include <algorithm>
@@ -9,7 +9,9 @@
 #include <string>
 #include <string_view>
 #include <sys/select.h>
-#include <sys/time.h>
+#include <sys/time.h> // NOLINT(misc-include-cleaner): the portable public
+                      // header for struct timeval, not the glibc-private one
+                      // the tool would otherwise suggest.
 #include <termios.h>
 #include <unistd.h>
 #include <vector>
@@ -83,7 +85,7 @@ Key read_key() {
     fd_set fds;
     FD_ZERO(&fds);
     FD_SET(STDIN_FILENO, &fds);
-    timeval timeout{};
+    timeval timeout{}; // NOLINT(misc-include-cleaner): from <sys/time.h> above
     timeout.tv_usec = 50'000;
     if (select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &timeout) <= 0)
       return Key::escape;

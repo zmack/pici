@@ -23,7 +23,8 @@ namespace pi::core {
 
 namespace {
 
-constexpr std::size_t kMaxStreamingErrorBody = 64U * 1024U;
+constexpr std::size_t kMaxStreamingErrorBody =
+    static_cast<std::size_t>(64U * 1024U);
 
 struct CurlHandle {
   CURL *handle{nullptr};
@@ -100,8 +101,12 @@ void append_authenticated_headers(
     if (auth->bearer_token)
       set_header("Authorization", "Bearer " + *auth->bearer_token);
   }
-  for (const auto &[key, value] : merged)
-    headers.append(key + ": " + value);
+  for (const auto &[key, value] : merged) {
+    std::string header = key;
+    header += ": ";
+    header += value;
+    headers.append(header);
+  }
 }
 
 } // namespace
@@ -417,10 +422,10 @@ bool HttpClient::post_streaming_authenticated(
     auto key = std::string(line.substr(0, colon));
     auto value = std::string(line.substr(colon + 1));
     while (!value.empty() &&
-           std::isspace(static_cast<unsigned char>(value.front())))
+           (std::isspace(static_cast<unsigned char>(value.front())) != 0))
       value.erase(value.begin());
     while (!value.empty() &&
-           std::isspace(static_cast<unsigned char>(value.back())))
+           (std::isspace(static_cast<unsigned char>(value.back())) != 0))
       value.pop_back();
     state->headers[std::move(key)] = std::move(value);
     return size * nmemb;

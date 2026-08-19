@@ -677,8 +677,11 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
         if (!err.is_discarded() && err.contains("error")) {
           const auto &error = err["error"];
           if (error.is_object()) {
-            result->error_message =
-                error.value("message", *result->error_message);
+            // result->error_message was unconditionally set a few lines
+            // above in this branch.
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+            const auto &previous_message = *result->error_message;
+            result->error_message = error.value("message", previous_message);
           } else if (error.is_string()) {
             result->error_message = error.get<std::string>();
           }

@@ -7,6 +7,7 @@
 #include "core/providers/faux_control.h"
 #include "core/request_presentation.h"
 #include "core/session/agent_session.h"
+#include "nlohmann/json_fwd.hpp"
 
 #include <array>
 #include <atomic>
@@ -318,8 +319,10 @@ int run_faux_control_socket(
   address.sun_family = AF_UNIX;
   std::strncpy(address.sun_path, socket_path.c_str(),
                sizeof(address.sun_path) - 1);
-  const auto *socket_address = reinterpret_cast<const sockaddr *>(
-      &address); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  // POSIX sockaddr_un/sockaddr aliasing is the standard bind()/listen() API
+  // shape; there is no bounds-checked alternative to reinterpret_cast here.
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  const auto *socket_address = reinterpret_cast<const sockaddr *>(&address);
   if (::bind(listener, socket_address, sizeof(address)) < 0 ||
       ::listen(listener, 1) < 0)
     return 1;

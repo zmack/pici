@@ -17,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -73,9 +74,8 @@ void AgentSession::activate_session(const SessionRecord &record) {
   std::string restored_provider = record.header.provider;
   std::string restored_model = record.header.model;
   if (restored_provider.empty() || restored_model.empty()) {
-    for (auto it = record.messages.rbegin(); it != record.messages.rend();
-         ++it) {
-      const auto *assistant = std::get_if<AssistantMessage>(&*it);
+    for (const auto &message : std::ranges::reverse_view(record.messages)) {
+      const auto *assistant = std::get_if<AssistantMessage>(&message);
       if (assistant == nullptr || assistant->provider.empty() ||
           assistant->model.empty())
         continue;
@@ -93,6 +93,9 @@ void AgentSession::activate_session(const SessionRecord &record) {
                              .source = "session"};
     auto resolution = model_registry_->resolve(selection);
     if (resolution) {
+      // resolution's operator bool() is defined as model.has_value(), so the
+      // check above already guarantees model is set here.
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
       model = resolution.model.value();
     } else {
       last_warning_ = resolution.error;

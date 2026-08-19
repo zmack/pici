@@ -25,6 +25,7 @@
 #include "core/event_types.h"
 #include "core/markdown.h"
 #include "core/message_types.h"
+#include "core/request_presentation.h"
 #include "core/terminal.h"
 
 namespace pi::core {

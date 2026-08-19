@@ -4,6 +4,8 @@
 #include "core/lua_tool.h"
 #include "core/mailbox/mailbox_coordinator.h"
 #include "core/mailbox/mailbox_types.h"
+#include "core/message_types.h"
+#include "nlohmann/json_fwd.hpp"
 
 #include <nlohmann/json.hpp>
 

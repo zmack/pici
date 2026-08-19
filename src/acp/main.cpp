@@ -5,7 +5,6 @@
 #include "core/auth/auth_resolver.h"
 #include "core/auth_types.h"
 #include "core/builtin_tools.h"
-#include "core/env_api_keys.h"
 #include "core/lua_tool.h"
 #include "core/message_types.h"
 #include "core/models.h"
@@ -141,7 +140,10 @@ int main(int argc, char *argv[]) noexcept {
       std::cerr << "error: " << resolution.error << "\n";
       return 1;
     }
-    model = resolution.model.value();
+    // resolution's operator bool() is defined as model.has_value(), so the
+    // !resolution check above already guarantees model is set here.
+    model =
+        resolution.model.value(); // NOLINT(bugprone-unchecked-optional-access)
   } else if (!args.provider.empty()) {
     const auto *provider = registry->provider(args.provider);
     if (provider == nullptr) {

@@ -5,6 +5,7 @@
 #include "core/mailbox/mailbox_store.h"
 #include "core/mailbox/mailbox_types.h"
 #include "core/message_types.h"
+#include "core/request_presentation.h"
 
 #include <algorithm>
 #include <atomic>

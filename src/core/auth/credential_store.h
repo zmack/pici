@@ -38,9 +38,9 @@ public:
   modify_oauth(std::string_view provider,
                const std::function<std::optional<OAuthCredential>(
                    const std::optional<OAuthCredential> &)> &fn,
-               std::stop_token stop_tok = {});
+               const std::stop_token &stop_tok = {});
 
-  void erase(std::string_view provider, std::stop_token stop_tok = {});
+  void erase(std::string_view provider, const std::stop_token &stop_tok = {});
 
 private:
   std::filesystem::path path_;

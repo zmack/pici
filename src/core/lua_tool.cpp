@@ -1490,7 +1490,7 @@ public:
     if (lua_istable(L, 1)) {
       auto sfield = [&](const char *k) -> std::string {
         lua_getfield(L, 1, k);
-        std::string s = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+        std::string s = (lua_isstring(L, -1) != 0) ? lua_tostring(L, -1) : "";
         lua_pop(L, 1);
         return s;
       };
@@ -1795,7 +1795,7 @@ public:
     }
     auto sfield = [&](const char *k) {
       lua_getfield(L, 1, k);
-      std::string s = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+      std::string s = (lua_isstring(L, -1) != 0) ? lua_tostring(L, -1) : "";
       lua_pop(L, 1);
       return s;
     };

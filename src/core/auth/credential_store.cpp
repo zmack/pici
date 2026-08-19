@@ -1,10 +1,15 @@
 #include "core/auth/credential_store.h"
+#include "nlohmann/json_fwd.hpp"
 
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -12,8 +17,10 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <sys/types.h>
 #include <system_error>
 #include <thread>
 #include <unistd.h>
@@ -33,9 +40,36 @@ constexpr int kSchemaVersion = 1;
 
 void reject_symlink(const std::filesystem::path &path);
 
+// strerror_r() has two incompatible signatures depending on feature-test
+// macros in scope when <cstring> was included: the POSIX form returns int
+// and always fills buffer, while the GNU form returns a char* that may
+// point elsewhere (e.g. a static string) instead of buffer. Overloading on
+// the actual return type selects the right behavior at compile time without
+// depending on ambient _GNU_SOURCE state, and unlike strerror(), both forms
+// are thread-safe.
+std::string strerror_r_result(char *message, const std::array<char, 256> &) {
+  return {message};
+}
+std::string strerror_r_result(int rc, const std::array<char, 256> &buffer) {
+  return rc == 0 ? std::string(buffer.data()) : "errno " + std::to_string(rc);
+}
+
+std::string errno_message(int err) {
+  std::array<char, 256> buffer{};
+  // strerror_r is a POSIX extension declared via <cstring> on this
+  // platform; the tool has no better header to suggest for it. `auto` (not
+  // `auto*`) is deliberate: strerror_r_result()'s overload set is exactly
+  // how this code stays portable between strerror_r's two incompatible
+  // return types (int on POSIX, char* on GNU) — narrowing this to a
+  // pointer type would fail to compile wherever the POSIX form is active.
+  // NOLINTNEXTLINE(misc-include-cleaner, readability-qualified-auto)
+  const auto result = ::strerror_r(err, buffer.data(), buffer.size());
+  return strerror_r_result(result, buffer);
+}
+
 class FileLock {
 public:
-  FileLock(const std::filesystem::path &path, std::stop_token stop_tok) {
+  FileLock(const std::filesystem::path &path, const std::stop_token &stop_tok) {
     const auto parent = path.parent_path().empty() ? std::filesystem::path(".")
                                                    : path.parent_path();
     std::error_code ec;
@@ -53,18 +87,18 @@ public:
     fd_ = ::open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC | nofollow, 0600);
     if (fd_ < 0)
       throw std::runtime_error("failed to open auth lock: " +
-                               std::string(std::strerror(errno)));
+                               errno_message(errno));
     if (::fchmod(fd_, S_IRUSR | S_IWUSR) != 0) {
       close();
       throw std::runtime_error("failed to secure auth lock: " +
-                               std::string(std::strerror(errno)));
+                               errno_message(errno));
     }
 
     while (::flock(fd_, LOCK_EX | LOCK_NB) != 0) {
       if (errno != EWOULDBLOCK && errno != EAGAIN) {
         close();
         throw std::runtime_error("failed to lock auth file: " +
-                                 std::string(std::strerror(errno)));
+                                 errno_message(errno));
       }
       if (stop_tok.stop_requested()) {
         close();
@@ -137,7 +171,7 @@ void reject_symlink(const std::filesystem::path &path) {
     throw std::runtime_error("auth path must not be a symbolic link");
   if (result != 0 && errno != ENOENT)
     throw std::runtime_error("failed to inspect auth file: " +
-                             std::string(std::strerror(errno)));
+                             errno_message(errno));
 }
 
 void ensure_secure_file(const std::filesystem::path &path) {
@@ -146,7 +180,7 @@ void ensure_secure_file(const std::filesystem::path &path) {
     if (errno == ENOENT)
       return;
     throw std::runtime_error("failed to inspect auth file: " +
-                             std::string(std::strerror(errno)));
+                             errno_message(errno));
   }
   if (S_ISLNK(st.st_mode))
     throw std::runtime_error("auth path must not be a symbolic link");
@@ -221,7 +255,7 @@ void write_all(int fd, std::string_view contents) {
       if (errno == EINTR)
         continue;
       throw std::runtime_error("failed to write auth file: " +
-                               std::string(std::strerror(errno)));
+                               errno_message(errno));
     }
     offset += static_cast<std::size_t>(written);
   }
@@ -236,29 +270,32 @@ void save_document(const std::filesystem::path &path, const json &document) {
   std::string temp_string = temp.string();
   std::vector<char> temp_buffer(temp_string.begin(), temp_string.end());
   temp_buffer.push_back('\0');
+  // mkstemp is a POSIX extension declared via <cstdlib> on this platform;
+  // the tool has no better header to suggest for it.
+  // NOLINTNEXTLINE(misc-include-cleaner)
   const int fd = ::mkstemp(temp_buffer.data());
   if (fd < 0)
     throw std::runtime_error("failed to create temporary auth file: " +
-                             std::string(std::strerror(errno)));
+                             errno_message(errno));
   const std::filesystem::path temp_path(temp_buffer.data());
   bool closed = false;
 
   try {
     if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0)
       throw std::runtime_error("failed to secure temporary auth file: " +
-                               std::string(std::strerror(errno)));
+                               errno_message(errno));
     const std::string contents = document.dump(2) + "\n";
     write_all(fd, contents);
     if (::fsync(fd) != 0)
       throw std::runtime_error("failed to flush temporary auth file: " +
-                               std::string(std::strerror(errno)));
+                               errno_message(errno));
     if (::close(fd) != 0)
       throw std::runtime_error("failed to close temporary auth file: " +
-                               std::string(std::strerror(errno)));
+                               errno_message(errno));
     closed = true;
     if (::rename(temp_path.c_str(), path.c_str()) != 0)
       throw std::runtime_error("failed to replace auth file: " +
-                               std::string(std::strerror(errno)));
+                               errno_message(errno));
   } catch (...) {
     if (!closed)
       ::close(fd);
@@ -279,15 +316,21 @@ void save_document(const std::filesystem::path &path, const json &document) {
 } // namespace
 
 std::filesystem::path default_auth_file_path() {
-  if (const char *override_path = std::getenv("PICI_AUTH_FILE");
+  // getenv() is only called here during startup path resolution, before any
+  // worker thread could concurrently call setenv()/putenv(), so the
+  // reentrancy hazard the check warns about doesn't apply in practice.
+  if (const char *override_path =
+          std::getenv("PICI_AUTH_FILE"); // NOLINT(concurrency-mt-unsafe)
       override_path != nullptr && *override_path != '\0') {
     return override_path;
   }
-  if (const char *xdg = std::getenv("XDG_CONFIG_HOME");
+  if (const char *xdg =
+          std::getenv("XDG_CONFIG_HOME"); // NOLINT(concurrency-mt-unsafe)
       xdg != nullptr && *xdg != '\0') {
     return std::filesystem::path(xdg) / "pici" / "auth.json";
   }
-  if (const char *home = std::getenv("HOME"); home != nullptr && *home != '\0')
+  if (const char *home = std::getenv("HOME"); // NOLINT(concurrency-mt-unsafe)
+      home != nullptr && *home != '\0')
     return std::filesystem::path(home) / ".config" / "pici" / "auth.json";
   throw std::runtime_error(
       "cannot determine auth file path; set PICI_AUTH_FILE");
@@ -342,7 +385,7 @@ std::optional<OAuthCredential> CredentialStore::modify_oauth(
     std::string_view provider,
     const std::function<std::optional<OAuthCredential>(
         const std::optional<OAuthCredential> &)> &fn,
-    std::stop_token stop_tok) {
+    const std::stop_token &stop_tok) {
   if (provider.empty() || !fn)
     throw std::invalid_argument(
         "provider and credential callback are required");
@@ -367,7 +410,7 @@ std::optional<OAuthCredential> CredentialStore::modify_oauth(
 }
 
 void CredentialStore::erase(std::string_view provider,
-                            std::stop_token stop_tok) {
+                            const std::stop_token &stop_tok) {
   if (provider.empty())
     throw std::invalid_argument("provider must not be empty");
   ensure_secure_parent(path_);

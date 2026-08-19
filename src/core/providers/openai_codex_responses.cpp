@@ -1,10 +1,13 @@
 #include "core/providers/openai_codex_responses.h"
 
+#include "core/agent_state.h"
+#include "core/auth_types.h"
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
 #include "core/providers/transform_messages.h"
 #include "http/http_client.h"
+#include "nlohmann/json_fwd.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -260,7 +263,7 @@ std::string resolve_reasoning_effort(const Model &model, ThinkingLevel level) {
   auto effort = std::string(thinking_level_to_string(level));
   if (auto it = model.thinking_level_map.find(effort);
       it != model.thinking_level_map.end() && it->second.has_value()) {
-    effort = *it->second;
+    effort = *it->second; // NOLINT(bugprone-unchecked-optional-access)
   }
   return effort;
 }
@@ -526,8 +529,10 @@ void OpenAICodexResponsesParser::close_slot(Slot &slot, const Json *item) {
   slot.open = false;
 }
 
-// NOLINTNEXTLINE(misc-no-recursion): a terminal item can synthesize its
-// missing added event before using the same slot handling path.
+// A terminal item can synthesize its missing added event before using the
+// same slot handling path; that self-call is bounded to one extra level
+// since the synthesized event always takes a different branch below.
+// NOLINTNEXTLINE(misc-no-recursion)
 void OpenAICodexResponsesParser::process_event(std::string_view event_name,
                                                const Json &event) {
   if (!event.is_object() || failed_)

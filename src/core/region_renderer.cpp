@@ -1,5 +1,6 @@
 #include "core/region_renderer.h"
 
+#include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/request_presentation.h"
 #include "core/stream_renderer.h"
@@ -506,8 +507,7 @@ std::string scroll_region_sequence(int height) {
 class RegionRenderer final : public Renderer {
 public:
   explicit RegionRenderer(int fd)
-      : fd_(fd), alt_screen_(fd),
-        last_resize_generation_(resize_generation()),
+      : fd_(fd), alt_screen_(fd), last_resize_generation_(resize_generation()),
         paint_thread_([this](const std::stop_token &st) { paint_loop(st); }) {
     install_resize_handler();
     const auto scroll_region = scroll_region_sequence(term_height(fd_));

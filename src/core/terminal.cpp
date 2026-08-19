@@ -11,9 +11,12 @@
 #include <mutex>
 #include <ranges>   // NOLINT(misc-include-cleaner)
 #include <signal.h> // NOLINT(modernize-deprecated-headers)
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <sys/ioctl.h>
+#include <sys/types.h>
+#include <system_error>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -23,11 +26,11 @@ namespace pi::core {
 
 namespace {
 
-volatile std::sig_atomic_t g_sigint_pending =
-    0; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+volatile std::sig_atomic_t g_sigint_pending = 0;
 
-volatile std::sig_atomic_t g_resize_generation =
-    0; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+volatile std::sig_atomic_t g_resize_generation = 0;
 
 void resize_sig_handler(int /*sig*/) {
   g_resize_generation = static_cast<std::sig_atomic_t>(g_resize_generation + 1);
@@ -520,7 +523,7 @@ std::string terminal_title_sequence(std::string_view sanitized_title) {
 
 std::string terminal_project_label(const std::filesystem::path &cwd) {
   std::error_code ec;
-  std::filesystem::path cur = cwd;
+  const std::filesystem::path &cur = cwd;
   if (cur.empty())
     return "pici";
   std::filesystem::path search = cur;
@@ -572,10 +575,11 @@ TerminalTitleResult clear_terminal_title(int fd) {
   return TerminalTitleResult::Applied;
 }
 
-TerminalTitleController::TerminalTitleController(int fd,
-                                                 std::string initial_base_title)
-    : fd_(fd), interval_(kTerminalTitleSpinnerInterval) {
-  is_tty_ = (isatty(fd_) != 0);
+TerminalTitleController::TerminalTitleController(
+    int fd, const std::string &initial_base_title)
+    : fd_(fd), interval_(kTerminalTitleSpinnerInterval),
+      is_tty_(isatty(fd_) != 0) {
+
   if (!is_tty_) {
     base_title_ = sanitize_terminal_title(initial_base_title);
     return;
@@ -592,7 +596,7 @@ TerminalTitleController::TerminalTitleController(int fd,
 }
 
 TerminalTitleController::TerminalTitleController(
-    int fd, std::string initial_base_title, Writer writer,
+    int fd, const std::string &initial_base_title, Writer writer,
     std::chrono::milliseconds interval)
     : fd_(fd), writer_(std::move(writer)), interval_(interval) {
   if (writer_)
@@ -605,7 +609,7 @@ TerminalTitleController::TerminalTitleController(
 }
 
 TerminalTitleController::TerminalTitleController(
-    int fd, std::string initial_base_title, Writer writer,
+    int fd, const std::string &initial_base_title, Writer writer,
     std::chrono::milliseconds interval, bool is_tty)
     : fd_(fd), writer_(std::move(writer)), interval_(interval),
       is_tty_(is_tty) {
@@ -627,11 +631,13 @@ TerminalTitleController::~TerminalTitleController() noexcept {
       has_applied_ = false;
       last_emitted_.clear();
     }
-  } catch (...) {
+  } catch (...) { // NOLINT(bugprone-empty-catch)
+    // A noexcept destructor must not let an exception escape; there is
+    // nothing more to do during teardown than swallow it.
   }
 }
 
-void TerminalTitleController::set_base_title(std::string title) {
+void TerminalTitleController::set_base_title(const std::string &title) {
   const std::string sanitized = sanitize_terminal_title(title);
   bool should_emit = false;
   {
@@ -660,7 +666,8 @@ void TerminalTitleController::start_activity() {
       format_active_terminal_title(base_copy, kTerminalTitleSpinnerFrames[0]);
   const std::string sanitized = sanitize_terminal_title(active_title);
   emit_sanitized(sanitized);
-  worker_ = std::jthread([this](std::stop_token st) { worker_loop(st); });
+  worker_ =
+      std::jthread([this](std::stop_token st) { worker_loop(std::move(st)); });
 }
 
 void TerminalTitleController::stop_activity() {
@@ -737,7 +744,7 @@ void TerminalTitleController::worker_loop(std::stop_token st) {
       base_copy = base_title_;
     }
     const std::string active_title = format_active_terminal_title(
-        base_copy, kTerminalTitleSpinnerFrames[idx]);
+        base_copy, kTerminalTitleSpinnerFrames.at(idx));
     const std::string sanitized = sanitize_terminal_title(active_title);
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -757,7 +764,9 @@ TerminalTitleActivityGuard::TerminalTitleActivityGuard(
 TerminalTitleActivityGuard::~TerminalTitleActivityGuard() noexcept {
   try {
     controller_.stop_activity();
-  } catch (...) {
+  } catch (...) { // NOLINT(bugprone-empty-catch)
+    // A noexcept destructor must not let an exception escape; there is
+    // nothing more to do during teardown than swallow it.
   }
 }
 
@@ -987,7 +996,7 @@ std::string sanitize_tool_output(std::string_view text) {
       if (next > i) {
         bool is_sgr = false;
         if (i + 1 < text.size() && text[i + 1] == '[' && next > 0) {
-          const unsigned char fin = static_cast<unsigned char>(text[next - 1]);
+          const auto fin = static_cast<unsigned char>(text[next - 1]);
           if (fin == 'm')
             is_sgr = true;
         }

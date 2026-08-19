@@ -63,7 +63,7 @@ public:
   const OpenAICodexOAuthEndpoints &endpoints() const { return endpoints_; }
 
   OAuthCredential login(const OpenAICodexLoginOptions &options,
-                        std::stop_token stop_tok = {}) const;
+                        const std::stop_token &stop_tok = {}) const;
   OAuthCredential refresh(const OAuthCredential &credential,
                           std::stop_token stop_tok = {}) const;
   std::optional<core::RequestAuth> resolve(std::stop_token stop_tok = {}) const;
@@ -72,12 +72,12 @@ private:
   OAuthCredential exchange_code(std::string_view code,
                                 std::string_view verifier,
                                 std::string_view redirect_uri,
-                                std::stop_token stop_tok) const;
+                                const std::stop_token &stop_tok) const;
 
   OAuthCredential login_browser(const OpenAICodexLoginOptions &options,
-                                std::stop_token stop_tok) const;
+                                const std::stop_token &stop_tok) const;
   OAuthCredential login_device(const OpenAICodexLoginOptions &options,
-                               std::stop_token stop_tok) const;
+                               const std::stop_token &stop_tok) const;
 
   mutable CredentialStore store_;
   OpenAICodexOAuthEndpoints endpoints_;

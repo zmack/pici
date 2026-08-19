@@ -33,7 +33,7 @@ public:
 
   std::optional<core::RequestAuth>
   resolve(std::string_view provider, std::string_view explicit_api_key = {},
-          std::stop_token stop_tok = {}) const;
+          const std::stop_token &stop_tok = {}) const;
 
   void set_runtime_api_key(std::string_view provider, std::string key);
   void clear_runtime_api_key(std::string_view provider);

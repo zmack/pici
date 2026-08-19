@@ -434,6 +434,9 @@ void RpcMode::handle(const nlohmann::json &command) {
         response(command, false, nullptr, resolution.error);
         return;
       }
+      // resolution's operator bool() is defined as model.has_value(), so the
+      // !resolution check above already guarantees model is set here.
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
       const auto &selected_model = resolution.model.value();
       if (auth_resolver_ &&
           auth_resolver_->availability(selected_model.provider) ==

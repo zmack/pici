@@ -115,8 +115,8 @@ std::string_view agent_task_error_code(AgentTaskErrorKind kind);
 
 class AgentTaskError : public std::runtime_error {
 public:
-  AgentTaskError(AgentTaskErrorKind kind, std::string message)
-      : std::runtime_error(std::move(message)), kind_(kind) {}
+  AgentTaskError(AgentTaskErrorKind kind, const std::string &message)
+      : std::runtime_error(message), kind_(kind) {}
 
   AgentTaskErrorKind kind() const noexcept { return kind_; }
   std::string_view code() const noexcept {
@@ -185,9 +185,9 @@ public:
     std::size_t max_nesting_depth{2};
     std::size_t max_direct_children{4};
     std::size_t max_mailbox_items{32};
-    std::size_t max_message_bytes{256 * 1024};
-    std::size_t max_output_bytes{256 * 1024};
-    std::size_t max_context_bytes{2 * 1024 * 1024};
+    std::size_t max_message_bytes{static_cast<std::size_t>(256 * 1024)};
+    std::size_t max_output_bytes{static_cast<std::size_t>(256 * 1024)};
+    std::size_t max_context_bytes{static_cast<std::size_t>(2 * 1024 * 1024)};
     std::chrono::milliseconds max_wait{std::chrono::seconds(60)};
   };
 

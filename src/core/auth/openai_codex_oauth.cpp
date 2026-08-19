@@ -1,6 +1,9 @@
 #include "core/auth/openai_codex_oauth.h"
 
+#include "core/auth/credential_store.h"
+#include "core/auth_types.h"
 #include "http/http_client.h"
+#include "nlohmann/json_fwd.hpp"
 
 #include <algorithm>
 #include <array>
@@ -21,6 +24,7 @@
 #include <openssl/sha.h>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -50,8 +54,8 @@ std::string percent_encode(std::string_view value) {
       result.push_back(static_cast<char>(c));
     } else {
       result.push_back('%');
-      result.push_back(hex[c >> 4]);
-      result.push_back(hex[c & 0x0f]);
+      result.push_back(hex.at(c >> 4));
+      result.push_back(hex.at(c & 0x0f));
     }
   }
   return result;
@@ -82,7 +86,11 @@ std::vector<std::byte> secure_random_bytes(std::size_t count) {
   std::vector<std::byte> bytes(count);
   std::size_t offset = 0;
   while (offset < count) {
-    const auto read_count = ::read(fd, bytes.data() + offset, count - offset);
+    // offset stays within [0, count), and bytes has count elements, so this
+    // stays in bounds; ::read()'s C API leaves no bounds-checked alternative.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+    std::byte *dest = bytes.data() + offset;
+    const auto read_count = ::read(fd, dest, count - offset);
     if (read_count < 0 && errno == EINTR)
       continue;
     if (read_count <= 0) {
@@ -182,7 +190,7 @@ OAuthCredential parse_token_response(const HttpClient::Response &response,
 }
 
 bool wait_interruptibly(std::chrono::milliseconds duration,
-                        std::stop_token stop_tok) {
+                        const std::stop_token &stop_tok) {
   constexpr auto slice = std::chrono::milliseconds(100);
   while (duration > std::chrono::milliseconds::zero()) {
     if (stop_tok.stop_requested())
@@ -235,16 +243,16 @@ std::optional<std::string> base64url_decode(std::string_view encoded) {
   std::array<int, 256> values{};
   values.fill(-1);
   for (std::size_t i = 0; i < kAlphabet.size(); ++i)
-    values[static_cast<unsigned char>(kAlphabet[i])] = static_cast<int>(i);
+    values.at(static_cast<unsigned char>(kAlphabet[i])) = static_cast<int>(i);
 
   std::string result;
   result.reserve(encoded.size() * 3 / 4);
   std::uint32_t accumulator = 0;
   int bits = 0;
   for (const unsigned char byte : encoded) {
-    if (values[byte] < 0)
+    if (values.at(byte) < 0)
       return std::nullopt;
-    accumulator = (accumulator << 6) | static_cast<unsigned>(values[byte]);
+    accumulator = (accumulator << 6) | static_cast<unsigned>(values.at(byte));
     bits += 6;
     if (bits >= 8) {
       bits -= 8;
@@ -263,17 +271,25 @@ PkcePair generate_pkce() {
 
 std::string pkce_challenge(std::string_view verifier) {
   std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
-  SHA256(reinterpret_cast<const unsigned char *>(verifier.data()),
-         verifier.size(), digest.data());
-  std::string digest_bytes(reinterpret_cast<const char *>(digest.data()),
-                           digest.size());
+  // OpenSSL's byte-buffer APIs are unsigned char*/char*; there is no
+  // standard-library alternative to reinterpret_cast for this interop.
+  // clang-format off
+  const auto *verifier_bytes = reinterpret_cast<const unsigned char *>(verifier.data()); // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  // clang-format on
+  SHA256(verifier_bytes, verifier.size(), digest.data());
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  const auto *digest_chars = reinterpret_cast<const char *>(digest.data());
+  std::string digest_bytes(digest_chars, digest.size());
   return base64url_encode(digest_bytes);
 }
 
 std::string generate_oauth_state() {
   const auto bytes = secure_random_bytes(16);
-  return base64url_encode(std::string_view(
-      reinterpret_cast<const char *>(bytes.data()), bytes.size()));
+  // std::byte -> char reinterpretation to build a text view over raw random
+  // bytes; no standard-library alternative exists for this interop.
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  const auto *chars = reinterpret_cast<const char *>(bytes.data());
+  return base64url_encode(std::string_view(chars, bytes.size()));
 }
 
 std::optional<std::string> extract_chatgpt_account_id(std::string_view jwt) {
@@ -306,7 +322,7 @@ OpenAICodexOAuth::OpenAICodexOAuth(CredentialStore store,
 
 OAuthCredential OpenAICodexOAuth::exchange_code(
     std::string_view code, std::string_view verifier,
-    std::string_view redirect_uri, std::stop_token stop_tok) const {
+    std::string_view redirect_uri, const std::stop_token &stop_tok) const {
   if (stop_tok.stop_requested())
     throw std::runtime_error("OpenAI Codex login was cancelled");
   const auto body = form_body({{"grant_type", "authorization_code"},
@@ -326,7 +342,7 @@ OAuthCredential OpenAICodexOAuth::exchange_code(
 
 OAuthCredential
 OpenAICodexOAuth::login_browser(const OpenAICodexLoginOptions &options,
-                                std::stop_token stop_tok) const {
+                                const std::stop_token &stop_tok) const {
   const auto pkce = generate_pkce();
   const auto state = generate_oauth_state();
   std::promise<std::string> code_promise;
@@ -381,7 +397,7 @@ OpenAICodexOAuth::login_browser(const OpenAICodexLoginOptions &options,
 
 OAuthCredential
 OpenAICodexOAuth::login_device(const OpenAICodexLoginOptions &options,
-                               std::stop_token stop_tok) const {
+                               const std::stop_token &stop_tok) const {
   auto response = HttpClient::post(
       endpoints_.device_user_code_url,
       json{{"client_id", endpoints_.client_id}}.dump(),
@@ -455,7 +471,7 @@ OpenAICodexOAuth::login_device(const OpenAICodexLoginOptions &options,
 }
 
 OAuthCredential OpenAICodexOAuth::login(const OpenAICodexLoginOptions &options,
-                                        std::stop_token stop_tok) const {
+                                        const std::stop_token &stop_tok) const {
   if (options.mode == OpenAICodexLoginMode::device)
     return login_device(options, stop_tok);
   return login_browser(options, stop_tok);
@@ -470,7 +486,7 @@ OAuthCredential OpenAICodexOAuth::refresh(const OAuthCredential &credential,
       HttpClient::post(endpoints_.token_url, body,
                        {{"Content-Type", "application/x-www-form-urlencoded"},
                         {"Accept", "application/json"}},
-                       std::nullopt, 60'000, stop_tok);
+                       std::nullopt, 60'000, std::move(stop_tok));
   if (!response)
     throw std::runtime_error("OpenAI Codex token refresh failed");
   return parse_token_response(*response, "token refresh");

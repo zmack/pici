@@ -334,7 +334,7 @@ bool AgentTaskManager::valid_task_name(std::string_view name) {
       name.front() != '_' && name.front() != '-')
     return false;
   return std::ranges::all_of(name, [](char c) {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '_' ||
+    return (std::isalnum(static_cast<unsigned char>(c)) != 0) || c == '_' ||
            c == '-' || c == '.';
   });
 }
@@ -717,7 +717,7 @@ void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
 void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
                                 const std::stop_token &stop_token) {
   std::stop_callback cancel_callback(stop_token, [task] {
-    if (task->session)
+    if (task->session != nullptr)
       task->session->agent().interrupt(TurnAbortReason::shutdown);
   });
 
@@ -790,6 +790,8 @@ void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
         current = AgentTaskStatusKind::closing;
       else if (aborted)
         current = AgentTaskStatusKind::interrupted;
+      // task->result is checked truthy immediately before the -> access.
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
       else if (task->result && task->result->error)
         current = AgentTaskStatusKind::errored;
       else

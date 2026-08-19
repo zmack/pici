@@ -107,7 +107,8 @@ std::ostream &operator<<(std::ostream &os, const AgentEvent &event) {
       [&](const auto &ev) {
         using T = std::remove_cvref_t<decltype(ev)>;
         if constexpr (std::same_as<T, AgentStartEvent> ||
-                      std::same_as<T, TurnStartEvent>) {
+                      std::same_as<T, TurnStartEvent> ||
+                      std::same_as<T, ToolPresentationEvent>) {
           os << "type:" << event_type_to_string(ev.type) << "}";
         } else if constexpr (std::same_as<T, TurnAbortedEvent>) {
           os << "type:" << event_type_to_string(ev.type)
@@ -137,8 +138,6 @@ std::ostream &operator<<(std::ostream &os, const AgentEvent &event) {
         } else if constexpr (std::same_as<T, ToolExecutionEndEvent>) {
           os << "type:" << event_type_to_string(ev.type)
              << ", tool: " << ev.tool_name << ", error: " << ev.is_error << "}";
-        } else if constexpr (std::same_as<T, ToolPresentationEvent>) {
-          os << "type:" << event_type_to_string(ev.type) << "}";
         } else if constexpr (std::same_as<T, CompactionEvent>) {
           os << "type:" << event_type_to_string(ev.type)
              << ", kind: " << compaction_event_kind_to_string(ev.kind)

@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -48,7 +49,6 @@
 #include "core/auth_types.h"
 #include "core/builtin_tools.h"
 #include "core/compaction.h"
-#include "core/env_api_keys.h"
 #include "core/event_types.h"
 #include "core/lua_tool.h"
 #include "core/mailbox/mailbox_bindings.h"
@@ -70,6 +70,7 @@
 #include "core/stream_diagnostics.h"
 #include "core/stream_renderer.h"
 #include "core/terminal.h"
+#include "nlohmann/json_fwd.hpp"
 #include <nlohmann/json.hpp>
 
 namespace pi {
@@ -926,6 +927,13 @@ std::vector<cli::ContextFile> load_context_files() {
   return result;
 }
 
+// cmd_run is the CLI's whole interactive-session entry point (renderer,
+// session, mailbox, and REPL command-dispatch setup all live in this one
+// scope so they can share local state via closures without a context
+// struct). Splitting it apart is a real, worthwhile refactor, but it's a
+// standalone architectural change with meaningful regression risk, not a
+// lint cleanup — deliberately not attempted here.
+// NOLINTNEXTLINE(readability-function-size)
 int cmd_run(const cli::Args &args,
             const std::shared_ptr<const core::ModelRegistry> &registry) {
   auto effective_registry = registry;

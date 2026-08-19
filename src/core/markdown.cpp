@@ -389,7 +389,7 @@ std::string render_table(const std::vector<std::string_view> &block) {
   auto hline = [&](const char *l, const char *m, const char *r) {
     std::string s = l;
     for (std::size_t c = 0; c < nc; ++c) {
-      if (c)
+      if (c != 0U)
         s += m;
       for (std::size_t i = 0; i < widths[c] + 2; ++i)
         s += kH;
@@ -398,7 +398,7 @@ std::string render_table(const std::vector<std::string_view> &block) {
   };
 
   auto padded = [&](std::string_view text, std::size_t w, Align a) {
-    const std::size_t len = static_cast<std::size_t>(display_columns(text));
+    const auto len = static_cast<std::size_t>(display_columns(text));
     const std::size_t pad = w > len ? w - len : 0;
     std::string s;
     if (a == Align::right) {
@@ -471,7 +471,7 @@ std::string render_markdown_ansi(std::string_view input) {
       return;
     cmark_node *doc =
         cmark_parse_document(buf.data(), buf.size(), CMARK_OPT_VALIDATE_UTF8);
-    if (doc) {
+    if (doc != nullptr) {
       render_node(r, doc);
       cmark_node_free(doc);
     }

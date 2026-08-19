@@ -26,7 +26,7 @@ env_api_key_cache() {
             -> std::optional<std::string> {
           for (const char *var : vars) {
             const char *val = std::getenv(var); // NOLINT(concurrency-mt-unsafe)
-            if (val && *val != '\0')
+            if ((val != nullptr) && *val != '\0')
               return std::string(val);
           }
           return std::nullopt;

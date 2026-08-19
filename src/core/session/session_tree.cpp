@@ -38,7 +38,7 @@ ancestor_chain(const std::unordered_map<std::string, SessionHeader> &headers,
     chain.push_back(cur);
     if (!it->second.parent_id)
       break;
-    cur = *it->second.parent_id;
+    cur = *it->second.parent_id; // NOLINT(bugprone-unchecked-optional-access)
   }
   return chain;
 }

@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <fcntl.h>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <string_view>
