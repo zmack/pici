@@ -53,16 +53,26 @@ struct RawMode {
   }
 };
 
+// Entering `1049h` while a caller already owns a persistent alt-screen
+// session (the region renderer) clears that screen without saving it, and
+// the matching `1049l` on exit drops back to the primary buffer the owning
+// renderer never painted, corrupting the whole display. When
+// `caller_owns_alt_screen` is true, this draws straight into the existing
+// screen instead and the caller repaints once control returns.
 struct AlternateScreen {
   bool active{false};
-  AlternateScreen() {
+  bool owned{false};
+  explicit AlternateScreen(bool caller_owns_alt_screen)
+      : owned(!caller_owns_alt_screen) {
+    if (!owned)
+      return;
     constexpr std::string_view sequence = "\033[?1049h";
     active = ::write(STDOUT_FILENO, sequence.data(), sequence.size()) >= 0;
   }
   AlternateScreen(const AlternateScreen &) = delete;
   AlternateScreen &operator=(const AlternateScreen &) = delete;
   ~AlternateScreen() {
-    if (active) {
+    if (active && owned) {
       constexpr std::string_view sequence = "\033[?1049l";
       ::write(STDOUT_FILENO, sequence.data(), sequence.size());
     }
@@ -146,13 +156,14 @@ ModelSelectorResult
 run_model_selector(const std::vector<const core::Model *> &models,
                    std::string_view current_provider,
                    std::string_view current_model,
-                   const ModelAvailability &availability) {
+                   const ModelAvailability &availability,
+                   bool caller_owns_alt_screen) {
   if (models.empty())
     return {};
   RawMode raw;
   if (!raw.enter(STDIN_FILENO))
     return {};
-  AlternateScreen screen;
+  AlternateScreen screen(caller_owns_alt_screen);
   const int visible_rows = std::max(1, core::term_height(STDOUT_FILENO) - 4);
   std::size_t cursor = 0;
   for (std::size_t i = 0; i < models.size(); ++i) {

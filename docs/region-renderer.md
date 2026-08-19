@@ -52,17 +52,28 @@ requests are still being appended to.
 ## The four sections: REQUEST, WORK, ANSWER, REPLY
 
 ```text
--- REQUEST ---------------------------------------------------
+-- REQUEST                                            (bold cyan)
 Why are parallel tool calls displayed out of order?
 
-WORK
+WORK                                                  (dim)
 Checking how tool blocks are inserted...
-  [slow-tool] running...
-  [fast-tool] done
+  [slow-tool] running…                                (bold yellow while running)
+  [fast-tool] done                                    (dim green once finished)
 
-ANSWER
+ANSWER                                                (bold white)
 Tool blocks were ordered by completion rather than call order.
 ```
+
+A blank row separates each section — and each turn — from whatever came
+before it (`append_section_heading()` / `append_request_lines()` in
+`region_renderer.cpp`), so a scrolling transcript reads as distinct turns
+instead of one dense wall of text. The color palette gives each section a
+consistent identity whether it's collapsed or expanded: REQUEST is bold cyan
+(matching the readline prompt's `>` chevron, so "this is user input" reads
+the same in the history and at the prompt), WORK stays dim/subordinate,
+ANSWER is bold white, and a failed tool call's `[name]` bracket and output
+turn bold/dim red respectively instead of blending into ordinary dim tool
+output (`tool_name_color()` in `region_renderer.cpp`).
 
 - `REQUEST` is rendered once per turn from `turn.requests`, wrapped with the
   same ANSI-aware physical-width logic as everything else
@@ -77,7 +88,8 @@ Tool blocks were ordered by completion rather than call order.
 - `WORK` groups thinking, intermediate assistant narration, and tool call
   regions. Contiguous work is grouped under one `WORK` heading; it is not
   repeated before every tool call (`append_section_heading()` only re-emits a
-  heading when the section actually changes).
+  heading when the section actually changes). A thinking block's `[thinking]`
+  label renders dim and italic on its own line, ahead of the reasoning text.
 - `ANSWER` (or `ANSWER | TRUNCATED`) is the terminal assistant response for
   the turn — see classification below.
 - `REPLY -> <recipient>` is a persistent, renderer-owned block that appears
@@ -196,6 +208,32 @@ exists to guarantee.
 - Readline cursor restoration, alternate-screen teardown, Ctrl-C, and resize
   behavior are unaffected by any of the above: they operate on the painted
   frame, not on `RegionState`.
+
+## Transient full-screen command UIs (`/tree`, `/model`)
+
+`RegionRenderer` owns one persistent alternate-screen session
+(`AltScreenSession` in `terminal.{h,cpp}`) for its entire lifetime — it never
+leaves the alternate screen between turns. The `/tree` and `/model` pickers
+(`cli::run_tree_selector()` / `cli::run_model_selector()`) are full-screen UIs
+of their own and used to unconditionally wrap themselves in a second
+`\033[?1049h` / `\033[?1049l` pair. Nesting that toggle inside an
+already-active alternate screen is unsafe: `1049h` clears the current
+alternate screen without saving it, and the matching `1049l` on exit drops
+the terminal back to the *primary* screen buffer — content the owning
+renderer never painted — corrupting the whole display until something forces
+a full repaint.
+
+Both pickers now take a `caller_owns_alt_screen` argument. `main.cpp` passes
+`renderer->owns_status_line()` (true only for the region renderer) at both
+call sites; when true, the picker draws straight into the existing alternate
+screen instead of nesting its own. Either way, the picker's own drawing
+happens outside `RegionRenderer`'s diff cache (`last_frame_lines_`), so the
+caller must repaint afterward: `Renderer::force_full_repaint()` — a new
+virtual, overridden by `RegionRenderer`, no-op elsewhere — clears the diff
+cache unconditionally and repaints every row, which `on_resize()` cannot do
+here since the terminal's actual dimensions never changed. Both call sites in
+`main.cpp` invoke it immediately after the picker returns, regardless of
+whether the user cancelled or made a selection.
 
 ## Testing
 

@@ -151,12 +151,26 @@ std::vector<std::string> split_region_lines(std::string_view source,
   return lines;
 }
 
+// Bold yellow while in flight, bold red on failure, dim green once it
+// finishes cleanly — the same three-state palette used by the expanded tool
+// header below, so a tool region reads the same way collapsed or open.
+std::string_view tool_name_color(const RegionToolBlock &tool) {
+  if (tool.running)
+    return "\033[1;33m";
+  if (tool.is_error)
+    return "\033[1;31m";
+  return "\033[38;5;114m";
+}
+
 std::string tool_summary(const RegionToolBlock &tool) {
-  std::string out = "[";
+  std::string out(tool_name_color(tool));
+  out += "[";
   out += tool.tool_name;
-  out += tool.running ? "] running\xE2\x80\xA6" : "] ";
+  out += "]";
+  out += "\033[0m";
+  out += tool.running ? " running\xE2\x80\xA6" : " ";
   if (!tool.running) {
-    out += tool.is_error ? "error" : "done";
+    out += tool.is_error ? "\033[1;31merror\033[0m" : "done";
   }
   return out;
 }
@@ -192,7 +206,10 @@ std::vector<std::string> tool_lines(const RegionToolBlock &tool, int width,
     }
   }
   if (header.empty()) {
-    header = "[" + tool.tool_name + "] ";
+    header = std::string(tool_name_color(tool));
+    header += "[";
+    header += tool.tool_name;
+    header += "]\033[0m ";
     header += "\033[38;5;214m";
     header += tool.args_json;
     header += "\033[0m";
@@ -204,7 +221,9 @@ std::vector<std::string> tool_lines(const RegionToolBlock &tool, int width,
   if (tool.raw_output.empty())
     return lines;
 
-  std::string body = "\033[38;5;245m";
+  // Failed output stays legible instead of blending into ordinary dim tool
+  // output — the error state is otherwise only visible in the header color.
+  std::string body(tool.is_error ? "\033[38;5;203m" : "\033[38;5;245m");
   body += truncate_tool_result(tool.raw_output);
   body += "\033[0m";
   auto body_lines = split_region_lines(body, width);
@@ -224,7 +243,8 @@ std::vector<std::string> legacy_region_lines(const RegionState &state,
   const auto append_thinking = [&] {
     if (state.thinking.empty())
       return;
-    auto thinking = render_visible_markdown("[thinking]\n" + state.thinking);
+    auto thinking = "\033[3;38;5;245m[thinking]\033[0m\n" +
+                    render_visible_markdown(state.thinking);
     auto thinking_lines = split_region_lines(thinking, width);
     lines.insert(lines.end(), std::make_move_iterator(thinking_lines.begin()),
                  std::make_move_iterator(thinking_lines.end()));
@@ -300,7 +320,7 @@ std::string request_sender_label(const RequestPresentation &metadata) {
 }
 
 std::string request_heading(const RegionRequestBlock &request) {
-  std::string heading = "-- REQUEST";
+  std::string heading = "\033[1;36m-- REQUEST";
   const auto source = request_source_label(request.metadata.source);
   if (!source.empty()) {
     heading += " | ";
@@ -342,7 +362,12 @@ void append_request_lines(std::vector<std::string> &lines,
                request_sender_label(request.metadata) != first_sender;
       });
   if (mixed)
-    heading = "-- REQUEST";
+    heading = "\033[1;36m-- REQUEST";
+  // A blank row separates this turn from whatever history precedes it so a
+  // scrolling transcript reads as distinct turns instead of one dense wall
+  // of text. The very first thing painted needs no leading gap.
+  if (!lines.empty())
+    lines.emplace_back("\033[0m");
   auto heading_lines = split_region_lines(heading, width);
   lines.insert(lines.end(), std::make_move_iterator(heading_lines.begin()),
                std::make_move_iterator(heading_lines.end()));
@@ -415,6 +440,13 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
       if (next == section)
         return;
       section = next;
+      if (next == RegionSection::none)
+        return;
+      // Separate this section from whatever came before it (a REQUEST body,
+      // or another section's content) so REQUEST/WORK/ANSWER read as
+      // distinct blocks rather than running text into the next label.
+      if (!lines.empty())
+        lines.emplace_back("\033[0m");
       auto heading_lines =
           split_region_lines(region_section_heading(next), width);
       lines.insert(lines.end(), std::make_move_iterator(heading_lines.begin()),
@@ -431,7 +463,8 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
       }
       if (const auto *thinking = std::get_if<RegionThinkingBlock>(&block)) {
         append_section_heading(RegionSection::work);
-        auto rendered = render_visible_markdown("[thinking]\n" + thinking->raw);
+        auto rendered = "\033[3;38;5;245m[thinking]\033[0m\n" +
+                        render_visible_markdown(thinking->raw);
         auto thinking_lines = split_region_lines(rendered, width);
         lines.insert(lines.end(),
                      std::make_move_iterator(thinking_lines.begin()),
@@ -441,6 +474,8 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
 
       if (const auto *reply = std::get_if<RegionReplyBlock>(&block)) {
         append_section_heading(RegionSection::none);
+        if (!lines.empty())
+          lines.emplace_back("\033[0m");
         auto heading = std::string("\033[1;96mREPLY -> ") +
                        sanitize_tool_output(reply->recipient_label) +
                        " queued\033[0m";
@@ -979,6 +1014,32 @@ public:
     }
   }
 
+  // Called after a transient full-screen command UI (e.g. /tree, /model)
+  // drew directly into this renderer's alternate screen and returned
+  // control. Those pickers reuse this renderer's existing alt-screen session
+  // instead of nesting their own — see owns_status_line() at the call site —
+  // so their content isn't reflected in last_frame_lines_ at all. A normal
+  // dirty repaint would diff against that stale cache and leave untouched
+  // rows showing picker leftovers; discarding the cache forces every row to
+  // be rewritten unconditionally.
+  void force_full_repaint() override {
+    bool paint_now = false;
+    {
+      std::scoped_lock lock(paint_mutex_);
+      last_frame_lines_.clear();
+    }
+    {
+      std::scoped_lock lock(mutex_);
+      state_.revision = ++revision_;
+      mark_dirty_locked();
+      paint_now = !turn_active_;
+    }
+    if (paint_now) {
+      paint_idle_synchronously();
+      position_prompt_cursor();
+    }
+  }
+
 private:
   struct State : RegionState {
     bool dirty{true};
@@ -1191,10 +1252,13 @@ private:
     if (usage.empty() || gap < 1)
       usage.clear();
 
-    std::string bar =
-        "\033[" + std::to_string(height - 1) + ";1H\033[2K\033[2m";
+    std::string bar = "\033[" + std::to_string(height - 1) + ";1H\033[2K";
+    // An error status stays visually distinct from routine tool/usage
+    // chatter on the same row instead of blending into the same dim gray.
+    bar += snapshot.has_error ? "\033[1;31m" : "\033[2m";
     bar += left;
     if (!usage.empty()) {
+      bar += "\033[0m\033[2m";
       bar.append(static_cast<std::size_t>(gap), ' ');
       bar += usage;
     }

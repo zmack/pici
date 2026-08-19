@@ -132,6 +132,16 @@ public:
   virtual bool owns_tool_output() const { return false; }
   virtual void on_tool_output_text(std::string_view call_id,
                                    std::string_view text) {}
+
+  // Force a full, non-diffed repaint of currently-known state, discarding
+  // any diff cache. A renderer that owns a persistent alternate-screen
+  // compositor (owns_status_line()) must implement this so a transient
+  // full-screen command UI (e.g. /tree, /model) that drew directly over its
+  // content — without its own nested alternate-screen enter/exit, since
+  // nesting an alt-screen toggle inside one already owned by this renderer
+  // corrupts the terminal — can hand back a clean screen afterward. No-op
+  // for renderers without a persistent compositor to invalidate.
+  virtual void force_full_repaint() {}
 };
 
 //

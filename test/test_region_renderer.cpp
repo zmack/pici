@@ -514,6 +514,47 @@ void test_region_factory_lifecycle() {
          "completed transcript remains available across turns");
 }
 
+// force_full_repaint() exists so a transient full-screen command UI (/tree,
+// /model) that drew directly into this renderer's alternate screen — see
+// docs/region-renderer.md's "Transient full-screen command UIs" section —
+// can hand back a clean screen. An ordinary dirty-driven repaint of
+// unchanged content diffs against the cache and writes nothing; this must
+// unconditionally discard the cache and repaint every row regardless.
+void test_force_full_repaint_reissues_every_row() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates force-repaint capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->on_turn_start();
+    renderer->on_text_delta("distinctive-repaint-marker");
+    renderer->on_message_end_presentation(pi::core::MessageEndPresentation{
+        .stop_reason = pi::core::StopReason::stop});
+    renderer->on_turn_end();
+    renderer->force_full_repaint();
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+  const auto first = output.find("distinctive-repaint-marker");
+  const auto second =
+      first == std::string::npos
+          ? std::string::npos
+          : output.find("distinctive-repaint-marker", first + 1);
+  expect(first != std::string::npos && second != std::string::npos,
+         "force_full_repaint() unconditionally repaints content the diff "
+         "cache would otherwise consider unchanged");
+}
+
 void test_idle_paint_saves_cursor_and_scrolls() {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
@@ -650,7 +691,7 @@ void test_request_audit_behaviors() {
       .raw_text = "mailbox"});
   const auto mixed_frame = pi::core::build_region_frame(
       pi::core::RegionState{.turns = {std::move(mixed)}}, 40, 20);
-  expect(mixed_frame.lines[0] == "-- REQUEST\033[0m",
+  expect(mixed_frame.lines[0] == "\033[1;36m-- REQUEST\033[0m",
          "mixed request provenance uses a neutral heading");
   expect(std::all_of(mixed_frame.lines.begin(), mixed_frame.lines.end(),
                      [](const auto &line) {
@@ -995,6 +1036,7 @@ int main() {
   test_tiny_layout_keeps_tool_body_collapsed();
   test_tool_callbacks_route_into_regions();
   test_region_factory_lifecycle();
+  test_force_full_repaint_reissues_every_row();
   test_mailbox_reply_receipt_is_persistent_and_safe();
   test_mailbox_reply_alongside_parallel_unrelated_tools();
   test_mailbox_reply_callback_path();

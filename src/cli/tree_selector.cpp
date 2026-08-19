@@ -142,7 +142,7 @@ void render(const std::vector<core::SessionTreeLine> &lines, std::size_t cursor,
 TreeSelectorResult
 run_tree_selector(const std::vector<core::SessionTreeLine> &lines,
                   const std::string & /*current_session_id*/,
-                  std::size_t initial_cursor) {
+                  std::size_t initial_cursor, bool caller_owns_alt_screen) {
   if (lines.empty())
     return {.cancelled = true};
 
@@ -153,8 +153,14 @@ run_tree_selector(const std::vector<core::SessionTreeLine> &lines,
   RawMode raw;
   const bool tty = raw.enter(STDIN_FILENO);
 
-  // Enter alternate screen
-  write_str("\033[?1049h");
+  // A caller that already owns a persistent alt-screen session (the region
+  // renderer) must not have it nested: entering `1049h` while already
+  // inside the alternate screen clears it without saving, and the matching
+  // `1049l` on exit drops back to the primary screen buffer the owning
+  // renderer never painted, corrupting the whole display. Draw straight
+  // into the existing screen instead; the caller repaints afterward.
+  if (!caller_owns_alt_screen)
+    write_str("\033[?1049h");
 
   std::size_t cursor = initial_cursor;
   // Scroll the window so the cursor is visible.
@@ -193,7 +199,8 @@ run_tree_selector(const std::vector<core::SessionTreeLine> &lines,
   }
 
   // Exit alternate screen (restores the previous terminal content)
-  write_str("\033[?1049l");
+  if (!caller_owns_alt_screen)
+    write_str("\033[?1049l");
 
   if (!tty)
     raw.leave(); // harmless no-op; leave() checks active flag

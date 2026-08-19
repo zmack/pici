@@ -2025,8 +2025,11 @@ int cmd_run(const cli::Args &args,
   std::string readline_draft;
   std::size_t readline_cursor = 0;
   while (true) {
-    // Build the prompt — let add-ons customise it
-    std::string prompt = "\n> ";
+    // Build the prompt — let add-ons customise it. The chevron uses the same
+    // bold-cyan accent as the region renderer's REQUEST heading so the "this
+    // is user input" color reads consistently end to end; \033[22;39m clears
+    // only weight/foreground so the input box's background tint survives.
+    std::string prompt = "\n\033[1;36m>\033[22;39m ";
     if (hooks && hooks->prompt_line) {
       const auto &msgs = agent.state().messages();
       std::size_t turns = 0;
@@ -2155,7 +2158,9 @@ int cmd_run(const cli::Args &args,
                 return std::string("expired_or_refresh_needed");
               }
               return std::string("unknown");
-            });
+            },
+            renderer->owns_status_line());
+        renderer->force_full_repaint();
         if (selected.cancelled || !selected.model)
           continue;
         spec = selected.model->provider + "/" + selected.model->id;
@@ -2235,8 +2240,9 @@ int cmd_run(const cli::Args &args,
         }
       }
 
-      auto result =
-          cli::run_tree_selector(tree_lines, current_session_id, cursor);
+      auto result = cli::run_tree_selector(tree_lines, current_session_id,
+                                           cursor, renderer->owns_status_line());
+      renderer->force_full_repaint();
       if (result.cancelled || result.selected_session_id == current_session_id)
         continue;
 
