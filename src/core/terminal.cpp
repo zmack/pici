@@ -83,8 +83,10 @@ void AltScreenSession::enter() {
   signals_installed_ = true;
 
   static constexpr std::string_view kEnter =
-      "\033[?1049h"    // enter alternate screen
-      "\033[H\033[2J"; // home + clear
+      "\033[?1049h"     // enter alternate screen
+      "\033[H\033[2J"   // home + clear
+      "\033[?1000h"     // report mouse button/wheel events
+      "\033[?1006h";    // ...using SGR extended coordinate encoding
   ::write(fd_, kEnter.data(), kEnter.size());
 }
 
@@ -94,6 +96,8 @@ void AltScreenSession::restore_terminal() noexcept {
 
   in_alt_ = false;
   static constexpr std::string_view kRestore =
+      "\033[?1006l"  // stop SGR mouse coordinate encoding
+      "\033[?1000l"  // stop mouse reporting — restores native selection
       "\033[r"       // reset scroll region
       "\033[?25h"    // show cursor (must precede ?1049l)
       "\033[?1049l"; // exit alternate screen

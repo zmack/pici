@@ -510,7 +510,10 @@ EscapeSequenceResult read_escape_sequence(int wake_fd) {
   if (c != '[' && c != 'O')
     return {.sequence = std::move(seq)};
 
-  while (seq.size() < 8) {
+  // SGR mouse reports ("[<Cb;Cx;Cy M") carry two decimal coordinates and can
+  // comfortably exceed the 8-byte budget that's ample for plain cursor/page
+  // keys, so give escape sequences more room to be read in full.
+  while (seq.size() < 32) {
     descriptors[0].revents = 0;
     if (descriptor_count > 1)
       descriptors[1].revents = 0;
@@ -547,6 +550,43 @@ bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn,
 
   if (!control_fn)
     return false;
+
+  // SGR mouse report: "[<Cb;Cx;Cy" then 'M' (press) or 'm' (release).
+  // Column/row (Cx/Cy) don't matter for scrolling, only the button code
+  // (Cb): bit 0x40 marks the "wheel" button group, and bit 0x01 within that
+  // group distinguishes down (odd) from up (even) — this holds regardless
+  // of any modifier-key bits also set in Cb. Only trigger on the press
+  // ('M'); wheel devices don't need the matching release to be handled.
+  if (seq.starts_with("[<")) {
+    std::size_t pos = 2;
+    const auto read_number = [&](std::size_t &p) -> long {
+      long value = 0;
+      bool any = false;
+      while (p < seq.size() && seq[p] >= '0' && seq[p] <= '9') {
+        value = (value * 10) + (seq[p] - '0');
+        ++p;
+        any = true;
+      }
+      return any ? value : -1;
+    };
+    const long cb = read_number(pos);
+    if (cb < 0 || pos >= seq.size() || seq[pos] != ';')
+      return false;
+    ++pos;
+    if (read_number(pos) < 0 || pos >= seq.size() || seq[pos] != ';')
+      return false;
+    ++pos;
+    if (read_number(pos) < 0 || pos >= seq.size())
+      return false;
+    if (seq[pos] != 'M' || (cb & 0x40) == 0)
+      return false;
+    constexpr int kLinesPerNotch = 3;
+    const auto action = (cb & 0x01) != 0 ? ControlAction::scroll_line_down
+                                         : ControlAction::scroll_line_up;
+    for (int i = 0; i < kLinesPerNotch; ++i)
+      control_fn(action);
+    return true;
+  }
 
   if (seq == "[A") {
     control_fn(ControlAction::scroll_line_up);

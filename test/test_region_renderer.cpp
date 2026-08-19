@@ -1016,6 +1016,46 @@ void test_error_survives_fast_turn_end() {
          "usage is visible in the status bar");
 }
 
+void test_turn_based_scroll_reaches_older_turns() {
+  // Reproduces the reported "scrolling doesn't work with the region
+  // renderer" complaint via the real event path (on_turn_start /
+  // on_text_delta / on_turn_end) instead of hand-built RegionState, since
+  // that's what actual chat sessions exercise and none of the existing
+  // scroll coverage goes through it (test_tail_anchor_and_scroll only
+  // covers the legacy state.blocks path).
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates turn-scroll capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    for (int turn = 0; turn < 15; ++turn) {
+      renderer->on_turn_start();
+      renderer->on_text_delta("turn " + std::to_string(turn) +
+                              " marker line one\n\nturn " +
+                              std::to_string(turn) + " marker line two\n\n");
+      renderer->on_turn_end();
+    }
+    renderer->on_scroll(pi::core::RendererScrollCommand::bottom);
+    renderer->on_scroll(pi::core::RendererScrollCommand::top);
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[4096];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+  expect(output.find("turn 14") != std::string::npos,
+         "latest turn is reachable before scrolling");
+  expect(output.find("turn 0 marker") != std::string::npos,
+         "scrolling to top repaints the earliest turn's content");
+}
+
 } // namespace
 
 int main() {
@@ -1041,6 +1081,7 @@ int main() {
   test_mailbox_reply_alongside_parallel_unrelated_tools();
   test_mailbox_reply_callback_path();
   test_idle_paint_saves_cursor_and_scrolls();
+  test_turn_based_scroll_reaches_older_turns();
   test_explicit_turn_request_sections();
   test_request_audit_behaviors();
   test_assistant_section_classification();

@@ -282,12 +282,73 @@ void test_eof_wake_race() {
   });
 }
 
+std::size_t count_occurrences(std::string_view haystack,
+                              std::string_view needle) {
+  std::size_t count = 0;
+  std::size_t pos = 0;
+  while ((pos = haystack.find(needle, pos)) != std::string_view::npos) {
+    ++count;
+    pos += needle.size();
+  }
+  return count;
+}
+
+void test_mouse_wheel_scroll() {
+  tests::run("readline: SGR mouse wheel drives scroll actions", [] {
+    int master = -1;
+    const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+    CHECK(child >= 0);
+    if (child == 0) {
+      dprintf(STDOUT_FILENO, "READY\n");
+      ControlFn control_fn = [](ControlAction action) {
+        dprintf(STDOUT_FILENO, "ACTION:%d\n", static_cast<int>(action));
+      };
+      const auto result = readline("> ", {}, control_fn, {}, "", 0);
+      dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+              static_cast<int>(result.reason), result.cursor,
+              result.text.c_str());
+      _exit(0);
+    }
+
+    auto output = read_until(master, {}, "READY");
+
+    // Wheel-up (Cb=64, no modifiers): three scroll_line_up actions per
+    // notch, none of the down action.
+    CHECK_EQ(::write(master, "\033[<64;10;5M", 11), 11);
+    output = read_new_output(master, std::move(output));
+
+    // Wheel-down (Cb=65): three scroll_line_down actions.
+    CHECK_EQ(::write(master, "\033[<65;10;5M", 11), 11);
+    output = read_new_output(master, std::move(output));
+
+    // A plain left-click (Cb=0, no wheel bit) is not a scroll gesture and
+    // must not drive any control action.
+    CHECK_EQ(::write(master, "\033[<0;10;5M", 10), 10);
+    output = read_new_output(master, std::move(output));
+
+    CHECK_EQ(::write(master, "\n", 1), 1);
+    output = read_until(master, std::move(output), "RESULT:");
+
+    const auto up_marker =
+        "ACTION:" + std::to_string(static_cast<int>(ControlAction::scroll_line_up));
+    const auto down_marker =
+        "ACTION:" +
+        std::to_string(static_cast<int>(ControlAction::scroll_line_down));
+    CHECK_EQ(count_occurrences(output, up_marker), 3U);
+    CHECK_EQ(count_occurrences(output, down_marker), 3U);
+
+    CHECK_EQ(wait_for_child(child), 0);
+    ::close(master);
+  });
+}
+
 int main() {
   test_wake_channel();
   test_non_tty_paths();
   test_tty_wake_and_reentry();
   test_escape_wake();
   test_eof_wake_race();
+  test_mouse_wheel_scroll();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
             << " passed, " << tests::failed << " failed\n";
   return tests::failed == 0 ? 0 : 1;
