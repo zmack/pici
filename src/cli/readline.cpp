@@ -1,12 +1,12 @@
 #include "cli/readline.h"
 
+#include "cli/wrap.h"
 #include "core/terminal.h"
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
-#include <cstdint>
 #include <cstdio>
 #include <fcntl.h>
 #include <functional>
@@ -176,51 +176,6 @@ struct RawMode {
   }
 };
 
-std::size_t utf8_length(std::string_view text, std::size_t offset) {
-  const auto first = static_cast<unsigned char>(text[offset]);
-  if (first < 0x80U)
-    return 1;
-  if ((first & 0xE0U) == 0xC0U && offset + 1 < text.size())
-    return 2;
-  if ((first & 0xF0U) == 0xE0U && offset + 2 < text.size())
-    return 3;
-  if ((first & 0xF8U) == 0xF0U && offset + 3 < text.size())
-    return 4;
-  return 1;
-}
-
-std::uint32_t utf8_codepoint(std::string_view text, std::size_t offset,
-                             std::size_t length) {
-  const auto first = static_cast<unsigned char>(text[offset]);
-  if (length == 1)
-    return first;
-  std::uint32_t value = first & ((1U << (8U - length - 1U)) - 1U);
-  for (std::size_t i = 1; i < length; ++i) {
-    value =
-        (value << 6U) | (static_cast<unsigned char>(text[offset + i]) & 0x3FU);
-  }
-  return value;
-}
-
-int codepoint_width(std::uint32_t codepoint) {
-  if (codepoint < 0x20U)
-    return 0;
-  if ((codepoint >= 0x300U && codepoint <= 0x36FU) ||
-      (codepoint >= 0xFE00U && codepoint <= 0xFE0FU))
-    return 0;
-  if ((codepoint >= 0x1100U && codepoint <= 0x115FU) ||
-      (codepoint >= 0x2329U && codepoint <= 0x232AU) ||
-      (codepoint >= 0x2E80U && codepoint <= 0xA4CFU) ||
-      (codepoint >= 0xAC00U && codepoint <= 0xD7A3U) ||
-      (codepoint >= 0xF900U && codepoint <= 0xFAFFU) ||
-      (codepoint >= 0xFE10U && codepoint <= 0xFE19U) ||
-      (codepoint >= 0xFE30U && codepoint <= 0xFE6FU) ||
-      (codepoint >= 0xFF00U && codepoint <= 0xFF60U) ||
-      (codepoint >= 0x1F300U && codepoint <= 0x1FAFFU))
-    return 2;
-  return 1;
-}
-
 std::size_t terminal_columns() {
   // NOLINTNEXTLINE(misc-include-cleaner): ioctl declarations vary by platform.
   struct winsize size {};
@@ -239,19 +194,6 @@ std::size_t terminal_columns() {
 // background) renders as a distinguishable mid-gray under most terminal
 // color themes, dark and light alike.
 constexpr std::string_view kInputAreaBackground = "\033[100m";
-
-std::size_t ansi_escape_length(std::string_view text, std::size_t offset) {
-  if (offset + 1 >= text.size() || text[offset] != '\033' ||
-      text[offset + 1] != '[')
-    return 0;
-  auto end = offset + 2;
-  while (end < text.size()) {
-    const auto c = static_cast<unsigned char>(text[end++]);
-    if (c >= '@' && c <= '~')
-      return end - offset;
-  }
-  return 1;
-}
 
 class InputRenderer {
 public:
@@ -463,6 +405,23 @@ private:
     const auto transition_in_viewport = [&] {
       return rows >= viewport_start && rows < viewport_end;
     };
+    // Word-wrap plan for the printable run currently being painted (see
+    // plan_word_wrap in cli/wrap.h). Recomputed lazily whenever `offset`
+    // reaches the end of the run it covers — a run spans from one hard
+    // control character ('\n'/'\r') to the next (or text.size()), matching
+    // the segments plan_word_wrap itself expects (no embedded '\n'). The
+    // plan is a pure function of (text, columns, start_column), so this
+    // measurement-only pass and the real paint pass below — and the cursor
+    // capture in both — all derive the exact same break points from it,
+    // which is what actually keeps the paint loop and the cursor
+    // calculation from disagreeing about where a wrap happens (the M0/M2
+    // invariant).
+    std::vector<WordWrapBreak> plan;
+    std::size_t plan_run_start = 0;
+    std::size_t plan_run_end = 0;
+    std::size_t plan_index = 0;
+    bool have_plan = false;
+
     for (std::size_t offset = 0; offset < text.size();) {
       if (const auto escape_length = ansi_escape_length(text, offset);
           escape_length > 0) {
@@ -486,8 +445,7 @@ private:
           // embedded newline whose preceding row was exactly full would
           // capture a position one column past that row's last cell,
           // matching the same class of bug M0 fixed for plain wrapped text
-          // (see the width-triggered branch and the end-of-text tail
-          // below).
+          // (see the word-wrap branch and the end-of-text tail below).
           if (cursor_position != nullptr &&
               cursor_position->column == columns) {
             ++cursor_position->row;
@@ -513,23 +471,51 @@ private:
         continue;
       }
 
-      const auto length = utf8_length(text, offset);
-      const auto width = codepoint_width(
-          utf8_codepoint(text, offset, std::min(length, text.size() - offset)));
-      // The wrap decision for this character has to land before its cursor
-      // position is captured: capturing beforehand can record a position
-      // one column past the row's last cell (or, for a wide glyph, one row
-      // short of where the glyph actually paints), which the caller can't
-      // tell apart from a valid position and ends up drawing the cursor
-      // glyph over a real character instead. Normalizing here means the
-      // capture always lands on the cell this character is about to be
-      // painted into.
-      if (width > 0 && column > 0 && column + width > columns) {
+      // Printable content: the word-wrap breaks for the run starting here
+      // are planned once, as a pure function of the text ahead, the
+      // terminal width, and the column this run starts at, then just
+      // replayed character by character below — so the plan and the paint
+      // loop can never disagree about where a break falls.
+      if (!have_plan || offset >= plan_run_end) {
+        plan_run_start = offset;
+        plan_run_end = offset;
+        while (plan_run_end < text.size() && text[plan_run_end] != '\n' &&
+               text[plan_run_end] != '\r')
+          ++plan_run_end;
+        plan = plan_word_wrap(
+            text.substr(plan_run_start, plan_run_end - plan_run_start), columns,
+            column);
+        plan_index = 0;
+        have_plan = true;
+      }
+
+      if (plan_index < plan.size() &&
+          offset == plan_run_start + plan[plan_index].content_end) {
+        const auto resume_offset =
+            plan_run_start + plan[plan_index].resume_offset;
+        // Same invariant as the '\n' branch above: the wrap decision for
+        // the content at `offset` is made — and the row bumped — before
+        // any cursor capture for it, so a capture here always lands on the
+        // new row's start rather than one column past the row this content
+        // is being wrapped off of.
         if (transition_in_viewport())
           std::cout << "\033[K\r\n";
         ++rows;
         column = 0;
+        // Everything in [offset, resume_offset) is dropped trailing
+        // whitespace that's never painted (standard word-wrap convention)
+        // — if the cursor sits anywhere in that range, it normalizes to
+        // the row it just moved onto, same as the M0/M1 full-row cases.
+        if (cursor_offset >= offset && cursor_offset < resume_offset)
+          capture();
+        ++plan_index;
+        offset = resume_offset;
+        continue;
       }
+
+      const auto length = utf8_length(text, offset);
+      const auto width = codepoint_width(
+          utf8_codepoint(text, offset, std::min(length, text.size() - offset)));
       if (offset == cursor_offset)
         capture();
 

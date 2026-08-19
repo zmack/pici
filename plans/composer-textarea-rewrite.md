@@ -283,27 +283,49 @@ broken interim state.
   submission. A draft taller than one row doesn't corrupt the display in
   region mode.
 
-### M2 — Word-boundary wrapping
-- Implement the lookahead break-point pre-pass described in design
-  decision 2, replacing the character-only check in `write_wrapped`
-  (`readline.cpp:390-397`), including the `start_column` input and ANSI-
-  escape skipping called out there.
-- Cursor-position tracking must be computed against the same break-point
-  list the paint loop uses, and must apply the M0 invariant at whichever
-  single point emits the final cursor position — this is what actually
-  prevents an M0-shaped bug from reappearing here, not just sharing the
-  break list (design decision 2).
-- Files: `src/cli/readline.cpp` — but note the wrap-planner needs to move
-  out of the anonymous namespace (`readline.cpp:128, 245`) into its own
-  translation unit (e.g. `src/cli/wrap.{h,cpp}`) for it to be unit-testable
-  at all, since `test/` links the whole `.cpp` as one TU
-  (`CMakeLists.txt:670`).
-- Test: unit tests for the wrap-planner directly (width N, various inputs,
-  including a prompt-carried `start_column`) — independent of terminal I/O.
-- Acceptance: typing a long sentence wraps at spaces, not mid-word; a
+### M2 — Word-boundary wrapping [DONE]
+
+Implemented: the wrap-planner moved out of `readline.cpp`'s anonymous
+namespace into its own translation unit, `src/cli/wrap.{h,cpp}` (real
+linkage), along with the UTF-8/ANSI-escape helpers it (and
+`InputRenderer`) both depend on. `plan_word_wrap(text, columns,
+start_column)` is a pure function that greedily accumulates
+whitespace-delimited words per row, breaking at the whitespace before a
+word that would overflow (dropping that whitespace, not carrying it to
+the next row) and falling back to the old character-boundary hard-wrap
+for a single token wider than the full row width (checked against the
+full row, not just the remaining space). `write_wrapped` now computes this
+plan once per printable run (a run spans from one hard `\n`/`\r` to the
+next, matching what the planner expects) and replays it character by
+character, so the measurement pass, the paint pass, and cursor capture
+all derive breaks from the exact same call — the M0/M1 cursor-capture
+invariant (a captured position never lands one column past a row's last
+cell) carries over unchanged to word-wrap break points, including the
+whitespace-drop case, which normalizes to `{row+1, 0}` for any offset in
+the dropped range.
+
+- Files: `src/cli/wrap.h`, `src/cli/wrap.cpp` (new), `src/cli/readline.cpp`
+  (`InputRenderer::write_wrapped`), `CMakeLists.txt` (new source wired into
+  `pi-cli`, `pi-acp`, `test-readline`, plus a new `test-wrap` target).
+- Test: `test/test_wrap.cpp` (new) — unit tests calling `plan_word_wrap`
+  directly, no pty: wraps at spaces not mid-word, a single overlong token
+  hard-wraps without overflow and resumes word-wrapping on the same row if
+  there's room, ANSI escapes are zero-width and never break points, a
+  nonzero `start_column` (prompt-carried) wraps correctly, and cursor
+  positions immediately before/at/after a word-wrap break (including
+  inside a hard-wrap fallback) land correctly. `test/test_readline.cpp`
+  gained two `forkpty`-based end-to-end tests
+  (`test_word_wrap_boundary`) confirming the same behavior against real
+  terminal output.
+- Acceptance met: typing a long sentence wraps at spaces, not mid-word; a
   single long unbroken token (e.g. a URL) still wraps without overflowing
   the box; cursor stays visually correct while navigating a wrapped line,
-  including right at a soft-wrap boundary.
+  including right at a soft-wrap boundary — verified by stashing the
+  `write_wrapped` change and confirming the new word-boundary tests fail
+  (they show the old code splitting "world" mid-word) before restoring and
+  confirming green, same protocol as M0/M1.
+- **Open question resolved** (see "Decisions resolved" below): continuation
+  rows start at column 0, not hang-indented under the prompt.
 
 ### M3 — Standard line-editing bindings + key remap + shared primitives
 - Decide and implement the scroll-vs-cursor remap from design decision 6.
@@ -440,11 +462,14 @@ against the same shared probe utility if genuinely run in parallel.
   continuously).
 - **Empty-buffer Enter is a no-op**, matching today's behavior
   (`main.cpp:2079-2080` already skips empty submitted lines).
+- **M2 continuation rows start at column 0, not hang-indented under the
+  prompt.** Decided in favor of simplicity and consistency with how
+  embedded hard-newlines already reset to column 0 — a wrapped
+  continuation row looks the same whether the break was a soft word-wrap
+  or a literal `\n` the user typed.
 
 ## Open questions (need user decisions before/at listed milestones)
 
-- **M2:** do wrapped continuation rows hang-indent under the prompt, or
-  start at column 0?
 - **M3:** confirm the scroll-key remap (Ctrl+Up/Down for transcript scroll)
   is acceptable before implementing — it changes existing muscle memory.
   (No history-recall fallback to design around — confirmed absent from the

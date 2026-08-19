@@ -731,6 +731,100 @@ void test_composer_height_cap() {
              });
 }
 
+void test_word_wrap_boundary() {
+  constexpr int kColumns = 10;
+
+  tests::run(
+      "readline: typing a long sentence wraps at word boundaries, not "
+      "mid-word",
+      [] {
+        struct winsize ws {};
+        ws.ws_row = 24;
+        ws.ws_col = kColumns;
+        int master = -1;
+        // "hello world foo" at 10 columns: "hello" (5) fits row one; the
+        // next word "world" doesn't fit alongside it (5+1+5=11 > 10) but
+        // does fit a fresh row on its own, so the break falls at the space
+        // between them (dropped, not carried over) rather than mid-word.
+        // "world foo" (9 columns) then fits together on the second row.
+        const auto child = forkpty(&master, nullptr, nullptr, &ws);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("", {}, {}, {}, "hello world foo", 15);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        output = read_until(master, std::move(output), "foo");
+
+        // The renderer emits "\033[K\r\n" for a row transition; ONLCR is
+        // still enabled on the pty's output side (RawMode only touches
+        // input flags, same as the embedded-\n tests above), so the raw
+        // '\n' byte lands here as an *additional* "\r\n" on top of the
+        // '\r' already written, observed as "\033[K\r\r\n".
+        CHECK(output.find("hello\033[K\r\r\nworld foo") != std::string::npos);
+        // Neither word is ever split across the row-clear/wrap sequence --
+        // if it were, "hell" or "worl" would appear immediately followed
+        // by it.
+        CHECK(output.find("hell\033[K\r\r\no") == std::string::npos);
+        CHECK(output.find("worl\033[K\r\r\nd") == std::string::npos);
+        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":15:hello world foo";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+
+  tests::run("readline: a single overlong token (longer than the row) still "
+             "hard-wraps without overflowing",
+             [] {
+               struct winsize ws {};
+               ws.ws_row = 24;
+               ws.ws_col = kColumns;
+               int master = -1;
+               const std::string token(40, 'x'); // no whitespace anywhere in it
+               const auto child = forkpty(&master, nullptr, nullptr, &ws);
+               CHECK(child >= 0);
+               if (child == 0) {
+                 dprintf(STDOUT_FILENO, "READY\n");
+                 const auto result =
+                     readline("", {}, {}, {}, token, token.size());
+                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                         static_cast<int>(result.reason), result.cursor,
+                         result.text.c_str());
+                 _exit(0);
+               }
+
+               auto output = read_until(master, {}, "READY");
+               output =
+                   read_until(master, std::move(output), std::string(4, 'x'));
+               // Wait for the redraw to finish so all four wrapped rows (40
+               // chars / 10 columns) have actually been emitted.
+               output = read_until(master, std::move(output), "\033[?7h");
+               CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+               // The row-clear/wrap marker (see the ONLCR note above for the
+               // doubled \r) must appear (repeatedly) inside the unbroken token
+               // -- confirming the hard-wrap fallback engaged instead of
+               // overflowing a single row with all 40 characters.
+               CHECK(count_occurrences(output, "\033[K\r\r\n") >= 3U);
+
+               CHECK_EQ(::write(master, "\r", 1), 1);
+               output = read_until(master, std::move(output), "RESULT:");
+               CHECK_EQ(wait_for_child(child), 0);
+               ::close(master);
+             });
+}
+
 int main() {
   test_wake_channel();
   test_non_tty_paths();
@@ -744,6 +838,7 @@ int main() {
   test_bracketed_paste_is_inert_block_insert();
   test_embedded_newline_cursor_placement();
   test_composer_height_cap();
+  test_word_wrap_boundary();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
             << " passed, " << tests::failed << " failed\n";
   return tests::failed == 0 ? 0 : 1;
