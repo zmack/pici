@@ -10,6 +10,7 @@
 #include <source_location>
 #include <string>
 #include <string_view>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -330,7 +331,8 @@ void test_mouse_wheel_scroll() {
     output = read_until(master, std::move(output), "RESULT:");
 
     const auto up_marker =
-        "ACTION:" + std::to_string(static_cast<int>(ControlAction::scroll_line_up));
+        "ACTION:" +
+        std::to_string(static_cast<int>(ControlAction::scroll_line_up));
     const auto down_marker =
         "ACTION:" +
         std::to_string(static_cast<int>(ControlAction::scroll_line_down));
@@ -342,6 +344,99 @@ void test_mouse_wheel_scroll() {
   });
 }
 
+// True if `output` contains a cursor-forward escape ("\033[<n>C") whose
+// argument reaches or exceeds `columns` — CSI n C clamps at the terminal's
+// rightmost cell for such an n, so the cursor glyph silently lands on the
+// last real character instead of where it was meant to go. See the M0 fix
+// in InputRenderer::write_wrapped/redraw for the invariant this guards.
+bool has_out_of_range_cursor_forward(std::string_view output, int columns) {
+  std::size_t pos = 0;
+  while ((pos = output.find("\033[", pos)) != std::string_view::npos) {
+    const std::size_t digits_start = pos + 2;
+    std::size_t i = digits_start;
+    while (i < output.size() && output[i] >= '0' && output[i] <= '9')
+      ++i;
+    if (i < output.size() && output[i] == 'C' && i > digits_start) {
+      const int n =
+          std::stoi(std::string(output.substr(digits_start, i - digits_start)));
+      if (n >= columns)
+        return true;
+    }
+    pos = digits_start;
+  }
+  return false;
+}
+
+void test_wrap_boundary_cursor_placement() {
+  constexpr int kColumns = 10;
+
+  tests::run("readline: cursor stays in range when text exactly fills a row",
+             [] {
+               struct winsize ws {};
+               ws.ws_row = 24;
+               ws.ws_col = kColumns;
+               int master = -1;
+               const auto child = forkpty(&master, nullptr, nullptr, &ws);
+               CHECK(child >= 0);
+               if (child == 0) {
+                 dprintf(STDOUT_FILENO, "READY\n");
+                 // Ten digits exactly fill a 10-column row with the cursor left
+                 // at the end of the text — the end-of-text tail-capture case.
+                 const auto result = readline("", {}, {}, {}, "0123456789", 10);
+                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                         static_cast<int>(result.reason), result.cursor,
+                         result.text.c_str());
+                 _exit(0);
+               }
+
+               auto output = read_until(master, {}, "READY");
+               output = read_until(master, std::move(output), "0123456789");
+               CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+               CHECK(output.find("\033[7m") != std::string::npos);
+
+               CHECK_EQ(::write(master, "\n", 1), 1);
+               output = read_until(master, std::move(output), "RESULT:");
+               CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+               CHECK_EQ(wait_for_child(child), 0);
+               ::close(master);
+             });
+
+  tests::run(
+      "readline: cursor stays in range mid-text at a soft wrap boundary", [] {
+        struct winsize ws {};
+        ws.ws_row = 24;
+        ws.ws_col = kColumns;
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, &ws);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          // 15 characters wrap once (row 1: "0123456789", row 2: "ABCDE").
+          const auto result = readline("", {}, {}, {}, "0123456789ABCDE", 15);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        output = read_until(master, std::move(output), "ABCDE");
+        // Walk the cursor back to offset 10 — the boundary between the two
+        // wrapped rows, i.e. sitting right at the soft wrap.
+        for (int i = 0; i < 5; ++i) {
+          CHECK_EQ(::write(master, "\033[D", 3), 3);
+          output = read_new_output(master, std::move(output));
+        }
+        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+
+        CHECK_EQ(::write(master, "\n", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
 int main() {
   test_wake_channel();
   test_non_tty_paths();
@@ -349,6 +444,7 @@ int main() {
   test_escape_wake();
   test_eof_wake_race();
   test_mouse_wheel_scroll();
+  test_wrap_boundary_cursor_placement();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
             << " passed, " << tests::failed << " failed\n";
   return tests::failed == 0 ? 0 : 1;

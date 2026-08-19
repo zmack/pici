@@ -83,10 +83,10 @@ void AltScreenSession::enter() {
   signals_installed_ = true;
 
   static constexpr std::string_view kEnter =
-      "\033[?1049h"     // enter alternate screen
-      "\033[H\033[2J"   // home + clear
-      "\033[?1000h"     // report mouse button/wheel events
-      "\033[?1006h";    // ...using SGR extended coordinate encoding
+      "\033[?1049h"   // enter alternate screen
+      "\033[H\033[2J" // home + clear
+      "\033[?1000h"   // report mouse button/wheel events
+      "\033[?1006h";  // ...using SGR extended coordinate encoding
   ::write(fd_, kEnter.data(), kEnter.size());
 }
 

@@ -293,12 +293,19 @@ public:
       else if (cursor_position.row > rows)
         std::cout << "\033[" << cursor_position.row - rows << 'B';
       std::cout << '\r';
-      if (cursor_position.column > 0)
+      // Guard against ever emitting CUF with n >= columns: CSI n C clamps
+      // at the terminal's rightmost cell, so a stray out-of-range position
+      // (which should no longer occur — see write_wrapped's capture sites)
+      // would silently land the cursor glyph on top of the last real
+      // character instead of failing loudly.
+      const bool cursor_in_row =
+          cursor_position.column > 0 && cursor_position.column < columns;
+      if (cursor_in_row)
         std::cout << "\033[" << cursor_position.column << 'C';
       // Toggle reverse video (SGR 7/27) for just the cursor cell without
       // dropping the input area's background tint.
       std::cout << "\033[7m \033[27m";
-      if (cursor_position.column > 0)
+      if (cursor_in_row)
         std::cout << "\033[D";
       cursor_row_ = cursor_position.row;
     } else {
@@ -357,13 +364,17 @@ private:
                             std::size_t &rows, std::size_t &column,
                             std::size_t cursor_offset = std::string_view::npos,
                             CursorPosition *cursor_position = nullptr) {
-    for (std::size_t offset = 0; offset < text.size();) {
-      if (cursor_position != nullptr && offset == cursor_offset) {
+    const auto capture = [&] {
+      if (cursor_position != nullptr) {
         cursor_position->row = rows;
         cursor_position->column = column;
       }
+    };
+    for (std::size_t offset = 0; offset < text.size();) {
       if (const auto escape_length = ansi_escape_length(text, offset);
           escape_length > 0) {
+        if (offset == cursor_offset)
+          capture();
         const auto escape = text.substr(offset, escape_length);
         std::cout.write(escape.data(),
                         static_cast<std::streamsize>(escape.size()));
@@ -372,6 +383,8 @@ private:
       }
 
       if (text[offset] == '\n') {
+        if (offset == cursor_offset)
+          capture();
         // Fill the remainder of the row before wrapping so the input area's
         // background tint covers the whole box, not just the glyphs.
         std::cout << "\033[K\r\n";
@@ -381,6 +394,8 @@ private:
         continue;
       }
       if (text[offset] == '\r') {
+        if (offset == cursor_offset)
+          capture();
         std::cout << '\r';
         column = 0;
         ++offset;
@@ -390,11 +405,21 @@ private:
       const auto length = utf8_length(text, offset);
       const auto width = codepoint_width(
           utf8_codepoint(text, offset, std::min(length, text.size() - offset)));
+      // The wrap decision for this character has to land before its cursor
+      // position is captured: capturing beforehand can record a position
+      // one column past the row's last cell (or, for a wide glyph, one row
+      // short of where the glyph actually paints), which the caller can't
+      // tell apart from a valid position and ends up drawing the cursor
+      // glyph over a real character instead. Normalizing here means the
+      // capture always lands on the cell this character is about to be
+      // painted into.
       if (width > 0 && column > 0 && column + width > columns) {
         std::cout << "\033[K\r\n";
         ++rows;
         column = 0;
       }
+      if (offset == cursor_offset)
+        capture();
 
       const auto character = text.substr(offset, length);
       std::cout.write(character.data(),
@@ -405,6 +430,16 @@ private:
     if (cursor_position != nullptr && cursor_offset == text.size()) {
       cursor_position->row = rows;
       cursor_position->column = column;
+      // The cursor sits after the last character, with no further
+      // character to decide a wrap for. If that character exactly filled
+      // the row, this position is one column past the last valid cell —
+      // normalize to the start of the next row, matching what redraw()'s
+      // synthetic blank-row insertion (triggered by that same
+      // column == columns case) actually paints.
+      if (cursor_position->column == columns) {
+        ++cursor_position->row;
+        cursor_position->column = 0;
+      }
     }
   }
 
