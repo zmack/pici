@@ -812,8 +812,8 @@ void test_alt_screen_session() {
     const ssize_t count = ::read(fds[0], buffer.data(), buffer.size());
     const std::string output(buffer.data(),
                              count > 0 ? static_cast<std::size_t>(count) : 0);
-    CHECK_EQ(output, "\033[?1049h\033[H\033[2J"
-                    "\033[r\033[?25h\033[?1049l");
+    CHECK_EQ(output, "\033[?1049h\033[H\033[2J\033[?1000h\033[?1006h"
+                     "\033[?1006l\033[?1000l\033[r\033[?25h\033[?1049l");
     ::close(fds[0]);
     ::close(fds[1]);
   });
