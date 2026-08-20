@@ -1,5 +1,6 @@
 #include "cli/readline.h"
 
+#include "core/stream_renderer.h"
 #include "core/terminal.h"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <fcntl.h>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <poll.h>
 #include <signal.h>
 #include <source_location>
@@ -16,6 +18,7 @@
 #include <string_view>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -1978,6 +1981,44 @@ private:
             r[static_cast<std::size_t>(c)] = ' ';
         break;
       }
+      case 'H':
+      case 'f': {
+        // CUP/HVP ("row;colH", either half optional, defaulting to 1) --
+        // needed to track RegionRenderer's absolute-addressed writes
+        // (position_prompt_cursor(), status/content row painting), unlike
+        // the plain-readline()-only tests above that never emit this
+        // sequence. Split on ';' explicitly instead of the single running
+        // accumulator the other cases share -- that accumulator never
+        // resets across a parameter boundary, which is harmless for every
+        // other case here (all single-parameter) but would silently
+        // concatenate "row;col" into one bogus number.
+        int one = 0;
+        int two = 0;
+        bool have_one = false;
+        bool have_two = false;
+        bool second = false;
+        for (std::size_t p = 2; p < end; ++p) {
+          if (data[p] == ';') {
+            second = true;
+            continue;
+          }
+          if (data[p] < '0' || data[p] > '9')
+            continue;
+          if (second) {
+            two = two * 10 + (data[p] - '0');
+            have_two = true;
+          } else {
+            one = one * 10 + (data[p] - '0');
+            have_one = true;
+          }
+        }
+        const int target_row = have_one ? one : 1;
+        const int target_col = have_two ? two : 1;
+        row_ =
+            std::clamp(target_row - 1, 0, static_cast<int>(rows_.size()) - 1);
+        col_ = std::clamp(target_col - 1, 0, width_ - 1);
+        break;
+      }
       default:
         break; // SGR (m), private modes (h/l), etc. -- no cursor/content
                // effect this simulator needs to track.
@@ -2204,6 +2245,120 @@ void test_osc11_probe_supported_blends_truecolor_tint() {
       });
 }
 
+// Region-mode analogue of test_footer_scroll_at_terminal_bottom_does_not_
+// desync_cursor above, but exercising a real RegionRenderer + readline()
+// across a genuine turn boundary instead of driving readline() alone --
+// see that test's own comment for why a bare forkpty of readline() by
+// itself can never reach this bug (no RegionRenderer, no
+// position_prompt_cursor(), no DECSTBM scroll region at all).
+//
+// Root cause (found via exactly this repro, replayed through a real
+// terminal for exact row-by-row verification before being encoded as this
+// permanent MiniTerminal-based test): main.cpp's "Print mode / initial
+// message" handling -- reachable any time a session is launched with an
+// initial prompt in non-print mode, e.g. `pici --render region "do X"`,
+// an ordinary way to start an agentic CLI session -- runs that message's
+// turn *before* the interactive readline() loop starts, then
+// unconditionally writes a bare "\n" straight through std::cout with no
+// check on renderer->owns_status_line(), completely bypassing both the
+// Renderer and readline()'s own row bookkeeping. From cursor position
+// (prompt_anchor, 1) -- exactly where position_prompt_cursor() had just
+// left it -- that untracked newline lands the very first interactive
+// InputRenderer's first_draw_ one row lower than position_prompt_cursor()'s
+// own formula assumes, so its footer paints one row lower too. That's
+// internally self-consistent for as long as that one InputRenderer
+// instance lives (its own clear_previous() correctly erases whatever it
+// itself painted), but the *next* turn boundary's position_prompt_cursor()
+// call resets the cursor back to the correct anchor absolutely, with no
+// memory of the drift -- so the next InputRenderer paints at the *correct*
+// row, and the previous one's now-orphaned footer, one row below it, is
+// never touched by anything again: two footers, visible from that point
+// on -- exactly the reported "doubled starting with the second prompt"
+// symptom, and it never self-heals since nothing owns that orphaned row.
+//
+// Fixed in region_renderer.cpp's position_prompt_cursor(): it now wipes
+// every row in the composer's reserved area before repositioning, so
+// whatever (if anything) desynced that area since the last turn boundary
+// is gone before the next InputRenderer ever paints into it -- closing the
+// gap regardless of what wrote there, not just this one specific main.cpp
+// bug.
+void test_region_turn_boundary_survives_untracked_cursor_drift() {
+  tests::run(
+      "region renderer + readline: an untracked write that shifts the "
+      "composer's on-screen position between turns (main.cpp's initial-CLI-"
+      "argument-message path bypasses both renderers with a bare std::cout "
+      "newline) must not leave a stale footer behind once "
+      "position_prompt_cursor() resets to the next prompt's correct row -- "
+      "regression test for 'doubled footer starting with the second "
+      "prompt' in --render region mode",
+      [] {
+        struct winsize ws {};
+        ws.ws_row = 24;
+        ws.ws_col = 80;
+        int master = -1;
+        // Flush every prior test's buffered "PASS ..." output before
+        // forking -- otherwise the child inherits an unflushed std::cout
+        // buffer and its own first flush dumps that stale content into the
+        // pty at whatever cursor position is active, corrupting the exact
+        // screen geometry this test depends on.
+        std::cout.flush();
+        const auto child = forkpty(&master, nullptr, nullptr, &ws);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          auto renderer = pi::core::make_region_renderer(STDOUT_FILENO);
+          const std::string prompt = "\n\033[1;36m\xe2\x80\xba\033[22;39m ";
+          // The initial CLI-argument message's turn, run before the
+          // interactive loop -- see main.cpp lines ~2006-2020.
+          renderer->on_turn_start();
+          renderer->on_text_delta("Initial CLI-argument message's reply.");
+          renderer->on_turn_end();
+          std::cout << "\n"; // the untracked write itself
+          std::cout.flush();
+
+          renderer->set_status_line(std::nullopt);
+          (void)readline(prompt, {}, {}, {}, "", 0, -1, true);
+          renderer->on_turn_start();
+          renderer->on_text_delta("Sure, here is a short reply.");
+          renderer->on_turn_end();
+          renderer->set_status_line(std::nullopt);
+          (void)readline(prompt, {}, {}, {}, "", 0, -1, true);
+          // Deliberately hang here (no _exit) -- the parent kills this
+          // child once it has captured the second interactive prompt's
+          // steady state; nothing past that point matters, and letting
+          // this readline() call's own eventual EOF handling run would
+          // repaint the screen again and contaminate the capture.
+          for (;;)
+            ::pause();
+        }
+
+        auto output = read_until(master, {}, "READY");
+        // Each readline() round trip (first paint, then the
+        // submit-triggered clear) emits exactly two "\033[?7h" markers;
+        // three occurrences reach the second interactive prompt's first
+        // paint -- the exact point the bug (and the fix) is about.
+        for (int occurrence = 0; occurrence < 3; ++occurrence) {
+          const auto from = output.size();
+          output = read_until_from(master, std::move(output), from, "\033[?7h");
+          if (occurrence == 0) // first prompt just finished painting once
+            CHECK_EQ(::write(master, "\r", 1), 1); // submit it
+        }
+
+        ::kill(child, SIGKILL);
+        int status = 0;
+        ::waitpid(child, &status, 0);
+        ::close(master);
+
+        MiniTerminal term(80, 24);
+        term.feed(output);
+        // Exactly one copy of the footer text must be visible -- before the
+        // fix, the first (drift-shifted) prompt's orphaned footer survived
+        // one row below the second prompt's correctly-positioned one.
+        CHECK_EQ(count_occurrences(term.screen_text(), "Alt+Enter: newline"),
+                 1U);
+      });
+}
+
 int main() {
   // Every test above the "M4: Kitty keyboard protocol probe" section is
   // exercising M1-M3 behavior, not the probe itself -- disable it
@@ -2256,6 +2411,7 @@ int main() {
   test_footer_scroll_at_terminal_bottom_does_not_desync_cursor();
   test_osc11_probe_skipped_without_truecolor_colorterm();
   test_osc11_probe_supported_blends_truecolor_tint();
+  test_region_turn_boundary_survives_untracked_cursor_drift();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
             << " passed, " << tests::failed << " failed\n";
   return tests::failed == 0 ? 0 : 1;

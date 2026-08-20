@@ -1317,11 +1317,51 @@ private:
   // Readline's prompt starts with a newline. Leave the cursor on the status
   // row so that newline advances to the dedicated prompt row at the very
   // bottom of the terminal.
+  //
+  // Also wipes every row in the composer's reserved area (prompt_anchor+1
+  // through the terminal's last row) before repositioning. This matters
+  // because the InputRenderer that's about to run next starts completely
+  // fresh -- rendered_rows_ == 0, so its first redraw()'s clear_previous()
+  // is a no-op -- and it assumes this reserved area already holds nothing
+  // but an empty, ready-for-input box (or nothing at all). That assumption
+  // is normally true, but nothing enforces it: this reserved area is a
+  // handoff point between two independently-instantiated pieces of code (a
+  // RegionRenderer that outlives the whole process and a fresh
+  // InputRenderer per prompt), and any write that lands here through a path
+  // neither side's own bookkeeping tracks -- e.g. a caller writing directly
+  // to the fd outside both renderers' contracts -- leaves content an
+  // InputRenderer instance can never know it needs to erase, since it has
+  // no memory of anything that happened before it existed. Root-caused
+  // empirically: main.cpp's initial-CLI-argument-message handling (the
+  // `pici --render region "message"` path, run before the interactive
+  // readline() loop starts) writes a bare "\n" straight through std::cout
+  // after that turn completes, bypassing both this Renderer and readline()
+  // entirely. From cursor position (prompt_anchor, 1) -- exactly where the
+  // *previous* call to this function had just left it -- that untracked
+  // newline lands the very first interactive InputRenderer's first_draw_
+  // one row lower than this function's own formula assumes, so its footer
+  // (and the composer box generally) paints one row lower too. That offset
+  // is internally self-consistent for as long as that one InputRenderer
+  // instance lives (its own clear_previous() correctly erases whatever it
+  // itself painted, wherever that ended up), but on the *next* turn
+  // boundary this function resets the cursor back to the correct
+  // prompt_anchor absolutely, with no memory of the drift -- so the next
+  // InputRenderer paints at the *correct* position, and the previous one's
+  // now-orphaned footer (one row below it) is never touched by anything
+  // again: two footers, visible from that point on, exactly the reported
+  // "doubled starting with the second prompt" symptom. Unconditionally
+  // clearing the reserved area here closes the gap regardless of what (if
+  // anything) desynced it since the last time this ran, rather than
+  // depending on every caller of this Renderer to route 100% of its output
+  // through it.
   void position_prompt_cursor() const {
-    const int prompt_anchor = std::max(1, term_height(fd_) - kComposerRows);
-    const auto cursor_sequence =
-        "\033[" + std::to_string(prompt_anchor) + ";1H\033[?25h";
-    write_all(fd_, cursor_sequence);
+    const int height = term_height(fd_);
+    const int prompt_anchor = std::max(1, height - kComposerRows);
+    std::string sequence;
+    for (int row = prompt_anchor + 1; row <= height; ++row)
+      sequence += "\033[" + std::to_string(row) + ";1H\033[2K";
+    sequence += "\033[" + std::to_string(prompt_anchor) + ";1H\033[?25h";
+    write_all(fd_, sequence);
   }
 
   static std::string status_sequence(const State &snapshot, int width,
