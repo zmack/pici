@@ -63,6 +63,11 @@
 [context]
 # disabled = false   # --no-context-files  (skip AGENTS.md / CLAUDE.md discovery)
 
+[input]
+# vim_mode = false   # Normal/Insert modal composer editing: motions h j k l
+# w b e 0 $, operators d/c. No CLI flag -- config.toml opt-in only. Escape
+# enters Normal mode; i/a/A/I return to Insert.
+
 [sandbox]
 # mode = "auto"       # auto|required|disabled; disabled is an explicit
 #                      # unsandboxed host-execution escape hatch

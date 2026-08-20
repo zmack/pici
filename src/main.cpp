@@ -2059,7 +2059,7 @@ int cmd_run(const cli::Args &args,
     auto readline_result =
         cli::readline(prompt, complete_fn, control_fn, readline_status,
                       readline_draft, readline_cursor, readline_wake_fd,
-                      full_screen_prompt, on_prompt_resize);
+                      full_screen_prompt, on_prompt_resize, args.vim_mode);
     if (readline_result.reason == cli::ReadlineExit::eof)
       break;
     if (readline_result.reason == cli::ReadlineExit::mailbox_wake) {

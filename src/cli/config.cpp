@@ -532,6 +532,9 @@ void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
   // [context]
   cfg.no_context_files = boolean("context", "disabled");
 
+  // [input]
+  cfg.vim_mode = boolean("input", "vim_mode");
+
   // [session]
   if (auto d = str("session", "dir"); !d.empty())
     cfg.session_dir = expand_tilde(d);
@@ -708,6 +711,7 @@ Args merge_args(const Args &config, const Args &cli) {
   out.faux_control_socket = cli.faux_control_socket;
   out.verbose = config.verbose || cli.verbose;
   out.no_context_files = config.no_context_files || cli.no_context_files;
+  out.vim_mode = config.vim_mode || cli.vim_mode;
   out.remote_compaction_enabled =
       config.remote_compaction_enabled || cli.remote_compaction_enabled;
   out.compaction_threshold_pct = cli.compaction_threshold_pct > 0.0

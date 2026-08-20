@@ -447,21 +447,79 @@ Alt+Enter; anything else submits, matching a raw `\r`.
   never replies meaningfully to the probe (plain xterm, Linux VT, tmux
   without `extended-keys`).
 
-### M5 — Vim mode (Normal/Insert + core motions/operators; text objects deferred)
-- Depends on M3's shared primitives, not just M1 (design decision 9) —
-  sequence as `M1 → M3 → M5`, not in parallel with M3.
-- Initial scope (design decision 8): `VimMode::{Normal,Insert}`; motions
-  `h j k l w b e 0 $`; operators `d`/`c` only. No text objects, no `y`, no
-  registers beyond a single implicit one — these are a follow-up once the
-  rest of the composer has been in real use for a while.
-- Implementation shape: a `VimEngine` that intercepts key events ahead of
-  the plain-editor key loop, toggled per design decision below (Open
-  questions), operating on the M1 buffer via M3's primitives.
-- Files: new `src/cli/vim_mode.{h,cpp}`, wired into `readline()`'s key
-  dispatch.
-- Acceptance: can compose and edit a multi-line message using only the
-  covered motions/operators; falls back to plain Insert-mode editing for
-  anything not covered rather than eating or misinterpreting keys.
+### M5 — Vim mode (Normal/Insert + core motions/operators; text objects deferred) [DONE]
+
+Implemented: a new `VimEngine` (`src/cli/vim_mode.{h,cpp}`) holding
+`VimMode::{Normal,Insert}` state, an operator-pending flag, and the dd/cc
+doubled-operator handling; constructed fresh inside `readline()` (starts in
+Insert, matching plain editing until the user presses Escape). `[input]
+vim_mode` in config.toml (`Args::vim_mode`, OR-merged like the other boolean
+flags) threads through `readline()`'s new trailing `vim_mode` parameter
+(defaulted `false`, so the one existing call site — and every future one —
+keeps working unchanged unless it opts in); `main.cpp` gained exactly one
+line at its `readline()` call site to pass `args.vim_mode` through.
+
+The hook point turned out narrower than "intercept key events ahead of the
+plain-editor key loop" suggested: only single, non-escape bytes are routed
+to `VimEngine` while in Normal mode. Multi-byte escape sequences (arrows,
+Ctrl+Left/Right, mouse wheel, Alt+B/F, Alt+Enter, bracketed paste, the Kitty
+protocol) are left completely untouched in both modes — vim's covered keys
+are all single ASCII bytes, so there's no overlap to arbitrate, and
+scroll/paste/newline-insert have no vim equivalent in this milestone's cut
+scope; swallowing them in Normal mode would be a worse surprise than "arrows
+still work." Submit (`\r`/`\n`) and EOF (Ctrl+D) also stay live in every
+mode — a Normal mode with no way to submit would trap the user into
+pressing `i` before every message, which a chat composer can't afford.
+Escape always cancels a pending `d`/`c` operator, matching real Vim.
+
+`w`/`b`/`e` reuse M3's primitives where they're actually correct
+(`previous_word_boundary` for `b`) but not verbatim for `w`/`e`, where
+getting Vim's semantics right required different traversal order/target
+convention than M3's bash/Emacs-style `next_word_boundary`: `w` (start of
+next word) needed its own traversal (consume the current word first, then
+skip whitespace, opposite of `next_word_boundary`'s order); `e` (end of
+current/next word) needed a genuinely new implementation landing *on* the
+word's last character (matching this UI's cursor overlay, which paints
+directly at `cursor_offset`) rather than one past it — and, since Vim
+classifies `e` as an inclusive motion unlike `w`'s exclusive one, the
+operator-pending path extends `e`'s span by one codepoint when combining
+with `d`/`c`, while plain cursor movement does not. `dd`/`cc` operate on the
+whole current line (absorbing a trailing or, on the last line, the
+preceding newline for `dd`; keeping line structure intact for `cc`).
+`d`/`c` only combine with the characterwise motions (`h l w b e 0 $`); `j`/`k`
+are movement-only, since Vim's linewise `d`/`c` + `j`/`k` semantics would need
+meaningfully more special-casing than doubled dd/cc already covers.
+
+- Files: `src/cli/vim_mode.h`, `src/cli/vim_mode.cpp` (new); `src/cli/
+  readline.h`/`readline.cpp` (new `vim_mode` parameter, the Normal-mode hook
+  point, and `previous_utf8_offset`/`next_utf8_offset`/`line_start`/
+  `line_end`/`previous_word_boundary`/`next_word_boundary`/
+  `previous_line_offset`/`next_line_offset` moved from internal to real
+  linkage so `vim_mode.cpp` can reuse them); `src/cli/args.h`, `src/cli/
+  config.cpp`, `config.toml.example` (`[input] vim_mode`); `src/main.cpp`
+  (one line, threading `args.vim_mode` through).
+- Test: 23 pure-unit tests in `test/test_vim_mode.cpp` covering every
+  motion, the `e`-vs-`w` distinction (including the "already at the last
+  character, repeated `e` skips a whole word" case), `d`/`c` + each motion,
+  `dd`/`cc` (including the last-line and single-line-buffer edge cases), an
+  uncovered key being a safe no-op, and an operator cancelling cleanly on an
+  invalid motion. 6 new `forkpty`-based tests in `test/test_readline.cpp`
+  (55 total) cover the parts that only make sense wired into `readline()`'s
+  own loop: Escape entering Normal mode without inserting a literal
+  character, `i` returning to Insert, `dd` end-to-end (including that plain
+  Enter still submits from Normal mode), `c<motion>` dropping into Insert,
+  an uncovered key staying inert against a real terminal, escape-sequence
+  bindings (Left arrow) working identically in Normal mode, and
+  `vim_mode=false` leaving `h`/`j`/`k`/`l` as literal inserted text. Verified
+  against the M4 baseline (stash of every file this milestone touched) that
+  the `test-vim-mode` target doesn't exist and `test-readline` reverts to
+  exactly its prior 49 tests without the implementation, before restoring
+  and confirming all green — same protocol as M0-M4.
+- Acceptance met: composing and editing a multi-line message works with
+  only the covered motions/operators; any key the Normal-mode state machine
+  doesn't recognize is a harmless no-op, never eaten or misinterpreted;
+  `vim_mode=false` (the default) leaves M0-M4 behavior completely
+  unaffected.
 
 ### M6 — Visual polish
 - Query actual terminal background (OSC 11, `\033]11;?\007`) and

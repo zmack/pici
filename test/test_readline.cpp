@@ -1413,6 +1413,270 @@ void test_kitty_supported_existing_bindings_unaffected() {
       });
 }
 
+// --- M5: vim mode ----------------------------------------------------------
+//
+// End-to-end coverage against a real terminal for the parts of vim mode
+// that only make sense wired into readline()'s own dispatch loop: Escape
+// entering Normal mode, i/a/A/I returning to Insert, an uncovered
+// Normal-mode key being a safe no-op, and vim_mode=false leaving M0-M4
+// behavior completely unchanged. Pure motion/operator logic (h j k l w b e
+// 0 $, d/c, dd/cc, including the e-vs-w distinction) is covered directly
+// against VimEngine, no pty needed, in test_vim_mode.cpp.
+
+void test_vim_mode_escape_enters_normal_and_h_moves_without_inserting() {
+  tests::run(
+      "vim mode: Escape enters Normal mode -- h moves the cursor instead of "
+      "inserting the letter 'h'; i returns to Insert",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result =
+              readline("> ", {}, {}, {}, "", 0, -1, false, {}, true);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        CHECK_EQ(::write(master, "ab", 2), 2);
+        output = read_new_output(master, std::move(output));
+        // Bare Escape: enters Normal mode, no visible change.
+        CHECK_EQ(::write(master, "\x1b", 1), 1);
+        // read_escape_sequence's own short poll window (25ms) has to expire
+        // before this is recognized as a *bare* Escape rather than the
+        // start of some other sequence -- give it a moment before sending
+        // the next byte, matching test_escape_wake's same requirement.
+        poll(nullptr, 0, 60);
+        // 'h': a vim motion, not a literal character -- if this were
+        // mistakenly inserted as text instead of intercepted, the
+        // submitted buffer below would read "abh" instead of "aXb".
+        CHECK_EQ(::write(master, "h", 1), 1);
+        output = read_new_output(master, std::move(output));
+        // 'i': insert before cursor (now at offset 1, between "a" and
+        // "b") -- returns to Insert mode without moving the cursor.
+        CHECK_EQ(::write(master, "i", 1), 1);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "X", 1), 1);
+        output = read_new_output(master, std::move(output));
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":2:aXb";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_vim_mode_dd_deletes_whole_line_end_to_end() {
+  tests::run(
+      "vim mode: dd deletes the whole current line against a real terminal, "
+      "and plain Enter still submits from Normal mode",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          // Cursor starts at offset 6, the start of "line2".
+          const auto result = readline("> ", {}, {}, {}, "line1\nline2\nline3",
+                                       6, -1, false, {}, true);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "line3");
+        CHECK_EQ(::write(master, "\x1b", 1), 1);
+        poll(nullptr, 0, 60);
+        CHECK_EQ(::write(master, "dd", 2), 2);
+        output = read_new_output(master, std::move(output));
+
+        // Plain Enter submits even while still in Normal mode -- a
+        // deliberate scope decision (see composer-textarea-rewrite.md M5
+        // and this test file's header comment): submit/EOF stay live in
+        // every mode so the user is never trapped needing to press 'i'
+        // first just to send a message.
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":6:line1\r\nline3";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_vim_mode_c_operator_enters_insert_mode() {
+  tests::run(
+      "vim mode: c<motion> deletes the span and drops straight into Insert "
+      "mode -- no separate 'i' needed before typing",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result =
+              readline("> ", {}, {}, {}, "hello world", 11, -1, false, {}, true);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "world");
+        CHECK_EQ(::write(master, "\x1b", 1), 1);
+        poll(nullptr, 0, 60);
+        CHECK_EQ(::write(master, "0", 1), 1); // line start
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "cw", 2), 2); // change "hello " -> insert
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "X", 1), 1); // now in Insert mode
+        output = read_new_output(master, std::move(output));
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":1:Xworld";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_vim_mode_uncovered_key_is_safe_noop() {
+  tests::run(
+      "vim mode: an uncovered Normal-mode key ('x', not implemented in this "
+      "milestone's scope) neither edits the buffer nor gets inserted as "
+      "text",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result =
+              readline("> ", {}, {}, {}, "", 0, -1, false, {}, true);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        CHECK_EQ(::write(master, "hi", 2), 2);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "\x1b", 1), 1);
+        poll(nullptr, 0, 60);
+        CHECK_EQ(::write(master, "x", 1), 1);
+        output = read_new_output(master, std::move(output));
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        // If 'x' had fallen through to plain-insert instead of being
+        // swallowed as an uncovered Normal-mode key, this would read
+        // "hix" instead.
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":2:hi";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_vim_mode_arrow_keys_unaffected_in_normal_mode() {
+  tests::run(
+      "vim mode: escape-sequence bindings (plain Left/Right) keep working "
+      "identically in Normal mode -- only single-byte keys are vim's to "
+      "intercept",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result =
+              readline("> ", {}, {}, {}, "ab", 2, -1, false, {}, true);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        CHECK_EQ(::write(master, "\x1b", 1), 1);
+        poll(nullptr, 0, 60);
+        // Plain Left (CSI "[D"), the ordinary arrow-key escape sequence --
+        // not a vim single-byte key -- still moves the cursor exactly as
+        // it would without vim mode.
+        CHECK_EQ(::write(master, "\033[D", 3), 3);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "i", 1), 1); // back to Insert at offset 1
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "X", 1), 1);
+        output = read_new_output(master, std::move(output));
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":2:aXb";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_vim_mode_false_leaves_hjkl_as_literal_text() {
+  tests::run(
+      "vim mode: with vim_mode=false (the default), h/j/k/l are inserted "
+      "as literal characters -- M0-M4 behavior is completely unaffected",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result =
+              readline("> ", {}, {}, {}, "", 0, -1, false, {}, false);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        CHECK_EQ(::write(master, "hjkl", 4), 4);
+        output = read_new_output(master, std::move(output));
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":4:hjkl";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
 int main() {
   // Every test above the "M4: Kitty keyboard protocol probe" section is
   // exercising M1-M3 behavior, not the probe itself -- disable it
@@ -1447,6 +1711,12 @@ int main() {
   test_kitty_probe_typeahead_survives_probe_window();
   test_kitty_disable_env_var_skips_probe_and_forces_fallback();
   test_kitty_supported_existing_bindings_unaffected();
+  test_vim_mode_escape_enters_normal_and_h_moves_without_inserting();
+  test_vim_mode_dd_deletes_whole_line_end_to_end();
+  test_vim_mode_c_operator_enters_insert_mode();
+  test_vim_mode_uncovered_key_is_safe_noop();
+  test_vim_mode_arrow_keys_unaffected_in_normal_mode();
+  test_vim_mode_false_leaves_hjkl_as_literal_text();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
             << " passed, " << tests::failed << " failed\n";
   return tests::failed == 0 ? 0 : 1;

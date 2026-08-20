@@ -1,5 +1,6 @@
 #include "cli/readline.h"
 
+#include "cli/vim_mode.h"
 #include "cli/wrap.h"
 #include "core/terminal.h"
 
@@ -685,6 +686,17 @@ private:
   bool first_draw_{true};
 };
 
+} // namespace
+
+// --- Shared editing primitives -------------------------------------------
+//
+// Line-boundary, word-boundary, and logical-row primitives used by the M3
+// key bindings below (Home/End/Ctrl+A/Ctrl+E, word-left/right, Ctrl+W/U/K/Y,
+// Up/Down) and by M5's vim_mode.cpp (declared in readline.h, real linkage
+// rather than the anonymous-namespace internal linkage used by the rest of
+// this file's helpers, specifically so VimEngine can reuse them directly
+// instead of re-deriving the same logic).
+
 std::size_t previous_utf8_offset(std::string_view buf, std::size_t cursor) {
   if (cursor == 0)
     return 0;
@@ -700,14 +712,6 @@ std::size_t next_utf8_offset(std::string_view buf, std::size_t cursor) {
     return buf.size();
   return std::min(buf.size(), cursor + utf8_length(buf, cursor));
 }
-
-// --- Shared editing primitives -------------------------------------------
-//
-// Line-boundary, word-boundary, and logical-row primitives used by the M3
-// key bindings below (Home/End/Ctrl+A/Ctrl+E, word-left/right, Ctrl+W/U/K/Y,
-// Up/Down). Kept as free functions on (buf, cursor) rather than inlined into
-// the key-dispatch chain so M5's vim mode can reuse them directly instead of
-// re-deriving the same logic.
 
 // Start offset of the '\n'-delimited logical line containing `cursor` (the
 // buffer index right after the preceding '\n', or 0 if there is none).
@@ -802,6 +806,8 @@ std::size_t next_line_offset(std::string_view buf, std::size_t cursor) {
     offset = next_utf8_offset(buf, offset);
   return offset;
 }
+
+namespace {
 
 // Apply completions to buf, redrawing the line as needed.
 void apply_completions(InputRenderer &renderer, std::string &buf,
@@ -1153,7 +1159,7 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
                         std::string_view initial_draft,
                         std::size_t initial_cursor, int wake_fd,
                         bool clear_on_submit,
-                        const std::function<void()> &on_resize) {
+                        const std::function<void()> &on_resize, bool vim_mode) {
   // Non-TTY fallback: just use getline (pipes, scripts, tests)
   if (isatty(STDIN_FILENO) == 0) {
     std::cout << prompt << std::flush;
@@ -1187,12 +1193,21 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
          (static_cast<unsigned char>(buf[cursor]) & 0xC0U) == 0x80U)
     --cursor;
 
-  // Single most-recent-kill slot for Ctrl+W/Ctrl+U/Ctrl+K/Ctrl+Y. Scoped to
-  // this call, matching M1's decision not to introduce a ReadlineState that
-  // persists across readline() calls -- nothing needs the kill buffer to
-  // outlive one prompt. Each kill overwrites it (last-kill-wins); this is
+  // Single most-recent-kill slot for Ctrl+W/Ctrl+U/Ctrl+K/Ctrl+Y -- also
+  // reused as vim mode's implicit unnamed register for d/c below, so a
+  // vim-mode deletion can be yanked back with Ctrl+Y and vice versa. Scoped
+  // to this call, matching M1's decision not to introduce a ReadlineState
+  // that persists across readline() calls -- nothing needs the kill buffer
+  // to outlive one prompt. Each kill overwrites it (last-kill-wins); this is
   // not a ring of multiple kills.
   std::string kill_buffer;
+
+  // Vim mode's Normal/Insert state machine (see cli/vim_mode.h). Always
+  // constructed -- cheap and inert when vim_mode is false or its mode stays
+  // Insert -- so the dispatch loop below has one object to check rather
+  // than conditionally allocating it. Starts in Insert mode, matching plain
+  // (non-vim) editing exactly until the user deliberately presses Escape.
+  VimEngine vim_engine;
 
   InputRenderer renderer(prompt, status_line);
   renderer.redraw(buf, cursor);
@@ -1294,10 +1309,47 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
       if (c == '\x04') // Ctrl+D — EOF
         return finish(ReadlineExit::eof);
 
+      // Vim mode's Normal-mode key layer intercepts single, non-escape
+      // bytes ahead of the plain-editor dispatch chain below -- see
+      // cli/vim_mode.h. Submit ('\r'/'\n', above) and EOF (Ctrl+D, above)
+      // stay live in every mode, since they're readline()-level controls
+      // rather than buffer edits (a Normal mode with no way to submit would
+      // trap the user into switching back to Insert for every message).
+      // Escape sequences (arrows, Ctrl+arrows, mouse wheel, Alt+B/F,
+      // bracketed paste, Alt+Enter, the Kitty protocol) are handled below,
+      // in the '\x1b' branch, exactly the same in both modes -- vim mode's
+      // covered keys are all single ASCII bytes, so there's no overlap to
+      // arbitrate, and scroll/paste/newline-insert have no vim equivalent
+      // in this milestone's cut-down scope. Any byte the Normal-mode state
+      // machine doesn't recognize (Backspace, Tab, Ctrl+A/E/W/U/K/Y, digits,
+      // punctuation, ...) is a harmless no-op -- see VimEngine::
+      // handle_normal_key's default case.
+      if (vim_mode && vim_engine.mode() == VimMode::Normal && c != '\x1b') {
+        const auto vim_result =
+            vim_engine.handle_normal_key(c, buf, cursor, kill_buffer);
+        if (vim_result.changed)
+          renderer.redraw(buf, cursor);
+        continue;
+      }
+
       if (c == '\x1b') {
         const auto escape = read_escape_sequence(wake_fd);
         if (escape.wake)
           return finish(ReadlineExit::mailbox_wake);
+        if (vim_mode) {
+          // Escape always cancels an in-progress d/c operator, matching
+          // real Vim -- regardless of whether this turns out to be a bare
+          // Escape or the start of some other escape sequence (a fast
+          // typist landing on an arrow key right after 'd', say).
+          vim_engine.cancel_pending();
+          if (escape.sequence.empty()) {
+            // Bare Escape (read_escape_sequence's short poll window timed
+            // out with nothing following): enter Normal mode. Idempotent
+            // if already there. No buffer/cursor change, so no redraw.
+            vim_engine.set_mode(VimMode::Normal);
+            continue;
+          }
+        }
         if (escape.sequence == "\r") {
           // Alt+Enter (legacy ESC + \r, distinguishable now that ICRNL is
           // cleared): insert a newline instead of submitting.

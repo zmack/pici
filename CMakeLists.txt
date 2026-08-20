@@ -545,6 +545,7 @@ add_executable(pi-cli
     src/cli/config.cpp
     src/cli/readline.cpp
     src/cli/wrap.cpp
+    src/cli/vim_mode.cpp
     src/cli/model_selector.cpp
     src/cli/rpc_mode.cpp
     src/cli/faux_control_mode.cpp
@@ -569,6 +570,7 @@ add_executable(pi-acp
     src/cli/config.cpp
     src/cli/readline.cpp
     src/cli/wrap.cpp
+    src/cli/vim_mode.cpp
     src/cli/system_prompt.cpp
 )
 target_include_directories(pi-acp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -669,7 +671,7 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-faux_control_mode PRIVATE pi-core)
     add_test(NAME test-faux_control_mode COMMAND test-faux_control_mode)
 
-    add_executable(test-readline test/test_readline.cpp src/cli/readline.cpp src/cli/wrap.cpp)
+    add_executable(test-readline test/test_readline.cpp src/cli/readline.cpp src/cli/wrap.cpp src/cli/vim_mode.cpp)
     target_include_directories(test-readline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test-readline PRIVATE pi-core)
     add_test(NAME test-readline COMMAND test-readline)
@@ -677,6 +679,11 @@ if(PI_CPP_BUILD_TESTS)
     add_executable(test-wrap test/test_wrap.cpp src/cli/wrap.cpp)
     target_include_directories(test-wrap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test-wrap COMMAND test-wrap)
+
+    add_executable(test-vim-mode test/test_vim_mode.cpp src/cli/vim_mode.cpp src/cli/readline.cpp src/cli/wrap.cpp)
+    target_include_directories(test-vim-mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-vim-mode PRIVATE pi-core)
+    add_test(NAME test-vim-mode COMMAND test-vim-mode)
 
     add_test(
         NAME test-addons

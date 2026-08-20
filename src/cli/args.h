@@ -64,6 +64,9 @@ struct Args {
   // Context files
   bool no_context_files{false}; // disable AGENTS.md / CLAUDE.md discovery
 
+  // Input / composer
+  bool vim_mode{false}; // [input] vim_mode: Normal/Insert modal editing
+
   // Session persistence
   bool session_continue{false};      // --continue / -c
   std::string session_resume;        // --resume / -r <prefix>  (empty = unset)

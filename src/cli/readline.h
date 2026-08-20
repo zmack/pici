@@ -80,13 +80,34 @@ private:
 // on_resize: invoked when a terminal resize is observed while editing, after
 // this function has redrawn its own line but before continuing to poll. Use
 // it to let a full-screen renderer repaint its own fixed layout.
-ReadlineResult readline(std::string_view prompt,
-                        const CompleteFn &complete_fn = {},
-                        const ControlFn &control_fn = {},
-                        std::string_view status_line = {},
-                        std::string_view initial_draft = {},
-                        std::size_t initial_cursor = std::string_view::npos,
-                        int wake_fd = -1, bool clear_on_submit = false,
-                        const std::function<void()> &on_resize = {});
+//
+// vim_mode: when true, a VimEngine (cli/vim_mode.h) intercepts Normal-mode
+// key input ahead of the plain key-dispatch chain below -- see
+// composer-textarea-rewrite.md's M5 section. Config-driven
+// ([input] vim_mode in config.toml), off by default; every other call site
+// keeps working unchanged since this defaults to false.
+ReadlineResult
+readline(std::string_view prompt, const CompleteFn &complete_fn = {},
+         const ControlFn &control_fn = {}, std::string_view status_line = {},
+         std::string_view initial_draft = {},
+         std::size_t initial_cursor = std::string_view::npos, int wake_fd = -1,
+         bool clear_on_submit = false,
+         const std::function<void()> &on_resize = {}, bool vim_mode = false);
+
+// --- Shared editing primitives -------------------------------------------
+//
+// Buffer-navigation primitives defined in readline.cpp, also used by
+// cli/vim_mode.cpp's VimEngine (see composer-textarea-rewrite.md, M3 design
+// decision 9: M5's vim mode consumes these directly rather than re-deriving
+// word/line-boundary logic). Operate on a '\n'-delimited UTF-8 buffer and a
+// byte cursor, always kept on a codepoint boundary.
+std::size_t previous_utf8_offset(std::string_view buf, std::size_t cursor);
+std::size_t next_utf8_offset(std::string_view buf, std::size_t cursor);
+std::size_t line_start(std::string_view buf, std::size_t cursor);
+std::size_t line_end(std::string_view buf, std::size_t cursor);
+std::size_t previous_word_boundary(std::string_view buf, std::size_t cursor);
+std::size_t next_word_boundary(std::string_view buf, std::size_t cursor);
+std::size_t previous_line_offset(std::string_view buf, std::size_t cursor);
+std::size_t next_line_offset(std::string_view buf, std::size_t cursor);
 
 } // namespace pi::cli
