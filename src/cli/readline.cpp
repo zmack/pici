@@ -628,23 +628,52 @@ public:
     const bool show_footer = composer_rows_shown < core::kMaxComposerRows;
     if (show_footer) {
       // Physical cursor is currently parked at the composer's own bottom
-      // row. Save/restore it (DECSC/DECRC) around painting one extra row
-      // below -- region_renderer.cpp's paint_idle_synchronously() uses the
-      // same "\0337"/"\0338" pair for the same "paint something extra, then
-      // get back" shape -- so the footer never has to be folded into the
-      // cursor-motion math just below, which still measures from the
-      // composer's own bottom row exactly as it did before this row
-      // existed. The explicit re-application of the tint after restoring
-      // doesn't rely on DECRC having restored SGR state (not every terminal
-      // does) -- it's reapplied unconditionally instead.
+      // row. Return it there after painting one extra row below via
+      // explicit relative motion ("\033[1A" + '\r' + a column-restoring
+      // CUF), NOT DECSC/DECRC ("\0337"/"\0338") -- unlike relative motion,
+      // DECSC/DECRC save/restore an ABSOLUTE (row, column) screen
+      // coordinate. In plain (non-region) mode there's nothing constraining
+      // where the composer's bottom row ends up: if it lands on the
+      // terminal's own last row, this row's "\r\n" has nowhere to go and
+      // scrolls the *entire screen* up by one line -- DECRC would then
+      // restore to a coordinate that, after the scroll, shows different
+      // (shifted) content than before: the footer's own row, not the
+      // composer's. The cursor-motion math just below (which measures
+      // purely from the composer's own bottom row, oblivious to any scroll)
+      // would then desync from the real cursor, and so would the next
+      // redraw's clear_previous() erase, which trusts that math --
+      // producing exactly the "doubled footer" symptom this was reported
+      // as. Relative motion has no such failure mode: moving up exactly one
+      // row from wherever painting the footer left the cursor always lands
+      // back on the row that -- scroll or no scroll -- now holds what was
+      // on the starting row, because a scroll (if one happened) shifted
+      // everything uniformly, "one row up from here" included. The column
+      // restore mirrors what DECRC used to do for callers that redraw with
+      // show_cursor=false, where nothing further repositions the cursor
+      // after this block. The explicit re-application of the tint doesn't
+      // rely on DECRC having restored SGR state (not every terminal does
+      // that anyway) -- it's reapplied unconditionally instead.
       static constexpr std::string_view kFooterHint =
           "Alt+Enter: newline · Ctrl+C: cancel";
-      std::cout << "\0337";
       std::cout << "\r\n\033[0m\033[2m"
                 << core::truncate_ansi_line(kFooterHint,
                                             static_cast<int>(columns))
                 << "\033[0m\033[K";
-      std::cout << "\0338" << input_area_background();
+      std::cout << "\033[1A\r";
+      // Guard against ever emitting CUF with n >= columns, same as the
+      // cursor-in-row guard just below for cursor_position.column: CSI n C
+      // clamps at the terminal's rightmost cell regardless, but more
+      // importantly `column` itself can equal `columns` here (the paint
+      // loop's own bookkeeping convention for "this row is exactly full")
+      // in the show_cursor=false path, which skips the normalization a few
+      // lines up that would otherwise reset it to 0 on a new row. With
+      // DECAWM off (the "\033[?7l" active for this whole redraw), the real
+      // terminal cursor can never actually reach column `columns` -- it's
+      // already clamped at `columns - 1` from painting the row's last cell,
+      // so there's nothing to restore in that case.
+      if (column > 0 && column < columns)
+        std::cout << "\033[" << column << 'C';
+      std::cout << input_area_background();
     }
 
     const std::size_t rows_relative = status_rows + composer_rows_shown;

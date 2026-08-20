@@ -2,6 +2,7 @@
 
 #include "core/terminal.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -16,6 +17,7 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 #ifdef __APPLE__
 #include <util.h>
@@ -1831,6 +1833,281 @@ void test_footer_hint_hidden_when_composer_at_height_cap() {
       });
 }
 
+// Minimal ANSI/VT100 terminal-state simulator -- just enough to track
+// absolute cursor (row, column) and on-screen content through the escape
+// sequences InputRenderer::redraw() actually emits: relative cursor motion
+// (CSI A/B/C/D), line erase (CSI K), DECSC/DECRC ("\0337"/"\0338"), '\r',
+// and '\n' -- including '\n' triggering a real scroll when the cursor is
+// already on the terminal's last row, exactly like a real terminal. SGR,
+// private-mode (?7h/?7l, ?2004h, etc.), and OSC sequences are recognized
+// just enough to be skipped without disturbing cursor/content tracking.
+//
+// This exists to verify, independent of the C++ implementation's own
+// internal row bookkeeping (rendered_rows_/cursor_row_), where the edit
+// cursor and screen content actually end up after a real terminal
+// interprets the bytes -- the same kind of check a real terminal emulator
+// would let you make visually. See
+// test_footer_scroll_at_terminal_bottom_does_not_desync_cursor below.
+class MiniTerminal {
+public:
+  MiniTerminal(int width, int height)
+      : width_(width),
+        rows_(static_cast<std::size_t>(height),
+              std::string(static_cast<std::size_t>(width), ' ')) {}
+
+  void feed(std::string_view data) {
+    for (std::size_t i = 0; i < data.size();) {
+      const auto c = static_cast<unsigned char>(data[i]);
+      if (c == 0x1b) {
+        i += handle_escape(data.substr(i));
+        continue;
+      }
+      if (c == '\r') {
+        col_ = 0;
+        ++i;
+        continue;
+      }
+      if (c == '\n') {
+        newline();
+        ++i;
+        continue;
+      }
+      // UTF-8 continuation bytes (0x80-0xBF) don't advance the column --
+      // only each codepoint's lead byte does. Good enough for the one
+      // multi-byte character (the footer's "\xc2\xb7") this ever needs to
+      // track.
+      if ((c & 0xc0) != 0x80) {
+        if (row_ < static_cast<int>(rows_.size()) && col_ < width_)
+          rows_[static_cast<std::size_t>(row_)]
+               [static_cast<std::size_t>(col_)] = static_cast<char>(c);
+        if (col_ + 1 < width_)
+          ++col_;
+      }
+      ++i;
+    }
+  }
+
+  int cursor_row() const { return row_; }
+  const std::string &row(int r) const {
+    return rows_[static_cast<std::size_t>(r)];
+  }
+  int height() const { return static_cast<int>(rows_.size()); }
+
+  // Every row's content, joined for a substring/count search across the
+  // whole visible screen (e.g. "does the footer text appear more than
+  // once anywhere on screen").
+  std::string screen_text() const {
+    std::string joined;
+    for (const auto &r : rows_) {
+      joined += r;
+      joined += '\n';
+    }
+    return joined;
+  }
+
+private:
+  void newline() {
+    if (row_ + 1 >= static_cast<int>(rows_.size())) {
+      // Already on the terminal's last row: a real terminal scrolls the
+      // whole screen up by one line here (this renderer never sets a
+      // DECSTBM scroll region, so the scrolling region is the whole
+      // screen) rather than moving the cursor further down.
+      rows_.erase(rows_.begin());
+      rows_.emplace_back(static_cast<std::size_t>(width_), ' ');
+    } else {
+      ++row_;
+    }
+  }
+
+  // Returns the number of bytes consumed starting at data[0] == ESC.
+  std::size_t handle_escape(std::string_view data) {
+    if (data.size() < 2)
+      return 1;
+    const char kind = data[1];
+    if (kind == '7') { // DECSC
+      saved_row_ = row_;
+      saved_col_ = col_;
+      has_saved_ = true;
+      return 2;
+    }
+    if (kind == '8') { // DECRC -- restores the ABSOLUTE saved position,
+                       // same as a real terminal: if a scroll happened
+                       // between the save and here, this does NOT track
+                       // it (that's the bug under test).
+      if (has_saved_) {
+        row_ = saved_row_;
+        col_ = saved_col_;
+      }
+      return 2;
+    }
+    if (kind == '[') {
+      std::size_t end = 2;
+      while (end < data.size() && !(data[end] >= '@' && data[end] <= '~'))
+        ++end;
+      if (end >= data.size())
+        return data.size();
+      const char final_byte = data[end];
+      int n = 0;
+      bool has_n = false;
+      for (std::size_t p = 2; p < end; ++p) {
+        if (data[p] >= '0' && data[p] <= '9') {
+          n = n * 10 + (data[p] - '0');
+          has_n = true;
+        }
+      }
+      switch (final_byte) {
+      case 'A':
+        row_ = std::max(0, row_ - (has_n ? n : 1));
+        break;
+      case 'B':
+        row_ = std::min(static_cast<int>(rows_.size()) - 1,
+                        row_ + (has_n ? n : 1));
+        break;
+      case 'C':
+        col_ = std::min(width_ - 1, col_ + (has_n ? n : 1));
+        break;
+      case 'D':
+        col_ = std::max(0, col_ - (has_n ? n : 1));
+        break;
+      case 'K': {
+        auto &r = rows_[static_cast<std::size_t>(row_)];
+        if (n == 2)
+          r.assign(static_cast<std::size_t>(width_), ' ');
+        else
+          for (int c = col_; c < width_; ++c)
+            r[static_cast<std::size_t>(c)] = ' ';
+        break;
+      }
+      default:
+        break; // SGR (m), private modes (h/l), etc. -- no cursor/content
+               // effect this simulator needs to track.
+      }
+      return end + 1;
+    }
+    if (kind == ']') { // OSC -- skip to BEL or ST, neither ever appears in
+                       // what redraw() itself emits, but the Kitty/OSC-11
+                       // capability probe queries do, so tests that start
+                       // from a bare "READY" (probe not yet disabled in
+                       // the child) still parse cleanly.
+      std::size_t end = 2;
+      while (end < data.size() && data[end] != '\007') {
+        if (data[end] == '\033' && end + 1 < data.size() &&
+            data[end + 1] == '\\')
+          return end + 2;
+        ++end;
+      }
+      return end < data.size() ? end + 1 : data.size();
+    }
+    return 2; // Unrecognized single-char escape (e.g. a bare ESC) -- skip.
+  }
+
+  int width_;
+  std::vector<std::string> rows_;
+  int row_{0};
+  int col_{0};
+  bool has_saved_{false};
+  int saved_row_{0};
+  int saved_col_{0};
+};
+
+void test_footer_scroll_at_terminal_bottom_does_not_desync_cursor() {
+  tests::run(
+      "readline: when the composer's own last row lands on the terminal's "
+      "physical last row, painting the footer hint below it must not "
+      "desync the edit cursor or leave stale content behind once the "
+      "composer's row count changes -- regression test for the DECSC/DECRC "
+      "vs. terminal-scroll bug (footer text appeared doubled when the row "
+      "count contracted)",
+      [] {
+        struct winsize ws {};
+        ws.ws_row = 24;
+        ws.ws_col = 80;
+        int master = -1;
+        // 19 leading newlines in the prompt (on top of the "READY\n" the
+        // child prints first) puts the prompt's own row at terminal row
+        // 20 (0-indexed 19) of this 24-row pty. A single unbroken 228-char
+        // draft line (no embedded '\n', so word-wrap owns every row break)
+        // word-wraps to exactly 3 more rows below that -- empirically,
+        // for a draft this long relative to the 80-column width, the
+        // planner starts the draft on its own row rather than packing any
+        // of it onto the prompt's "> " row, so the composer occupies rows
+        // 19-22 (0-indexed) and the footer -- still under
+        // core::kMaxComposerRows (6), so it shows -- lands on row 23: this
+        // terminal's own last row. That's the exact geometry that used to
+        // trigger the bug: the footer's "\r\n" transition has nowhere to
+        // go there and scrolls the whole screen, which DECSC/DECRC (an
+        // ABSOLUTE position save/restore) doesn't account for.
+        const std::string prompt = std::string(19, '\n') + "> ";
+        const std::string draft(228, 'x');
+        const auto child = forkpty(&master, nullptr, nullptr, &ws);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline(prompt, {}, {}, "", draft, draft.size());
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        // Wait for the first redraw to finish in full.
+        output = read_until(master, std::move(output), "\033[?7h");
+        CHECK(output.find("Alt+Enter: newline") != std::string::npos);
+
+        MiniTerminal term(80, 24);
+        term.feed(output);
+        // The edit cursor must land on the composer's own last content
+        // row (which holds draft text -- 'x' characters), never on the
+        // footer's own row, regardless of whether painting the footer
+        // scrolled the screen out from under an absolute DECSC/DECRC
+        // restore.
+        CHECK(term.cursor_row() >= 0 && term.cursor_row() < term.height());
+        const auto &cursor_row_text = term.row(term.cursor_row());
+        CHECK(cursor_row_text.find('x') != std::string::npos);
+        CHECK(cursor_row_text.find("Alt+Enter") == std::string::npos);
+        // Exactly one copy of the footer text is visible on screen after
+        // the first paint.
+        CHECK_EQ(count_occurrences(term.screen_text(), "Alt+Enter: newline"),
+                 1U);
+
+        // Now shrink the composer abruptly: Ctrl+U kills from the start of
+        // the current logical line to the cursor -- with no embedded '\n'
+        // in this draft, that's the whole 228-character buffer, collapsing
+        // the composer from 3 content rows to 0 in a single redraw. This
+        // is the "row count contracts" step from the bug report.
+        const auto before_shrink = output.size();
+        CHECK_EQ(::write(master, "\x15", 1), 1);
+        output = read_until_from(master, std::move(output), before_shrink,
+                                 "\033[?7h");
+
+        term.feed(output.substr(before_shrink));
+        // After the shrink, the composer is back to just the empty
+        // prompt row and the footer immediately below it -- nowhere near
+        // the terminal's bottom, so no further scroll should be in play.
+        // If the earlier scroll had desynced rendered_rows_/cursor_row_
+        // from where the physical cursor really was, this redraw's
+        // clear_previous() would erase the wrong rows and/or the footer
+        // paint would land somewhere stale, leaving more than one visible
+        // copy of the footer text on screen -- the reported "doubled"
+        // symptom. There must still be exactly one.
+        CHECK_EQ(count_occurrences(term.screen_text(), "Alt+Enter: newline"),
+                 1U);
+        CHECK(term.cursor_row() >= 0 && term.cursor_row() < term.height());
+        CHECK(term.row(term.cursor_row()).find("Alt+Enter") ==
+              std::string::npos);
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) + ":0:";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
 // OSC 11 background-color probe tests. Written in one combined query with
 // the same DA1 sentinel the Kitty probe uses (see
 // compute_input_area_background() in readline.cpp), so these follow the
@@ -1976,6 +2253,7 @@ int main() {
   test_vim_mode_false_leaves_hjkl_as_literal_text();
   test_footer_hint_shown_and_bookkept();
   test_footer_hint_hidden_when_composer_at_height_cap();
+  test_footer_scroll_at_terminal_bottom_does_not_desync_cursor();
   test_osc11_probe_skipped_without_truecolor_colorterm();
   test_osc11_probe_supported_blends_truecolor_tint();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
