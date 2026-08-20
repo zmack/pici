@@ -2029,7 +2029,7 @@ int cmd_run(const cli::Args &args,
     // bold-cyan accent as the region renderer's REQUEST heading so the "this
     // is user input" color reads consistently end to end; \033[22;39m clears
     // only weight/foreground so the input box's background tint survives.
-    std::string prompt = "\n\033[1;36m>\033[22;39m ";
+    std::string prompt = "\n\033[1;36m›\033[22;39m ";
     if (hooks && hooks->prompt_line) {
       const auto &msgs = agent.state().messages();
       std::size_t turns = 0;

@@ -521,23 +521,82 @@ meaningfully more special-casing than doubled dd/cc already covers.
   `vim_mode=false` (the default) leaves M0-M4 behavior completely
   unaffected.
 
-### M6 — Visual polish
-- Query actual terminal background (OSC 11, `\033]11;?\007`) and
-  alpha-blend a tint instead of the fixed `\033[100m`
-  (`readline.cpp:230`) — reusing M4's shared probe infrastructure and
-  process-wide caching rather than a second ad-hoc probe. Blending requires
-  truecolor (`48;2;r;g;b`) output, so this also needs a truecolor-support
-  check alongside the background query, not just the query itself.
-- Leading prompt glyph (`›` or similar) in place of/alongside `prompt_`.
-- Persistent single-line footer hint row below the input showing live
-  shortcuts (mirrors the existing `status_line_` row already drawn above
-  the input at `readline.cpp:270-276`).
-- Files: `src/cli/readline.cpp`, `src/core/terminal.cpp` (OSC 11 query,
-  truecolor detection).
-- Acceptance: input box tint looks correct on both a light-background and
-  dark-background terminal with truecolor support; degrades to the current
-  fixed tint on a terminal without it; footer hint doesn't break existing
-  row-count bookkeeping (`rendered_rows_`) used by `clear_previous()`.
+### M6 — Visual polish [DONE]
+
+Implemented: `core::match_osc_color_reply` (`terminal.h`/`.cpp`) is a new
+matcher parallel to M4's `match_dec_private_reply` — a completely different
+reply shape (`\033]11;...` terminated by BEL or ST, not a CSI DEC-private
+reply) — passed as the `is_reply` callback to M4's unmodified
+`probe_terminal_capability`, alongside an OSC 11 background-color query
+(`\033]11;?\007`, BEL-terminated, immediately followed by the same DA1
+sentinel the Kitty probe uses) sent from a new `compute_input_area_background`
+in `cli/readline.cpp`. Truecolor support is gated on `COLORTERM` being
+`truecolor` or `24bit`; without it, the query is never sent at all and the
+fixed `\033[100m` tint is used unchanged. When the query succeeds,
+`parse_osc_color_reply` extracts R/G/B (taking the high byte of whichever
+hex width the terminal answers with — 2 or 4 digits per component) and
+`blend_input_area_tint` nudges the queried background's own lightness by a
+fixed 12% toward white (if dark) or black (if light) — deliberately modest,
+"barely there but perceptible" — and emits a `48;2;r;g;b` truecolor SGR
+sequence. Cached once per process via a function-local `static`, same
+pattern as `kitty_keyboard_enabled()`, invoked from `RawMode::enter()` right
+after the Kitty probe so it also runs only once raw mode is confirmed
+active. The prompt glyph changed from a plain `>` to `›` at its one call
+site in `main.cpp`, with no other change to that line's color/spacing/
+newline structure.
+
+`InputRenderer::redraw` gained a footer hint row (`Alt+Enter: newline ·
+Ctrl+C: cancel`) painted below the composer, the mirror image of
+`status_line_`'s existing row above it. It's shown whenever the composer
+isn't already using its full `core::kMaxComposerRows` budget
+(`composer_rows_shown < kMaxComposerRows`) — both so it never grows the box
+past that cap, and so it never needs `region_renderer.cpp`'s fixed
+bottom-row reservation (sized to exactly `kMaxComposerRows`) to grow to
+match; a composer already at the cap simply gets no footer that redraw, and
+`region_renderer.cpp` needed no changes. The footer is painted by
+saving/restoring the real cursor with DECSC/DECRC (`\0337`/`\0338` —
+`region_renderer.cpp`'s `paint_idle_synchronously()` already uses the same
+pair for the same "paint something extra, then get back" shape) around the
+composer's own bottom row, so the existing cursor-placement math is
+untouched and still measures from the composer's own bottom row exactly as
+it did before the footer row existed; only `rendered_rows_` (not the
+cursor-motion variable) gains the extra row, keeping `clear_previous()`'s
+erase count in sync without touching its up/down motion logic.
+
+- Files: `src/core/terminal.h`/`.cpp` (`match_osc_color_reply`),
+  `src/cli/readline.cpp` (`compute_input_area_background`,
+  `parse_osc_color_reply`, `blend_input_area_tint`, `RawMode::enter`,
+  `InputRenderer::redraw`'s footer row), `src/main.cpp` (one line, the
+  prompt glyph).
+- Test: `test/test_terminal.cpp` gained 8 unit tests for
+  `match_osc_color_reply` (BEL- and ST-terminated replies, 2- vs 4-digit
+  components, a nonzero offset, rejecting a DEC-private CSI reply, plain
+  text, an unrelated OSC, and an incomplete reply still arriving).
+  `test/test_readline.cpp` gained 4 `forkpty` tests (59 total): the footer
+  row appears and is correctly folded into `rendered_rows_`/
+  `clear_previous()` bookkeeping (a second redraw's erase emits exactly 2
+  `"\033[2K"`, one per row); the footer is omitted once the composer sits at
+  exactly `kMaxComposerRows`; without `COLORTERM=truecolor`/`24bit` the OSC
+  11 query is never sent and the fixed tint is used; with
+  `COLORTERM=truecolor` and a scripted OSC 11 reply, a `48;2;57;57;61`
+  truecolor SGR sequence appears (the expected blend of a scripted dark
+  30/30/34 background). Two pre-existing M0/M1 tests
+  (`test_embedded_newline_cursor_placement`) asserted on the literal
+  adjacency `"\033[K\r\033[7m"`, which the footer row now sits between —
+  updated to check the same underlying invariant (no erroneous
+  `"\033[1A"`/`"\033[1B"` immediately before the reverse-video toggle)
+  without requiring byte-adjacency to the fill. Verified against a stash of
+  the implementation (`readline.cpp`, `terminal.cpp`, `terminal.h`, tests
+  left in place) that `test-terminal` fails to build (`match_osc_color_reply`
+  undeclared) and `test-readline`'s new footer/tint tests fail, before
+  restoring and confirming all 33 suites green.
+- Acceptance met: input box tint blends against the terminal's actual
+  queried background on truecolor terminals, both light and dark, nudged a
+  modest 12%; degrades to the unchanged fixed `\033[100m` tint on any
+  terminal without confirmed truecolor support; footer hint row doesn't
+  desync `rendered_rows_`/`clear_previous()`'s bookkeeping.
+
+## All six milestones (M0-M6) are now complete.
 
 ## Sequencing
 

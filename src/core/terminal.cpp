@@ -282,6 +282,21 @@ std::size_t match_dec_private_reply(std::string_view s, std::size_t i,
   return s[j] == final_byte ? j - i + 1 : 0;
 }
 
+std::size_t match_osc_color_reply(std::string_view s, std::size_t i) {
+  static constexpr std::string_view kPrefix = "\033]11;";
+  if (i + kPrefix.size() > s.size())
+    return 0;
+  if (s.substr(i, kPrefix.size()) != kPrefix)
+    return 0;
+  for (std::size_t j = i + kPrefix.size(); j < s.size(); ++j) {
+    if (s[j] == '\007')
+      return j - i + 1;
+    if (s[j] == '\033' && j + 1 < s.size() && s[j + 1] == '\\')
+      return j - i + 2;
+  }
+  return 0; // terminator hasn't arrived yet
+}
+
 TerminalProbeResult
 probe_terminal_capability(int read_fd, const TerminalProbeMatcher &is_reply,
                           std::chrono::milliseconds timeout) {

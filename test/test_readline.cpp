@@ -630,14 +630,20 @@ void test_embedded_newline_cursor_placement() {
         auto output = read_until(master, {}, "READY");
         output = read_until(master, std::move(output), "ABCDE");
         CHECK(!has_out_of_range_cursor_forward(output, kColumns));
-        // The final fill-and-toggle sequence must be a bare "\r" straight
-        // into the reverse-video toggle — no vertical move at all, since
-        // the cursor's normalized row (start of the second row) matches
-        // where painting actually stopped. Before the M1 fix, capturing
-        // the pre-break {row 1, column 10} here produced an extra
-        // "\033[1A" that painted the cursor block back over the first
-        // row's last digit instead.
-        CHECK(output.find("\033[K\r\033[7m") != std::string::npos);
+        // The final fill-and-toggle sequence must reach the reverse-video
+        // toggle via a bare "\r" — no vertical move at all, since the
+        // cursor's normalized row (start of the second row) matches where
+        // painting actually stopped. Before the M1 fix, capturing the
+        // pre-break {row 1, column 10} here produced an extra "\033[1A"
+        // that painted the cursor block back over the first row's last
+        // digit instead. M6's footer hint row (see readline.cpp's
+        // InputRenderer::redraw) now sits between the composer's own
+        // "\033[K" fill and this "\r\033[7m", so the two are no longer
+        // byte-adjacent -- check for "\r\033[7m" and the *absence* of the
+        // erroneous vertical move instead of exact adjacency to the fill.
+        CHECK(output.find("\r\033[7m") != std::string::npos);
+        CHECK(output.find("\033[1A\r\033[7m") == std::string::npos);
+        CHECK(output.find("\033[1B\r\033[7m") == std::string::npos);
 
         CHECK_EQ(::write(master, "\n", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
@@ -669,7 +675,11 @@ void test_embedded_newline_cursor_placement() {
         auto output = read_until(master, {}, "READY");
         output = read_until(master, std::move(output), "ABCDE");
         CHECK(!has_out_of_range_cursor_forward(output, kColumns));
-        CHECK(output.find("\033[K\r\033[7m") != std::string::npos);
+        // See the comment on the identical check just above -- M6's footer
+        // row now sits between the composer's fill and the toggle.
+        CHECK(output.find("\r\033[7m") != std::string::npos);
+        CHECK(output.find("\033[1A\r\033[7m") == std::string::npos);
+        CHECK(output.find("\033[1B\r\033[7m") == std::string::npos);
 
         CHECK_EQ(::write(master, "\n", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
@@ -1677,6 +1687,207 @@ void test_vim_mode_false_leaves_hjkl_as_literal_text() {
       });
 }
 
+// --- M6: visual polish --------------------------------------------------
+//
+// Footer hint row tests exercise InputRenderer::redraw's new row painted
+// below the composer (mirrors status_line_'s existing row above it) and
+// specifically the acceptance criterion the plan calls out: it must not
+// desync rendered_rows_/clear_previous()'s relative-motion erase
+// bookkeeping. These don't touch COLORTERM (left unset by main() below),
+// so the OSC 11 background-tint probe never fires here -- these are about
+// the footer row, not the tint.
+
+void test_footer_hint_shown_and_bookkept() {
+  tests::run(
+      "readline: footer hint row is drawn below the composer and folded "
+      "into rendered_rows_ -- a later redraw's clear_previous() erases "
+      "exactly one row for the composer and one for the footer",
+      [] {
+        struct winsize ws {};
+        ws.ws_row = 24;
+        ws.ws_col = 80;
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, &ws);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("> ", {}, {}, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        // Wait for the first redraw to finish in full (its trailing
+        // "\033[?7h", not just the content partway through).
+        output = read_until(master, std::move(output), "\033[?7h");
+        CHECK(output.find("Alt+Enter: newline") != std::string::npos);
+        // rendered_rows_ was 0 before this first paint, so clear_previous()
+        // was a no-op -- no erase yet.
+        CHECK_EQ(count_occurrences(output, "\033[2K"), 0U);
+        const auto before_size = output.size();
+
+        // A keystroke triggers a second redraw: clear_previous() now has to
+        // erase both the composer's own row and the footer's row from the
+        // first paint -- exactly 2 rows, one "\033[2K" each, if the footer
+        // was correctly folded into rendered_rows_.
+        CHECK_EQ(::write(master, "a", 1), 1);
+        output = read_until_from(master, std::move(output), before_size,
+                                 "\033[?7h");
+        const auto second_redraw = output.substr(before_size);
+        CHECK_EQ(count_occurrences(second_redraw, "\033[2K"), 2U);
+        CHECK(second_redraw.find("Alt+Enter: newline") != std::string::npos);
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":1:a";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_footer_hint_hidden_when_composer_at_height_cap() {
+  tests::run(
+      "readline: footer hint row is omitted once the composer is already "
+      "using its full core::kMaxComposerRows budget, so it never grows the "
+      "box past the cap or past region_renderer.cpp's fixed reservation",
+      [] {
+        struct winsize ws {};
+        ws.ws_row = 24;
+        ws.ws_col = 80;
+        int master = -1;
+        // Exactly core::kMaxComposerRows (6) lines, no wrapping at 80
+        // columns -- the composer is already at its height cap with no
+        // spare row for the footer.
+        const std::string draft = "l0\nl1\nl2\nl3\nl4\nl5";
+        const auto child = forkpty(&master, nullptr, nullptr, &ws);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result =
+              readline("> ", {}, {}, {}, draft, draft.size());
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        output = read_until(master, std::move(output), "\033[?7h");
+        CHECK(output.find("l5") != std::string::npos);
+        CHECK(output.find("Alt+Enter: newline") == std::string::npos);
+
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        CHECK(output.find("RESULT:" + std::to_string(static_cast<int>(
+                                          ReadlineExit::submitted))) !=
+              std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+// OSC 11 background-color probe tests. Written in one combined query with
+// the same DA1 sentinel the Kitty probe uses (see
+// compute_input_area_background() in readline.cpp), so these follow the
+// exact same await-query/script-reply shape as the Kitty probe tests above
+// -- the Kitty probe itself stays disabled throughout (main() below sets
+// PICI_DISABLE_KITTY_KEYBOARD=1 process-wide and these tests don't undo
+// it), so it never sends its own query to confuse these assertions.
+constexpr std::string_view kOsc11ProbeQuery = "\033]11;?\007\033[c";
+
+void await_osc11_probe_query(int master, std::string &output) {
+  output = read_until(master, std::move(output), kOsc11ProbeQuery);
+  CHECK(output.find(kOsc11ProbeQuery) != std::string::npos);
+}
+
+void test_osc11_probe_skipped_without_truecolor_colorterm() {
+  tests::run(
+      "readline: without COLORTERM=truecolor/24bit, the OSC 11 background "
+      "query is never sent at all and the fixed \\033[100m tint is used",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          ::unsetenv("COLORTERM");
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("> ", {}, {}, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        output = read_until(master, std::move(output), "\033[?7h");
+        CHECK(output.find("\033[100m") != std::string::npos);
+        CHECK(output.find("\033]11;?") == std::string::npos);
+
+        CHECK_EQ(::write(master, "x", 1), 1);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        CHECK(output.find("RESULT:" + std::to_string(static_cast<int>(
+                                          ReadlineExit::submitted))) !=
+              std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
+void test_osc11_probe_supported_blends_truecolor_tint() {
+  tests::run(
+      "readline: COLORTERM=truecolor plus a scripted OSC 11 reply arriving "
+      "before DA1 makes the composer's tint a blended truecolor "
+      "\\033[48;2;r;g;bm sequence instead of the fixed fallback",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          ::setenv("COLORTERM", "truecolor", 1);
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("> ", {}, {}, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        await_osc11_probe_query(master, output);
+        // A dark background (r=g=0x1e, b=0x22 -- decimal 30/30/34),
+        // ST-terminated ("\033\\") rather than the BEL terminator the query
+        // used -- exercises "accept either terminator in the reply" -- then
+        // the DA1 sentinel immediately after.
+        static constexpr std::string_view kBackgroundReply =
+            "\033]11;rgb:1e1e/1e1e/2222\033\\\033[?62c";
+        CHECK_EQ(::write(master, kBackgroundReply.data(),
+                         kBackgroundReply.size()),
+                 static_cast<ssize_t>(kBackgroundReply.size()));
+        output = read_until(master, std::move(output), "\033[?7h");
+
+        // Dark background, so each channel is nudged 12% toward white:
+        // 30 + (255-30)*0.12 = 57 (r, g); 34 + (255-34)*0.12 = 60.52,
+        // rounds to 61 (b).
+        CHECK(output.find("\033[48;2;57;57;61m") != std::string::npos);
+        CHECK(output.find("\033[100m") == std::string::npos);
+
+        CHECK_EQ(::write(master, "x", 1), 1);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
+}
+
 int main() {
   // Every test above the "M4: Kitty keyboard protocol probe" section is
   // exercising M1-M3 behavior, not the probe itself -- disable it
@@ -1685,6 +1896,12 @@ int main() {
   // probe's query/DA1 round trip entirely. The Kitty-probe-specific tests
   // undo this in their own forked child.
   ::setenv("PICI_DISABLE_KITTY_KEYBOARD", "1", 1);
+  // Same rationale for the M6 OSC 11 background-tint probe (see
+  // compute_input_area_background() in readline.cpp): every test other
+  // than the OSC-11-probe-specific ones below should behave exactly as if
+  // COLORTERM were never set to a truecolor value, regardless of what the
+  // ambient environment this test binary runs in happens to have.
+  ::unsetenv("COLORTERM");
 
   test_wake_channel();
   test_non_tty_paths();
@@ -1717,6 +1934,10 @@ int main() {
   test_vim_mode_uncovered_key_is_safe_noop();
   test_vim_mode_arrow_keys_unaffected_in_normal_mode();
   test_vim_mode_false_leaves_hjkl_as_literal_text();
+  test_footer_hint_shown_and_bookkept();
+  test_footer_hint_hidden_when_composer_at_height_cap();
+  test_osc11_probe_skipped_without_truecolor_colorterm();
+  test_osc11_probe_supported_blends_truecolor_tint();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
             << " passed, " << tests::failed << " failed\n";
   return tests::failed == 0 ? 0 : 1;

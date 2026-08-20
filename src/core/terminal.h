@@ -173,6 +173,20 @@ private:
 std::size_t match_dec_private_reply(std::string_view s, std::size_t i,
                                     char final_byte);
 
+// One "\033]11;...(BEL|ST)" OSC background-color-query reply -- e.g.
+// xterm's documented "\033]11;rgb:rrrr/gggg/bbbb\033\\" format, also seen
+// BEL-terminated, and occasionally as "rgba:..." on terminals that report
+// an alpha channel. The OSC 11 counterpart to match_dec_private_reply above
+// (a completely different shape -- OSC-introduced and BEL/ST-terminated,
+// not a CSI DEC-private-mode reply), for the M6 terminal-background-tint
+// probe. Returns the reply's length in bytes if a complete one starting at
+// s[i] is found ending in BEL ("\007") or ST ("\033\\") -- either accepted,
+// since terminals aren't consistent about which one they answer with -- or
+// 0 if s[i] doesn't start one or the sequence hasn't finished arriving yet
+// (see match_dec_private_reply's doc comment for why that distinction
+// matters to probe_terminal_capability below).
+std::size_t match_osc_color_reply(std::string_view s, std::size_t i);
+
 // Result of probe_terminal_capability below.
 struct TerminalProbeResult {
   // Whether a reply recognized by the probe's `is_reply` matcher arrived

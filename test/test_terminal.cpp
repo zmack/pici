@@ -147,6 +147,75 @@ void test_skip_ansi_non_escape() {
   });
 }
 
+// ── match_osc_color_reply (M6: OSC 11 background-tint probe) ─────────────────
+
+void test_match_osc_color_reply() {
+  tests::register_test(
+      "match_osc_color_reply: xterm-style BEL-terminated reply", [] {
+        std::string_view s = "\033]11;rgb:1e1e/1e1e/2222\007";
+        CHECK_EQ(match_osc_color_reply(s, 0), s.size());
+      });
+
+  tests::register_test(
+      "match_osc_color_reply: ST-terminated reply, accepted the same as BEL",
+      [] {
+        std::string_view s = "\033]11;rgb:1e1e/1e1e/2222\033\\";
+        CHECK_EQ(match_osc_color_reply(s, 0), s.size());
+      });
+
+  tests::register_test(
+      "match_osc_color_reply: 2-digit-per-component reply", [] {
+        std::string_view s = "\033]11;rgb:1e/1e/22\007";
+        CHECK_EQ(match_osc_color_reply(s, 0), s.size());
+      });
+
+  tests::register_test(
+      "match_osc_color_reply: matches at a nonzero offset, ignoring a "
+      "leading prefix",
+      [] {
+        std::string_view s = "garbage\033]11;rgb:00/00/00\007";
+        CHECK_EQ(match_osc_color_reply(s, 7), s.size() - 7);
+      });
+
+  tests::register_test(
+      "match_osc_color_reply: rejects a DEC-private CSI reply — completely "
+      "different shape",
+      [] {
+        std::string_view s = "\033[?1u";
+        CHECK_EQ(match_osc_color_reply(s, 0), 0u);
+      });
+
+  tests::register_test(
+      "match_osc_color_reply: rejects plain text", [] {
+        std::string_view s = "hello";
+        CHECK_EQ(match_osc_color_reply(s, 0), 0u);
+      });
+
+  tests::register_test(
+      "match_osc_color_reply: rejects an unrelated OSC (window title, not "
+      "OSC 11)",
+      [] {
+        std::string_view s = "\033]0;my title\007";
+        CHECK_EQ(match_osc_color_reply(s, 0), 0u);
+      });
+
+  tests::register_test(
+      "match_osc_color_reply: not finished arriving yet — no terminator "
+      "seen -- returns 0, not a false negative",
+      [] {
+        std::string_view s = "\033]11;rgb:1e1e/1e1e/2222";
+        CHECK_EQ(match_osc_color_reply(s, 0), 0u);
+      });
+
+  tests::register_test(
+      "match_osc_color_reply: a lone trailing ESC (possible partial ST) "
+      "doesn't falsely match",
+      [] {
+        std::string_view s = "\033]11;rgb:1e1e/1e1e/2222\033";
+        CHECK_EQ(match_osc_color_reply(s, 0), 0u);
+      });
+}
+
 // ── advance_utf8 ─────────────────────────────────────────────────────────────
 
 void test_advance_utf8() {
@@ -832,6 +901,7 @@ int main() {
   test_skip_ansi_osc();
   test_skip_ansi_twobyte();
   test_skip_ansi_non_escape();
+  test_match_osc_color_reply();
   test_advance_utf8();
   test_codepoint_width();
   test_terminal_ui_helpers();

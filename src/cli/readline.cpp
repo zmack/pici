@@ -8,6 +8,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include <fcntl.h>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <sys/fcntl.h>
@@ -242,6 +244,182 @@ bool kitty_keyboard_enabled() {
   return supported;
 }
 
+// How long the OSC 11 background-color probe below will wait for a DA1
+// reply before giving up -- same rationale as kKittyProbeTimeout above,
+// just for a different query.
+constexpr std::chrono::milliseconds kOsc11ProbeTimeout{300};
+
+// The input box's background tint before any terminal-background query --
+// used outright on a terminal without confirmed truecolor support, and as
+// the fallback if the query times out or the reply can't be parsed. SGR 100
+// (bright-black background) renders as a distinguishable mid-gray under
+// most terminal color themes, dark and light alike.
+constexpr std::string_view kFallbackInputAreaBackground = "\033[100m";
+
+// Extracts one 0-255 color component from an OSC 11 reply's "rrrr"/"gggg"/
+// "bbbb" hex token (xterm's format allows 1-4 hex digits per component;
+// only 1-2 are seen in practice). Takes the first (up to) two hex digits --
+// i.e. the high byte of whatever width arrives -- which is the usual
+// normalization for this reply and is precise for the common 2-digit case.
+bool parse_osc_color_component(std::string_view token, int &out) {
+  if (token.empty() || token.size() > 4)
+    return false;
+  const auto hex_value = [](char c) -> int {
+    if (c >= '0' && c <= '9')
+      return c - '0';
+    if (c >= 'a' && c <= 'f')
+      return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+      return c - 'A' + 10;
+    return -1;
+  };
+  const int d0 = hex_value(token[0]);
+  if (d0 < 0)
+    return false;
+  if (token.size() == 1) {
+    out = d0 * 17; // nibble replication for a bare single hex digit
+    return true;
+  }
+  const int d1 = hex_value(token[1]);
+  if (d1 < 0)
+    return false;
+  out = d0 * 16 + d1;
+  return true;
+}
+
+// Parses R/G/B out of one complete OSC 11 reply already matched by
+// core::match_osc_color_reply, e.g. "\033]11;rgb:1e1e/1e1e/2222\033\\" or
+// "\033]11;rgb:1e/1e/22\007". Rejects anything that isn't three '/'-
+// separated hex tokens after the first ':' -- including the "rgba:" form
+// some terminals use, which this milestone doesn't need to special-case
+// since falling back to the fixed tint is always safe.
+bool parse_osc_color_reply(std::string_view reply, int &r, int &g, int &b) {
+  const auto colon = reply.find(':');
+  if (colon == std::string_view::npos)
+    return false;
+  auto body = reply.substr(colon + 1);
+  if (!body.empty() && body.back() == '\007')
+    body.remove_suffix(1);
+  else if (body.size() >= 2 && body.substr(body.size() - 2) == "\033\\")
+    body.remove_suffix(2);
+
+  // Pulls off the next '/'-delimited token from `body`, advancing past it
+  // (and the separator) -- three calls below, one per component, instead
+  // of an indexed loop.
+  const auto next_token =
+      [&body](bool expect_more) -> std::optional<std::string_view> {
+    const auto slash = body.find('/');
+    if ((slash == std::string_view::npos) == expect_more)
+      return std::nullopt; // wrong number of '/'-separated tokens
+    if (slash == std::string_view::npos) {
+      const auto token = body;
+      body = {};
+      return token;
+    }
+    const auto token = body.substr(0, slash);
+    body.remove_prefix(slash + 1);
+    return token;
+  };
+
+  const auto r_token = next_token(true);
+  if (!r_token || !parse_osc_color_component(*r_token, r))
+    return false;
+  const auto g_token = next_token(true);
+  if (!g_token || !parse_osc_color_component(*g_token, g))
+    return false;
+  const auto b_token = next_token(false);
+  return b_token.has_value() && parse_osc_color_component(*b_token, b);
+}
+
+// Nudges the terminal's own queried background lightness by a small, fixed
+// amount instead of blending toward a second reference color -- keeps the
+// tint readably distinct in both light and dark themes without needing one.
+// ~12% is deliberately modest: "barely there but perceptible" is the goal,
+// matching what the fixed \033[100m fallback above aims for by different
+// means.
+std::string blend_input_area_tint(int r, int g, int b) {
+  constexpr double kBlendAmount = 0.12;
+  const double luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const bool dark = luminance < 128.0;
+  const auto blend_channel = [&](int channel) {
+    const double target = dark ? 255.0 : 0.0;
+    const double blended = channel + (target - channel) * kBlendAmount;
+    return std::clamp(static_cast<int>(std::lround(blended)), 0, 255);
+  };
+  return "\033[48;2;" + std::to_string(blend_channel(r)) + ';' +
+         std::to_string(blend_channel(g)) + ';' +
+         std::to_string(blend_channel(b)) + 'm';
+}
+
+// Computes the input box's background tint once per process (see
+// input_area_background() below). Truecolor output (needed to blend at
+// all) has no reliable terminal-query protocol, so this uses the standard
+// pragmatic check most CLI tools use instead: COLORTERM set to "truecolor"
+// or "24bit". Without it, the OSC 11 query below is skipped entirely --
+// this function returns the fixed fallback immediately, without touching
+// the terminal -- since blending without confirmed truecolor support would
+// just produce a broken SGR sequence.
+std::string compute_input_area_background() {
+  // NOLINTNEXTLINE(concurrency-mt-unsafe)
+  const char *colorterm = std::getenv("COLORTERM");
+  const bool truecolor =
+      colorterm != nullptr && (std::string_view(colorterm) == "truecolor" ||
+                               std::string_view(colorterm) == "24bit");
+  if (!truecolor)
+    return std::string(kFallbackInputAreaBackground);
+
+  // OSC 11 background-color query, BEL-terminated -- the more broadly
+  // compatible choice, since some terminals only answer a BEL-terminated
+  // query even though they'd accept either terminator on the way in; the
+  // reply itself is accepted with either terminator regardless (see
+  // core::match_osc_color_reply). Followed immediately by the same DA1
+  // sentinel the Kitty probe above uses, in one write so it can't be left
+  // sitting in an iostream buffer while probe_terminal_capability blocks
+  // waiting for the reply.
+  static constexpr std::string_view kQuery = "\033]11;?\007\033[c";
+  if (::write(STDOUT_FILENO, kQuery.data(), kQuery.size()) !=
+      static_cast<ssize_t>(kQuery.size()))
+    return std::string(kFallbackInputAreaBackground);
+
+  // probe_terminal_capability only reports whether a reply matched, not the
+  // reply's own content -- capture it as a side effect of the matcher
+  // closure it invokes, since core::match_osc_color_reply itself stays a
+  // pure length-only matcher (parallel to match_dec_private_reply, reusable
+  // on its own).
+  std::string captured_reply;
+  auto result = core::probe_terminal_capability(
+      STDIN_FILENO,
+      [&](std::string_view buf, std::size_t i) {
+        const auto len = core::match_osc_color_reply(buf, i);
+        if (len > 0)
+          captured_reply = std::string(buf.substr(i, len));
+        return len;
+      },
+      kOsc11ProbeTimeout);
+
+  // Same replay contract as the Kitty probe: whatever wasn't consumed by
+  // either reply must not be lost.
+  g_pending_stdin_bytes.insert(g_pending_stdin_bytes.end(),
+                               result.leftover.begin(), result.leftover.end());
+
+  int r = 0;
+  int g = 0;
+  int b = 0;
+  if (!result.supported || !parse_osc_color_reply(captured_reply, r, g, b))
+    return std::string(kFallbackInputAreaBackground);
+  return blend_input_area_tint(r, g, b);
+}
+
+// Cached process-wide, same pattern as kitty_keyboard_enabled() above --
+// computed once on the first call and simply read back on every later one,
+// so raw mode being entered on every readline() call never repeats the
+// query/DA1 round trip. Must only be called once raw mode is already
+// active on stdin, same precondition as the Kitty probe.
+std::string_view input_area_background() {
+  static const std::string background = compute_input_area_background();
+  return background;
+}
+
 // RAII guard: put terminal into raw mode while alive.
 // ISIG is kept enabled so Ctrl+C still delivers SIGINT.
 struct RawMode {
@@ -295,6 +473,12 @@ struct RawMode {
       std::cout << "\033[>1u" << std::flush;
       kitty_pushed = true;
     }
+    // Background tint: query the terminal's actual background via OSC 11
+    // (once per process -- see input_area_background() above) so redraw()
+    // can blend a tint against it instead of always using the fixed
+    // fallback. Same precondition as the Kitty probe above: must run once
+    // raw mode is confirmed active, so the reply can be read back cleanly.
+    (void)input_area_background();
     return true;
   }
 
@@ -325,10 +509,11 @@ std::size_t terminal_columns() {
 // is required rather than reverse video (SGR 7): terminals fill cells
 // touched by an erase-in-line ("\033[K") using the active background color,
 // but not the reverse-video bit, so reverse video alone would only tint the
-// glyphs actually written, not the rest of the row. SGR 100 (bright-black
-// background) renders as a distinguishable mid-gray under most terminal
-// color themes, dark and light alike.
-constexpr std::string_view kInputAreaBackground = "\033[100m";
+// glyphs actually written, not the rest of the row. input_area_background()
+// (above) returns either a truecolor tint blended against the terminal's
+// actual queried background, or the fixed SGR 100 (bright-black background)
+// fallback -- either way it renders as a distinguishable mid-gray-ish box
+// under most terminal color themes, dark and light alike.
 
 class InputRenderer {
 public:
@@ -409,7 +594,7 @@ public:
       ++rows;
     }
     std::cout << "\033[?7l";
-    std::cout << kInputAreaBackground;
+    std::cout << input_area_background();
     write_wrapped(prompt_, columns, rows, column, std::string_view::npos,
                   nullptr, viewport_start, viewport_end);
     CursorPosition cursor_position;
@@ -432,6 +617,36 @@ public:
     const std::size_t printed_final_row = std::min(rows, viewport_end);
     const std::size_t composer_rows_shown =
         printed_final_row - viewport_start + 1;
+
+    // Footer hint row: mirrors status_line_'s existing row-above pattern,
+    // but after the composer instead of before it. Only painted when the
+    // composer isn't already using its full core::kMaxComposerRows budget --
+    // both so it never grows the box past that cap, and so it never needs
+    // region_renderer.cpp's fixed bottom-row reservation (sized to exactly
+    // kMaxComposerRows) to grow to match; a composer already at the cap
+    // simply doesn't get a footer this redraw.
+    const bool show_footer = composer_rows_shown < core::kMaxComposerRows;
+    if (show_footer) {
+      // Physical cursor is currently parked at the composer's own bottom
+      // row. Save/restore it (DECSC/DECRC) around painting one extra row
+      // below -- region_renderer.cpp's paint_idle_synchronously() uses the
+      // same "\0337"/"\0338" pair for the same "paint something extra, then
+      // get back" shape -- so the footer never has to be folded into the
+      // cursor-motion math just below, which still measures from the
+      // composer's own bottom row exactly as it did before this row
+      // existed. The explicit re-application of the tint after restoring
+      // doesn't rely on DECRC having restored SGR state (not every terminal
+      // does) -- it's reapplied unconditionally instead.
+      static constexpr std::string_view kFooterHint =
+          "Alt+Enter: newline · Ctrl+C: cancel";
+      std::cout << "\0337";
+      std::cout << "\r\n\033[0m\033[2m"
+                << core::truncate_ansi_line(kFooterHint,
+                                            static_cast<int>(columns))
+                << "\033[0m\033[K";
+      std::cout << "\0338" << input_area_background();
+    }
+
     const std::size_t rows_relative = status_rows + composer_rows_shown;
     if (show_cursor) {
       const std::size_t cursor_row_relative =
@@ -462,7 +677,12 @@ public:
     }
     std::cout << "\033[0m"; // leave the tinted box before yielding control
     std::cout << "\033[?7h" << std::flush;
-    rendered_rows_ = rows_relative;
+    // The footer, when shown, is one more row on screen than rows_relative
+    // accounts for -- fold it into rendered_rows_ here (not into
+    // rows_relative itself) so clear_previous()'s erase loop covers it too,
+    // without disturbing the cursor-motion math above, which intentionally
+    // still measures from the composer's own bottom row.
+    rendered_rows_ = rows_relative + (show_footer ? 1 : 0);
     rendered_column_ = column;
   }
 
