@@ -237,7 +237,7 @@ void test_tty_wake_and_reentry() {
     CHECK_EQ(::write(master, "X", 1), 1);
     output = read_new_output(master, std::move(output));
     CHECK(wake.notify());
-    CHECK_EQ(::write(master, "\n", 1), 1);
+    CHECK_EQ(::write(master, "\r", 1), 1);
     output = read_until(master, std::move(output), "RESULT2:");
     const auto expected_second =
         "RESULT2:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
@@ -353,7 +353,7 @@ void test_mouse_wheel_scroll() {
     CHECK_EQ(::write(master, "\033[<0;10;5M", 10), 10);
     output = read_new_output(master, std::move(output));
 
-    CHECK_EQ(::write(master, "\n", 1), 1);
+    CHECK_EQ(::write(master, "\r", 1), 1);
     output = read_until(master, std::move(output), "RESULT:");
 
     const auto up_marker =
@@ -420,7 +420,7 @@ void test_wrap_boundary_cursor_placement() {
                CHECK(!has_out_of_range_cursor_forward(output, kColumns));
                CHECK(output.find("\033[7m") != std::string::npos);
 
-               CHECK_EQ(::write(master, "\n", 1), 1);
+               CHECK_EQ(::write(master, "\r", 1), 1);
                output = read_until(master, std::move(output), "RESULT:");
                CHECK(!has_out_of_range_cursor_forward(output, kColumns));
                CHECK_EQ(wait_for_child(child), 0);
@@ -455,7 +455,7 @@ void test_wrap_boundary_cursor_placement() {
         }
         CHECK(!has_out_of_range_cursor_forward(output, kColumns));
 
-        CHECK_EQ(::write(master, "\n", 1), 1);
+        CHECK_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         CHECK(!has_out_of_range_cursor_forward(output, kColumns));
         CHECK_EQ(wait_for_child(child), 0);
@@ -505,6 +505,45 @@ void test_alt_enter_inserts_newline() {
                CHECK_EQ(wait_for_child(child), 0);
                ::close(master);
              });
+}
+
+void test_bare_lf_inserts_newline() {
+  tests::run(
+      "readline: bare LF (Ctrl+J) inserts a newline, same as Alt+Enter -- "
+      "many terminals translate Shift+Enter into a raw LF independent of "
+      "the Kitty keyboard protocol or tmux's extended-keys forwarding",
+      [] {
+        int master = -1;
+        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          const auto result = readline("> ", {}, {}, {}, "", 0);
+          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                  static_cast<int>(result.reason), result.cursor,
+                  result.text.c_str());
+          _exit(0);
+        }
+
+        auto output = read_until(master, {}, "READY");
+        CHECK_EQ(::write(master, "ab", 2), 2);
+        output = read_new_output(master, std::move(output));
+        // Bare '\n' (Ctrl+J) -- must insert, not submit.
+        CHECK_EQ(::write(master, "\n", 1), 1);
+        output = read_new_output(master, std::move(output));
+        CHECK_EQ(::write(master, "cd", 2), 2);
+        output = read_new_output(master, std::move(output));
+        // Plain Enter ('\r') still submits.
+        CHECK_EQ(::write(master, "\r", 1), 1);
+        output = read_until(master, std::move(output), "RESULT:");
+        const auto expected =
+            "RESULT:" +
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+            ":5:ab\r\ncd";
+        CHECK(output.find(expected) != std::string::npos);
+        CHECK_EQ(wait_for_child(child), 0);
+        ::close(master);
+      });
 }
 
 void test_multiline_navigation_and_backspace() {
@@ -645,7 +684,7 @@ void test_embedded_newline_cursor_placement() {
         CHECK(output.find("\033[1A\r\033[7m") == std::string::npos);
         CHECK(output.find("\033[1B\r\033[7m") == std::string::npos);
 
-        CHECK_EQ(::write(master, "\n", 1), 1);
+        CHECK_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         CHECK_EQ(wait_for_child(child), 0);
         ::close(master);
@@ -681,7 +720,7 @@ void test_embedded_newline_cursor_placement() {
         CHECK(output.find("\033[1A\r\033[7m") == std::string::npos);
         CHECK(output.find("\033[1B\r\033[7m") == std::string::npos);
 
-        CHECK_EQ(::write(master, "\n", 1), 1);
+        CHECK_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         CHECK_EQ(wait_for_child(child), 0);
         ::close(master);
@@ -1911,6 +1950,7 @@ int main() {
   test_mouse_wheel_scroll();
   test_wrap_boundary_cursor_placement();
   test_alt_enter_inserts_newline();
+  test_bare_lf_inserts_newline();
   test_multiline_navigation_and_backspace();
   test_bracketed_paste_is_inert_block_insert();
   test_embedded_newline_cursor_placement();

@@ -1523,8 +1523,24 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
       if (n < 0)
         return finish(ReadlineExit::eof);
 
-      if (c == '\r' || c == '\n')
+      if (c == '\r')
         return finish(ReadlineExit::submitted);
+
+      if (c == '\n') {
+        // Bare LF (Ctrl+J): many terminals translate Shift+Enter into a
+        // raw '\n' byte at the terminal level, entirely independent of the
+        // Kitty keyboard protocol or tmux's extended-keys forwarding --
+        // Codex's own keymap treats Ctrl+J the same way, as an
+        // always-available newline-insert binding regardless of whether
+        // protocol negotiation succeeded. ICRNL is already cleared
+        // (RawMode::enter), so '\r' (Enter) and '\n' (Ctrl+J / a
+        // terminal-translated Shift+Enter) reliably arrive as distinct
+        // bytes here.
+        buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor), '\n');
+        ++cursor;
+        renderer.redraw(buf, cursor);
+        continue;
+      }
 
       if (c == '\x04') // Ctrl+D — EOF
         return finish(ReadlineExit::eof);
