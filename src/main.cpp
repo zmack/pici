@@ -2016,7 +2016,15 @@ int cmd_run(const cli::Args &args,
     }
     if (!prompt.empty()) {
       accumulate(run_and_persist(prompt));
-      std::cout << "\n";
+      // A full-screen renderer (currently only --render region) owns its
+      // own fixed alt-screen layout, cursor anchoring, and reserved
+      // composer rows — an untracked write straight through std::cout
+      // bypasses all of that bookkeeping and desyncs the very first
+      // interactive prompt's on-screen position from what position_prompt_
+      // cursor() assumes, which used to surface as a doubled footer hint
+      // starting with the session's second prompt.
+      if (!renderer->owns_status_line())
+        std::cout << "\n";
     }
     if (args.print_mode)
       return 0;
