@@ -91,9 +91,26 @@ bool sgr_is_only_reset(std::string_view sequence) {
   return true;
 }
 
+// True if `c` is treated as inter-word whitespace for word-wrap purposes.
+// Mirrors cli::is_wrap_space, but region_renderer.cpp lives in core/ and
+// must not depend on cli/wrap.h (core/ is depended on by cli/, not the
+// reverse) -- see the file-level notes on the pre-existing utf8/ANSI helper
+// duplication between the two layers.
+bool is_wrap_space(char c) { return c == ' ' || c == '\t'; }
+
 // split_lines() intentionally preserves escape sequences but does not reopen
 // SGR state at a physical wrap. The compositor needs that extra property when
 // a single row is diffed, so this small wrapper carries SGR prefixes forward.
+//
+// Wrapping itself is greedy, whitespace-delimited word wrap, single-pass
+// with backtracking: as `line` is built up character by character, the most
+// recent word boundary on the row is tracked (see the break bookkeeping
+// below). When a character would overflow `width` while still inside a
+// word, the row backtracks to that boundary instead of splitting the word.
+// A single token wider than the entire row (no boundary recorded yet) falls
+// back to hard character-boundary wrapping for that token only, then
+// resumes word-wrap tracking immediately after -- the same fallback rule
+// used by the composer's independent word-wrap planner in cli/wrap.cpp.
 std::vector<std::string> split_region_lines(std::string_view source,
                                             int width) {
   if (width <= 0)
@@ -104,9 +121,36 @@ std::vector<std::string> split_region_lines(std::string_view source,
   std::string active_sgr;
   int columns = 0;
 
+  // Word-wrap break bookkeeping for the row currently under construction.
+  // `break_content_end` is the byte offset in `line` right before the
+  // whitespace run that follows the most recently completed word -- cutting
+  // the row there trims the trailing whitespace rather than carrying it
+  // over, matching the composer's convention. `break_resume` is the byte
+  // offset right after that whitespace run, i.e. where the next word
+  // begins -- the leftover from there onward (never the whitespace itself)
+  // is what moves to the new row. `break_sgr` snapshots the running SGR
+  // state at `break_resume`, which may already include a color change that
+  // happened inside the now-dropped whitespace, so that state isn't lost
+  // when the whitespace bytes are discarded. `has_break` is only set once
+  // both halves of a boundary have been recorded since the row started, so
+  // a row's very first (still wordless) whitespace can't be used as a
+  // degenerate break that would produce an empty row.
+  bool have_content_end = false;
+  bool has_break = false;
+  bool prev_was_space = false;
+  std::size_t break_content_end = 0;
+  std::size_t break_resume = 0;
+  std::string break_sgr;
+
   auto start_line = [&] {
     line = active_sgr;
     columns = 0;
+    have_content_end = false;
+    has_break = false;
+    prev_was_space = false;
+    break_content_end = 0;
+    break_resume = 0;
+    break_sgr.clear();
   };
   auto finish_line = [&] {
     lines.push_back(with_sgr_reset(std::move(line)));
@@ -142,15 +186,55 @@ std::vector<std::string> split_region_lines(std::string_view source,
       }
     }
 
+    const bool is_space = is_wrap_space(source[i]);
     const auto next = advance_utf8(source, i);
-    const int next_columns = columns + codepoint_width(source, i);
-    if (columns > 0 && next_columns > width) {
-      finish_line();
-      start_line();
+    const int char_width = codepoint_width(source, i);
+    const int next_columns = columns + char_width;
+
+    // Update break bookkeeping for *this* character before deciding
+    // whether it overflows the row -- a word that starts exactly on the
+    // character that overflows must still be usable as this row's break
+    // point (with an empty leftover carried to the new row), rather than
+    // falling through to the hard-wrap fallback below and leaving the
+    // finished row's trailing whitespace untrimmed.
+    if (is_space && !prev_was_space && columns > 0) {
+      break_content_end = line.size();
+      have_content_end = true;
     }
+    if (!is_space && prev_was_space && have_content_end) {
+      break_resume = line.size();
+      break_sgr = active_sgr;
+      has_break = true;
+    }
+
+    if (columns > 0 && next_columns > width) {
+      if (!is_space && has_break) {
+        // Word-boundary backtrack: end the row at the last recorded break
+        // (trimming its trailing whitespace) and carry the in-progress word
+        // -- reopening whatever SGR state was active when that word
+        // started -- onto a fresh row instead of splitting the word.
+        auto finished = line.substr(0, break_content_end);
+        auto leftover = line.substr(break_resume);
+        lines.push_back(with_sgr_reset(std::move(finished)));
+        line = break_sgr + leftover;
+        columns = display_columns(leftover);
+        have_content_end = false;
+        has_break = false;
+        prev_was_space = false;
+      } else {
+        // No word boundary to backtrack to (a single token wider than the
+        // whole row) or the overflow lands on whitespace itself: fall back
+        // to a hard character-boundary wrap, matching the pre-word-wrap
+        // behavior for this one character.
+        finish_line();
+        start_line();
+      }
+    }
+
     line.append(source.substr(i, next - i));
-    columns += codepoint_width(source, i);
+    columns += char_width;
     i = next;
+    prev_was_space = is_space;
   }
   finish_line();
   return lines;

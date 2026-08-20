@@ -97,6 +97,64 @@ void test_sgr_reopens_after_wrap() {
          "reset-plus-color reopens color on continuation");
 }
 
+void test_word_wrap_breaks_on_spaces() {
+  pi::core::RegionState state;
+  state.blocks = {pi::core::RegionTextBlock{"alpha beta gamma delta"}};
+  // Each word is 5, 4, 5, 5 columns wide; at width 9 a character-boundary
+  // wrap would split "beta"/"gamma"/"delta" mid-word (e.g. "alpha bet" /
+  // "a gamm" / ...). Word-boundary wrapping instead breaks before whatever
+  // word wouldn't fit, landing one whole word per row here.
+  const auto frame = pi::core::build_region_frame(state, 9, 10);
+  expect(frame.lines.size() == 4, "one word per row at this width");
+  expect(frame.lines[0] == "alpha\033[0m", "first word is not split mid-word");
+  expect(frame.lines[1] == "beta\033[0m", "second word is not split mid-word");
+  expect(frame.lines[2] == "gamma\033[0m", "third word is not split mid-word");
+  expect(frame.lines[3] == "delta\033[0m", "fourth word is not split mid-word");
+  // Trailing whitespace at a word-wrap break is dropped, not carried to the
+  // next row -- none of the rows above start or end with a space, and none
+  // is shorter than its full word plus the trailing SGR reset would suggest
+  // a stray space snuck in.
+  expect(std::none_of(frame.lines.begin(), frame.lines.end(),
+                      [](const auto &line) {
+                        return line.starts_with(' ') ||
+                               line.starts_with("\033[0m ");
+                      }),
+         "word-wrap breaks drop whitespace rather than carrying it forward");
+}
+
+void test_word_wrap_overlong_token_hard_wraps() {
+  pi::core::RegionState state;
+  // A single unbroken token wider than the whole row has no word boundary
+  // to backtrack to, so it must still fall back to hard character-boundary
+  // wrapping (matching the composer's analogous fallback) instead of
+  // overflowing the row.
+  state.blocks = {pi::core::RegionTextBlock{"abcdefghijklmnop"}};
+  const auto frame = pi::core::build_region_frame(state, 5, 10);
+  expect(frame.lines.size() == 4,
+         "a 16-column token hard-wraps into four 5-wide rows");
+  expect(frame.lines[0] == "abcde\033[0m", "first hard-wrapped chunk");
+  expect(frame.lines[1] == "fghij\033[0m", "second hard-wrapped chunk");
+  expect(frame.lines[2] == "klmno\033[0m", "third hard-wrapped chunk");
+  expect(frame.lines[3] == "p\033[0m", "final partial chunk");
+}
+
+void test_word_wrap_sgr_reopens_after_word_boundary_break() {
+  pi::core::RegionState state;
+  // "red " fits within width 5 and "w" still fits on that row, but "wo"
+  // would overflow -- so the row breaks between "red" and "word" at the
+  // word boundary (not mid-word), and the color that was active when
+  // "word" started must still reopen on the continuation row.
+  state.blocks = {pi::core::RegionTextBlock{"\033[31mred word\033[0m"}};
+  const auto frame = pi::core::build_region_frame(state, 5, 10);
+  expect(frame.lines.size() == 2,
+         "colored text wraps at the word boundary into two rows");
+  expect(frame.lines[0] == "\033[31mred\033[0m",
+         "first row holds the whole first word with no trailing space");
+  expect(frame.lines[1].starts_with("\033[31mword"),
+         "word-boundary wrap reopens the color that was active at the break");
+  expect(frame.lines[1].ends_with("\033[0m"), "wrapped row closes color");
+}
+
 void test_diff_only_changes_rows() {
   const std::vector<std::string> old_rows = {"one", "two", "three"};
   const std::vector<std::string> new_rows = {"one", "changed", "three"};
@@ -857,7 +915,16 @@ void test_request_audit_behaviors() {
     expect(visible_length(line) <= 10,
            "sanitized request rows stay within the requested width");
   }
-  expect(unsafe_text.find("visible text red") != std::string::npos,
+  // Word wrapping legitimately drops the space at whatever word boundary a
+  // row happens to break on (see split_region_lines), so compare with
+  // interior spaces collapsed rather than requiring an exact byte-for-byte
+  // "visible text red" substring across the wrapped rows.
+  std::string unsafe_text_no_spaces;
+  for (const char c : unsafe_text) {
+    if (c != ' ')
+      unsafe_text_no_spaces.push_back(c);
+  }
+  expect(unsafe_text_no_spaces.find("visibletextred") != std::string::npos,
          "sanitized request keeps visible text");
   expect(unsafe_text.find("2J") == std::string::npos &&
              unsafe_text.find("?25l") == std::string::npos &&
@@ -1112,6 +1179,9 @@ int main() {
   test_tail_anchor_and_scroll();
   test_thinking_is_inserted_at_the_current_turn_boundary();
   test_sgr_reopens_after_wrap();
+  test_word_wrap_breaks_on_spaces();
+  test_word_wrap_overlong_token_hard_wraps();
+  test_word_wrap_sgr_reopens_after_word_boundary_break();
   test_diff_only_changes_rows();
   test_diff_scrolls_tail_without_repainting_every_row();
   test_degenerate_sizing();
