@@ -1909,16 +1909,64 @@ public:
   }
 
 private:
+  // 0-indexed, inclusive top/bottom of the current DECSTBM scroll region --
+  // defaults to the whole screen, matching every test above this one (none
+  // of them ever sets a narrower region, since plain readline() alone never
+  // emits DECSTBM at all -- only RegionRenderer does). With the default,
+  // every branch below that checks "is row_ inside the region" is trivially
+  // true everywhere, so behavior for those tests is unchanged from before
+  // this region-awareness was added.
+  int scroll_top() const { return scroll_top_; }
+  int scroll_bottom() const {
+    return scroll_bottom_ < 0 ? static_cast<int>(rows_.size()) - 1
+                              : scroll_bottom_;
+  }
+
   void newline() {
-    if (row_ + 1 >= static_cast<int>(rows_.size())) {
-      // Already on the terminal's last row: a real terminal scrolls the
-      // whole screen up by one line here (this renderer never sets a
-      // DECSTBM scroll region, so the scrolling region is the whole
-      // screen) rather than moving the cursor further down.
-      rows_.erase(rows_.begin());
-      rows_.emplace_back(static_cast<std::size_t>(width_), ' ');
-    } else {
+    const int top = scroll_top();
+    const int bottom = scroll_bottom();
+    if (row_ >= top && row_ <= bottom) {
+      // Cursor is inside the active scroll region (or the region is the
+      // whole screen, the default -- see the member comment above).
+      if (row_ == bottom) {
+        scroll_region_up(top, bottom, 1);
+        return;
+      }
       ++row_;
+      return;
+    }
+    // Cursor is outside the active scroll region entirely -- e.g. the
+    // composer rows below RegionRenderer's DECSTBM-constrained transcript
+    // region. A real terminal never scrolls anything on account of a
+    // linefeed out here; the cursor just moves down, clamped at the
+    // terminal's own physical last row (never at the region's boundary,
+    // since it isn't in the region).
+    if (row_ + 1 < static_cast<int>(rows_.size()))
+      ++row_;
+  }
+
+  // Shifts rows [top, bottom] (0-indexed, inclusive) up by `count` lines,
+  // filling the vacated rows at the bottom with blanks -- SU (CSI n S) and
+  // an at-bottom linefeed inside a scroll region both funnel through this.
+  void scroll_region_up(int top, int bottom, int count) {
+    for (int step = 0; step < count; ++step) {
+      for (int r = top; r < bottom; ++r)
+        rows_[static_cast<std::size_t>(r)] =
+            rows_[static_cast<std::size_t>(r + 1)];
+      rows_[static_cast<std::size_t>(bottom)] =
+          std::string(static_cast<std::size_t>(width_), ' ');
+    }
+  }
+
+  // Shifts rows [top, bottom] (0-indexed, inclusive) down by `count` lines,
+  // filling the vacated rows at the top with blanks -- SD (CSI n T).
+  void scroll_region_down(int top, int bottom, int count) {
+    for (int step = 0; step < count; ++step) {
+      for (int r = bottom; r > top; --r)
+        rows_[static_cast<std::size_t>(r)] =
+            rows_[static_cast<std::size_t>(r - 1)];
+      rows_[static_cast<std::size_t>(top)] =
+          std::string(static_cast<std::size_t>(width_), ' ');
     }
   }
 
@@ -2019,6 +2067,46 @@ private:
         col_ = std::clamp(target_col - 1, 0, width_ - 1);
         break;
       }
+      case 'r': {
+        // DECSTBM ("top;bottomr", both optional -- defaults to 1 and the
+        // terminal's own last row respectively) -- needed to confine
+        // region_renderer.cpp's content-area repaints and diff_region_rows's
+        // S/T scroll-shift optimization the same way a real terminal would,
+        // so a test can tell "content painting stayed inside its region"
+        // from "it reached rows outside it" (e.g. the composer's rows).
+        // Same two-param split-on-';' parsing as 'H'/'f' above.
+        int one = 0;
+        int two = 0;
+        bool have_one = false;
+        bool have_two = false;
+        bool second = false;
+        for (std::size_t p = 2; p < end; ++p) {
+          if (data[p] == ';') {
+            second = true;
+            continue;
+          }
+          if (data[p] < '0' || data[p] > '9')
+            continue;
+          if (second) {
+            two = two * 10 + (data[p] - '0');
+            have_two = true;
+          } else {
+            one = one * 10 + (data[p] - '0');
+            have_one = true;
+          }
+        }
+        const int last_row = static_cast<int>(rows_.size()) - 1;
+        scroll_top_ = have_one ? std::clamp(one - 1, 0, last_row) : 0;
+        scroll_bottom_ =
+            have_two ? std::clamp(two - 1, scroll_top_, last_row) : last_row;
+        break;
+      }
+      case 'S': // SU -- scroll the active region up by n (default 1).
+        scroll_region_up(scroll_top(), scroll_bottom(), has_n ? n : 1);
+        break;
+      case 'T': // SD -- scroll the active region down by n (default 1).
+        scroll_region_down(scroll_top(), scroll_bottom(), has_n ? n : 1);
+        break;
       default:
         break; // SGR (m), private modes (h/l), etc. -- no cursor/content
                // effect this simulator needs to track.
@@ -2049,6 +2137,10 @@ private:
   bool has_saved_{false};
   int saved_row_{0};
   int saved_col_{0};
+  // 0-indexed; scroll_bottom_ of -1 means "not yet set by DECSTBM", read as
+  // the terminal's current last row via the scroll_bottom() accessor above.
+  int scroll_top_{0};
+  int scroll_bottom_{-1};
 };
 
 void test_footer_scroll_at_terminal_bottom_does_not_desync_cursor() {
@@ -2359,6 +2451,191 @@ void test_region_turn_boundary_survives_untracked_cursor_drift() {
       });
 }
 
+// Regression test for "the input line disappears when the agent generates
+// output" in --render region mode: a real terminal resize observed *while a
+// turn is active* -- distinct from the drift test just above, whose two
+// turns are both already finished by on_turn_end() before either readline()
+// call runs, so it can never reach a resize mid-turn.
+//
+// Root cause (found via a real forkpty + tmux repro, replayed row-by-row
+// through a real terminal before being encoded here): RegionRenderer::
+// on_resize() is documented to only ever run between turns -- it's wired up
+// exclusively through readline()'s own on_resize callback in
+// cli/readline.cpp, which by construction only fires while readline()
+// itself is polling for keys, never while a turn is active. But paint_loop()
+// deliberately keeps polling for a resize while a turn is active anyway (see
+// its own comment: a resize must still reflow the transcript at a new width
+// without waiting for the turn to end), and render_frame() recomputed
+// content_rows from the terminal's *live* term_height(fd_) on every single
+// frame -- so a real mid-turn resize changed content_rows on the very next
+// frame, in violation of on_resize()'s own "only between turns" contract.
+// Growing the terminal grows content_rows to cover physical rows that still
+// hold readline()'s already-painted "> " prompt and footer hint (left on
+// screen, untouched, for the whole turn -- see position_prompt_cursor()'s
+// own comment); diff_region_rows's unconditional full repaint (triggered by
+// the resulting layout_changed) then overwrites them with transcript
+// content. Confirmed empirically: resizing a real pty 24 rows -> 30 rows a
+// few hundred ms into on_text_delta() streaming wiped the prompt and footer
+// off the visible screen immediately in a real terminal (tmux), and they
+// didn't return until on_turn_end() -> position_prompt_cursor() -> the next
+// readline() call repainted them at the (by-then-current) correct rows.
+//
+// Fixed in region_renderer.cpp: State::turn_layout_height pins the height
+// render_frame() uses for row math (content_rows, the DECSTBM scroll
+// region, the status row) to whatever it was at on_turn_start(), for the
+// rest of that turn, so a resize's row-count change genuinely cannot reach
+// render_frame() until on_turn_end() resets it back to 0 ("use the live
+// height").
+void test_composer_survives_mid_turn_resize() {
+  tests::run(
+      "region renderer: a terminal resize observed while a turn is active "
+      "(paint_loop's own resize polling, not readline()'s on_resize "
+      "callback -- see RegionRenderer::on_resize()'s own comment that it "
+      "must only run between turns) must not let the transcript/status "
+      "repaint reclaim rows the composer's prompt and footer are still "
+      "painted on -- regression test for 'the input line disappears when "
+      "the agent generates output'",
+      [] {
+        struct winsize ws {};
+        ws.ws_row = 24;
+        ws.ws_col = 80;
+        int master = -1;
+        std::cout.flush();
+        const auto child = forkpty(&master, nullptr, nullptr, &ws);
+        CHECK(child >= 0);
+        if (child == 0) {
+          dprintf(STDOUT_FILENO, "READY\n");
+          auto renderer = pi::core::make_region_renderer(STDOUT_FILENO);
+          const std::string prompt = "\n> ";
+          // A non-empty initial draft submits on a bare "\r" with no typing
+          // needed (an empty buffer's Enter is a no-op) -- same trick
+          // test_footer_scroll_at_terminal_bottom... above uses.
+          (void)readline(prompt, {}, {}, {}, "hi", 2, -1,
+                         /*clear_on_submit=*/true);
+          renderer->on_turn_start();
+          // 24 chunks * 25ms ~= 600ms of simulated token-by-token
+          // streaming -- long enough for the parent to resize reliably
+          // partway through, with plenty of turn left afterward for more
+          // frames to paint post-resize (the bug needs the composer to
+          // still be gone right up to on_turn_end(), not just for one
+          // transient frame).
+          for (int i = 0; i < 24; ++i) {
+            renderer->on_text_delta("chunk ");
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+          }
+          renderer->on_turn_end();
+          // Deliberately hang -- the parent kills this child once it has
+          // captured everything it needs; letting readline()'s next call
+          // run (it would block on stdin forever anyway with no more
+          // scripted input) adds nothing and risks a stray extra repaint
+          // contaminating the capture, same rationale as the drift test
+          // above.
+          for (;;)
+            ::pause();
+        }
+
+        auto output = read_until(master, {}, "READY");
+        output = read_until(master, std::move(output), "\033[?7h");
+        CHECK_EQ(::write(master, "\r", 1), 1); // submit "hi"
+        // The clear_on_submit redraw: the composer's static "empty box +
+        // footer" that's left on screen, untouched, for the rest of the
+        // turn. Captures the size before the move -- passing std::move
+        // (output) and output.size() as sibling arguments would read the
+        // size in unspecified order relative to the move.
+        const auto before_submit = output.size();
+        output = read_until_from(master, std::move(output), before_submit,
+                                 "\033[?7h");
+
+        constexpr int kComposerRows =
+            static_cast<int>(pi::core::kMaxComposerRows);
+        constexpr int kOldContentRows = 24 - 1 - kComposerRows; // == 17
+        MiniTerminal before(80, 24);
+        before.feed(output);
+        // Composer's own first row (content_rows rows, then the status row,
+        // then the composer starts) holds the prompt; the footer sits one
+        // row below it -- see region_renderer.cpp's row-layout comments.
+        CHECK(before.row(kOldContentRows + 1).find("> ") != std::string::npos);
+        CHECK(before.row(kOldContentRows + 2).find("Alt+Enter") !=
+              std::string::npos);
+
+        // Let a couple of streaming frames land, then resize mid-turn --
+        // the exact condition under test.
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        struct winsize grown {};
+        grown.ws_row = 30;
+        grown.ws_col = 80;
+        // ioctl declarations vary by platform -- same rationale as
+        // readline.cpp's terminal_columns().
+        // NOLINTNEXTLINE(misc-include-cleaner)
+        CHECK_EQ(::ioctl(master, TIOCSWINSZ, &grown), 0);
+        ::kill(child, SIGWINCH);
+
+        // Let streaming continue well past the resize -- 200ms is ~8 more
+        // on_text_delta() chunks at 25ms each, comfortably inside the 600ms
+        // (24 chunks) the child's loop runs for, so the turn is still
+        // active. This is the exact window the bug needs: not just the one
+        // frame immediately after the resize, but the composer staying gone
+        // for a real, sustained stretch of continued generation -- matching
+        // the user's report ("disappears when the agent generates output"),
+        // and distinguishing it from a resize that's noticed but only
+        // transiently mishandled. Drains everything the pty produces over
+        // that whole window (unlike read_new_output, which returns after
+        // the *first* non-empty read -- too early to capture a 200ms
+        // backlog) via the same poll+read loop read_until uses internally,
+        // just bounded by wall-clock time instead of a marker.
+        {
+          const auto deadline =
+              std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+          while (std::chrono::steady_clock::now() < deadline) {
+            pollfd descriptor{.fd = master, .events = POLLIN};
+            if (::poll(&descriptor, 1, 25) <= 0)
+              continue;
+            char buffer[256];
+            const auto count = ::read(master, buffer, sizeof(buffer));
+            if (count > 0)
+              output.append(buffer, static_cast<std::size_t>(count));
+          }
+        }
+
+        // Confirm this snapshot really is still mid-turn, not a race where
+        // the turn happened to finish before the sleep above elapsed --
+        // "tokens: 0  done" only ever appears once, written by
+        // on_turn_end(), never before.
+        CHECK(output.find("tokens: 0  done") == std::string::npos);
+
+        // Replay everything captured so far on an 80x30 canvas -- a strict
+        // superset of the pre-resize 80x24 screen, so this changes nothing
+        // about the composer's original rows unless render_frame() itself
+        // started addressing rows outside its old content_rows range, which
+        // is exactly what's under test. The composer's prompt and footer
+        // must still be sitting at their original rows (kOldContentRows + 1
+        // and + 2), untouched, well after the resize and with the turn
+        // still actively streaming.
+        MiniTerminal mid(80, 30);
+        mid.feed(output);
+        CHECK(mid.row(kOldContentRows + 1).find("> ") != std::string::npos);
+        CHECK(mid.row(kOldContentRows + 2).find("Alt+Enter") !=
+              std::string::npos);
+
+        // Let the turn actually finish and confirm recovery: the next
+        // resync (triggered by on_turn_end() resetting turn_layout_height
+        // back to 0) picks up the terminal's now-current 30-row size, so the
+        // DECSTBM sequence for its content_rows (23 == 30 - 1 -
+        // kMaxComposerRows) must appear by the time the turn ends -- proving
+        // the resize was deferred, not silently dropped altogether.
+        output = read_until(master, std::move(output), "tokens: 0  done");
+        CHECK(output.find("tokens: 0  done") != std::string::npos);
+        const std::string grown_scroll_region =
+            "\033[1;" + std::to_string(30 - 1 - kComposerRows) + "r";
+        CHECK(output.find(grown_scroll_region) != std::string::npos);
+
+        ::kill(child, SIGKILL);
+        int status = 0;
+        ::waitpid(child, &status, 0);
+        ::close(master);
+      });
+}
+
 int main() {
   // Every test above the "M4: Kitty keyboard protocol probe" section is
   // exercising M1-M3 behavior, not the probe itself -- disable it
@@ -2412,6 +2689,7 @@ int main() {
   test_osc11_probe_skipped_without_truecolor_colorterm();
   test_osc11_probe_supported_blends_truecolor_tint();
   test_region_turn_boundary_survives_untracked_cursor_drift();
+  test_composer_survives_mid_turn_resize();
   std::cout << "\nTests: " << tests::total << " total, " << tests::passed
             << " passed, " << tests::failed << " failed\n";
   return tests::failed == 0 ? 0 : 1;

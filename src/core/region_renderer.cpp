@@ -702,6 +702,10 @@ public:
     state_.last_usage = {};
     state_.start_new_text_block = true;
     state_.hide_cursor_on_frame = true;
+    // Pin the row geometry render_frame() uses for the whole turn to
+    // whatever the terminal's height is right now -- see the State::
+    // turn_layout_height comment below for why.
+    state_.turn_layout_height = term_height(fd_);
     state_.revision = ++revision_;
     state_.dirty = true;
     turn_active_ = true;
@@ -1098,6 +1102,11 @@ public:
         state_.status_text =
             "tokens: " + std::to_string(state_.last_usage.output) + "  done";
       }
+      // The turn is over: this render_frame() call (and every one after it,
+      // until the next on_turn_start()) must resync to the terminal's
+      // actual current size again, exactly like the idle paint paths
+      // already do -- see the State::turn_layout_height comment above.
+      state_.turn_layout_height = 0;
       state_.revision = ++revision_;
       state_.dirty = false;
       snapshot = state_;
@@ -1169,6 +1178,50 @@ private:
     bool has_error{false};
     std::optional<std::string> custom_status_line;
     TokenUsage last_usage;
+    // The terminal height render_frame() must use for the content/status
+    // area's row math (content_rows, scroll_region_sequence's DECSTBM
+    // bottom, status_sequence's row) while a turn is active; 0 means "use
+    // the terminal's actual current height" (the only value this ever holds
+    // between turns). Set to the real height at on_turn_start() and reset to
+    // 0 at on_turn_end().
+    //
+    // Root cause this closes: paint_loop() deliberately keeps noticing a
+    // terminal resize while a turn is active (see its own comment -- a
+    // resize must still reflow the transcript at a new width without
+    // waiting for the turn to end), and render_frame() recomputes
+    // content_rows from term_height(fd_) fresh on every single frame. If the
+    // terminal's row count changes mid-turn, content_rows changes with it on
+    // the very next frame -- but readline()'s InputRenderer painted the
+    // composer box (an empty prompt + footer hint, left in place for the
+    // whole turn -- see position_prompt_cursor()'s own comment) at physical
+    // rows anchored to the *old* height, and nothing repaints or re-anchors
+    // that box mid-turn (RegionRenderer::on_resize() -- the thing that
+    // normally does this -- is documented to only ever run between turns,
+    // since it's wired up exclusively through readline()'s own on_resize
+    // callback in cli/readline.cpp, which by construction only fires while
+    // readline() itself is polling for keys). Concretely: growing the
+    // terminal mid-turn grows content_rows to cover physical rows that still
+    // hold the composer's live "> " prompt and footer text, and
+    // diff_region_rows's unconditional full repaint (triggered by the
+    // resulting layout_changed) overwrites them with transcript content;
+    // shrinking it moves the status row and composer up to rows nothing
+    // repaints, leaving the composer's old rows outside the region the
+    // terminal now reports and no new box painted at the smaller size's
+    // correct location either way, the composer visibly disappears for the
+    // rest of the turn. Confirmed empirically via a real forkpty + tmux
+    // session: resizing 24 rows -> 30 rows (or -> 15 rows) a few hundred ms
+    // into on_text_delta() streaming wipes the "> " prompt and footer hint
+    // off the visible screen immediately, and they don't return until
+    // on_turn_end() -> position_prompt_cursor() -> the next readline() call
+    // repaints them at the (by-then-current) correct rows.
+    //
+    // Pinning the height used for row math to whatever it was at
+    // on_turn_start() keeps render_frame() from ever reinterpreting the
+    // composer's already-painted rows as newly-available content/status
+    // rows mid-turn -- width is deliberately left unpinned (kComposerRows is
+    // a fixed row count, so only a height change can move the composer's row
+    // range) so a same-turn width reflow keeps working exactly as before.
+    int turn_layout_height{0};
   };
 
   // EventStream serializes renderer callbacks on its consumer thread, even
@@ -1268,7 +1321,14 @@ private:
   void render_frame(const State &snapshot) {
     std::scoped_lock output_lock(paint_mutex_);
     const int width = term_width(fd_);
-    const int height = term_height(fd_);
+    // Use the height pinned at on_turn_start() while a turn is active
+    // (turn_layout_height != 0), not whatever the terminal currently
+    // reports -- see State::turn_layout_height's comment for the exact
+    // corruption this prevents. Outside a turn it's always 0, so this is
+    // just term_height(fd_) for every idle repaint, unchanged from before.
+    const int height = snapshot.turn_layout_height != 0
+                           ? snapshot.turn_layout_height
+                           : term_height(fd_);
     const int content_rows = std::max(0, height - 1 - kComposerRows);
     if (content_rows < 1)
       return;
