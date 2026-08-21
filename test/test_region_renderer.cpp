@@ -621,6 +621,49 @@ void test_composer_rows_reserved_in_region_mode() {
          "rows");
 }
 
+// on_command_output() (used for /usage, /tools, /addons between turns) must
+// re-anchor the composer's reserved rows exactly like on_resize() and
+// force_full_repaint() already do -- otherwise the composer/footer left by
+// the prompt that submitted the command is never wiped, and the next
+// readline() prompt draws one row lower instead of reusing it, compounding
+// into a drifting stack of stale composers with every subsequent command.
+void test_command_output_reanchors_composer_between_turns() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates command-output capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->on_command_output("distinctive-command-output");
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+
+  // Default (non-tty) terminal is 24 rows x 80 columns.
+  constexpr int kHeight = 24;
+  const int reserved = static_cast<int>(pi::core::kMaxComposerRows);
+  const int prompt_anchor = kHeight - reserved;
+  const auto reanchor_sequence =
+      "\033[" + std::to_string(prompt_anchor) + ";1H\033[?25h";
+
+  const auto content_pos = output.find("distinctive-command-output");
+  expect(content_pos != std::string::npos,
+         "command output is visible in the transcript");
+  expect(content_pos != std::string::npos &&
+             output.find(reanchor_sequence, content_pos) != std::string::npos,
+         "on_command_output() re-anchors the composer's prompt cursor after "
+         "painting, not just the constructor's initial placement");
+}
+
 // force_full_repaint() exists so a transient full-screen command UI (/tree,
 // /model) that drew directly into this renderer's alternate screen — see
 // docs/region-renderer.md's "Transient full-screen command UIs" section —
@@ -1196,6 +1239,7 @@ int main() {
   test_tool_callbacks_route_into_regions();
   test_region_factory_lifecycle();
   test_composer_rows_reserved_in_region_mode();
+  test_command_output_reanchors_composer_between_turns();
   test_force_full_repaint_reissues_every_row();
   test_mailbox_reply_receipt_is_persistent_and_safe();
   test_mailbox_reply_alongside_parallel_unrelated_tools();

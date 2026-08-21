@@ -569,11 +569,11 @@ std::vector<std::string> turn_region_lines(const RegionState &state, int width,
         const bool nested = text_section == RegionSection::work ||
                             text_section == RegionSection::provisional;
         auto text_lines =
-            nested ? indent_lines(split_region_lines(
-                         rendered,
-                         std::max(1, width - static_cast<int>(
-                                                 kToolIndent.size()))))
-                   : split_region_lines(rendered, width);
+            nested
+                ? indent_lines(split_region_lines(
+                      rendered, std::max(1, width - static_cast<int>(
+                                                        kToolIndent.size()))))
+                : split_region_lines(rendered, width);
         lines.insert(lines.end(), std::make_move_iterator(text_lines.begin()),
                      std::make_move_iterator(text_lines.end()));
         continue;
@@ -1001,8 +1001,21 @@ public:
       mark_dirty_locked();
       paint_now = !turn_active_;
     }
-    if (paint_now)
+    if (paint_now) {
       paint_idle_synchronously();
+      // Like on_resize() / force_full_repaint(), this can run between turns
+      // (e.g. /usage, /tools, /addons), and paint_idle_synchronously() only
+      // repaints the content/status rows via save/restore cursor -- it never
+      // touches the composer's reserved rows. Without re-anchoring here, the
+      // still-visible composer left by the prompt that submitted this
+      // command is never wiped, and the next readline() call's first_draw_
+      // prints its own leading newline relative to that untouched cursor
+      // position, landing its composer one row below the stale one instead
+      // of reusing it -- the same doubled-composer drift
+      // position_prompt_cursor()'s own comment describes, just reached via a
+      // different caller.
+      position_prompt_cursor();
+    }
   }
 
   void on_error(RendererErrorKind, std::string_view message) override {
