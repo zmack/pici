@@ -907,6 +907,43 @@ void test_idle_paint_saves_cursor_and_scrolls() {
          "idle errors are painted in the compositor");
 }
 
+void test_custom_status_line_outranks_builtin_status_text() {
+  // An addon-provided status line (e.g. costline) must outrank the built-in
+  // "tokens: N  done" text that on_turn_end() leaves in status_text --
+  // otherwise the addon line is buried for the whole idle period between
+  // turns. Errors remain the one exception: they always outrank the addon.
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates status precedence capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->set_status_line(std::string("custom status"));
+    renderer->on_turn_start();
+    renderer->on_message_end(pi::core::TokenUsage{.input = 12, .output = 34});
+    renderer->on_turn_end();
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[256];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+  // The turn-end frame paints "tokens: ..." (addon not yet consulted at
+  // that exact instant), but the idle repaint driven by the next
+  // set_status_line() must show the addon line, never the built-in token
+  // tally.
+  expect(output.find("custom status") != std::string::npos,
+         "custom status line survives a completed turn");
+  expect(output.find("tokens: ") == std::string::npos,
+         "built-in token tally must not bury the custom status line");
+}
+
 void test_explicit_turn_request_sections() {
   pi::core::RegionState state;
   pi::core::RegionTurn ordinary;
@@ -1407,6 +1444,7 @@ int main() {
   test_mailbox_reply_alongside_parallel_unrelated_tools();
   test_mailbox_reply_callback_path();
   test_idle_paint_saves_cursor_and_scrolls();
+  test_custom_status_line_outranks_builtin_status_text();
   test_turn_based_scroll_reaches_older_turns();
   test_explicit_turn_request_sections();
   test_request_audit_behaviors();
