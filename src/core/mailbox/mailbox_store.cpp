@@ -363,7 +363,7 @@ void MailboxStore::open() {
       throw MailboxError(MailboxErrorCode::permission_denied,
                          "failed to create mailbox directory: " +
                              error.message());
-    struct stat parent_stat{};
+    struct stat parent_stat {};
     if (::lstat(parent.c_str(), &parent_stat) != 0 ||
         !S_ISDIR(parent_stat.st_mode) || parent_stat.st_uid != ::geteuid())
       throw MailboxError(MailboxErrorCode::permission_denied,
@@ -385,7 +385,7 @@ void MailboxStore::open() {
                          "failed to secure mailbox directory: " +
                              error.message());
   }
-  struct stat path_stat{};
+  struct stat path_stat {};
   const bool file_existed = ::lstat(options_.path.c_str(), &path_stat) == 0;
   if (file_existed &&
       (S_ISLNK(path_stat.st_mode) || !S_ISREG(path_stat.st_mode) ||

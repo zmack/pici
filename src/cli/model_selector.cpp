@@ -152,12 +152,10 @@ void render(const std::vector<const core::Model *> &models, std::size_t cursor,
 
 } // namespace
 
-ModelSelectorResult
-run_model_selector(const std::vector<const core::Model *> &models,
-                   std::string_view current_provider,
-                   std::string_view current_model,
-                   const ModelAvailability &availability,
-                   bool caller_owns_alt_screen) {
+ModelSelectorResult run_model_selector(
+    const std::vector<const core::Model *> &models,
+    std::string_view current_provider, std::string_view current_model,
+    const ModelAvailability &availability, bool caller_owns_alt_screen) {
   if (models.empty())
     return {};
   RawMode raw;
