@@ -49,6 +49,9 @@ constexpr std::size_t kReadMaxLines = 2000;
 constexpr int kLsDefaultLimit = 500;
 constexpr int kFindDefaultLimit = 1000;
 constexpr int kGrepDefaultLimit = 100;
+// Suggestions appended when the skill tool is called with an unknown name
+// (plans/agent-skills.md §5: cheap miss handling saves a whole retry turn).
+constexpr std::size_t kSkillMissSuggestions = 3;
 
 class TextToolResult : public ToolResult {
 public:
@@ -478,6 +481,89 @@ public:
       return error_result(err);
     }
   }
+};
+
+// Loads the full body of a named skill from the catalog (plan
+// plans/agent-skills.md §5). Read-only, so it is registered in both coding
+// and read-only tool sets and inherited by mailbox children.
+class SkillTool final : public BuiltinTool {
+public:
+  SkillTool(const std::filesystem::path &cwd,
+            std::shared_ptr<const SkillCatalog> catalog)
+      : BuiltinTool(
+            "skill",
+            "Load the full instructions of a named skill. Use when the task "
+            "matches a skill listed under '# Skills' in your system prompt.",
+            R"json({"type":"object","properties":{"name":{"type":"string","description":"Exact skill name from the '# Skills' index"}},"required":["name"],"additionalProperties":false})json",
+            cwd, true),
+        catalog_(std::move(catalog)) {}
+
+  std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
+                                      std::stop_token,
+                                      ToolUpdateCallback) const override {
+    try {
+      const auto json = parse_args(args);
+      const auto name = json.value("name", "");
+      if (name.empty()) {
+        throw std::runtime_error("Missing required argument: name");
+      }
+
+      const SkillMetadata *match = nullptr;
+      if (catalog_ != nullptr) {
+        for (const auto &skill : catalog_->skills) {
+          if (skill.name == name) {
+            match = &skill;
+            break;
+          }
+        }
+      }
+      if (match == nullptr) {
+        // Exact-name lookup only; suggest the closest names to save a retry
+        // turn.
+        throw std::runtime_error("Unknown skill '" + name + "'." +
+                                 closest_names(name));
+      }
+
+      auto body = load_skill_body(*match);
+      if (!body) {
+        return std::make_shared<TextToolResult>(body.error(), true);
+      }
+      return std::make_shared<TextToolResult>(
+          "Loaded skill '" + match->name + "' from " + match->path +
+          ". Sibling files referenced below can be read relative to " +
+          match->dir.string() + ".\n\n" + *body);
+    } catch (const std::exception &err) {
+      return error_result(err);
+    }
+  }
+
+private:
+  // Up to three closest catalog names by common-prefix length.
+  [[nodiscard]] std::string closest_names(const std::string &name) const {
+    if (catalog_ == nullptr || catalog_->skills.empty()) {
+      return {};
+    }
+    const auto prefix_len = [](const std::string &a, const std::string &b) {
+      size_t n = 0;
+      while (n < a.size() && n < b.size() && a[n] == b[n]) {
+        ++n;
+      }
+      return n;
+    };
+    std::vector<std::pair<size_t, std::string>> scored;
+    for (const auto &skill : catalog_->skills) {
+      scored.emplace_back(prefix_len(skill.name, name), skill.name);
+    }
+    std::sort(scored.begin(), scored.end(),
+              [](const auto &a, const auto &b) { return a.first > b.first; });
+    std::string out = " Available skills:";
+    for (size_t i = 0; i < scored.size() && i < kSkillMissSuggestions; ++i) {
+      out += (i == 0 ? " " : ", ") + scored[i].second;
+    }
+    return out;
+  }
+
+  std::shared_ptr<const SkillCatalog> catalog_;
 };
 
 class WriteTool final : public BuiltinTool {
@@ -1275,7 +1361,8 @@ private:
 
 std::vector<std::shared_ptr<const ToolDefinition>>
 create_coding_tools(const std::filesystem::path &cwd,
-                    SandboxPolicyPtr sandbox_policy) {
+                    SandboxPolicyPtr sandbox_policy,
+                    std::shared_ptr<const SkillCatalog> skills) {
   if (!sandbox_policy)
     sandbox_policy = std::make_shared<SandboxPolicy>();
   std::vector<std::shared_ptr<const ToolDefinition>> tools;
@@ -1283,23 +1370,29 @@ create_coding_tools(const std::filesystem::path &cwd,
   tools.push_back(std::make_shared<BashTool>(cwd, std::move(sandbox_policy)));
   tools.push_back(std::make_shared<EditTool>(cwd));
   tools.push_back(std::make_shared<WriteTool>(cwd));
+  if (skills != nullptr && !skills->skills.empty())
+    tools.push_back(std::make_shared<SkillTool>(cwd, std::move(skills)));
   return tools;
 }
 
 std::vector<std::shared_ptr<const ToolDefinition>>
-create_read_only_tools(const std::filesystem::path &cwd) {
+create_read_only_tools(const std::filesystem::path &cwd,
+                       std::shared_ptr<const SkillCatalog> skills) {
   std::vector<std::shared_ptr<const ToolDefinition>> tools;
   tools.push_back(std::make_shared<ReadTool>(cwd));
   tools.push_back(std::make_shared<GrepTool>(cwd));
   tools.push_back(std::make_shared<FindTool>(cwd));
   tools.push_back(std::make_shared<LsTool>(cwd));
+  if (skills != nullptr && !skills->skills.empty())
+    tools.push_back(std::make_shared<SkillTool>(cwd, std::move(skills)));
   return tools;
 }
 
 std::vector<std::shared_ptr<const ToolDefinition>>
 create_all_tools(const std::filesystem::path &cwd,
-                 SandboxPolicyPtr sandbox_policy) {
-  auto tools = create_coding_tools(cwd, std::move(sandbox_policy));
+                 SandboxPolicyPtr sandbox_policy,
+                 std::shared_ptr<const SkillCatalog> skills) {
+  auto tools = create_coding_tools(cwd, std::move(sandbox_policy), skills);
   tools.push_back(std::make_shared<GrepTool>(cwd));
   tools.push_back(std::make_shared<FindTool>(cwd));
   tools.push_back(std::make_shared<LsTool>(cwd));

@@ -15,6 +15,7 @@
 
 #include "core/agent_loop.h"
 #include "core/agent_state.h"
+#include "core/builtin_tools.h"
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
@@ -2537,6 +2538,116 @@ void test_tool_full_round_trip_message_sequence() {
 
 // ─── Main ──────────────────────────────────────────────────────────────────
 
+// ─── Skill tool full round trip through the real agent loop ──────────────
+
+void test_skill_tool_round_trip() {
+    tests::register_test("Skill loop: real skill tool loads body into transcript", []() {
+        // Fixture skill on disk.
+        const auto root = std::filesystem::temp_directory_path() /
+                          "pici-agent-loop-skill-test";
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root / "skills" / "release-checklist");
+        {
+            std::ofstream out(root / "skills" / "release-checklist" / "SKILL.md");
+            out << "---\nname: release-checklist\n"
+                << "description: Steps to cut a release.\n---\n"
+                << "# Release checklist\n\n1. Run `make release`.\n2. Tag.\n";
+        }
+
+        auto catalog = std::make_shared<SkillCatalog>();
+        catalog->skills.push_back(
+            {"release-checklist", "Steps to cut a release.",
+             (root / "skills" / "release-checklist" / "SKILL.md").string(),
+             root / "skills" / "release-checklist", "project"});
+
+        Model model;
+        model.id = "test-model";
+        model.api = "test";
+        model.provider = "test";
+
+        int call_count = 0;
+        std::string captured_skill_result;
+
+        auto llm_client = std::make_shared<TestLLMClient>(
+            [&](const AgentContext& context,
+                const StreamOptions&,
+                AssistantEventCallback,
+                std::stop_token) -> std::shared_ptr<AssistantMessage> {
+                ++call_count;
+                auto msg = std::make_shared<AssistantMessage>();
+                msg->api = "test";
+                msg->provider = "test";
+                msg->model = "test-model";
+                msg->timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                if (call_count == 1) {
+                    msg->stop_reason = StopReason::tool_use;
+                    ToolCall tc;
+                    tc.id = "call_skill";
+                    tc.name = "skill";
+                    tc.arguments["name"] = "release-checklist";
+                    msg->content.push_back(std::move(tc));
+                } else {
+                    for (const auto& m : context.messages) {
+                        if (const auto* trm = std::get_if<ToolResultMessage>(&m)) {
+                            if (trm->tool_name == "skill") {
+                                for (const auto& cb : trm->content) {
+                                    if (const auto* t = std::get_if<TextContent>(&cb)) {
+                                        captured_skill_result += t->text;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    msg->stop_reason = StopReason::stop;
+                    TextContent text;
+                    text.text = "following the checklist";
+                    msg->content.push_back(std::move(text));
+                }
+                return msg;
+            });
+
+        AgentContext ctx;
+        ctx.system_prompt = "skills e2e";
+        // Real built-in read-only tools including the skill tool.
+        ctx.tools = create_read_only_tools(root, catalog);
+
+        AgentLoopConfig config;
+        config.model = model;
+        config.llm_client = llm_client;
+        config.convert_to_llm = [](const std::vector<Message>& msgs) { return msgs; };
+        config.should_stop_after_turn = nullptr;
+        config.get_steering_messages = [] { return std::vector<Message>{}; };
+        config.get_follow_up_messages = [] { return std::vector<Message>{}; };
+
+        UserMessage user;
+        user.content.emplace_back(TextContent{.text = "cut a release please"});
+
+        int tool_end_count = 0;
+        bool tool_end_error = true;
+        auto stream = run_agent_loop({user}, ctx, config,
+                                     [&](const AgentEvent& ev) {
+                                         if (auto* e = std::get_if<ToolExecutionEndEvent>(&ev)) {
+                                             if (e->tool_name == "skill") {
+                                                 tool_end_count++;
+                                                 tool_end_error = e->is_error;
+                                             }
+                                         }
+                                     });
+        for (auto& ev : stream) { (void)ev; }
+
+        CHECK_EQ(call_count, 2);
+        CHECK_EQ(tool_end_count, 1);
+        CHECK(!tool_end_error);
+        CHECK(captured_skill_result.find("Loaded skill 'release-checklist'") !=
+              std::string::npos);
+        CHECK(captured_skill_result.find("Tag.") != std::string::npos);
+
+        std::filesystem::remove_all(root);
+    });
+}
+
 int main() {
     std::cout << "=== pi-cpp agent loop tests ===\n\n";
 
@@ -2559,6 +2670,7 @@ int main() {
     test_agent_loop_steering_envelopes();
     test_agent_loop_argument_validation_blocks_execution();
     test_agent_loop_prepare_arguments_before_validation();
+    test_skill_tool_round_trip();
     test_parallel_completion_vs_source_order();
     test_parallel_mixed_immediate_source_order();
     test_per_tool_sequential_override();

@@ -67,6 +67,7 @@
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
 #include "core/session/session_tree.h"
+#include "core/skills.h"
 #include "core/stream_diagnostics.h"
 #include "core/stream_renderer.h"
 #include "core/terminal.h"
@@ -1080,20 +1081,22 @@ int cmd_run(const cli::Args &args,
     }
   }
 
-  core::SkillCatalog skill_catalog;
+  std::shared_ptr<const core::SkillCatalog> skill_catalog_shared;
   const core::SkillCatalog *skill_catalog_ptr = nullptr;
   if (!args.no_skills) {
     const auto agent_dir =
         (args.config_path.empty() ? cli::default_config_path()
                                   : std::filesystem::path(args.config_path))
             .parent_path();
-    skill_catalog =
-        core::discover_skills(std::filesystem::current_path(), agent_dir);
-    for (const auto &diag : skill_catalog.diagnostics) {
+    auto owned = std::make_shared<core::SkillCatalog>(
+        core::discover_skills(std::filesystem::current_path(), agent_dir));
+    for (const auto &diag : owned->diagnostics) {
       std::cerr << "[skills: diagnostic] " << diag << "\n";
     }
-    if (!skill_catalog.skills.empty())
-      skill_catalog_ptr = &skill_catalog;
+    if (!owned->skills.empty()) {
+      skill_catalog_ptr = owned.get();
+      skill_catalog_shared = std::move(owned);
+    }
   }
 
   core::Agent::Options opts;
@@ -1301,11 +1304,13 @@ int cmd_run(const cli::Args &args,
       args.faux_control_socket.empty()) {
     if (args.tools.empty()) {
       agent.set_tools(core::create_all_tools(std::filesystem::current_path(),
-                                             sandbox_policy));
+                                             sandbox_policy,
+                                             skill_catalog_shared));
     } else {
       // Allowlist filter
-      for (auto &t : core::create_all_tools(std::filesystem::current_path(),
-                                            sandbox_policy)) {
+      for (auto &t :
+           core::create_all_tools(std::filesystem::current_path(),
+                                  sandbox_policy, skill_catalog_shared)) {
         for (const auto &name : args.tools) {
           if (t->name() == name) {
             agent.add_tool(t);
@@ -2106,6 +2111,21 @@ int cmd_run(const cli::Args &args,
 
   std::string readline_draft;
   std::size_t readline_cursor = 0;
+  // A full-screen renderer (RegionRenderer) owns a persistent alt-screen
+  // compositor for the whole session, not just while readline() is
+  // blocking. readline() normally enters/leaves raw mode around each call,
+  // which left the terminal in cooked/echo mode for the whole span of a
+  // turn (no readline() call in flight) -- long enough for real turns that
+  // keystrokes typed then got echoed by the tty driver straight into the
+  // compositor's fixed layout, then silently dropped when the next
+  // readline() call re-entered raw mode (TCSAFLUSH discards unread input on
+  // a termios switch). Owning raw mode here for the whole session instead
+  // means those keystrokes stay queued, unechoed, in the kernel's raw input
+  // buffer and simply show up as type-ahead once readline() resumes.
+  const bool owns_full_screen = renderer->owns_status_line();
+  cli::TerminalRawMode session_raw_mode;
+  if (owns_full_screen)
+    session_raw_mode.enter(STDIN_FILENO);
   while (true) {
     // Build the prompt — let add-ons customise it. The chevron uses the same
     // bold-cyan accent as the region renderer's REQUEST heading so the "this
@@ -2139,10 +2159,11 @@ int cmd_run(const cli::Args &args,
     const bool full_screen_prompt = renderer->owns_status_line();
     const auto on_prompt_resize = [&] { renderer->on_resize(); };
     renderer->prepare_for_prompt();
-    auto readline_result =
-        cli::readline(prompt, complete_fn, control_fn, readline_status,
-                      readline_draft, readline_cursor, readline_wake_fd,
-                      full_screen_prompt, on_prompt_resize, args.vim_mode);
+    auto readline_result = cli::readline(
+        prompt, complete_fn, control_fn, readline_status, readline_draft,
+        readline_cursor, readline_wake_fd, full_screen_prompt,
+        on_prompt_resize, args.vim_mode,
+        owns_full_screen ? &session_raw_mode : nullptr);
     if (readline_result.reason == cli::ReadlineExit::eof)
       break;
     if (readline_result.reason == cli::ReadlineExit::mailbox_wake) {

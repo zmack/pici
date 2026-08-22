@@ -400,6 +400,70 @@ void test_bash_tool() {
   });
 }
 
+void test_skill_tool() {
+  tests::register_test("Skill tool: registered only with non-empty catalog",
+                       []() {
+                         auto empty =
+                             std::make_shared<SkillCatalog>();
+                         CHECK(!find_tool(create_all_tools(
+                                               std::filesystem::temp_directory_path(),
+                                               {}, empty),
+                                           "skill"));
+
+                         auto catalog = std::make_shared<SkillCatalog>();
+                         catalog->skills.push_back(
+                             {"demo", "A demo skill.", "/tmp/demo/SKILL.md",
+                              "/tmp/demo", "project"});
+                         CHECK(find_tool(create_all_tools(
+                                             std::filesystem::temp_directory_path(),
+                                             {}, catalog),
+                                         "skill"));
+                         CHECK(find_tool(create_read_only_tools(
+                                             std::filesystem::temp_directory_path(),
+                                             catalog),
+                                         "skill"));
+                       });
+
+  tests::register_test("Skill tool: loads body from disk", []() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      "pici-builtin-tools-skill-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "skills" / "demo");
+    const auto skill_file = root / "skills" / "demo" / "SKILL.md";
+    {
+      std::ofstream out(skill_file);
+      out << "---\nname: demo\ndescription: A demo skill.\n---\n"
+          << "Step one.\nStep two.\n";
+    }
+
+    auto catalog = std::make_shared<SkillCatalog>();
+    catalog->skills.push_back({"demo", "A demo skill.", skill_file.string(),
+                               skill_file.parent_path(), "project"});
+    const auto tools = create_read_only_tools(root, catalog);
+    const auto skill_tool = find_tool(tools, "skill");
+    CHECK(skill_tool != nullptr);
+
+    const auto result = skill_tool->execute("1", R"({"name":"demo"})", {}, {});
+    CHECK(!result->is_error());
+    CHECK(result->content().find("Loaded skill 'demo'") !=
+          std::string::npos);
+    CHECK(result->content().find("Step two.") != std::string::npos);
+  });
+
+  tests::register_test("Skill tool: unknown name suggests closest", []() {
+    auto catalog = std::make_shared<SkillCatalog>();
+    catalog->skills.push_back(
+        {"release-checklist", "d", "/x/SKILL.md", "/x", "project"});
+    const auto tools =
+        create_read_only_tools(std::filesystem::temp_directory_path(), catalog);
+    const auto result =
+        find_tool(tools, "skill")
+            ->execute("1", R"({"name":"release-checklst"})", {}, {});
+    CHECK(result->is_error());
+    CHECK(result->content().find("release-checklist") != std::string::npos);
+  });
+}
+
 int main() {
   test_tool_factories();
   test_file_tools();
@@ -408,6 +472,7 @@ int main() {
   test_image_read();
   test_discovery_tools();
   test_bash_tool();
+  test_skill_tool();
 
   tests::print_summary();
   return tests::failed == 0 ? 0 : 1;

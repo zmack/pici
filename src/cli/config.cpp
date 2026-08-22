@@ -711,6 +711,7 @@ Args merge_args(const Args &config, const Args &cli) {
   out.faux_control_socket = cli.faux_control_socket;
   out.verbose = config.verbose || cli.verbose;
   out.no_context_files = config.no_context_files || cli.no_context_files;
+  out.no_skills = config.no_skills || cli.no_skills;
   out.vim_mode = config.vim_mode || cli.vim_mode;
   out.remote_compaction_enabled =
       config.remote_compaction_enabled || cli.remote_compaction_enabled;
