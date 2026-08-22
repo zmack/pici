@@ -74,7 +74,7 @@ struct AlternateScreen {
   ~AlternateScreen() {
     if (active && owned) {
       constexpr std::string_view sequence = "\033[?1049l";
-      ::write(STDOUT_FILENO, sequence.data(), sequence.size());
+      core::write_best_effort(STDOUT_FILENO, sequence.data(), sequence.size());
     }
   }
 };
@@ -116,7 +116,7 @@ Key read_key() {
 }
 
 void write_text(std::string_view text) {
-  ::write(STDOUT_FILENO, text.data(), text.size());
+  core::write_best_effort(STDOUT_FILENO, text.data(), text.size());
 }
 
 std::string display(const core::Model &model,

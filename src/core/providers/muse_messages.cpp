@@ -5,6 +5,7 @@
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
+#include "core/terminal.h"
 #include "core/providers/transform_messages.h"
 #include "http/http_client.h"
 
@@ -722,7 +723,7 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
 
   if (options.verbose) {
     std::string debug = "[request] POST " + url + "\n" + request.dump(2) + "\n";
-    ::write(STDERR_FILENO, debug.data(), debug.size());
+    write_best_effort(STDERR_FILENO, debug.data(), debug.size());
   }
 
   std::map<std::string, std::string> headers = model.headers;

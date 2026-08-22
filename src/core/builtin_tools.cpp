@@ -1,6 +1,7 @@
 #include "core/builtin_tools.h"
 #include "core/message_types.h"
 #include "core/sandbox.h"
+#include "core/terminal.h"
 #include "nlohmann/json_fwd.hpp"
 
 #include <algorithm>
@@ -1174,7 +1175,7 @@ public:
         // and synchronises with any in-progress invocation before we close.
         std::stop_callback sc(stop_tok, [wfd = wakeup[1]] {
           char b = 1;
-          ::write(wfd, &b, 1);
+          write_best_effort(wfd, &b, 1);
         });
 
         while (true) {

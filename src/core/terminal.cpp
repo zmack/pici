@@ -90,7 +90,7 @@ void AltScreenSession::enter() {
       "\033[H\033[2J" // home + clear
       "\033[?1000h"   // report mouse button/wheel events
       "\033[?1006h";  // ...using SGR extended coordinate encoding
-  ::write(fd_, kEnter.data(), kEnter.size());
+  write_best_effort(fd_, kEnter.data(), kEnter.size());
 }
 
 void AltScreenSession::restore_terminal() noexcept {
@@ -104,7 +104,7 @@ void AltScreenSession::restore_terminal() noexcept {
       "\033[r"       // reset scroll region
       "\033[?25h"    // show cursor (must precede ?1049l)
       "\033[?1049l"; // exit alternate screen
-  ::write(fd_, kRestore.data(), kRestore.size());
+  write_best_effort(fd_, kRestore.data(), kRestore.size());
 }
 
 void AltScreenSession::restore_signal_handlers() noexcept {
@@ -761,7 +761,7 @@ TerminalTitleController::~TerminalTitleController() noexcept {
       if (writer_) {
         writer_("");
       } else if (isatty(fd_) != 0) {
-        ::write(fd_, seq.data(), seq.size());
+        write_best_effort(fd_, seq.data(), seq.size());
       }
       has_applied_ = false;
       last_emitted_.clear();

@@ -78,25 +78,25 @@ public:
   explicit RawStreamRenderer(int fd) : fd_(fd) {}
 
   void on_text_delta(std::string_view delta) override {
-    ::write(fd_, delta.data(), delta.size());
+    write_best_effort(fd_, delta.data(), delta.size());
   }
 
   void on_message_end(const TokenUsage &) override {
     const char nl = '\n';
-    ::write(fd_, &nl, 1);
+    write_best_effort(fd_, &nl, 1);
   }
 
   void on_command_output(std::string_view text) override {
-    ::write(fd_, text.data(), text.size());
+    write_best_effort(fd_, text.data(), text.size());
     if (text.empty() || text.back() != '\n')
-      ::write(fd_, "\n", 1);
+      write_best_effort(fd_, "\n", 1);
   }
 
   // Concise plain text only: never the replacement transcript's opaque
   // server payload, which these hooks never carry in the first place.
   void on_compaction_start() override {
     static constexpr std::string_view msg = "[compacting context...]\n";
-    ::write(fd_, msg.data(), msg.size());
+    write_best_effort(fd_, msg.data(), msg.size());
   }
 
   void on_compaction_complete(std::size_t retained_message_count,
@@ -104,14 +104,14 @@ public:
     const std::string msg =
         "[context compacted: " + std::to_string(retained_message_count) +
         " message(s) retained]\n";
-    ::write(fd_, msg.data(), msg.size());
+    write_best_effort(fd_, msg.data(), msg.size());
   }
 
   void on_compaction_error(std::string_view message, bool cancelled) override {
     const std::string msg =
         cancelled ? "[compaction cancelled]\n"
                   : "[compaction failed: " + std::string(message) + "]\n";
-    ::write(fd_, msg.data(), msg.size());
+    write_best_effort(fd_, msg.data(), msg.size());
   }
 
 private:
@@ -150,7 +150,7 @@ public:
         rendered.starts_with(prev_rendered_)) {
       const auto suffix = rendered.substr(prev_rendered_.size());
       if (!suffix.empty()) {
-        ::write(fd_, suffix.data(), suffix.size());
+        write_best_effort(fd_, suffix.data(), suffix.size());
         advance_commit(rendered, w);
       }
       prev_rendered_ = std::move(rendered);
@@ -160,7 +160,7 @@ public:
 
     if (prev_rendered_.empty()) {
       if (!rendered.empty()) {
-        ::write(fd_, rendered.data(), rendered.size());
+        write_best_effort(fd_, rendered.data(), rendered.size());
         advance_commit(rendered, w);
       }
       prev_rendered_ = std::move(rendered);
@@ -230,7 +230,7 @@ public:
     frame += "\033[J";
     frame.append(rendered.substr(live_start));
 
-    ::write(fd_, frame.data(), frame.size());
+    write_best_effort(fd_, frame.data(), frame.size());
 
     committed_bytes_ = new_commit;
     committed_rows_ = cursor_rows_for_rendered(
@@ -241,21 +241,21 @@ public:
 
   void on_message_end(const TokenUsage &) override {
     const char nl = '\n';
-    ::write(fd_, &nl, 1);
+    write_best_effort(fd_, &nl, 1);
     clear_state();
   }
 
   void on_command_output(std::string_view text) override {
-    ::write(fd_, text.data(), text.size());
+    write_best_effort(fd_, text.data(), text.size());
     if (text.empty() || text.back() != '\n')
-      ::write(fd_, "\n", 1);
+      write_best_effort(fd_, "\n", 1);
   }
 
   // Plain text status, matching on_command_output — never the replacement
   // transcript's opaque server payload, which these hooks never carry.
   void on_compaction_start() override {
     static constexpr std::string_view msg = "[compacting context...]\n";
-    ::write(fd_, msg.data(), msg.size());
+    write_best_effort(fd_, msg.data(), msg.size());
   }
 
   void on_compaction_complete(std::size_t retained_message_count,
@@ -263,14 +263,14 @@ public:
     const std::string msg =
         "[context compacted: " + std::to_string(retained_message_count) +
         " message(s) retained]\n";
-    ::write(fd_, msg.data(), msg.size());
+    write_best_effort(fd_, msg.data(), msg.size());
   }
 
   void on_compaction_error(std::string_view message, bool cancelled) override {
     const std::string msg =
         cancelled ? "[compaction cancelled]\n"
                   : "[compaction failed: " + std::string(message) + "]\n";
-    ::write(fd_, msg.data(), msg.size());
+    write_best_effort(fd_, msg.data(), msg.size());
   }
 
   void on_turn_start() override { clear_state(); }
@@ -504,9 +504,9 @@ private:
     // signal-safe, but leave() is only called from atexit or destructor).
     if (!raw_buffer_.empty()) {
       auto r = render_visible_markdown(raw_buffer_);
-      ::write(fd_, r.data(), r.size());
+      write_best_effort(fd_, r.data(), r.size());
       if (r.empty() || r.back() != '\n')
-        ::write(fd_, "\n", 1);
+        write_best_effort(fd_, "\n", 1);
     }
   }
 
@@ -627,7 +627,7 @@ private:
       }
     }
 
-    ::write(fd_, frame.data(), frame.size());
+    write_best_effort(fd_, frame.data(), frame.size());
     paint_status();
   }
 
@@ -688,10 +688,10 @@ private:
       bar += usage_text;
     }
     bar += "\033[0m";
-    ::write(fd_, bar.data(), bar.size());
+    write_best_effort(fd_, bar.data(), bar.size());
   }
 
-  void write_seq(const char *s) const { ::write(fd_, s, std::strlen(s)); }
+  void write_seq(const char *s) const { write_best_effort(fd_, s, std::strlen(s)); }
 
   // Cached rendered ANSI for the finalized (complete-block) prefix of content.
   // Populated when BlockBoundaryScanner finds a new stable boundary.  On the

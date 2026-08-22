@@ -1535,14 +1535,12 @@ private:
     // be able to hide one), then an addon-provided status line (e.g. a
     // costline) outranks the built-in status text ("tokens: N  done",
     // "[thinking……]", running tool names), mirroring the viewport renderer's
-    // paint_status() where custom_status_line_ wins outright. Built-in text
-    // only paints when no addon claims the row.
-    if (snapshot.has_error && !snapshot.status_text.empty()) {
+    // paint_status() where custom_status_line_ wins outright.
+    if (!snapshot.status_text.empty() &&
+        (snapshot.has_error || !snapshot.custom_status_line)) {
       left = snapshot.status_text;
     } else if (snapshot.custom_status_line) {
       left = *snapshot.custom_status_line;
-    } else if (!snapshot.status_text.empty()) {
-      left = snapshot.status_text;
     } else {
       bool first = true;
       const auto append_tools = [&first, &left](const auto &blocks) {

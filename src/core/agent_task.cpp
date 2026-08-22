@@ -320,7 +320,7 @@ AgentTaskManager::snapshot(const std::shared_ptr<Task> &task) {
     info.total_tokens = last_usage.total_tokens != 0
                             ? last_usage.total_tokens
                             : last_usage.input + last_usage.output;
-    result.context_info = std::move(info);
+    result.context_info = info;
   }
   // Read agent state without holding task->mutex so the manager/task/state
   // lock order is never nested here.
@@ -335,8 +335,8 @@ AgentTaskManager::snapshot(const std::shared_ptr<Task> &task) {
       const auto &model = task->session->agent().state().model();
       if (model.context_window != 0)
         info.context_window = model.context_window;
-    } catch (...) {
       // State momentarily unavailable: keep zeros rather than fail get/list.
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
   }
   return result;

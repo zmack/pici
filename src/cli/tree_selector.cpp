@@ -102,9 +102,11 @@ Key read_key() {
   return Key::Other;
 }
 
-void write_str(const char *s) { ::write(STDOUT_FILENO, s, std::strlen(s)); }
+void write_str(const char *s) {
+  core::write_best_effort(STDOUT_FILENO, s, std::strlen(s));
+}
 void write_str(const std::string &s) {
-  ::write(STDOUT_FILENO, s.data(), s.size());
+  core::write_best_effort(STDOUT_FILENO, s.data(), s.size());
 }
 
 // Render the visible window of lines into the alternate screen.

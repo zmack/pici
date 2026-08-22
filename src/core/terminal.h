@@ -13,12 +13,31 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace pi::core {
 
 int term_width(int fd);
 int term_height(int fd);
+
+// Best-effort write for fire-and-forget terminal sequences and diagnostics
+// where there is no meaningful recovery path. Retries partial writes and
+// gives up on error; the caller never sees the result, which also keeps
+// builds quiet under _FORTIFY_SOURCE's warn_unused_result on write(2).
+inline void write_best_effort(int fd, const char *data, std::size_t size) {
+  std::string_view view{data, size};
+  while (!view.empty()) {
+    const ssize_t n = ::write(fd, view.data(), view.size());
+    if (n <= 0)
+      return;
+    view.remove_prefix(static_cast<std::size_t>(n));
+  }
+}
+
+inline void write_best_effort(int fd, std::string_view data) {
+  write_best_effort(fd, data.data(), data.size());
+}
 
 // Owns the alternate-screen session and the process-wide signal hooks used by
 // full-screen renderers. There is deliberately one pending SIGINT flag for
