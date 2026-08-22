@@ -815,6 +815,27 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
     return result;
   }
 
+  // Some providers (observed via OpenRouter) can return an HTTP-200
+  // streaming response whose body never actually carries a finish_reason,
+  // content delta, or usage event -- no transport error, just nothing.
+  // result->stop_reason is left at its StopReason::stop default (line
+  // ~615) in that case, so without this check the turn would silently end
+  // as if the model had chosen to say nothing. A legitimate empty
+  // completion still bills at least the input tokens for the prompt that
+  // was sent, so all-zero usage alongside empty content is the fingerprint
+  // of a dropped/empty stream, not a real "model said nothing" turn.
+  if (result->content.empty() && result->usage.input == 0 &&
+      result->usage.output == 0 && result->usage.total_tokens == 0) {
+    result->stop_reason = StopReason::error;
+    result->error_message =
+        "LLM response was empty: the provider returned success but the "
+        "stream carried no content, tool calls, or usage";
+    if (on_event)
+      on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
+                                          .error = *result});
+    return result;
+  }
+
   if (on_event)
     on_event(AssistantMessageDoneEvent{.reason = result->stop_reason,
                                        .message = *result});
