@@ -532,6 +532,9 @@ void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
   // [context]
   cfg.no_context_files = boolean("context", "disabled");
 
+  // [skills]
+  cfg.no_skills = boolean("skills", "disabled");
+
   // [input]
   cfg.vim_mode = boolean("input", "vim_mode");
 

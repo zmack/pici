@@ -208,6 +208,29 @@ std::string format_tools(
   return ss.str();
 }
 
+std::string format_skill_catalog(const core::SkillCatalog &catalog) {
+  if (catalog.skills.empty()) {
+    return "(no skills discovered)\n";
+  }
+  std::ostringstream ss;
+  for (const auto &s : catalog.skills) {
+    ss << s.name << "\n"
+       << "  scope: " << s.scope << "\n"
+       << "  path: " << s.path << "\n";
+    if (!s.description.empty()) {
+      ss << "  " << s.description << "\n";
+    }
+    ss << "\n";
+  }
+  if (!catalog.diagnostics.empty()) {
+    ss << "diagnostics:\n";
+    for (const auto &d : catalog.diagnostics) {
+      ss << "  - " << d << "\n";
+    }
+  }
+  return ss.str();
+}
+
 std::string
 format_addons(const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
   if (hooks_list.empty()) {
@@ -1919,7 +1942,8 @@ int cmd_run(const cli::Args &args,
             std::string_view("/reload-addons"), std::string_view("/usage"),
             std::string_view("/model"), std::string_view("/models"),
             std::string_view("/name"), std::string_view("/fork"),
-            std::string_view("/tree"), std::string_view("/compact")}) {
+            std::string_view("/tree"), std::string_view("/compact"),
+            std::string_view("/skills")}) {
         if (b.starts_with(partial))
           result.emplace_back(b);
       }
@@ -2161,9 +2185,8 @@ int cmd_run(const cli::Args &args,
     renderer->prepare_for_prompt();
     auto readline_result = cli::readline(
         prompt, complete_fn, control_fn, readline_status, readline_draft,
-        readline_cursor, readline_wake_fd, full_screen_prompt,
-        on_prompt_resize, args.vim_mode,
-        owns_full_screen ? &session_raw_mode : nullptr);
+        readline_cursor, readline_wake_fd, full_screen_prompt, on_prompt_resize,
+        args.vim_mode, owns_full_screen ? &session_raw_mode : nullptr);
     if (readline_result.reason == cli::ReadlineExit::eof)
       break;
     if (readline_result.reason == cli::ReadlineExit::mailbox_wake) {
@@ -2185,6 +2208,22 @@ int cmd_run(const cli::Args &args,
       break;
     if (line == "/tools") {
       renderer->on_command_output(format_tools(agent.state().tools()));
+      continue;
+    }
+    if (line == "/skills") {
+      if (skill_catalog_shared != nullptr) {
+        renderer->on_command_output(
+            format_skill_catalog(*skill_catalog_shared));
+      } else if (args.no_skills) {
+        renderer->on_command_output("skills disabled (--no-skills or "
+                                    "[skills] disabled = true)\n");
+      } else {
+        renderer->on_command_output(
+            "(no skills discovered)\n"
+            "Add SKILL.md files under .pici/skills/, skills/ or "
+            ".agents/skills/ in the workspace, or skills/ under the config "
+            "directory.\n");
+      }
       continue;
     }
     if (line == "/addons") {

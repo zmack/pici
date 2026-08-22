@@ -1,12 +1,12 @@
-#include "cli/config.h"
 #include "cli/args.h"
+#include "cli/config.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <cstdlib>
 #include <initializer_list>
 #include <iostream>
-#include <algorithm>
 #include <source_location>
 #include <string_view>
 #include <vector>
@@ -16,15 +16,18 @@ int passed{0}, failed{0}, total{0};
 bool check(bool cond, std::string_view expr,
            std::source_location loc = std::source_location::current()) {
   ++total;
-  if (cond) { ++passed; return true; }
+  if (cond) {
+    ++passed;
+    return true;
+  }
   ++failed;
-  std::cout << "  FAIL " << loc.file_name() << ":" << loc.line()
-            << " — " << expr << "\n";
+  std::cout << "  FAIL " << loc.file_name() << ":" << loc.line() << " — "
+            << expr << "\n";
   return false;
 }
 } // namespace tests
 #define CHECK(e) tests::check(!!(e), #e)
-#define CHECK_EQ(a,b) tests::check((a)==(b), #a " == " #b)
+#define CHECK_EQ(a, b) tests::check((a) == (b), #a " == " #b)
 
 using namespace pi::cli;
 
@@ -105,19 +108,20 @@ claim_lease_ms = 31000
 retention_days = 45
 )toml");
     auto cfg = load_config(p);
-    CHECK_EQ(cfg.model,          std::string("gpt-4o"));
-    CHECK_EQ(cfg.provider,       std::string("openai"));
-    CHECK_EQ(cfg.base_url,       std::string("https://api.openai.com/v1"));
-    CHECK_EQ(cfg.system_prompt,  std::string("You are helpful."));
+    CHECK_EQ(cfg.model, std::string("gpt-4o"));
+    CHECK_EQ(cfg.provider, std::string("openai"));
+    CHECK_EQ(cfg.base_url, std::string("https://api.openai.com/v1"));
+    CHECK_EQ(cfg.system_prompt, std::string("You are helpful."));
     CHECK(cfg.thinking == ThinkingLevel::medium);
-    CHECK_EQ(cfg.tools_dir,      std::string("/tmp/tools"));
+    CHECK_EQ(cfg.tools_dir, std::string("/tmp/tools"));
     CHECK(!cfg.no_tools);
-    CHECK_EQ(cfg.tools.size(),   std::size_t(2));
+    CHECK_EQ(cfg.tools.size(), std::size_t(2));
     CHECK_EQ(cfg.hooks_files.size(), std::size_t(2));
-    CHECK_EQ(cfg.hooks_dir,      std::string("/tmp/addons"));
-    CHECK_EQ(cfg.render,         std::string("markdown"));
+    CHECK_EQ(cfg.hooks_dir, std::string("/tmp/addons"));
+    CHECK_EQ(cfg.render, std::string("markdown"));
     CHECK(cfg.verbose);
     CHECK(cfg.no_context_files);
+    CHECK(!cfg.no_skills); // [skills] absent in this fixture
     CHECK_EQ(cfg.sandbox_mode, std::string("disabled"));
     CHECK(cfg.mailbox_enabled);
     CHECK_EQ(cfg.mailbox_path, std::string("~/custom-mailbox.sqlite3"));
@@ -184,7 +188,8 @@ context_window = 200000
     CHECK_EQ(local.model_overrides.at("accounts/company/models/coder")
                  .max_tokens.value(),
              std::uint64_t(32768));
-    CHECK_EQ(config.providers.at("openai").model_overrides.at("gpt-4.1")
+    CHECK_EQ(config.providers.at("openai")
+                 .model_overrides.at("gpt-4.1")
                  .context_window.value(),
              std::uint64_t(200000));
   }
@@ -218,9 +223,9 @@ id = "duplicate"
     CHECK(has_diagnostic(config, "providers.bad.headers.X-Number"));
     CHECK(has_diagnostic(config, "providers.bad.models[0].context_window"));
     CHECK(has_diagnostic(config,
-                        "providers.bad.models[0].input_capabilities[1]"));
-    CHECK(has_diagnostic(config,
-                        "providers.bad.models[0].thinking_level_map.unsupported"));
+                         "providers.bad.models[0].input_capabilities[1]"));
+    CHECK(has_diagnostic(
+        config, "providers.bad.models[0].thinking_level_map.unsupported"));
     CHECK(has_diagnostic(config, "duplicate model id"));
   }
 
@@ -239,17 +244,23 @@ api_key_env = "PICI_CODEX_KEY"
 
   // merge: CLI string wins over config
   {
-    Args conf; conf.model = "gpt-4o";      conf.provider = "openai";
-    Args cli;  cli.model  = "gpt-4o-mini"; cli.provider  = "";
+    Args conf;
+    conf.model = "gpt-4o";
+    conf.provider = "openai";
+    Args cli;
+    cli.model = "gpt-4o-mini";
+    cli.provider = "";
     auto out = merge_args(conf, cli);
-    CHECK_EQ(out.model,    std::string("gpt-4o-mini")); // CLI wins
-    CHECK_EQ(out.provider, std::string("openai"));       // config wins (CLI empty)
+    CHECK_EQ(out.model, std::string("gpt-4o-mini")); // CLI wins
+    CHECK_EQ(out.provider, std::string("openai"));   // config wins (CLI empty)
   }
 
   // sandbox mode merges like other scalar configuration values
   {
-    Args conf; conf.sandbox_mode = "required";
-    Args cli;  cli.sandbox_mode = "disabled";
+    Args conf;
+    conf.sandbox_mode = "required";
+    Args cli;
+    cli.sandbox_mode = "disabled";
     auto out = merge_args(conf, cli);
     CHECK_EQ(out.sandbox_mode, std::string("disabled"));
   }
@@ -264,8 +275,12 @@ api_key_env = "PICI_CODEX_KEY"
 
   // merge: booleans are OR'd
   {
-    Args conf; conf.no_tools = true;  conf.verbose = false;
-    Args cli;  cli.no_tools  = false; cli.verbose  = true;
+    Args conf;
+    conf.no_tools = true;
+    conf.verbose = false;
+    Args cli;
+    cli.no_tools = false;
+    cli.verbose = true;
     auto out = merge_args(conf, cli);
     CHECK(out.no_tools); // conf true OR cli false → true
     CHECK(out.verbose);  // conf false OR cli true → true
@@ -273,8 +288,10 @@ api_key_env = "PICI_CODEX_KEY"
 
   // merge: hooks_files accumulate (config first then CLI)
   {
-    Args conf; conf.hooks_files = {"/conf/hook.lua"};
-    Args cli;  cli.hooks_files  = {"/cli/hook.lua"};
+    Args conf;
+    conf.hooks_files = {"/conf/hook.lua"};
+    Args cli;
+    cli.hooks_files = {"/cli/hook.lua"};
     auto out = merge_args(conf, cli);
     CHECK_EQ(out.hooks_files.size(), std::size_t(2));
     CHECK_EQ(out.hooks_files[0], std::string("/conf/hook.lua"));
@@ -283,8 +300,10 @@ api_key_env = "PICI_CODEX_KEY"
 
   // merge: CLI tools vector wins over config
   {
-    Args conf; conf.tools = {"read", "bash"};
-    Args cli;  cli.tools  = {"grep"};
+    Args conf;
+    conf.tools = {"read", "bash"};
+    Args cli;
+    cli.tools = {"grep"};
     auto out = merge_args(conf, cli);
     CHECK_EQ(out.tools.size(), std::size_t(1));
     CHECK_EQ(out.tools[0], std::string("grep")); // CLI wins
@@ -302,7 +321,8 @@ path = "/toml/mailbox.sqlite3"
     std::vector<char *> argv;
     for (auto &value : values)
       argv.push_back(value.data());
-    auto environment = load_and_merge(static_cast<int>(argv.size()), argv.data());
+    auto environment =
+        load_and_merge(static_cast<int>(argv.size()), argv.data());
     CHECK_EQ(environment.config_path, p.string());
     CHECK_EQ(environment.mailbox_path, std::string("/env/mailbox.sqlite3"));
     CHECK(environment.mailbox_enabled);
@@ -311,7 +331,8 @@ path = "/toml/mailbox.sqlite3"
     argv.clear();
     for (auto &value : values)
       argv.push_back(value.data());
-    auto command_line = load_and_merge(static_cast<int>(argv.size()), argv.data());
+    auto command_line =
+        load_and_merge(static_cast<int>(argv.size()), argv.data());
     CHECK_EQ(command_line.mailbox_path, std::string("/cli/mailbox.sqlite3"));
     CHECK(command_line.mailbox_enabled);
     values = {"pi", "--no-mailbox"};
@@ -327,7 +348,11 @@ path = "/toml/mailbox.sqlite3"
   {
     auto p = write_toml("pici_bad.toml", "not = valid [ toml");
     bool threw = false;
-    try { load_config(p); } catch (const std::exception &) { threw = true; }
+    try {
+      load_config(p);
+    } catch (const std::exception &) {
+      threw = true;
+    }
     CHECK(threw);
   }
 
@@ -356,16 +381,16 @@ path = "/toml/mailbox.sqlite3"
     CHECK(args.verbose);
     CHECK(args.diagnostics.empty());
 
-    auto invalid = parse({"pi", "auth", "login", "openai-codex", "--model",
-                          "gpt-5.5"});
+    auto invalid =
+        parse({"pi", "auth", "login", "openai-codex", "--model", "gpt-5.5"});
     CHECK(!invalid.diagnostics.empty());
     CHECK(invalid.diagnostics.front().is_error);
   }
 
   // --compaction-threshold parses a valid fraction
   {
-    auto args = parse({"pi", "--remote-compaction", "--compaction-threshold",
-                       "0.7"});
+    auto args =
+        parse({"pi", "--remote-compaction", "--compaction-threshold", "0.7"});
     CHECK(args.remote_compaction_enabled);
     CHECK(args.compaction_threshold_pct > 0.699);
     CHECK(args.compaction_threshold_pct < 0.701);
@@ -397,6 +422,21 @@ threshold_pct = 0.65
     CHECK(cfg.remote_compaction_enabled);
     CHECK(cfg.compaction_threshold_pct > 0.649);
     CHECK(cfg.compaction_threshold_pct < 0.651);
+  }
+
+  // [skills] disabled loads from TOML and merges with the CLI flag
+  {
+    auto p = write_toml("pici_skills.toml", R"toml(
+[skills]
+disabled = true
+)toml");
+    auto cfg = load_config(p);
+    CHECK(cfg.no_skills);
+
+    auto merged = merge_args(cfg, parse({"pi"}));
+    CHECK(merged.no_skills);
+    auto cli_wins = merge_args(cfg, parse({"pi"}));
+    CHECK(cli_wins.no_skills);
   }
 
   // an out-of-range TOML threshold_pct is ignored (falls back to the
@@ -432,9 +472,8 @@ threshold_pct = 1.5
   }
 
   std::cout << "\n========================================\n"
-            << "  Tests: " << tests::total  << " total, "
-            << tests::passed << " passed, "
-            << tests::failed << " failed\n"
+            << "  Tests: " << tests::total << " total, " << tests::passed
+            << " passed, " << tests::failed << " failed\n"
             << "========================================\n";
   return tests::failed == 0 ? 0 : 1;
 }
