@@ -96,6 +96,14 @@ public:
   virtual void on_tool_end(std::string_view call_id, std::string_view tool_name,
                            const ToolResult &result, bool is_error) {}
 
+  // The in-flight assistant message's usage as currently known, fired
+  // alongside streaming deltas whenever the provider has reported new usage
+  // counts (e.g. input tokens at message start, output tokens once the
+  // provider's trailing usage update arrives). Not fired on every delta —
+  // only when the numbers actually change. Renderers that don't care about
+  // a live running total can ignore this and read on_message_end() instead.
+  virtual void on_usage_update(const TokenUsage &usage) {}
+
   // One assistant message is fully received (there may be several per turn
   // when tool calls are involved).  usage is the token count for this message.
   virtual void on_message_end(const TokenUsage &usage) {}

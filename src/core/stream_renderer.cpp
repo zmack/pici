@@ -759,6 +759,8 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
             r.on_request(request);
           }
         } else if constexpr (std::is_same_v<T, MessageUpdateEvent>) {
+          if (const auto *am = std::get_if<AssistantMessage>(&e.message))
+            r.on_usage_update(am->usage);
           std::visit(
               [&r](const auto &ae) {
                 using AE = std::decay_t<decltype(ae)>;

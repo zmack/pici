@@ -645,6 +645,7 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
           using E = std::decay_t<decltype(e)>;
           if constexpr (std::is_same_v<E, AssistantMessageStartEvent>) {
             partial = std::make_shared<AssistantMessage>(e.partial);
+            compute_cost(partial->usage, config.model.cost);
             context.messages.emplace_back(*partial);
             added_partial = true;
             emit(MessageStartEvent(*partial));
@@ -654,6 +655,7 @@ stream_assistant_response(AgentContext &context, const AgentLoopConfig &config,
           } else {
             if (partial) {
               partial = std::make_shared<AssistantMessage>(get_partial(ev));
+              compute_cost(partial->usage, config.model.cost);
               context.messages.back() = *partial;
               emit(MessageUpdateEvent(*partial, ev));
             }

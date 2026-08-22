@@ -500,9 +500,37 @@ class VerboseRenderer final : public core::Renderer {
 public:
   VerboseRenderer(core::Renderer &base, bool verbose,
                   std::shared_ptr<core::StreamDiagnostics> diagnostics,
-                  std::shared_ptr<HookRuntime> hook_runtime = nullptr)
+                  std::shared_ptr<HookRuntime> hook_runtime = nullptr,
+                  std::function<core::LuaUiContext()> context_builder = nullptr)
       : base_(base), verbose_(verbose), diagnostics_(std::move(diagnostics)),
-        hook_runtime_(std::move(hook_runtime)) {}
+        hook_runtime_(std::move(hook_runtime)),
+        context_builder_(std::move(context_builder)) {}
+
+  // Fired mid-turn whenever the provider reports new usage counts (input
+  // tokens at message start, output tokens once the trailing usage update
+  // arrives). Lets the status_line addon show live cost as a turn streams
+  // instead of only once the whole turn (all messages + tool calls) ends —
+  // see update_terminal_ui(), which covers the post-turn case.
+  void on_usage_update(const core::TokenUsage &u) override {
+    if (u.input == last_reported_usage_.input &&
+        u.output == last_reported_usage_.output &&
+        u.cache_read == last_reported_usage_.cache_read &&
+        u.cache_write == last_reported_usage_.cache_write)
+      return;
+    last_reported_usage_ = u;
+    if (!hook_runtime_ || !context_builder_)
+      return;
+    std::shared_ptr<core::LuaHooks> hooks;
+    {
+      std::scoped_lock lock(hook_runtime_->mutex);
+      hooks = hook_runtime_->hooks;
+    }
+    if (!hooks || !hooks->status_line)
+      return;
+    auto ctx = context_builder_();
+    ctx.last = u;
+    base_.set_status_line(hooks->status_line(ctx));
+  }
 
   void on_turn_start() override {
     if (diagnostics_)
@@ -760,8 +788,10 @@ private:
   bool verbose_;
   std::shared_ptr<core::StreamDiagnostics> diagnostics_;
   std::shared_ptr<HookRuntime> hook_runtime_;
+  std::function<core::LuaUiContext()> context_builder_;
   std::unordered_map<std::string, nlohmann::json> pending_tool_args_;
   core::TokenUsage last_usage_;
+  core::TokenUsage last_reported_usage_;
 };
 
 template <typename Invoke>
@@ -769,9 +799,10 @@ core::TokenUsage
 run_turn_impl(core::AgentSession &session, core::Renderer &renderer,
               bool verbose,
               std::shared_ptr<core::StreamDiagnostics> diagnostics,
-              std::shared_ptr<HookRuntime> hook_runtime, Invoke &&invoke) {
+              std::shared_ptr<HookRuntime> hook_runtime, Invoke &&invoke,
+              std::function<core::LuaUiContext()> context_builder = nullptr) {
   VerboseRenderer vr(renderer, verbose, std::move(diagnostics),
-                     std::move(hook_runtime));
+                     std::move(hook_runtime), std::move(context_builder));
   std::jthread interrupt_watcher([&session](const std::stop_token &stop_token) {
     while (!stop_token.stop_requested()) {
       if (core::consume_sigint()) {
@@ -794,12 +825,15 @@ run_turn_impl(core::AgentSession &session, core::Renderer &renderer,
 core::TokenUsage run_turn(core::AgentSession &session, const std::string &input,
                           core::Renderer &renderer, bool verbose,
                           std::shared_ptr<core::StreamDiagnostics> diagnostics,
-                          std::shared_ptr<HookRuntime> hook_runtime = nullptr) {
+                          std::shared_ptr<HookRuntime> hook_runtime = nullptr,
+                          std::function<core::LuaUiContext()> context_builder =
+                              nullptr) {
   return run_turn_impl(session, renderer, verbose, std::move(diagnostics),
                        std::move(hook_runtime),
                        [&session, &input](const auto &callback) {
                          return session.run_prompt(input, callback);
-                       });
+                       },
+                       std::move(context_builder));
 }
 
 core::TokenUsage
@@ -807,13 +841,15 @@ run_message_turn(core::AgentSession &session,
                  std::vector<core::AgentMessageEnvelope> messages,
                  core::Renderer &renderer, bool verbose,
                  std::shared_ptr<core::StreamDiagnostics> diagnostics,
-                 std::shared_ptr<HookRuntime> hook_runtime = nullptr) {
+                 std::shared_ptr<HookRuntime> hook_runtime = nullptr,
+                 std::function<core::LuaUiContext()> context_builder = nullptr) {
   return run_turn_impl(
       session, renderer, verbose, std::move(diagnostics),
       std::move(hook_runtime),
       [&session, messages = std::move(messages)](const auto &callback) mutable {
         return session.run_messages(std::move(messages), callback);
-      });
+      },
+      std::move(context_builder));
 }
 
 // Drives AgentSession::compact_active_session to completion, reusing the
@@ -1973,7 +2009,7 @@ int cmd_run(const cli::Args &args,
     }
     RootRunningGuard running_guard{mailbox};
     auto result = run_turn(runtime, input, *renderer, args.verbose,
-                           stream_diagnostics, hook_runtime);
+                           stream_diagnostics, hook_runtime, build_ui_context);
     return result;
   };
 
@@ -2000,7 +2036,7 @@ int cmd_run(const cli::Args &args,
         RootRunningGuard running_guard{mailbox};
         accumulate(run_message_turn(runtime, std::move(messages), *renderer,
                                     args.verbose, stream_diagnostics,
-                                    hook_runtime));
+                                    hook_runtime, build_ui_context));
       }
       autonomous_budget.record();
     }
