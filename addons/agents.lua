@@ -22,7 +22,7 @@ local function tool(name, description, schema, fn)
   })
 end
 
-tool("spawn_agent", "Start a named asynchronous read-only child agent and return its identity.", {
+tool("spawn_agent", "Start a named asynchronous read-only child agent and return its identity. The returned snapshot includes a `context` object (context_bytes, last/total tokens, context_window) for tracking the child's context growth; poll list_agents/get and close_agent when the child's total_tokens approach its context_window.", {
   type = "object",
   properties = {
     task_name = {type = "string"},
@@ -90,7 +90,20 @@ local function list_output()
   if not value then return err end
   local lines = {}
   for _, item in ipairs(value) do
-    table.insert(lines, string.format("%s  %s  %s", item.id, item.status, item.task_path))
+    local ctx = ""
+    if item.context then
+      local window = item.context.context_window
+      if window and window > 0 then
+        ctx = string.format("  ctx=%.1fk/%.0fk (%d%%)",
+          item.context.total_tokens / 1024, window / 1024,
+          math.floor(100 * item.context.total_tokens /
+            math.max(window, 1)))
+      else
+        ctx = string.format("  ctx=%dk", item.context.total_tokens // 1024)
+      end
+    end
+    table.insert(lines, string.format("%s  %s  %s%s", item.id, item.status,
+      item.task_path, ctx))
   end
   return #lines > 0 and table.concat(lines, "\n") or "no agents"
 end

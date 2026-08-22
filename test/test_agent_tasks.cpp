@@ -112,6 +112,46 @@ private:
   std::shared_ptr<std::vector<std::string>> tools_;
 };
 
+class BlockingUsageClient : public LLMClient {
+public:
+  explicit BlockingUsageClient(std::shared_ptr<std::atomic<bool>> entered,
+                               std::shared_ptr<std::atomic<bool>> release)
+      : entered_(std::move(entered)), release_(std::move(release)) {}
+
+  std::shared_ptr<AssistantMessage>
+  stream(const Model &model, const AgentContext &, const StreamOptions &,
+         AssistantEventCallback, std::stop_token) override {
+    auto message = std::make_shared<AssistantMessage>();
+    message->api = model.api;
+    message->provider = model.provider;
+    message->model = model.id;
+    if (calls_++ == 0) {
+      // First turn: return immediately so its usage is recorded.
+      message->usage = TokenUsage{.input = 1000, .output = 200,
+                                  .total_tokens = 1200};
+      message->stop_reason = StopReason::stop;
+      return message;
+    }
+    // Second turn: block so the test can observe the first turn's usage and
+    // the growing transcript through a concurrent get() while still running.
+    entered_->store(true);
+    while (!release_->load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    message->usage = TokenUsage{.input = 2000, .output = 500,
+                                .total_tokens = 2500};
+    message->stop_reason = StopReason::stop;
+    return message;
+  }
+
+  std::string_view provider_name() const override { return "blocking-usage"; }
+  std::string_view api_id() const override { return "blocking-usage"; }
+
+private:
+  std::shared_ptr<std::atomic<bool>> entered_;
+  std::shared_ptr<std::atomic<bool>> release_;
+  int calls_{0}; // per-instance; share one instance to count across turns
+};
+
 AgentTaskSnapshot wait_terminal(AgentTaskManager &manager,
                                 AgentTaskSnapshot current) {
   for (int attempts = 0; attempts < 5; ++attempts) {
@@ -586,10 +626,30 @@ return {}
   auto child = manager.spawn({.task_name = "review", .prompt = "Review"});
   CHECK(!child.id.empty());
   CHECK(child.task_path == "/root/review");
+
+  // Context observability: the spawn snapshot carries live context info.
+  CHECK(child.context_info.has_value());
+  {
+    const auto &info = *child.context_info;
+    // Seed prompt is queued in work; the transcript fills on MessageEndEvent,
+    // so at spawn time it is still empty.
+    CHECK(info.message_count == 0);
+    CHECK(info.context_bytes == 0);
+    CHECK(info.last_input_tokens == 0);
+    CHECK(info.total_tokens == 0);
+    // Faux model declares no window.
+    CHECK(!info.context_window.has_value());
+  }
+
   auto completed = wait_terminal(manager, child);
   CHECK(completed.status == AgentTaskStatusKind::completed);
   CHECK(completed.result.has_value());
   CHECK(completed.result->text == "child result");
+  CHECK(completed.context_info.has_value());
+  CHECK(completed.context_info->last_input_tokens == 0);
+  // FauxClient scripts carry no usage; total falls back to input+output = 0.
+  CHECK(completed.context_info->total_tokens == 0);
+  CHECK(completed.context_info->message_count >= 2); // prompt + assistant
 
   auto queued = manager.send_message(
       child.id, UserMessage{.content = {TextContent{.text = "context"}}});
@@ -600,6 +660,10 @@ return {}
   CHECK(second.status == AgentTaskStatusKind::completed);
   CHECK(second.result.has_value());
   CHECK(second.result->text == "follow-up result");
+  // Context grew across the follow-up turn.
+  CHECK(second.context_info.has_value());
+  CHECK(second.context_info->message_count > completed.context_info->message_count);
+  CHECK(second.context_info->context_bytes > completed.context_info->context_bytes);
 
   int accepted = 0;
   UserMessage mailbox_message;
@@ -668,6 +732,72 @@ return {}
   CHECK(reused_result.status == AgentTaskStatusKind::completed);
   CHECK(reused_result.result && reused_result.result->text == "reused");
   interrupt_manager.shutdown();
+
+  // --- Mid-turn context observability -----------------------------------
+  // The child runs two turns: turn 1 returns immediately (usage recorded),
+  // turn 2 (queued via follow_up) blocks inside stream() so the test can
+  // observe turn 1's usage and the growing transcript through get() while
+  // the task is still running.
+  auto entered = std::make_shared<std::atomic<bool>>(false);
+  auto release = std::make_shared<std::atomic<bool>>(false);
+  // One shared instance so calls_ counts across turns.
+  auto usage_client =
+      std::make_shared<BlockingUsageClient>(entered, release);
+  LLMClientRegistry::instance().register_client(
+      "blocking-usage", [usage_client] { return usage_client; });
+  Model usage_model;
+  usage_model.id = "usage-model";
+  usage_model.api = "blocking-usage";
+  usage_model.provider = "blocking-usage";
+  usage_model.context_window = 100000; // declared window must surface
+  Agent::Options usage_options;
+  usage_options.model = usage_model;
+  AgentSession usage_root({.agent_options = usage_options});
+  AgentTaskManager usage_manager(usage_root, usage_options);
+  auto observed_child =
+      usage_manager.spawn({.task_name = "observed", .prompt = "observe"});
+
+  // Spawn snapshot: seed prompt still queued in work, not yet in state.
+  CHECK(observed_child.context_info.has_value());
+  CHECK(observed_child.context_info->message_count == 0);
+  CHECK(observed_child.context_info->last_input_tokens == 0);
+  // Window resolved from the child's model at spawn time.
+  CHECK(observed_child.context_info->context_window.value_or(0) == 100000);
+
+  // Queue turn 2 up front: it starts once turn 1 finishes.
+  static_cast<void>(usage_manager.follow_up(
+      observed_child.id,
+      Message{UserMessage{.content = {TextContent{.text = "second"}}}}));
+
+  // Wait until turn 2 is streaming...
+  const auto entered_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(5);
+  while (!entered->load() && std::chrono::steady_clock::now() < entered_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(entered->load());
+  // ...and observe turn-1 usage live through a plain get().
+  const auto mid_turn = usage_manager.get(observed_child.id);
+  CHECK(mid_turn.has_value());
+  CHECK(mid_turn->status == AgentTaskStatusKind::running);
+  CHECK(mid_turn->context_info.has_value());
+  CHECK(mid_turn->context_info->last_input_tokens == 1000);
+  CHECK(mid_turn->context_info->last_output_tokens == 200);
+  CHECK(mid_turn->context_info->total_tokens == 1200);
+  CHECK(mid_turn->context_info->context_window.value_or(0) == 100000);
+  // Turn 1 transcript: prompt + assistant.
+  CHECK(mid_turn->context_info->message_count >= 2);
+  CHECK(mid_turn->context_info->context_bytes > 0);
+
+  release->store(true);
+  const auto usage_done = wait_terminal(usage_manager, observed_child);
+  CHECK(usage_done.status == AgentTaskStatusKind::completed);
+  CHECK(usage_done.context_info.has_value());
+  // Turn-2 usage replaced turn-1 usage; total falls back to input+output.
+  CHECK(usage_done.context_info->last_input_tokens == 2000);
+  CHECK(usage_done.context_info->total_tokens == 2500);
+  CHECK(usage_done.context_info->message_count ==
+        mid_turn->context_info->message_count + 1); // + turn-2 assistant
+  usage_manager.shutdown();
 
   if (failed != 0)
     return 1;

@@ -1460,6 +1460,20 @@ int cmd_run(const cli::Args &args,
       value["parent_id"] = *snapshot.parent_id;
     else
       value["parent_id"] = nullptr;
+    if (snapshot.context_info) {
+      const auto &info = *snapshot.context_info;
+      nlohmann::json context = {
+          {"message_count", info.message_count},
+          {"context_bytes", info.context_bytes},
+          {"last_input_tokens", info.last_input_tokens},
+          {"last_output_tokens", info.last_output_tokens},
+          {"total_tokens", info.total_tokens},
+      };
+      context["context_window"] =
+          info.context_window ? nlohmann::json(*info.context_window)
+                              : nlohmann::json(nullptr);
+      value["context"] = std::move(context);
+    }
     if (snapshot.result) {
       value["result"] = {
           {"text", snapshot.result->text},

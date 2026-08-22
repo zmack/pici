@@ -233,6 +233,9 @@ struct AgentTaskManager::Task {
   std::deque<AgentTaskManager::WorkItem> work;
   std::deque<Message> mailbox;
   std::optional<AgentInterruptReason> pending_interrupt;
+  // Usage of the most recent assistant turn, refreshed on each
+  // MessageEndEvent so it is observable while the task is still running.
+  TokenUsage last_usage;
   std::uint64_t generation{0};
   bool execution_reserved{false};
   bool close_requested{false};
@@ -296,17 +299,46 @@ AgentTaskManager::find_task_locked(const AgentTaskId &target) const {
 
 AgentTaskSnapshot
 AgentTaskManager::snapshot(const std::shared_ptr<Task> &task) {
-  std::scoped_lock lock(task->mutex);
   AgentTaskSnapshot result;
-  result.id = task->id;
-  result.task_path = task->task_path;
-  result.parent_id = task->parent_id;
-  result.task_name = task->task_name;
-  result.status = task->status;
-  result.result = task->result;
-  result.child_count = task->children.size();
-  result.queued_message_count = task->mailbox.size() + task->work.size();
-  result.generation = task->generation;
+  {
+    std::scoped_lock lock(task->mutex);
+    result.id = task->id;
+    result.task_path = task->task_path;
+    result.parent_id = task->parent_id;
+    result.task_name = task->task_name;
+    result.status = task->status;
+    result.result = task->result;
+    result.child_count = task->children.size();
+    result.queued_message_count = task->mailbox.size() + task->work.size();
+    result.generation = task->generation;
+    // Copy usage under the same lock; execute_work's event callback updates
+    // it while the task is running. Trivially copyable, so cheap.
+    const TokenUsage last_usage = task->last_usage;
+    AgentTaskContextInfo info;
+    info.last_input_tokens = last_usage.input;
+    info.last_output_tokens = last_usage.output;
+    info.total_tokens = last_usage.total_tokens != 0
+                            ? last_usage.total_tokens
+                            : last_usage.input + last_usage.output;
+    result.context_info = std::move(info);
+  }
+  // Read agent state without holding task->mutex so the manager/task/state
+  // lock order is never nested here.
+  if (task->session != nullptr) {
+    try {
+      const auto transcript =
+          task->session->agent().state().snapshot_transcript();
+      auto &info = *result.context_info;
+      info.message_count = transcript.messages.size();
+      for (const auto &message : transcript.messages)
+        info.context_bytes += message_bytes(message);
+      const auto &model = task->session->agent().state().model();
+      if (model.context_window != 0)
+        info.context_window = model.context_window;
+    } catch (...) {
+      // State momentarily unavailable: keep zeros rather than fail get/list.
+    }
+  }
   return result;
 }
 
@@ -692,8 +724,13 @@ void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
         }
       }
     } else if (const auto *end = std::get_if<MessageEndEvent>(&event)) {
-      if (const auto *assistant = std::get_if<AssistantMessage>(&end->message))
+      if (const auto *assistant = std::get_if<AssistantMessage>(&end->message)) {
         final_message = *assistant;
+        // Publish usage for live observability; snapshot() reads it under
+        // the same mutex.
+        std::scoped_lock usage_lock(task->mutex);
+        task->last_usage = assistant->usage;
+      }
     }
   };
 

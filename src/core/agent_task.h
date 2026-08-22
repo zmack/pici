@@ -84,6 +84,19 @@ struct AgentTaskResult {
   bool truncated{false};
 };
 
+// Live context-size observability for a child task. Populated by
+// AgentTaskManager::snapshot() so a parent can watch a child's context grow
+// (message bytes, last assistant-turn token usage, declared model window)
+// and decide when the child should be closed/discarded.
+struct AgentTaskContextInfo {
+  std::size_t message_count{0};
+  std::size_t context_bytes{0};
+  std::uint64_t last_input_tokens{0};
+  std::uint64_t last_output_tokens{0};
+  std::uint64_t total_tokens{0};
+  std::optional<std::uint64_t> context_window;
+};
+
 struct AgentTaskSnapshot {
   AgentTaskId id;
   std::string task_path;
@@ -94,6 +107,8 @@ struct AgentTaskSnapshot {
   std::size_t child_count{0};
   std::size_t queued_message_count{0};
   std::uint64_t generation{0};
+  // Live context-size info; nullopt only if task state is unavailable.
+  std::optional<AgentTaskContextInfo> context_info;
 };
 
 enum class AgentTaskErrorKind {
