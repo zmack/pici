@@ -414,6 +414,100 @@ void test_tool_callbacks_route_into_regions() {
              output.find("[beta]") < output.find("after"),
          "callback-created regions preserve transcript order");
 }
+void test_tool_call_streaming_finalizes_into_single_block() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates streaming capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->on_turn_start();
+    // id/name are still empty on the first delta, then fill in; args grow
+    // across deltas exactly as stream_renderer.cpp's dispatch_event feeds
+    // AssistantMessageToolCallStartEvent/DeltaEvent through.
+    renderer->on_tool_call_streaming(0, "", "", "{\"path\":");
+    renderer->on_tool_call_streaming(0, "call-1", "read", "{\"path\":\"README");
+    renderer->on_tool_call_streaming(0, "call-1", "read",
+                                     "{\"path\":\"README.md\"}");
+    // on_tool_start() fires once the whole call has parsed; it must finalize
+    // the drafting block in place rather than appending a duplicate.
+    renderer->on_tool_start("call-1", "read", "{\"path\":\"README.md\"}");
+    renderer->on_tool_end("call-1", "read", TestToolResult{"file contents"},
+                          false);
+    renderer->on_turn_end();
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (ssize_t count; (count = ::read(fds[0], buffer, sizeof(buffer))) > 0;)
+    output.append(buffer, static_cast<std::size_t>(count));
+  ::close(fds[0]);
+  auto count_occurrences = [](const std::string &haystack,
+                              std::string_view needle) {
+    std::size_t occurrences = 0;
+    for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
+        pos = haystack.find(needle, pos + needle.size()))
+      ++occurrences;
+    return occurrences;
+  };
+  expect(count_occurrences(output, "[read]") == 1,
+         "streamed-then-started tool call paints exactly one block");
+  expect(output.find("README.md") != std::string::npos,
+         "finalized block shows the fully-parsed arguments");
+  expect(output.find("file contents") != std::string::npos,
+         "completion still attaches to the streamed-in block");
+}
+
+void test_tool_call_streaming_interleaved_calls_stay_isolated() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates interleaved streaming capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->on_turn_start();
+    // Two calls streaming concurrently, correlated by content_index rather
+    // than call_id (which is still empty on their first delta each).
+    renderer->on_tool_call_streaming(0, "", "", "{\"path\":");
+    renderer->on_tool_call_streaming(1, "", "", "{\"pattern\":");
+    renderer->on_tool_call_streaming(0, "call-1", "read", "{\"path\":\"a.txt");
+    renderer->on_tool_call_streaming(1, "call-2", "grep", "{\"pattern\":\"foo");
+    renderer->on_tool_call_streaming(0, "call-1", "read",
+                                     "{\"path\":\"a.txt\"}");
+    renderer->on_tool_call_streaming(1, "call-2", "grep",
+                                     "{\"pattern\":\"foo\"}");
+    renderer->on_tool_start("call-1", "read", "{\"path\":\"a.txt\"}");
+    renderer->on_tool_start("call-2", "grep", "{\"pattern\":\"foo\"}");
+    renderer->on_tool_end("call-1", "read", TestToolResult{"file contents"},
+                          false);
+    renderer->on_tool_end("call-2", "grep", TestToolResult{"3 matches"},
+                          false);
+    renderer->on_turn_end();
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (ssize_t count; (count = ::read(fds[0], buffer, sizeof(buffer))) > 0;)
+    output.append(buffer, static_cast<std::size_t>(count));
+  ::close(fds[0]);
+  expect(output.find("[read]") != std::string::npos &&
+             output.find("[grep]") != std::string::npos,
+         "both interleaved streaming calls produce their own block");
+  expect(output.find("a.txt") != std::string::npos &&
+             output.find("foo") != std::string::npos,
+         "neither call's arguments leak into the other's block");
+  expect(output.find("file contents") != std::string::npos &&
+             output.find("3 matches") != std::string::npos,
+         "each call's result attaches to its own streamed-in block");
+  expect(output.find("[read]") < output.find("[grep]") &&
+             output.find("[grep]") < output.find("3 matches"),
+         "interleaved calls preserve their content_index arrival order");
+}
+
 void test_mailbox_reply_callback_path() {
   int fds[2]{};
   if (::pipe(fds) != 0) {
@@ -1302,6 +1396,8 @@ int main() {
   test_formatter_sanitization_contract();
   test_tiny_layout_keeps_tool_body_collapsed();
   test_tool_callbacks_route_into_regions();
+  test_tool_call_streaming_finalizes_into_single_block();
+  test_tool_call_streaming_interleaved_calls_stay_isolated();
   test_region_factory_lifecycle();
   test_composer_rows_reserved_in_region_mode();
   test_prepare_for_prompt_reanchors_composer();

@@ -68,6 +68,23 @@ public:
   virtual void on_thinking_delta(std::string_view delta) {}
   virtual void on_thinking_end() {}
 
+  // The model is still emitting this tool call -- fired repeatedly as its
+  // name and arguments stream in, strictly before on_tool_start(), which
+  // only fires once the whole call has finished streaming and been parsed
+  // (see agent_loop.cpp's execute_tool_calls(), reached after the message's
+  // finish_reason arrives). content_index is stable for this call for the
+  // lifetime of the current turn and is the correlation key to use before
+  // call_id is known -- id and name may both still be empty on the very
+  // first call for a given content_index; args_json is the raw, possibly
+  // incomplete/invalid-as-JSON text accumulated so far, for display only.
+  // Renderers that show tool calls should use this so a call with large
+  // arguments has something on screen while it's still streaming in,
+  // instead of showing nothing until on_tool_start() finally fires.
+  virtual void on_tool_call_streaming(std::size_t content_index,
+                                      std::string_view call_id,
+                                      std::string_view tool_name,
+                                      std::string_view partial_args_json) {}
+
   // Tool call lifecycle.  call_id correlates start with end — important for
   // parallel tool execution where multiple calls may interleave.
   virtual void on_tool_start(std::string_view call_id,

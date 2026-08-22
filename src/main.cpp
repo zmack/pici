@@ -539,6 +539,17 @@ public:
     base_.on_thinking_end();
   }
 
+  void on_tool_call_streaming(std::size_t content_index,
+                              std::string_view call_id,
+                              std::string_view tool_name,
+                              std::string_view partial_args_json) override {
+    if (diagnostics_)
+      diagnostics_->record_renderer_event("tool_call_streaming",
+                                          partial_args_json.size());
+    base_.on_tool_call_streaming(content_index, call_id, tool_name,
+                                 partial_args_json);
+  }
+
   void on_tool_update(std::string_view call_id, std::string_view name,
                       std::string_view partial_result) override {
     if (diagnostics_)

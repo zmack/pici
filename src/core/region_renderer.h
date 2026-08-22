@@ -79,6 +79,12 @@ struct RegionState {
   std::vector<RegionBlock> blocks;
   std::unordered_map<std::string, std::size_t> tool_index;
   std::unordered_map<std::string, RegionToolAddress> tool_addresses;
+  // Correlates a still-streaming tool call's content_index (stable before
+  // its call_id is known) to the block on_tool_call_streaming() created for
+  // it, so on_tool_start() can finalize that same block in place once the
+  // whole call has parsed instead of appending a duplicate. Reset every
+  // on_turn_start() alongside tool_index/tool_addresses.
+  std::unordered_map<std::size_t, RegionToolAddress> drafting_tool_addresses;
   std::string thinking;
   std::size_t thinking_block_index{0};
   bool in_thinking{false};

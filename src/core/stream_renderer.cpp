@@ -769,6 +769,20 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
 
                 } else if constexpr (std::is_same_v<
                                          AE,
+                                         AssistantMessageToolCallStartEvent> ||
+                                     std::is_same_v<
+                                         AE,
+                                         AssistantMessageToolCallDeltaEvent>) {
+                  if (ae.content_index < ae.partial.content.size()) {
+                    if (const auto *tc = std::get_if<ToolCall>(
+                            &ae.partial.content[ae.content_index])) {
+                      r.on_tool_call_streaming(ae.content_index, tc->id,
+                                               tc->name, tc->partial_json);
+                    }
+                  }
+
+                } else if constexpr (std::is_same_v<
+                                         AE,
                                          AssistantMessageThinkingStartEvent>) {
                   r.on_thinking_start();
 

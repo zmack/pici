@@ -693,6 +693,7 @@ public:
     state_.has_active_turn = true;
     state_.tool_index.clear();
     state_.tool_addresses.clear();
+    state_.drafting_tool_addresses.clear();
     state_.thinking.clear();
     state_.thinking_block_index = state_.blocks.size();
     state_.in_thinking = false;
@@ -801,29 +802,104 @@ public:
     mark_dirty_locked();
   }
 
-  void on_tool_start(std::string_view call_id, std::string_view tool_name,
-                     std::string_view args_json) override {
+  // See Renderer::on_tool_call_streaming(). Gives a tool call with large
+  // arguments something on screen while the model is still emitting them,
+  // rather than nothing until the whole call finishes streaming and
+  // on_tool_start() finally fires. Creates the block early, keyed by
+  // content_index until call_id is known; on_tool_start() looks that same
+  // block up by call_id and finalizes it in place rather than appending a
+  // duplicate.
+  void on_tool_call_streaming(std::size_t content_index,
+                              std::string_view call_id,
+                              std::string_view tool_name,
+                              std::string_view partial_args_json) override {
     std::scoped_lock lock(mutex_);
-    RegionToolBlock tool;
-    tool.call_id.assign(call_id);
-    tool.tool_name.assign(tool_name);
-    tool.args_json.assign(args_json);
-    if (state_.has_active_turn) {
-      auto &turn = state_.turns[state_.active_turn_index];
-      const auto block_index = turn.blocks.size();
+    if (!state_.has_active_turn ||
+        state_.active_turn_index >= state_.turns.size())
+      return;
+    auto &turn = state_.turns[state_.active_turn_index];
+
+    const auto it = state_.drafting_tool_addresses.find(content_index);
+    if (it == state_.drafting_tool_addresses.end()) {
       if (!turn.blocks.empty()) {
         if (auto *text = std::get_if<RegionTextBlock>(&turn.blocks.back()))
           if (text->kind == RegionAssistantTextKind::provisional)
             text->kind = RegionAssistantTextKind::work;
       }
-
+      RegionToolBlock tool;
+      tool.call_id.assign(call_id);
+      tool.tool_name.assign(tool_name);
+      tool.args_json.assign(partial_args_json);
+      const auto block_index = turn.blocks.size();
       turn.blocks.emplace_back(std::move(tool));
-      state_.tool_addresses[std::string(call_id)] =
+      const auto address =
           RegionToolAddress{state_.active_turn_index, block_index};
-      state_.tool_index[std::string(call_id)] = block_index;
-    } else {
-      state_.tool_index[std::string(call_id)] = state_.blocks.size();
-      state_.blocks.emplace_back(std::move(tool));
+      state_.drafting_tool_addresses[content_index] = address;
+      if (!call_id.empty()) {
+        state_.tool_addresses[std::string(call_id)] = address;
+        state_.tool_index[std::string(call_id)] = block_index;
+      }
+    } else if (it->second.block_index < turn.blocks.size()) {
+      if (auto *tool = std::get_if<RegionToolBlock>(
+              &turn.blocks[it->second.block_index])) {
+        if (tool->call_id.empty() && !call_id.empty()) {
+          tool->call_id.assign(call_id);
+          state_.tool_addresses[std::string(call_id)] = it->second;
+          state_.tool_index[std::string(call_id)] = it->second.block_index;
+        }
+        if (tool->tool_name.empty() && !tool_name.empty())
+          tool->tool_name.assign(tool_name);
+        tool->args_json.assign(partial_args_json);
+      }
+    }
+    state_.revision = ++revision_;
+    mark_dirty_locked();
+  }
+
+  void on_tool_start(std::string_view call_id, std::string_view tool_name,
+                     std::string_view args_json) override {
+    std::scoped_lock lock(mutex_);
+    bool reused_drafting_block = false;
+    if (state_.has_active_turn) {
+      const auto it = state_.tool_addresses.find(std::string(call_id));
+      if (it != state_.tool_addresses.end() &&
+          it->second.turn_index == state_.active_turn_index) {
+        auto &turn = state_.turns[it->second.turn_index];
+        if (it->second.block_index < turn.blocks.size()) {
+          if (auto *tool = std::get_if<RegionToolBlock>(
+                  &turn.blocks[it->second.block_index])) {
+            // A drafting block already exists for this call -- see
+            // on_tool_call_streaming() -- so finalize it in place now that
+            // the whole call has parsed, rather than appending a duplicate.
+            tool->tool_name.assign(tool_name);
+            tool->args_json.assign(args_json);
+            reused_drafting_block = true;
+          }
+        }
+      }
+    }
+    if (!reused_drafting_block) {
+      RegionToolBlock tool;
+      tool.call_id.assign(call_id);
+      tool.tool_name.assign(tool_name);
+      tool.args_json.assign(args_json);
+      if (state_.has_active_turn) {
+        auto &turn = state_.turns[state_.active_turn_index];
+        const auto block_index = turn.blocks.size();
+        if (!turn.blocks.empty()) {
+          if (auto *text = std::get_if<RegionTextBlock>(&turn.blocks.back()))
+            if (text->kind == RegionAssistantTextKind::provisional)
+              text->kind = RegionAssistantTextKind::work;
+        }
+
+        turn.blocks.emplace_back(std::move(tool));
+        state_.tool_addresses[std::string(call_id)] =
+            RegionToolAddress{state_.active_turn_index, block_index};
+        state_.tool_index[std::string(call_id)] = block_index;
+      } else {
+        state_.tool_index[std::string(call_id)] = state_.blocks.size();
+        state_.blocks.emplace_back(std::move(tool));
+      }
     }
     state_.revision = ++revision_;
     mark_dirty_locked();
