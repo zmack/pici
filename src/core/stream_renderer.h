@@ -142,6 +142,16 @@ public:
   // corrupts the terminal — can hand back a clean screen afterward. No-op
   // for renderers without a persistent compositor to invalidate.
   virtual void force_full_repaint() {}
+
+  // The interactive loop is about to hand control to readline() to accept
+  // the next prompt. A renderer that owns a persistent alternate-screen
+  // compositor and reserves fixed rows for the composer (owns_status_line())
+  // must re-anchor the terminal cursor on that reserved area here — turn
+  // boundaries are not a reliable signal for this, since a single
+  // user-visible exchange can contain several on_turn_start()/on_turn_end()
+  // pairs when the agent calls tools, and readline() only runs after the
+  // last one. No-op for renderers without a persistent compositor.
+  virtual void prepare_for_prompt() {}
 };
 
 //

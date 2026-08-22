@@ -621,21 +621,24 @@ void test_composer_rows_reserved_in_region_mode() {
          "rows");
 }
 
-// on_command_output() (used for /usage, /tools, /addons between turns) must
-// re-anchor the composer's reserved rows exactly like on_resize() and
-// force_full_repaint() already do -- otherwise the composer/footer left by
-// the prompt that submitted the command is never wiped, and the next
-// readline() prompt draws one row lower instead of reusing it, compounding
-// into a drifting stack of stale composers with every subsequent command.
-void test_command_output_reanchors_composer_between_turns() {
+// prepare_for_prompt() -- called by the interactive loop immediately before
+// every readline() call -- must re-anchor the composer's reserved rows
+// regardless of what ran just before it (a real turn, a between-turn
+// command like /usage, on_resize(), ...). Without this, the composer/footer
+// left by the prompt that submitted the last input is never wiped, and the
+// next readline() prompt draws one row lower instead of reusing it,
+// compounding into a drifting stack of stale composers with every
+// subsequent command.
+void test_prepare_for_prompt_reanchors_composer() {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
-  expect(pipe_ok, "pipe creates command-output capture fd");
+  expect(pipe_ok, "pipe creates prepare-for-prompt capture fd");
   if (!pipe_ok)
     return;
   {
     auto renderer = pi::core::make_region_renderer(fds[1]);
     renderer->on_command_output("distinctive-command-output");
+    renderer->prepare_for_prompt();
   }
   ::close(fds[1]);
   std::string output;
@@ -660,8 +663,70 @@ void test_command_output_reanchors_composer_between_turns() {
          "command output is visible in the transcript");
   expect(content_pos != std::string::npos &&
              output.find(reanchor_sequence, content_pos) != std::string::npos,
-         "on_command_output() re-anchors the composer's prompt cursor after "
+         "prepare_for_prompt() re-anchors the composer's prompt cursor after "
          "painting, not just the constructor's initial placement");
+}
+
+// Reproduces the reported "footer disappears once tool calls get displayed"
+// bug. A single user-visible exchange fires on_turn_start()/on_turn_end()
+// once per model round-trip when the agent calls tools (agent_loop.cpp's
+// inner tool-calling loop), not once for the whole exchange -- readline()
+// only runs again after the *last* round, not between intermediate ones. An
+// on_turn_end() that wipes/re-anchors the composer's reserved rows itself
+// (as it used to, via position_prompt_cursor()) blanks them the moment a
+// second round starts, since nothing but readline()'s own InputRenderer
+// ever redraws the "› " prompt and footer hint there, and readline() isn't
+// called again until the whole exchange ends. Only prepare_for_prompt() may
+// do that wipe/re-anchor; on_turn_end() alone must leave the reserved rows
+// untouched so the composer's last-known-good contents keep showing through
+// every intermediate round.
+void test_intermediate_turn_end_does_not_blank_composer() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates multi-round capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    // Round 1: a tool call, then this round's turn ends.
+    renderer->on_turn_start();
+    renderer->on_tool_start("call-1", "bash", R"({"command":"echo hi"})");
+    renderer->on_tool_end("call-1", "bash", TestToolResult{"hi"}, false);
+    renderer->on_turn_end();
+    // Round 2 starts immediately, exactly like agent_loop.cpp's inner loop
+    // does when has_more_tool_calls is true -- no readline() call, and thus
+    // no prepare_for_prompt() call, happens in between.
+    renderer->on_turn_start();
+    renderer->on_tool_start("call-2", "bash", R"({"command":"echo bye"})");
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+
+  // Default (non-tty) terminal is 24 rows x 80 columns.
+  constexpr int kHeight = 24;
+  const int reserved = static_cast<int>(pi::core::kMaxComposerRows);
+  const int prompt_anchor = kHeight - reserved;
+  const auto reanchor_sequence =
+      "\033[" + std::to_string(prompt_anchor) + ";1H\033[?25h";
+
+  // The constructor performs exactly one re-anchor up front, before either
+  // round runs -- anything beyond that would mean on_turn_end() (round 1)
+  // re-anchored on its own, which is the bug this test guards against.
+  std::size_t occurrences = 0;
+  for (std::size_t pos = output.find(reanchor_sequence); pos != std::string::npos;
+       pos = output.find(reanchor_sequence, pos + 1))
+    ++occurrences;
+  expect(occurrences == 1,
+         "on_turn_end() must not wipe/re-anchor the composer when another "
+         "round is already starting -- only prepare_for_prompt() may");
 }
 
 // force_full_repaint() exists so a transient full-screen command UI (/tree,
@@ -1239,7 +1304,8 @@ int main() {
   test_tool_callbacks_route_into_regions();
   test_region_factory_lifecycle();
   test_composer_rows_reserved_in_region_mode();
-  test_command_output_reanchors_composer_between_turns();
+  test_prepare_for_prompt_reanchors_composer();
+  test_intermediate_turn_end_does_not_blank_composer();
   test_force_full_repaint_reissues_every_row();
   test_mailbox_reply_receipt_is_persistent_and_safe();
   test_mailbox_reply_alongside_parallel_unrelated_tools();

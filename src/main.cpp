@@ -188,37 +188,33 @@ std::string workspace_identity(const std::filesystem::path &workspace_path) {
   return result.str();
 }
 
-void print_tools(
+std::string format_tools(
     const std::vector<std::shared_ptr<const core::ToolDefinition>> &tools) {
   if (tools.empty()) {
-    std::cout << "(no tools loaded)\n";
-    return;
+    return "(no tools loaded)\n";
   }
-  std::size_t wsrc = 7;
-  std::size_t wname = 4;
+  std::ostringstream ss;
   for (const auto &t : tools) {
-    wsrc = std::max(wsrc, t->source_path().size());
-    wname = std::max(wname, t->name().size());
+    ss << t->name() << "\n";
+    if (!t->source_path().empty()) {
+      ss << "  source: " << t->source_path() << "\n";
+    }
+    if (!t->description().empty()) {
+      ss << "  " << t->description() << "\n";
+    }
+    ss << "\n";
   }
-  std::cout << std::left << std::setw(static_cast<int>(wsrc + 2)) << "source"
-            << std::setw(static_cast<int>(wname + 2)) << "name"
-            << "description\n";
-  for (const auto &t : tools) {
-    std::cout << std::left << std::setw(static_cast<int>(wsrc + 2))
-              << t->source_path() << std::setw(static_cast<int>(wname + 2))
-              << t->name() << t->description() << "\n";
-  }
+  return ss.str();
 }
 
-void print_addons(
-    const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
+std::string
+format_addons(const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
   if (hooks_list.empty()) {
-    std::cout << "(no add-ons loaded)\n";
-    return;
+    return "(no add-ons loaded)\n";
   }
+  std::ostringstream ss;
   for (const auto &h : hooks_list) {
-    std::cout << (h->source_path.empty() ? "<composed>" : h->source_path)
-              << "\n";
+    ss << (h->source_path.empty() ? "<composed>" : h->source_path) << "\n";
     std::vector<std::string> active;
     if (h->before_tool_call)
       active.emplace_back("before_tool_call");
@@ -241,22 +237,23 @@ void print_addons(
     if (h->format_tool_result)
       active.emplace_back("format_tool_result");
     if (!active.empty()) {
-      std::cout << "  hooks:";
+      ss << "  hooks:";
       for (const auto &a : active)
-        std::cout << "  " << a;
-      std::cout << "\n";
+        ss << "  " << a;
+      ss << "\n";
     }
     if (!h->commands.empty()) {
       for (const auto &cmd : h->commands) {
-        std::cout << "  /" << cmd.name;
+        ss << "  /" << cmd.name;
         if (!cmd.args_hint.empty())
-          std::cout << " " << cmd.args_hint;
+          ss << " " << cmd.args_hint;
         if (!cmd.description.empty())
-          std::cout << "  — " << cmd.description;
-        std::cout << "\n";
+          ss << "  — " << cmd.description;
+        ss << "\n";
       }
     }
   }
+  return ss.str();
 }
 
 // Returns "$0.0023" for 0.002341928, "$1.23" for 1.234, "$12.34" for 12.345
@@ -860,27 +857,27 @@ struct CostAccumulator {
   }
 };
 
-void print_usage(const CostAccumulator &last, const CostAccumulator &session,
-                 bool has_pricing) {
+std::string format_usage(const CostAccumulator &last,
+                         const CostAccumulator &session, bool has_pricing) {
+  std::ostringstream ss;
   auto row = [&](std::string_view label, const CostAccumulator &acc) {
-    std::cout << std::left << std::setw(10) << label << "  in=" << std::setw(8)
-              << format_tokens(acc.input_tokens) << "  out=" << std::setw(8)
-              << format_tokens(acc.output_tokens)
-              << "  cache_r=" << std::setw(8)
-              << format_tokens(acc.cache_read_tokens)
-              << "  cache_w=" << std::setw(8)
-              << format_tokens(acc.cache_write_tokens);
+    ss << std::left << std::setw(10) << label << "  in=" << std::setw(8)
+       << format_tokens(acc.input_tokens) << "  out=" << std::setw(8)
+       << format_tokens(acc.output_tokens) << "  cache_r=" << std::setw(8)
+       << format_tokens(acc.cache_read_tokens) << "  cache_w=" << std::setw(8)
+       << format_tokens(acc.cache_write_tokens);
     if (has_pricing)
-      std::cout << "  " << format_cost(acc.total_cost);
-    std::cout << "\n";
+      ss << "  " << format_cost(acc.total_cost);
+    ss << "\n";
   };
-  std::cout << "\n";
+  ss << "\n";
   row("last turn:", last);
   row("session:", session);
-  std::cout << "  turns: " << session.turns;
+  ss << "  turns: " << session.turns;
   if (!has_pricing)
-    std::cout << "  (cost unknown)";
-  std::cout << "\n";
+    ss << "  (cost unknown)";
+  ss << "\n";
+  return ss.str();
 }
 
 std::vector<cli::ContextFile> load_context_files() {
@@ -1293,11 +1290,11 @@ int cmd_run(const cli::Args &args,
 
   // --list-tools / --list-addons (exit immediately after printing)
   if (args.list_tools) {
-    print_tools(agent.state().tools());
+    std::cout << format_tools(agent.state().tools());
     return 0;
   }
   if (args.list_addons) {
-    print_addons(hooks_list_saved);
+    std::cout << format_addons(hooks_list_saved);
     return 0;
   }
 
@@ -2064,6 +2061,7 @@ int cmd_run(const cli::Args &args,
     // fixed alt-screen layout that needs repainting on a terminal resize.
     const bool full_screen_prompt = renderer->owns_status_line();
     const auto on_prompt_resize = [&] { renderer->on_resize(); };
+    renderer->prepare_for_prompt();
     auto readline_result =
         cli::readline(prompt, complete_fn, control_fn, readline_status,
                       readline_draft, readline_cursor, readline_wake_fd,
@@ -2088,11 +2086,11 @@ int cmd_run(const cli::Args &args,
     if (line == "/exit" || line == "/quit")
       break;
     if (line == "/tools") {
-      print_tools(agent.state().tools());
+      renderer->on_command_output(format_tools(agent.state().tools()));
       continue;
     }
     if (line == "/addons") {
-      print_addons(hooks_list_saved);
+      renderer->on_command_output(format_addons(hooks_list_saved));
       continue;
     }
     if (line == "/reload-addons") {
@@ -2216,7 +2214,8 @@ int cmd_run(const cli::Args &args,
       continue;
     }
     if (line == "/usage") {
-      print_usage(last_turn, session, has_current_pricing());
+      renderer->on_command_output(
+          format_usage(last_turn, session, has_current_pricing()));
       continue;
     }
     if (line.starts_with("/name ") || line == "/name") {
@@ -2248,8 +2247,8 @@ int cmd_run(const cli::Args &args,
         }
       }
 
-      auto result = cli::run_tree_selector(tree_lines, current_session_id,
-                                           cursor, renderer->owns_status_line());
+      auto result = cli::run_tree_selector(
+          tree_lines, current_session_id, cursor, renderer->owns_status_line());
       renderer->force_full_repaint();
       if (result.cancelled || result.selected_session_id == current_session_id)
         continue;

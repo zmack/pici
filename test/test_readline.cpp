@@ -2409,11 +2409,20 @@ void test_region_turn_boundary_survives_untracked_cursor_drift() {
           std::cout.flush();
 
           renderer->set_status_line(std::nullopt);
+          // Mirrors main.cpp's interactive loop, which calls this
+          // immediately before every readline() call now -- see
+          // prepare_for_prompt()'s own comment: on_turn_end() alone no
+          // longer wipes/re-anchors the composer, since a single
+          // user-visible exchange can span several on_turn_start()/
+          // on_turn_end() pairs when the agent calls tools, and only the
+          // *last* one is followed by readline().
+          renderer->prepare_for_prompt();
           (void)readline(prompt, {}, {}, {}, "", 0, -1, true);
           renderer->on_turn_start();
           renderer->on_text_delta("Sure, here is a short reply.");
           renderer->on_turn_end();
           renderer->set_status_line(std::nullopt);
+          renderer->prepare_for_prompt();
           (void)readline(prompt, {}, {}, {}, "", 0, -1, true);
           // Deliberately hang here (no _exit) -- the parent kills this
           // child once it has captured the second interactive prompt's

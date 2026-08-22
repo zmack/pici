@@ -1001,21 +1001,8 @@ public:
       mark_dirty_locked();
       paint_now = !turn_active_;
     }
-    if (paint_now) {
+    if (paint_now)
       paint_idle_synchronously();
-      // Like on_resize() / force_full_repaint(), this can run between turns
-      // (e.g. /usage, /tools, /addons), and paint_idle_synchronously() only
-      // repaints the content/status rows via save/restore cursor -- it never
-      // touches the composer's reserved rows. Without re-anchoring here, the
-      // still-visible composer left by the prompt that submitted this
-      // command is never wiped, and the next readline() call's first_draw_
-      // prints its own leading newline relative to that untouched cursor
-      // position, landing its composer one row below the stale one instead
-      // of reusing it -- the same doubled-composer drift
-      // position_prompt_cursor()'s own comment describes, just reached via a
-      // different caller.
-      position_prompt_cursor();
-    }
   }
 
   void on_error(RendererErrorKind, std::string_view message) override {
@@ -1131,8 +1118,33 @@ public:
       last_frame_lines_.clear();
       // Keep terminal teardown available after malformed markdown.
     }
-    position_prompt_cursor();
+    // Deliberately does NOT call position_prompt_cursor() here -- see
+    // prepare_for_prompt()'s comment for why a turn boundary is the wrong
+    // signal for wiping and re-anchoring the composer's reserved rows.
   }
+
+  // See Renderer::prepare_for_prompt(). Root-caused empirically via a real
+  // forkpty + tmux session driving a multi-round tool-calling exchange: the
+  // agent loop fires a fresh on_turn_start()/on_turn_end() pair for every
+  // model round-trip, including ones that only execute a tool call and
+  // immediately continue (agent_loop.cpp's inner `while (has_more_tool_calls
+  // || !pending_messages.empty())` loop) -- readline() is not called again
+  // between those intermediate rounds, only after the exchange's last
+  // round. on_turn_end() used to call position_prompt_cursor() itself,
+  // which wipes the composer's reserved rows and shows the cursor there;
+  // that's only safe when readline()'s InputRenderer is about to redraw the
+  // "› " prompt and footer hint into that same area right after -- nothing
+  // else ever does. For an intermediate round it wiped the rows and then
+  // nothing repainted them until the whole exchange finally ended: the
+  // composer and footer hint visibly vanished the moment a second tool call
+  // started, and stayed gone through every subsequent tool call and the
+  // final answer, only reappearing once control actually returned to
+  // readline(). Moving the wipe/re-anchor to this method -- called by the
+  // interactive loop exactly once, immediately before every readline() call,
+  // regardless of how many turns preceded it -- keeps the composer showing
+  // its last-known-good contents for the whole exchange and only refreshes
+  // it right when readline() is actually about to run.
+  void prepare_for_prompt() override { position_prompt_cursor(); }
 
   bool owns_tool_output() const override { return true; }
 
