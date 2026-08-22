@@ -420,80 +420,11 @@ std::string_view input_area_background() {
   return background;
 }
 
-// RAII guard: put terminal into raw mode while alive.
-// ISIG is kept enabled so Ctrl+C still delivers SIGINT.
-struct RawMode {
-  int fd{-1};
-  struct termios saved {};
-  bool active{false};
-  bool kitty_pushed{false};
+// Out-of-line: TerminalRawMode is declared in readline.h (pi::cli, external
+// linkage) since main.cpp needs to own one across its whole interactive
+// session; everything it calls here (kitty_keyboard_enabled,
+// input_area_background) stays in this file's anonymous namespace.
 
-  RawMode() = default;
-  RawMode(const RawMode &) = delete;
-  RawMode &operator=(const RawMode &) = delete;
-  RawMode(RawMode &&) = delete;
-  RawMode &operator=(RawMode &&) = delete;
-  ~RawMode() { leave(); }
-
-  bool enter(int fdesc) {
-    if (isatty(fdesc) == 0)
-      return false;
-    if (tcgetattr(fdesc, &saved) != 0)
-      return false;
-    struct termios raw = saved;
-    raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON);
-    // Clear ICRNL so \r (Enter) and \n (Ctrl+J) arrive as distinct bytes.
-    // With it set, the line discipline translates \r to \n before pici ever
-    // sees it, making Enter indistinguishable from Ctrl+J — and making
-    // Alt+Enter's second byte (a literal \r) collapse into the same byte as
-    // Alt+Ctrl+J, so a newline-insert binding can't tell the two apart.
-    raw.c_iflag &= ~static_cast<tcflag_t>(ICRNL);
-    raw.c_cc[VMIN] = 1;
-    raw.c_cc[VTIME] = 0;
-    if (tcsetattr(fdesc, TCSAFLUSH, &raw) != 0)
-      return false;
-    fd = fdesc;
-    active = true;
-    // Bracketed paste: the terminal wraps pasted content in ESC[200~ /
-    // ESC[201~ markers so it can be read as one block instead of being
-    // indistinguishable from typed keystrokes.
-    std::cout << "\033[?2004h" << std::flush;
-    // Kitty keyboard protocol: push just the "disambiguate escape codes"
-    // flag (value 1) so Enter and Shift+Enter arrive as distinguishable
-    // "CSI u" key reports instead of the same '\r' byte -- see
-    // kitty_keyboard_enabled() above for the once-per-process probe this is
-    // gated on, and classify_csi_u_enter() below for the decode side.
-    // Popped in leave() below, which runs on every exit path (a normal
-    // return and ~RawMode() alike) -- matched to exactly the same
-    // signal-safety level as the rest of this struct's state: ISIG is left
-    // enabled (see the comment on this struct), so an abnormal Ctrl+C exit
-    // leaves the termios/bracketed-paste/kitty-flag state exactly as
-    // unrestored as each other, no better and no worse.
-    if (kitty_keyboard_enabled()) {
-      std::cout << "\033[>1u" << std::flush;
-      kitty_pushed = true;
-    }
-    // Background tint: query the terminal's actual background via OSC 11
-    // (once per process -- see input_area_background() above) so redraw()
-    // can blend a tint against it instead of always using the fixed
-    // fallback. Same precondition as the Kitty probe above: must run once
-    // raw mode is confirmed active, so the reply can be read back cleanly.
-    (void)input_area_background();
-    return true;
-  }
-
-  void leave() {
-    if (active) {
-      if (kitty_pushed) {
-        std::cout << "\033[<u" << std::flush;
-        kitty_pushed = false;
-      }
-      std::cout << "\033[?2004l" << std::flush;
-      tcsetattr(fd, TCSAFLUSH, &saved);
-      active = false;
-    }
-  }
-};
 
 std::size_t terminal_columns() {
   // NOLINTNEXTLINE(misc-include-cleaner): ioctl declarations vary by platform.
@@ -1402,13 +1333,75 @@ bool handle_escape_sequence(std::string_view seq, const ControlFn &control_fn,
 
 } // namespace
 
+TerminalRawMode::~TerminalRawMode() { leave(); }
+
+bool TerminalRawMode::enter(int fdesc) {
+  if (isatty(fdesc) == 0)
+    return false;
+  if (tcgetattr(fdesc, &saved_) != 0)
+    return false;
+  struct termios raw = saved_;
+  raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON);
+  // Clear ICRNL so \r (Enter) and \n (Ctrl+J) arrive as distinct bytes.
+  // With it set, the line discipline translates \r to \n before pici ever
+  // sees it, making Enter indistinguishable from Ctrl+J — and making
+  // Alt+Enter's second byte (a literal \r) collapse into the same byte as
+  // Alt+Ctrl+J, so a newline-insert binding can't tell the two apart.
+  raw.c_iflag &= ~static_cast<tcflag_t>(ICRNL);
+  raw.c_cc[VMIN] = 1;
+  raw.c_cc[VTIME] = 0;
+  if (tcsetattr(fdesc, TCSAFLUSH, &raw) != 0)
+    return false;
+  fd_ = fdesc;
+  active_ = true;
+  // Bracketed paste: the terminal wraps pasted content in ESC[200~ /
+  // ESC[201~ markers so it can be read as one block instead of being
+  // indistinguishable from typed keystrokes.
+  std::cout << "\033[?2004h" << std::flush;
+  // Kitty keyboard protocol: push just the "disambiguate escape codes"
+  // flag (value 1) so Enter and Shift+Enter arrive as distinguishable
+  // "CSI u" key reports instead of the same '\r' byte -- see
+  // kitty_keyboard_enabled() above for the once-per-process probe this is
+  // gated on, and classify_csi_u_enter() below for the decode side.
+  // Popped in leave() below, which runs on every exit path (a normal
+  // return and ~TerminalRawMode() alike) -- matched to exactly the same
+  // signal-safety level as the rest of this class's state: ISIG is left
+  // enabled (see this class's comment in readline.h), so an abnormal
+  // Ctrl+C exit leaves the termios/bracketed-paste/kitty-flag state
+  // exactly as unrestored as each other, no better and no worse.
+  if (kitty_keyboard_enabled()) {
+    std::cout << "\033[>1u" << std::flush;
+    kitty_pushed_ = true;
+  }
+  // Background tint: query the terminal's actual background via OSC 11
+  // (once per process -- see input_area_background() above) so redraw()
+  // can blend a tint against it instead of always using the fixed
+  // fallback. Same precondition as the Kitty probe above: must run once
+  // raw mode is confirmed active, so the reply can be read back cleanly.
+  (void)input_area_background();
+  return true;
+}
+
+void TerminalRawMode::leave() {
+  if (active_) {
+    if (kitty_pushed_) {
+      std::cout << "\033[<u" << std::flush;
+      kitty_pushed_ = false;
+    }
+    std::cout << "\033[?2004l" << std::flush;
+    tcsetattr(fd_, TCSAFLUSH, &saved_);
+    active_ = false;
+  }
+}
+
 ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
                         const ControlFn &control_fn,
                         std::string_view status_line,
                         std::string_view initial_draft,
                         std::size_t initial_cursor, int wake_fd,
                         bool clear_on_submit,
-                        const std::function<void()> &on_resize, bool vim_mode) {
+                        const std::function<void()> &on_resize, bool vim_mode,
+                        TerminalRawMode *external_raw_mode) {
   // Non-TTY fallback: just use getline (pipes, scripts, tests)
   if (isatty(STDIN_FILENO) == 0) {
     std::cout << prompt << std::flush;
@@ -1421,8 +1414,17 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
             .cursor = cursor};
   }
 
-  RawMode raw;
-  if (!raw.enter(STDIN_FILENO)) {
+  // external_raw_mode's caller owns entering/leaving it across a whole
+  // interactive session (see TerminalRawMode's comment in readline.h); this
+  // call must not tear it down on the way out. Otherwise, scope a local
+  // instance to exactly this call, as before.
+  std::optional<TerminalRawMode> local_raw;
+  TerminalRawMode *raw = external_raw_mode;
+  if (!raw) {
+    local_raw.emplace();
+    raw = &*local_raw;
+  }
+  if (!raw->active() && !raw->enter(STDIN_FILENO)) {
     // Couldn't enter raw mode — fall back
     std::cout << prompt << std::flush;
     std::string line;
@@ -1472,11 +1474,13 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
       // state instead of committing a trailing newline. The submitted text
       // itself is still returned below — only the on-screen box is emptied.
       renderer.redraw(std::string{}, 0, false);
-      raw.leave();
+      if (!external_raw_mode)
+        raw->leave();
       std::cout << std::flush;
     } else {
       renderer.redraw(buf, cursor, false);
-      raw.leave();
+      if (!external_raw_mode)
+        raw->leave();
       std::cout << "\r\n" << std::flush;
     }
     return ReadlineResult{

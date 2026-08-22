@@ -6,7 +6,42 @@
 #include <string_view>
 #include <vector>
 
+#include <termios.h>
+
 namespace pi::cli {
+
+// RAII guard: puts fd into raw mode (no ECHO/ICANON; ISIG stays enabled so
+// Ctrl+C still delivers SIGINT) for as long as it's active.
+//
+// readline() manages its own instance by default, entered/left around each
+// call. A caller that owns a persistent full-screen compositor (e.g.
+// RegionRenderer's alt-screen) should instead construct one of these before
+// its interactive loop starts and pass it via readline()'s
+// external_raw_mode parameter -- otherwise the terminal reverts to
+// cooked/echo mode for the whole span of a turn (no readline() call in
+// flight), and stray keystrokes get echoed by the tty driver straight into
+// the compositor's fixed layout instead of being captured, then silently
+// dropped when the next readline() call re-enters raw mode (TCSAFLUSH
+// discards unread input on a termios switch).
+class TerminalRawMode {
+public:
+  TerminalRawMode() = default;
+  ~TerminalRawMode();
+  TerminalRawMode(const TerminalRawMode &) = delete;
+  TerminalRawMode &operator=(const TerminalRawMode &) = delete;
+  TerminalRawMode(TerminalRawMode &&) = delete;
+  TerminalRawMode &operator=(TerminalRawMode &&) = delete;
+
+  bool enter(int fd);
+  void leave();
+  bool active() const { return active_; }
+
+private:
+  int fd_{-1};
+  struct termios saved_ {};
+  bool active_{false};
+  bool kitty_pushed_{false};
+};
 
 // Called with the current buffer when Tab is pressed.
 // Returns candidate completion strings.
@@ -86,13 +121,20 @@ private:
 // composer-textarea-rewrite.md's M5 section. Config-driven
 // ([input] vim_mode in config.toml), off by default; every other call site
 // keeps working unchanged since this defaults to false.
+//
+// external_raw_mode: nullptr (default) means this call enters and leaves its
+// own raw mode, exactly scoped to this one call, as above. Pass an already-
+// entered TerminalRawMode owned by the caller instead to skip that per-call
+// enter/leave -- see TerminalRawMode's comment for why a full-screen caller
+// wants to do this.
 ReadlineResult
 readline(std::string_view prompt, const CompleteFn &complete_fn = {},
          const ControlFn &control_fn = {}, std::string_view status_line = {},
          std::string_view initial_draft = {},
          std::size_t initial_cursor = std::string_view::npos, int wake_fd = -1,
          bool clear_on_submit = false,
-         const std::function<void()> &on_resize = {}, bool vim_mode = false);
+         const std::function<void()> &on_resize = {}, bool vim_mode = false,
+         TerminalRawMode *external_raw_mode = nullptr);
 
 // --- Shared editing primitives -------------------------------------------
 //
