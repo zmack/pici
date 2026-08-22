@@ -616,6 +616,51 @@ control are intentionally out of scope for v1. The coordinator's pending-work
 API is the host boundary for future ACP and GUI adapters; the current
 self-pipe/readline integration is CLI-specific and is not a remote transport.
 
+## Skills
+
+Skills are on-demand instruction packages the model can load when a task
+matches. A skill is a directory containing a `SKILL.md` file with a small
+YAML-frontmatter header and a Markdown body:
+
+```markdown
+---
+name: release-checklist
+description: Steps to cut a release: version bump, changelog, tag, smoke test.
+---
+
+# Release checklist
+
+1. Run `make release`.
+2. Tag the commit.
+```
+
+At startup pici scans (in ascending precedence — later wins on name
+collision):
+
+1. `.claude/skills/` and `.codex/skills/` in workspace ancestors (compat
+   reads; lowest precedence)
+2. `skills/` under the config directory (`~/.config/pici/skills/` by default)
+3. `.pici/skills/`, `skills/`, and `.agents/skills/` in workspace ancestors,
+   outermost to innermost
+
+Only a compact index (name + one-line description) is injected into the
+system prompt, so always-on token cost is proportional to the number of
+skills, not their content. When a task matches an entry, the model calls the
+read-only `skill` tool with the exact name; the full body is loaded into the
+current turn, and sibling files (scripts, templates) can be read relative to
+the skill's directory with the normal read tool.
+
+Frontmatter rules: `description` is required (1–1024 chars — it is the
+retrieval signal, so write "what it does + when to use it"); `name` is
+optional (defaults to the directory name; 1–64 chars, lowercase letters,
+digits, `-`, `_`). Bodies are capped at 128 KiB; malformed skills produce
+startup diagnostics and are skipped, never fatal. Skill bodies are untrusted
+workspace content with the same trust level as AGENTS.md — the sandbox and
+permission layers gate what loaded instructions can actually do.
+
+Use `/skills` to list the discovered catalog with diagnostics, or
+`--no-skills` / `[skills] disabled = true` to turn the feature off.
+
 ## Key Design Decisions
 
 1. **nlohmann/json** — all JSON parsing/serialization via nlohmann/json; JSON Schema validation via pboettch/json-schema-validator

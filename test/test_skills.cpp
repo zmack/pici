@@ -24,19 +24,18 @@ bool CHECK_impl(bool cond, bool expected, std::string_view expr,
   if (cond != expected) {
     current_failed++;
     std::cerr << "  FAIL " << loc.file_name() << ":" << loc.line() << " - "
-              << expr << " (expected " << expected << ", got " << cond
-              << ")\n";
+              << expr << " (expected " << expected << ", got " << cond << ")\n";
     return false;
   }
   return true;
 }
 
 #define CHECK(cond)                                                            \
-  (::tests::CHECK_impl(static_cast<bool>(cond), true, #cond,                  \
+  (::tests::CHECK_impl(static_cast<bool>(cond), true, #cond,                   \
                        std::source_location::current()))
 
 #define CHECK_EQ(a, b)                                                         \
-  (::tests::CHECK_impl((a) == (b), true, #a " == " #b,                        \
+  (::tests::CHECK_impl((a) == (b), true, #a " == " #b,                         \
                        std::source_location::current()))
 
 void register_test(std::string name, std::function<void()> fn) {
@@ -107,8 +106,8 @@ Fixture make_workspace(TempDir &tmp) {
   return f;
 }
 
-const SkillMetadata *
-find_skill(const SkillCatalog &catalog, const std::string &name) {
+const SkillMetadata *find_skill(const SkillCatalog &catalog,
+                                const std::string &name) {
   for (const auto &s : catalog.skills)
     if (s.name == name)
       return &s;
@@ -125,7 +124,8 @@ static void test_frontmatter() {
   using namespace tests;
 
   tests::register_test("frontmatter: valid minimal", []() {
-    auto fm = parse_skill_frontmatter("---\nname: foo\ndescription: bar\n---\n\nbody");
+    auto fm = parse_skill_frontmatter(
+        "---\nname: foo\ndescription: bar\n---\n\nbody");
     CHECK(fm.has_value());
     CHECK_EQ(fm->name, "foo");
     CHECK_EQ(fm->description, "bar");
@@ -155,8 +155,8 @@ static void test_frontmatter() {
   });
 
   tests::register_test("frontmatter: CRLF tolerated", []() {
-    auto fm =
-        parse_skill_frontmatter("---\r\nname: crlf\r\ndescription: ok\r\n---\r\nbody\r\n");
+    auto fm = parse_skill_frontmatter(
+        "---\r\nname: crlf\r\ndescription: ok\r\n---\r\nbody\r\n");
     CHECK(fm.has_value());
     CHECK_EQ(fm->name, "crlf");
     CHECK_EQ(fm->description, "ok");
@@ -176,8 +176,8 @@ static void test_frontmatter() {
 
   tests::register_test("frontmatter: over-long description rejected", []() {
     std::string long_desc(kSkillMaxDescriptionLength + 1, 'x');
-    auto fm = parse_skill_frontmatter("---\nname: big\ndescription: " +
-                                      long_desc + "\n---\n");
+    auto fm = parse_skill_frontmatter(
+        "---\nname: big\ndescription: " + long_desc + "\n---\n");
     CHECK(!fm.has_value());
 
     auto ok = parse_skill_frontmatter(
@@ -187,11 +187,9 @@ static void test_frontmatter() {
   });
 
   tests::register_test("frontmatter: invalid names rejected", []() {
-    CHECK(!parse_skill_frontmatter(
-               "---\nname: Bad Name\ndescription: d\n---\n")
+    CHECK(!parse_skill_frontmatter("---\nname: Bad Name\ndescription: d\n---\n")
                .has_value()); // uppercase + space
-    CHECK(parse_skill_frontmatter(
-              "---\nname: a-b_c9\ndescription: d\n---\n")
+    CHECK(parse_skill_frontmatter("---\nname: a-b_c9\ndescription: d\n---\n")
               .has_value());
   });
 
@@ -210,16 +208,18 @@ static void test_frontmatter() {
   });
 
   tests::register_test("frontmatter: unknown keys ignored", []() {
-    auto fm = parse_skill_frontmatter(
-        "---\nname: u\ndescription: d\nallowed-tools: [read]\nmetadata:\n  x: 1\n---\n");
+    auto fm =
+        parse_skill_frontmatter("---\nname: u\ndescription: d\nallowed-tools: "
+                                "[read]\nmetadata:\n  x: 1\n---\n");
     CHECK(fm.has_value());
     CHECK_EQ(fm->description, "d");
   });
 
   tests::register_test("frontmatter: short-description capped", []() {
     std::string too_long(kSkillMaxShortDescriptionLength + 1, 'y');
-    auto fm = parse_skill_frontmatter("---\nname: s\ndescription: d\nshort-description: " +
-                                      too_long + "\n---\n");
+    auto fm = parse_skill_frontmatter(
+        "---\nname: s\ndescription: d\nshort-description: " + too_long +
+        "\n---\n");
     CHECK(!fm.has_value());
   });
 }
@@ -229,6 +229,36 @@ static void test_frontmatter() {
 // ---------------------------------------------------------------------------
 
 static void test_discovery() {
+  using namespace tests;
+
+  tests::register_test("discovery: repo fixtures parse as expected", []() {
+  // The committed fixtures double as living documentation: one canonical
+  // skill, one compat-format skill (no name -> directory default).
+#ifdef PI_CPP_SOURCE_DIR
+    const auto fixtures = std::filesystem::path(PI_CPP_SOURCE_DIR) / "test" /
+                          "fixtures" / "skills";
+    TempDir tmp;
+    const auto ws = tmp.path() / "ws";
+    std::filesystem::create_directories(ws / "skills");
+    std::filesystem::create_directories(ws / ".claude" / "skills");
+    std::filesystem::copy(fixtures / "release-checklist",
+                          ws / "skills" / "release-checklist",
+                          std::filesystem::copy_options::recursive);
+    std::filesystem::copy(fixtures / "pdf-extraction",
+                          ws / ".claude" / "skills" / "pdf-extraction",
+                          std::filesystem::copy_options::recursive);
+
+    auto catalog = discover_skills(ws, tmp.path() / "agent");
+    CHECK_EQ(catalog.skills.size(), 2u);
+    CHECK(catalog.diagnostics.empty());
+    const auto *rc = find_skill(catalog, "release-checklist");
+    CHECK(rc != nullptr);
+    CHECK(rc && rc->scope == "project");
+    const auto *pdf = find_skill(catalog, "pdf-extraction");
+    CHECK(pdf != nullptr); // dir-name default from frontmatter-less file
+    CHECK(pdf && pdf->scope == "compat");
+#endif
+  });
   using namespace tests;
 
   tests::register_test("discovery: project skill found", []() {
@@ -276,22 +306,22 @@ static void test_discovery() {
     CHECK_EQ(catalog.skills[0].description, "inner");
   });
 
-  tests::register_test("discovery: compat roots scanned, lowest precedence",
-                       []() {
-    TempDir tmp;
-    auto f = make_workspace(tmp);
-    write_file(f.root / ".claude" / "skills" / "claude-one" / "SKILL.md",
-               "---\ndescription: claude format (no name)\n---\n");
-    write_file(f.root / ".codex" / "skills" / "codex-one" / "SKILL.md",
-               "---\nname: codex-one\ndescription: codex format\n---\n");
+  tests::register_test(
+      "discovery: compat roots scanned, lowest precedence", []() {
+        TempDir tmp;
+        auto f = make_workspace(tmp);
+        write_file(f.root / ".claude" / "skills" / "claude-one" / "SKILL.md",
+                   "---\ndescription: claude format (no name)\n---\n");
+        write_file(f.root / ".codex" / "skills" / "codex-one" / "SKILL.md",
+                   "---\nname: codex-one\ndescription: codex format\n---\n");
 
-    auto catalog = discover_skills(f.root, f.agent_dir);
-    CHECK_EQ(catalog.skills.size(), 2u);
-    const auto *c = find_skill(catalog, "claude-one"); // dir-name default
-    CHECK(c != nullptr);
-    CHECK(c && c->scope == "compat");
-    CHECK(find_skill(catalog, "codex-one") != nullptr);
-  });
+        auto catalog = discover_skills(f.root, f.agent_dir);
+        CHECK_EQ(catalog.skills.size(), 2u);
+        const auto *c = find_skill(catalog, "claude-one"); // dir-name default
+        CHECK(c != nullptr);
+        CHECK(c && c->scope == "compat");
+        CHECK(find_skill(catalog, "codex-one") != nullptr);
+      });
 
   tests::register_test("discovery: user beats compat on collision", []() {
     TempDir tmp;
@@ -305,21 +335,21 @@ static void test_discovery() {
     CHECK_EQ(catalog.skills[0].description, "user wins");
   });
 
-  tests::register_test("discovery: invalid skills skipped with diagnostic",
-                       []() {
-    TempDir tmp;
-    auto f = make_workspace(tmp);
-    write_file(f.root / "skills" / "bad" / "SKILL.md",
-               "# no frontmatter at all\n");
-    write_file(f.root / "skills" / "good" / "SKILL.md",
-               "---\nname: good\ndescription: fine\n---\n");
+  tests::register_test(
+      "discovery: invalid skills skipped with diagnostic", []() {
+        TempDir tmp;
+        auto f = make_workspace(tmp);
+        write_file(f.root / "skills" / "bad" / "SKILL.md",
+                   "# no frontmatter at all\n");
+        write_file(f.root / "skills" / "good" / "SKILL.md",
+                   "---\nname: good\ndescription: fine\n---\n");
 
-    auto catalog = discover_skills(f.root, f.agent_dir);
-    CHECK_EQ(catalog.skills.size(), 1u);
-    CHECK_EQ(catalog.skills[0].name, "good");
-    CHECK_EQ(catalog.diagnostics.size(), 1u);
-    CHECK(catalog.diagnostics[0].find("bad") != std::string::npos);
-  });
+        auto catalog = discover_skills(f.root, f.agent_dir);
+        CHECK_EQ(catalog.skills.size(), 1u);
+        CHECK_EQ(catalog.skills[0].name, "good");
+        CHECK_EQ(catalog.diagnostics.size(), 1u);
+        CHECK(catalog.diagnostics[0].find("bad") != std::string::npos);
+      });
 
   tests::register_test("discovery: empty roots produce nothing", []() {
     TempDir tmp;
@@ -364,26 +394,25 @@ static void test_discovery() {
 static void test_load_body() {
   using namespace tests;
 
-  tests::register_test("load: body returned verbatim without frontmatter",
-                       []() {
-    TempDir tmp;
-    const auto dir = tmp.path() / "sk";
-    write_file(dir / "SKILL.md",
-               "---\nname: lb\ndescription: d\n---\nStep 1\nStep 2\n");
-    SkillMetadata meta;
-    meta.name = "lb";
-    meta.path = (dir / "SKILL.md").string();
-    auto body = load_skill_body(meta);
-    CHECK(body.has_value());
-    CHECK(body && *body == "Step 1\nStep 2\n");
-  });
+  tests::register_test(
+      "load: body returned verbatim without frontmatter", []() {
+        TempDir tmp;
+        const auto dir = tmp.path() / "sk";
+        write_file(dir / "SKILL.md",
+                   "---\nname: lb\ndescription: d\n---\nStep 1\nStep 2\n");
+        SkillMetadata meta;
+        meta.name = "lb";
+        meta.path = (dir / "SKILL.md").string();
+        auto body = load_skill_body(meta);
+        CHECK(body.has_value());
+        CHECK(body && *body == "Step 1\nStep 2\n");
+      });
 
   tests::register_test("load: size cap enforced as error", []() {
     TempDir tmp;
     const auto dir = tmp.path() / "big";
-    write_file(dir / "SKILL.md",
-               "---\nname: big\ndescription: d\n---\n" +
-                   std::string(kSkillMaxBodyBytes + 1, 'x'));
+    write_file(dir / "SKILL.md", "---\nname: big\ndescription: d\n---\n" +
+                                     std::string(kSkillMaxBodyBytes + 1, 'x'));
     SkillMetadata meta;
     meta.name = "big";
     meta.path = (dir / "SKILL.md").string();

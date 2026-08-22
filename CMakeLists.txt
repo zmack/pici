@@ -599,6 +599,9 @@ if(PI_CPP_BUILD_TESTS)
     target_compile_definitions(test-agent_tasks PRIVATE
         PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
+    target_compile_definitions(test-skills PRIVATE
+        PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
 
     add_executable(test-markdown-display test/test_markdown_display.cpp)
     target_link_libraries(test-markdown-display PRIVATE pi-core)
