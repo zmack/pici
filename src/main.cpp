@@ -822,27 +822,27 @@ run_turn_impl(core::AgentSession &session, core::Renderer &renderer,
   return vr.last_usage();
 }
 
-core::TokenUsage run_turn(core::AgentSession &session, const std::string &input,
-                          core::Renderer &renderer, bool verbose,
-                          std::shared_ptr<core::StreamDiagnostics> diagnostics,
-                          std::shared_ptr<HookRuntime> hook_runtime = nullptr,
-                          std::function<core::LuaUiContext()> context_builder =
-                              nullptr) {
-  return run_turn_impl(session, renderer, verbose, std::move(diagnostics),
-                       std::move(hook_runtime),
-                       [&session, &input](const auto &callback) {
-                         return session.run_prompt(input, callback);
-                       },
-                       std::move(context_builder));
+core::TokenUsage
+run_turn(core::AgentSession &session, const std::string &input,
+         core::Renderer &renderer, bool verbose,
+         std::shared_ptr<core::StreamDiagnostics> diagnostics,
+         std::shared_ptr<HookRuntime> hook_runtime = nullptr,
+         std::function<core::LuaUiContext()> context_builder = nullptr) {
+  return run_turn_impl(
+      session, renderer, verbose, std::move(diagnostics),
+      std::move(hook_runtime),
+      [&session, &input](const auto &callback) {
+        return session.run_prompt(input, callback);
+      },
+      std::move(context_builder));
 }
 
-core::TokenUsage
-run_message_turn(core::AgentSession &session,
-                 std::vector<core::AgentMessageEnvelope> messages,
-                 core::Renderer &renderer, bool verbose,
-                 std::shared_ptr<core::StreamDiagnostics> diagnostics,
-                 std::shared_ptr<HookRuntime> hook_runtime = nullptr,
-                 std::function<core::LuaUiContext()> context_builder = nullptr) {
+core::TokenUsage run_message_turn(
+    core::AgentSession &session,
+    std::vector<core::AgentMessageEnvelope> messages, core::Renderer &renderer,
+    bool verbose, std::shared_ptr<core::StreamDiagnostics> diagnostics,
+    std::shared_ptr<HookRuntime> hook_runtime = nullptr,
+    std::function<core::LuaUiContext()> context_builder = nullptr) {
   return run_turn_impl(
       session, renderer, verbose, std::move(diagnostics),
       std::move(hook_runtime),
@@ -1078,6 +1078,22 @@ int cmd_run(const cli::Args &args,
       if (args.verbose)
         std::cerr << "[context: " << cf.path << "]\n";
     }
+  }
+
+  core::SkillCatalog skill_catalog;
+  const core::SkillCatalog *skill_catalog_ptr = nullptr;
+  if (!args.no_skills) {
+    const auto agent_dir =
+        (args.config_path.empty() ? cli::default_config_path()
+                                  : std::filesystem::path(args.config_path))
+            .parent_path();
+    skill_catalog =
+        core::discover_skills(std::filesystem::current_path(), agent_dir);
+    for (const auto &diag : skill_catalog.diagnostics) {
+      std::cerr << "[skills: diagnostic] " << diag << "\n";
+    }
+    if (!skill_catalog.skills.empty())
+      skill_catalog_ptr = &skill_catalog;
   }
 
   core::Agent::Options opts;
@@ -1331,7 +1347,7 @@ int cmd_run(const cli::Args &args,
     tool_names.emplace_back(tool->name());
   const auto system = cli::build_system_prompt(
       args.system_prompt, args.append_system_prompts, context_files, tool_names,
-      std::filesystem::current_path());
+      std::filesystem::current_path(), skill_catalog_ptr);
   agent.state().set_system_prompt(system);
   opts.system_prompt = system;
 
@@ -1516,9 +1532,9 @@ int cmd_run(const cli::Args &args,
           {"last_output_tokens", info.last_output_tokens},
           {"total_tokens", info.total_tokens},
       };
-      context["context_window"] =
-          info.context_window ? nlohmann::json(*info.context_window)
-                              : nlohmann::json(nullptr);
+      context["context_window"] = info.context_window
+                                      ? nlohmann::json(*info.context_window)
+                                      : nlohmann::json(nullptr);
       value["context"] = std::move(context);
     }
     if (snapshot.result) {

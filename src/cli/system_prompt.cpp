@@ -1,6 +1,7 @@
 #include "cli/system_prompt.h"
 
 #include <chrono>
+#include <cstddef>
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
@@ -11,6 +12,10 @@
 
 namespace pi::cli {
 namespace {
+
+// Cap on the '# Skills' index injected into the system prompt; prevents
+// unbounded prompt growth for very large catalogs (plans/agent-skills.md §4).
+constexpr size_t kMaxSkillsInPromptIndex = 48;
 
 std::string current_date() {
   const auto now =
@@ -48,7 +53,8 @@ std::string build_system_prompt(std::string_view custom_prompt,
                                 const std::vector<std::string> &append_prompts,
                                 const std::vector<ContextFile> &context_files,
                                 const std::vector<std::string> &tool_names,
-                                const std::filesystem::path &cwd) {
+                                const std::filesystem::path &cwd,
+                                const pi::core::SkillCatalog *skills) {
   std::string prompt;
   if (!custom_prompt.empty()) {
     prompt = std::string(custom_prompt);
@@ -95,6 +101,26 @@ std::string build_system_prompt(std::string_view custom_prompt,
     prompt += "\n\n# Project Context\n\n";
     for (const auto &context : context_files) {
       prompt += "## " + context.path + "\n\n" + context.content + "\n\n";
+    }
+  }
+
+  if (skills != nullptr && !skills->skills.empty()) {
+    prompt += "\n\n# Skills\n\n";
+    prompt +=
+        "Structured instruction packages available in this workspace. When a "
+        "task matches one of these descriptions, call the `skill` tool with "
+        "its name to load the full instructions before proceeding. After "
+        "loading, sibling files referenced by the skill can be read relative "
+        "to its directory with the read tool.\n\n";
+    size_t count = 0;
+    for (const auto &skill : skills->skills) {
+      if (count >= kMaxSkillsInPromptIndex) {
+        prompt += "- ...and " + std::to_string(skills->skills.size() - count) +
+                  " more; the `skill` tool accepts exact names only\n";
+        break;
+      }
+      prompt += "- " + skill.name + ": " + skill.description + "\n";
+      ++count;
     }
   }
 

@@ -252,6 +252,8 @@ Args parse_args(int argc, char **argv) {
         result.messages.emplace_back(v);
     } else if (arg == "--no-context-files" || arg == "-nc") {
       result.no_context_files = true;
+    } else if (arg == "--no-skills" || arg == "-ns") {
+      result.no_skills = true;
     } else if (arg == "--remote-compaction") {
       result.remote_compaction_enabled = true;
     } else if (arg == "--compaction-threshold") {
@@ -326,6 +328,8 @@ void print_help(const char *prog) {
          "medium, high, xhigh\n"
          "  --no-tools, -nt             Disable all tools\n"
          "  --no-builtin-tools, -nbt    Disable built-in tools only\n"
+         "  --no-skills, -ns            Disable skill scanning and the skill "
+         "tool\n"
          "  --tools, -t <names>         Comma-separated allowlist of tool "
          "names\n"
          "  --tools-dir <dir>           Load Lua tools from directory\n"

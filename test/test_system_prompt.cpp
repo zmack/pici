@@ -61,6 +61,62 @@ int main() {
     CHECK(prompt.find("Current date: ") != std::string::npos);
   });
 
+  tests::run("skills index injected when catalog provided", [] {
+    pi::core::SkillCatalog catalog;
+    catalog.skills.push_back({"release-checklist",
+                              "Steps to cut a release: version bump, "
+                              "changelog, tag, smoke test.",
+                              "/ws/skills/release-checklist/SKILL.md",
+                              "/ws/skills/release-checklist", "project"});
+    catalog.skills.push_back({"pdf-extraction",
+                              "Extract tables/text from PDFs.",
+                              "/ws/skills/pdf-extraction/SKILL.md",
+                              "/ws/skills/pdf-extraction", "project"});
+
+    const auto prompt = pi::cli::build_system_prompt(
+        {}, {}, {}, {"read", "bash"}, "/tmp/pici", &catalog);
+
+    CHECK(prompt.find("# Skills") != std::string::npos);
+    CHECK(prompt.find("- release-checklist: Steps to cut a release") !=
+          std::string::npos);
+    CHECK(prompt.find("- pdf-extraction: Extract tables/text") !=
+          std::string::npos);
+    CHECK(prompt.find("call the `skill` tool with its name") !=
+          std::string::npos);
+  });
+
+  tests::run("empty skills catalog injects nothing", [] {
+    pi::core::SkillCatalog empty;
+    const auto prompt = pi::cli::build_system_prompt({}, {}, {}, {"read"},
+                                                    "/tmp/pici", &empty);
+    CHECK(prompt.find("# Skills") == std::string::npos);
+
+    const auto null_prompt = pi::cli::build_system_prompt({}, {}, {}, {"read"},
+                                                         "/tmp/pici", nullptr);
+    CHECK(null_prompt.find("# Skills") == std::string::npos);
+  });
+
+  tests::run("skills index truncated at cap with overflow notice", [] {
+    pi::core::SkillCatalog big;
+    for (int i = 0; i < 60; ++i) {
+      const std::string name =
+          "skill-" + (i < 10 ? std::string("0") : std::string()) +
+          std::to_string(i);
+      big.skills.push_back(
+          {name, "desc " + name, "/tmp/" + name + "/SKILL.md",
+           "/tmp/" + name, "project"});
+    }
+    const auto prompt =
+        pi::cli::build_system_prompt({}, {}, {}, {"read"}, "/tmp/pici", &big);
+
+    const auto first = prompt.find("- skill-00:");
+    CHECK(first != std::string::npos);
+    // skill-48..59 exist but must not be listed; the overflow line is.
+    CHECK(prompt.find("- skill-48:") == std::string::npos);
+    CHECK(prompt.find("...and 12 more") != std::string::npos);
+    CHECK(prompt.find("accepts exact names only") != std::string::npos);
+  });
+
   std::cout << "Tests: " << tests::passed << " passed, " << tests::failed
             << " failed\n";
   return tests::failed == 0 ? 0 : 1;

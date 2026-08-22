@@ -64,6 +64,9 @@ struct Args {
   // Context files
   bool no_context_files{false}; // disable AGENTS.md / CLAUDE.md discovery
 
+  // Skills (plans/agent-skills.md)
+  bool no_skills{false}; // disable skill scanning and the `skill` tool
+
   // Input / composer
   bool vim_mode{false}; // [input] vim_mode: Normal/Insert modal editing
 
