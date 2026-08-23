@@ -22,7 +22,7 @@ local function tool(name, description, schema, fn)
   })
 end
 
-tool("spawn_agent", "Start a child agent. Children are read-only by default; write tools require agents.write_tools = core/all and explicit allow_write_tools.", {
+tool("spawn_agent", "Start a child agent. Children are read-only by default; write tools require agents.write_tools = core/all and explicit allow_write_tools. There is a fixed cap on live direct children per parent; once it's hit, spawn_agent fails with 'parent child limit reached (N/limit)' until you wait_agent or close_agent an existing child to free a slot -- don't just retry with a new task_name.", {
   type = "object",
   properties = {
     task_name = {type = "string"},
@@ -48,13 +48,19 @@ end)
 tool("wait_agent", "Wait for a child status change with a bounded timeout.", {
   type = "object",
   properties = {
-    targets = {type = "array", items = {type = "string"}},
+    targets = {type = "array", items = {type = "string"}, description = "Child agent ids to wait on (also accepted as 'ids')"},
+    ids = {type = "array", items = {type = "string"}},
     after_generation = {type = "integer"},
     timeout_ms = {type = "integer"},
   },
-  required = {"targets"},
   additionalProperties = false,
 }, function(args)
+  local targets = args.targets or args.ids
+  if not targets then
+    return nil, "wait_agent requires targets: [child agent ids]"
+  end
+  args.targets = targets
+  args.ids = nil
   return agents.wait(args)
 end)
 

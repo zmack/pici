@@ -144,6 +144,11 @@ std::optional<Patch> parse_patch(std::string_view text, bool lenient,
   AddFile *current_add = nullptr;
   for (std::size_t n = 0; n < lines.size(); ++n) {
     const auto &raw = lines[n];
+    // Lenient mode only relaxes matching of directive markers ("*** ..."
+    // and "@@" lines some models pad with stray whitespace). Content lines
+    // (+/-/space-prefixed) must keep their raw form: the leading character
+    // is the diff-line sentinel, not incidental formatting, so trimming it
+    // away would turn a valid context line into an unrecognized one.
     const auto line = lenient ? trim(raw) : raw;
     if (!begun) {
       if (line == "*** Begin Patch" || line.starts_with("*** Begin Patch"))
@@ -191,8 +196,8 @@ std::optional<Patch> parse_patch(std::string_view text, bool lenient,
       chunk->anchored_to_eof = true;
       continue;
     }
-    if (current_add && !line.empty() && line[0] == '+') {
-      current_add->lines.push_back(line.substr(1));
+    if (current_add && !raw.empty() && raw[0] == '+') {
+      current_add->lines.push_back(raw.substr(1));
       continue;
     }
     if (current_update && line.rfind("@@", 0) == 0) {
@@ -203,15 +208,15 @@ std::optional<Patch> parse_patch(std::string_view text, bool lenient,
         chunk->change_context = std::move(ctx);
       continue;
     }
-    if (current_update && chunk && !line.empty() &&
-        (line[0] == '+' || line[0] == '-' || line[0] == ' ')) {
-      if (line[0] == '-')
-        chunk->old_lines.push_back(line.substr(1));
-      else if (line[0] == '+')
-        chunk->new_lines.push_back(line.substr(1));
+    if (current_update && chunk && !raw.empty() &&
+        (raw[0] == '+' || raw[0] == '-' || raw[0] == ' ')) {
+      if (raw[0] == '-')
+        chunk->old_lines.push_back(raw.substr(1));
+      else if (raw[0] == '+')
+        chunk->new_lines.push_back(raw.substr(1));
       else {
-        chunk->old_lines.push_back(line.substr(1));
-        chunk->new_lines.push_back(line.substr(1));
+        chunk->old_lines.push_back(raw.substr(1));
+        chunk->new_lines.push_back(raw.substr(1));
       }
       continue;
     }

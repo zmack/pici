@@ -73,6 +73,7 @@
 #include "core/skills.h"
 #include "core/stream_diagnostics.h"
 #include "core/stream_renderer.h"
+#include "core/subagent_activity.h"
 #include "core/terminal.h"
 #include "nlohmann/json_fwd.hpp"
 #include <nlohmann/json.hpp>
@@ -822,12 +823,12 @@ private:
 };
 
 template <typename Invoke>
-core::TokenUsage
-run_turn_impl(core::AgentSession &session, core::Renderer &renderer,
-              bool verbose,
-              std::shared_ptr<core::StreamDiagnostics> diagnostics,
-              std::shared_ptr<HookRuntime> hook_runtime, Invoke &&invoke,
-              std::function<core::LuaUiContext()> context_builder = nullptr) {
+core::TokenUsage run_turn_impl(
+    core::AgentSession &session, core::Renderer &renderer, bool verbose,
+    std::shared_ptr<core::StreamDiagnostics> diagnostics,
+    std::shared_ptr<HookRuntime> hook_runtime, Invoke &&invoke,
+    std::function<core::LuaUiContext()> context_builder = nullptr,
+    std::shared_ptr<core::SubagentActivityBridge> activity = nullptr) {
   VerboseRenderer vr(renderer, verbose, std::move(diagnostics),
                      std::move(hook_runtime), std::move(context_builder));
   std::jthread interrupt_watcher([&session](const std::stop_token &stop_token) {
@@ -839,9 +840,11 @@ run_turn_impl(core::AgentSession &session, core::Renderer &renderer,
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   });
-  auto result =
-      std::forward<Invoke>(invoke)([&vr](const core::AgentEvent &event) {
+  auto result = std::forward<Invoke>(invoke)(
+      [&vr, &activity](const core::AgentEvent &event) {
         core::dispatch_event(event, vr);
+        if (activity)
+          activity->drain(vr);
       });
   interrupt_watcher.request_stop();
   if (result.error && !session.agent().state().error_message())
@@ -854,14 +857,15 @@ run_turn(core::AgentSession &session, const std::string &input,
          core::Renderer &renderer, bool verbose,
          std::shared_ptr<core::StreamDiagnostics> diagnostics,
          std::shared_ptr<HookRuntime> hook_runtime = nullptr,
-         std::function<core::LuaUiContext()> context_builder = nullptr) {
+         std::function<core::LuaUiContext()> context_builder = nullptr,
+         std::shared_ptr<core::SubagentActivityBridge> activity = nullptr) {
   return run_turn_impl(
       session, renderer, verbose, std::move(diagnostics),
       std::move(hook_runtime),
       [&session, &input](const auto &callback) {
         return session.run_prompt(input, callback);
       },
-      std::move(context_builder));
+      std::move(context_builder), std::move(activity));
 }
 
 core::TokenUsage run_message_turn(
@@ -869,14 +873,15 @@ core::TokenUsage run_message_turn(
     std::vector<core::AgentMessageEnvelope> messages, core::Renderer &renderer,
     bool verbose, std::shared_ptr<core::StreamDiagnostics> diagnostics,
     std::shared_ptr<HookRuntime> hook_runtime = nullptr,
-    std::function<core::LuaUiContext()> context_builder = nullptr) {
+    std::function<core::LuaUiContext()> context_builder = nullptr,
+    std::shared_ptr<core::SubagentActivityBridge> activity = nullptr) {
   return run_turn_impl(
       session, renderer, verbose, std::move(diagnostics),
       std::move(hook_runtime),
       [&session, messages = std::move(messages)](const auto &callback) mutable {
         return session.run_messages(std::move(messages), callback);
       },
-      std::move(context_builder));
+      std::move(context_builder), std::move(activity));
 }
 
 // Drives AgentSession::compact_active_session to completion, reusing the
@@ -1623,15 +1628,20 @@ int cmd_run(const cli::Args &args,
         apply_hook_tools();
     }
   }
+  auto mailbox_wake = std::make_shared<cli::ReadlineWake>();
+  auto activity = std::make_shared<core::SubagentActivityBridge>(
+      [mailbox_wake] { static_cast<void>(mailbox_wake->notify()); });
   auto mailbox_observer = std::make_shared<MailboxTaskObserver>();
   mailbox_observer->coordinator = mailbox;
   auto task_callbacks = std::vector<core::AgentTaskEventCallback>{};
-  if (mailbox) {
+  task_callbacks.emplace_back([activity](const core::AgentTaskEvent &event) {
+    activity->observe(event);
+  });
+  if (mailbox)
     task_callbacks.emplace_back(
         [mailbox_observer](const core::AgentTaskEvent &event) {
           mailbox_observer->observe(event);
         });
-  }
   auto task_manager = std::make_shared<core::AgentTaskManager>(
       runtime, opts, core::AgentTaskManager::Limits{},
       core::fan_out_agent_task_callbacks(std::move(task_callbacks)),
@@ -1647,8 +1657,8 @@ int cmd_run(const cli::Args &args,
           mailbox->unregister_subagent(task_id);
         });
   }
-  auto mailbox_wake = mailbox ? std::make_shared<cli::ReadlineWake>() : nullptr;
   auto mailbox_delivery = std::make_shared<core::MailboxDeliveryTargets>();
+
   mailbox_delivery->root =
       [&runtime](std::vector<core::AgentMessageEnvelope> messages) {
         runtime.agent().steer_envelopes(std::move(messages));
@@ -2207,14 +2217,16 @@ int cmd_run(const cli::Args &args,
 
   // Run a turn and persist all new messages to the session file.
   auto run_and_persist = [&](const std::string &input) {
-    core::TerminalTitleActivityGuard activity(title_controller);
+    core::TerminalTitleActivityGuard title_activity(title_controller);
     if (mailbox) {
       mailbox->set_root_running(true);
       mailbox->pump_inbox();
     }
     RootRunningGuard running_guard{mailbox};
-    auto result = run_turn(runtime, input, *renderer, args.verbose,
-                           stream_diagnostics, hook_runtime, build_ui_context);
+    auto result = run_turn(
+        runtime, input, *renderer, args.verbose, stream_diagnostics,
+        hook_runtime, build_ui_context,
+        (isatty(STDIN_FILENO) != 0 && !args.print_mode) ? activity : nullptr);
     return result;
   };
 
@@ -2237,11 +2249,13 @@ int cmd_run(const cli::Args &args,
       if (messages.empty())
         return;
       {
-        core::TerminalTitleActivityGuard activity(title_controller);
+        core::TerminalTitleActivityGuard title_activity(title_controller);
         RootRunningGuard running_guard{mailbox};
-        accumulate(run_message_turn(runtime, std::move(messages), *renderer,
-                                    args.verbose, stream_diagnostics,
-                                    hook_runtime, build_ui_context));
+        accumulate(run_message_turn(
+            runtime, std::move(messages), *renderer, args.verbose,
+            stream_diagnostics, hook_runtime, build_ui_context,
+            (isatty(STDIN_FILENO) != 0 && !args.print_mode) ? activity
+                                                            : nullptr));
       }
       autonomous_budget.record();
     }
@@ -2260,6 +2274,13 @@ int cmd_run(const cli::Args &args,
         *status_line += " | " + std::string(paused);
       else
         status_line = std::string(paused);
+    }
+    const auto subagent_summary = activity->summary();
+    if (!subagent_summary.empty()) {
+      if (status_line)
+        *status_line += " | " + subagent_summary;
+      else
+        status_line = subagent_summary;
     }
     renderer->set_status_line(status_line);
     if (hooks && hooks->tab_title) {
@@ -2352,11 +2373,13 @@ int cmd_run(const cli::Args &args,
     if (readline_result.reason == cli::ReadlineExit::mailbox_wake) {
       readline_draft = std::move(readline_result.text);
       readline_cursor = readline_result.cursor;
+      activity->drain(*renderer);
       run_idle_mailbox_turns();
       continue;
     }
     if (autonomous_budget_exhausted && mailbox_wake)
       mailbox_wake->drain();
+    activity->drain(*renderer);
     autonomous_budget.reset();
     autonomous_budget_exhausted = false;
     readline_draft.clear();

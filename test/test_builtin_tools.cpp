@@ -186,6 +186,53 @@ void test_file_tools() {
     std::filesystem::remove_all(root);
   });
 
+  tests::register_test("Edit tool: accepts old_text/new_text snake_case alias", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-edit-snake-alias";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto tools = create_all_tools(root);
+    auto write = find_tool(tools, "write");
+    auto edit  = find_tool(tools, "edit");
+    auto read  = find_tool(tools, "read");
+
+    write->execute("1", R"({"path":"s.txt","content":"alpha\nbeta"})");
+    nlohmann::json raw = {
+        {"path", "s.txt"},
+        {"edits", nlohmann::json::array({nlohmann::json{
+                     {"old_text", "alpha"}, {"new_text", "ALPHA"}}})}};
+    auto prepared = edit->prepare_arguments(raw);
+    CHECK(prepared["edits"][0].contains("oldText"));
+    CHECK(!prepared["edits"][0].contains("old_text"));
+    auto r = edit->execute("2", prepared.dump());
+    CHECK(!r->is_error());
+    auto content = read->execute("3", R"({"path":"s.txt"})");
+    CHECK(content->content().find("ALPHA") != std::string::npos);
+    std::filesystem::remove_all(root);
+  });
+
+  tests::register_test("Edit tool: miss on stale oldText hints the nearby line", []() {
+    const auto root = std::filesystem::temp_directory_path() / "pici-edit-near-miss";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto tools = create_all_tools(root);
+    auto write = find_tool(tools, "write");
+    auto edit  = find_tool(tools, "edit");
+
+    write->execute(
+        "1",
+        R"({"path":"n.txt","content":"one\ntwo\nthree hundred forty\nfour\n"})");
+    // The line grew an extra word since the model last read the file; it
+    // still asks to replace the old, now-stale line verbatim.
+    auto r = edit->execute(
+        "2",
+        R"({"path":"n.txt","edits":[{"oldText":"three hundred\n","newText":"THREE HUNDRED\n"}]})");
+    CHECK(r->is_error());
+    CHECK(r->content().find("Closest match is near line 3") !=
+          std::string::npos);
+    CHECK(r->content().find("three hundred forty") != std::string::npos);
+    std::filesystem::remove_all(root);
+  });
+
   tests::register_test("Edit tool: overlap detection", []() {
     const auto root = std::filesystem::temp_directory_path() / "pici-edit-overlap";
     std::filesystem::remove_all(root);
@@ -342,6 +389,28 @@ void test_discovery_tools() {
     auto grep_result = grep->execute("3", R"({"pattern":"needle"})");
     CHECK(grep_result->content().find("README.md:1: needle") !=
           std::string::npos);
+    std::filesystem::remove_all(root);
+  });
+
+  tests::register_test("Grep tool: unbalanced paren gives actionable error", []() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      "pici-builtin-tools-grep-regex-error";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(root / "a.cpp") << "void run_turn() {}\n";
+    const auto tools = create_all_tools(root);
+    auto grep = find_tool(tools, "grep");
+
+    // A bare function-call-shaped pattern is invalid regex (unbalanced
+    // '('); the tool should say so and point at literal:true rather than
+    // leaking the raw std::regex_error message.
+    auto bad = grep->execute("1", R"({"pattern":"run_turn("})");
+    CHECK(bad->is_error());
+    CHECK(bad->content().find("literal: true") != std::string::npos);
+
+    auto literal = grep->execute("2", R"({"pattern":"run_turn(","literal":true})");
+    CHECK(!literal->is_error());
+    CHECK(literal->content().find("a.cpp:1:") != std::string::npos);
     std::filesystem::remove_all(root);
   });
 }

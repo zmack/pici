@@ -660,8 +660,13 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
               : pending_children_it->second;
       if (parent->children.size() + pending_children >=
           limits_.max_direct_children)
-        throw AgentTaskError(AgentTaskErrorKind::residency_limit,
-                             "parent child limit reached");
+        throw AgentTaskError(
+            AgentTaskErrorKind::residency_limit,
+            "parent child limit reached (" +
+                std::to_string(parent->children.size() + pending_children) +
+                "/" + std::to_string(limits_.max_direct_children) +
+                " direct children); call wait_agent or close_agent on an "
+                "existing child before spawning more");
       for (const auto &child_id : parent->children) {
         const auto child = tasks_.at(child_id);
         if (child->task_name == request.task_name)

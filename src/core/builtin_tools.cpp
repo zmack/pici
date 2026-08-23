@@ -650,7 +650,10 @@ public:
       : BuiltinTool(
             "write",
             "Write content to a file. Creates parent directories and "
-            "overwrites existing content.",
+            "overwrites existing content. Path must be inside the current "
+            "working directory (relative paths are resolved from it); paths "
+            "outside it, including /tmp, are rejected -- put scratch files "
+            "in a workspace subdirectory instead.",
             R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file to write (relative or absolute)"},"content":{"type":"string","description":"Content to write to the file"}},"required":["path","content"],"additionalProperties":false})json",
             cwd, true) {}
 
@@ -841,6 +844,49 @@ std::size_t count_occurrences(const std::string &content,
   return count;
 }
 
+// Best-effort hint for a failed oldText match: locate where the edit's
+// first line still occurs (exactly, or fuzzily under the same whitespace/
+// Unicode normalization apply_edits itself uses) and show a few lines of
+// the file's *current* content around it, so the caller can correct
+// oldText on the next call instead of re-reading the whole file. Returns
+// an empty string when no plausible anchor is found.
+std::string near_miss_hint(const std::string &lf_content,
+                           const std::string &old_text) {
+  const auto nl = old_text.find('\n');
+  std::string needle =
+      nl == std::string::npos ? old_text : old_text.substr(0, nl);
+  const auto first = needle.find_first_not_of(" \t");
+  if (first == std::string::npos)
+    return {};
+  const auto last = needle.find_last_not_of(" \t");
+  needle = needle.substr(first, last - first + 1);
+  if (needle.size() < 6) // too short to anchor on with any confidence
+    return {};
+
+  const auto r = fuzzy_find(lf_content, needle);
+  if (!r.found)
+    return {};
+
+  const std::string searched =
+      r.used_fuzzy ? normalize_for_fuzzy_match(lf_content) : lf_content;
+  const auto line_idx = static_cast<std::size_t>(std::count(
+      searched.begin(), searched.begin() + static_cast<std::ptrdiff_t>(r.index),
+      '\n'));
+
+  const auto lines = split_lines(lf_content);
+  if (line_idx >= lines.size())
+    return {};
+  const auto start = line_idx > 1 ? line_idx - 1 : std::size_t{0};
+  const auto end = std::min(lines.size() - 1, line_idx + 4);
+
+  std::ostringstream out;
+  out << " Closest match is near line " << (line_idx + 1) << ":\n";
+  for (auto i = start; i <= end; ++i) {
+    out << "  " << (i + 1) << ": " << lines[i] << "\n";
+  }
+  return out.str();
+}
+
 struct MatchedEdit {
   std::size_t edit_index;
   std::size_t match_index;
@@ -879,14 +925,17 @@ apply_edits(const std::string &lf_content,
     }
     auto r = fuzzy_find(base, old_text);
     if (!r.found) {
+      const auto hint = near_miss_hint(lf_content, old_text);
       if (edits.size() == 1)
         throw std::runtime_error("Could not find the text in " + path +
                                  ". The old text must match exactly including "
-                                 "all whitespace and newlines.");
+                                 "all whitespace and newlines." +
+                                 hint);
       throw std::runtime_error("Could not find edits[" + std::to_string(i) +
                                "] in " + path +
                                ". The oldText must match exactly including all "
-                               "whitespace and newlines.");
+                               "whitespace and newlines." +
+                               hint);
     }
     auto occ = count_occurrences(base, old_text);
     if (occ > 1) {
@@ -980,9 +1029,23 @@ public:
             R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text to replace"},"newText":{"type":"string","description":"Replacement text"}},"required":["oldText","newText"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false})json",
             cwd, true) {}
 
+  // Some models default to the old_text/new_text naming convention used by
+  // other tools in the wild instead of this tool's camelCase oldText/
+  // newText. Normalize the alias before schema validation runs rather than
+  // hard-rejecting it.
+  static void rename_snake_case_alias(nlohmann::json &obj, const char *snake,
+                                      const char *camel) {
+    if (obj.contains(snake) && !obj.contains(camel)) {
+      obj[camel] = std::move(obj[snake]);
+      obj.erase(snake);
+    }
+  }
+
   ToolArguments
   prepare_arguments(const ToolArguments &arguments) const override {
     auto prepared = arguments;
+    rename_snake_case_alias(prepared, "old_text", "oldText");
+    rename_snake_case_alias(prepared, "new_text", "newText");
     if (prepared.contains("oldText") && prepared.contains("newText") &&
         !prepared.contains("edits")) {
       prepared["edits"] =
@@ -996,6 +1059,14 @@ public:
                                           nullptr, false);
       if (!parsed.is_discarded() && parsed.is_array()) {
         prepared["edits"] = std::move(parsed);
+      }
+    }
+    if (prepared.contains("edits") && prepared["edits"].is_array()) {
+      for (auto &edit : prepared["edits"]) {
+        if (!edit.is_object())
+          continue;
+        rename_snake_case_alias(edit, "old_text", "oldText");
+        rename_snake_case_alias(edit, "new_text", "newText");
       }
     }
     return prepared;
@@ -1240,11 +1311,21 @@ public:
       const auto limit = std::max(1, json.value("limit", kGrepDefaultLimit));
       const auto flags =
           ignore_case ? std::regex::icase : std::regex::ECMAScript;
-      const std::regex matcher(
-          literal ? std::regex_replace(
-                        pattern, std::regex(R"([.^$|()\\[\]{}*+?])"), R"(\$&)")
-                  : pattern,
-          flags);
+      std::regex matcher;
+      try {
+        matcher = std::regex(
+            literal ? std::regex_replace(pattern,
+                                         std::regex(R"([.^$|()\\[\]{}*+?])"),
+                                         R"(\$&)")
+                    : pattern,
+            flags);
+      } catch (const std::regex_error &) {
+        throw std::runtime_error(
+            "pattern is not valid regex: \"" + pattern +
+            "\". If you meant to search for it literally (e.g. a function "
+            "call or symbol like \"foo(\"), pass literal: true instead of "
+            "escaping the regex metacharacters yourself.");
+      }
       const std::optional<std::regex> glob_matcher =
           glob.empty() ? std::nullopt
                        : std::optional<std::regex>(glob_to_regex(glob));
