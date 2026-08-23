@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/event_types.h"
+#include "core/memory_stats.h"
 #include "core/message_types.h"
 
 namespace pi::core {
@@ -58,8 +59,12 @@ public:
 
     std::weak_ptr<State> weak_state = state;
     worker_state->thread =
-        std::jthread([weak_state, worker = std::move(worker)](
+        std::jthread([weak_state, worker = inherit_arena(std::move(worker))](
                          const std::stop_token &) mutable {
+          // §Design 2: inherit_arena() captured the spawning thread's arena
+          // context at wrap time; the ArenaInheritor re-binds it as this
+          // thread's first action and restores on exit. Passthrough when
+          // memory stats are unavailable.
           PushFn push = [weak_state](Event event) {
             auto state = weak_state.lock();
             if (!state)

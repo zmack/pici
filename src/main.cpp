@@ -10,13 +10,13 @@
 #include <format>
 #include <functional>
 #include <iomanip>
-#include <locale>
-#include <numeric>
 #include <iostream>
 #include <iterator>
+#include <locale>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -56,8 +56,8 @@
 #include "core/mailbox/mailbox_bindings.h"
 #include "core/mailbox/mailbox_coordinator.h"
 #include "core/mailbox/mailbox_types.h"
-#include "core/message_types.h"
 #include "core/memory_stats.h"
+#include "core/message_types.h"
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/providers/faux_control.h"
@@ -964,8 +964,8 @@ std::string format_memory_bytes(std::uint64_t bytes) {
     ss << std::fixed << std::setprecision(1)
        << static_cast<double>(bytes) / (1024.0 * 1024.0) << " MB";
   else if (bytes >= 1024)
-    ss << std::fixed << std::setprecision(1) << static_cast<double>(bytes) /
-              1024.0 << " KB";
+    ss << std::fixed << std::setprecision(1)
+       << static_cast<double>(bytes) / 1024.0 << " KB";
   else
     ss << bytes << " B";
   return ss.str();
@@ -973,34 +973,32 @@ std::string format_memory_bytes(std::uint64_t bytes) {
 
 // Content-composition panel (§Design 3): escaped-JSON wire sizes split by
 // content-block kind, for the root session plus every live child task.
-std::string
-format_memory_composition(const core::AgentSession &session,
-                          const core::AgentTaskManager &tasks) {
+std::string format_memory_composition(const core::AgentSession &session,
+                                      const core::AgentTaskManager &tasks) {
   struct Row {
     std::string label;
     core::SessionCompositionReport report;
   };
   std::vector<Row> rows;
   rows.emplace_back("root", core::composition_report_for_messages(
-                                  session.agent().state().messages()));
+                                session.agent().state().messages()));
   for (auto &[path, report] : tasks.composition_reports()) {
     if (path == "/root")
       continue; // root already reported from the live AgentSession above
     rows.emplace_back(path, report);
   }
 
-  const auto label_width = std::accumulate(
-      rows.begin(), rows.end(), std::size_t{7}, [](std::size_t acc,
-                                                    const Row &row) {
-        return std::max(acc, row.label.size());
-      });
+  const auto label_width =
+      std::accumulate(rows.begin(), rows.end(), std::size_t{7},
+                      [](std::size_t acc, const Row &row) {
+                        return std::max(acc, row.label.size());
+                      });
   std::ostringstream ss;
   ss << "\n=== context composition (JSON wire bytes — what you pay tokens "
         "for) ===\n";
   ss << std::left << std::setw(static_cast<int>(label_width)) << "session"
-     << "  " << std::right << std::setw(10) << "transcript"
-     << std::setw(10) << "text"
-     << std::setw(13) << "tool_result" << std::setw(10) << "tool_use"
+     << "  " << std::right << std::setw(10) << "transcript" << std::setw(10)
+     << "text" << std::setw(13) << "tool_result" << std::setw(10) << "tool_use"
      << std::setw(9) << "other\n";
   for (const auto &row : rows) {
     ss << std::left << std::setw(static_cast<int>(label_width))
@@ -1015,15 +1013,76 @@ format_memory_composition(const core::AgentSession &session,
   return ss.str();
 }
 
+// Heap panel (§Design 4): real allocator bytes per session arena, plus the
+// unattributed "shared" remainder and process-level totals. Requires
+// jemalloc as the active global allocator; callers check
+// memory_stats_available() first.
+std::string format_memory_heap(const core::AgentTaskManager &tasks) {
+  const auto heaps = tasks.heap_reports();
+  if (heaps.empty())
+    return {};
+  const auto snapshot = core::read_process_snapshot();
+
+  const auto label_width = std::accumulate(
+      heaps.begin(), heaps.end(), std::size_t{22},
+      [](std::size_t acc, const core::SessionHeapReport &report) {
+        return std::max(acc, report.label.size());
+      });
+  std::ostringstream ss;
+  ss << "\n=== heap (real allocator bytes) ===\n";
+  ss << std::left << std::setw(static_cast<int>(label_width)) << "session"
+     << "  " << std::right << std::setw(11) << "allocated\n";
+  std::uint64_t arena_sum = 0;
+  for (const auto &report : heaps) {
+    ss << std::left << std::setw(static_cast<int>(label_width))
+       << report.label.substr(0, label_width) << "  ";
+    if (report.arena) {
+      arena_sum += report.arena->allocated_bytes;
+      ss << std::right << std::setw(11)
+         << format_memory_bytes(report.arena->allocated_bytes);
+    } else {
+      ss << std::right << std::setw(11) << "n/a";
+    }
+    ss << "\n";
+  }
+  ss << std::setfill('-') << std::setw(static_cast<int>(label_width) + 13) << ""
+     << std::setfill(' ') << "\n";
+  // §Design 4's internal-consistency identity: shared is DEFINED as
+  // stats.allocated − Σ(session arenas); both are live-malloc-byte
+  // quantities in the same units. Clamp tiny negative drift from reading
+  // different arenas across separate epoch refreshes.
+  ss << std::left << std::setw(static_cast<int>(label_width))
+     << "shared (unattributed)" << "  " << std::right << std::setw(11);
+  if (snapshot.allocator_allocated_bytes)
+    ss << format_memory_bytes(snapshot.allocator_allocated_bytes > arena_sum
+                                  ? *snapshot.allocator_allocated_bytes -
+                                        arena_sum
+                                  : 0);
+  else
+    ss << "n/a";
+  ss << "\n";
+  if (snapshot.allocator_resident_bytes)
+    ss << std::left << std::setw(static_cast<int>(label_width))
+       << "allocator resident" << "  " << std::right << std::setw(11)
+       << format_memory_bytes(*snapshot.allocator_resident_bytes) << "\n";
+  ss << std::left << std::setw(static_cast<int>(label_width)) << "process RSS"
+     << "  " << std::right << std::setw(11)
+     << format_memory_bytes(snapshot.rss_bytes) << "\n";
+  ss.flush();
+  return ss.str();
+}
+
 std::string format_memory(const core::AgentSession &session,
                           const core::AgentTaskManager &tasks) {
-  auto out = format_memory_composition(session, tasks);
-  if (!core::memory_stats_available()) {
+  std::string out;
+  if (core::memory_stats_available())
+    out += format_memory_heap(tasks);
+  else
     out +=
         "\nheap panel unavailable: run with jemalloc as the global allocator "
         "to enable it\n(e.g. LD_PRELOAD=libjemalloc.so.2 pi-cli, or build "
         "with -DPI_CPP_MEMSTATS=ON and -DPI_CPP_MEMSTATS_LINK_JEMALLOC=ON)\n";
-  }
+  out += format_memory_composition(session, tasks);
   return out;
 }
 
@@ -1986,6 +2045,11 @@ int cmd_run(const cli::Args &args,
 
   auto renderer = make_renderer(args);
 
+  // §Design 2: bind the root session's arena on this (main) thread before
+  // the interactive loop; everything the root session allocates from here on
+  // lands in "root" rather than "shared". No-op without jemalloc.
+  task_manager->bind_root_arena();
+
   if (sandbox_mode == core::SandboxMode::disabled)
     std::cerr << "[sandbox: disabled; bash runs without bubblewrap]\n";
   else if (args.verbose)
@@ -2017,10 +2081,9 @@ int cmd_run(const cli::Args &args,
             std::string_view("/tools"), std::string_view("/addons"),
             std::string_view("/reload-addons"), std::string_view("/usage"),
             std::string_view("/memory"), std::string_view("/model"),
-            std::string_view("/models"),
-            std::string_view("/name"), std::string_view("/fork"),
-            std::string_view("/tree"), std::string_view("/compact"),
-            std::string_view("/skills")}) {
+            std::string_view("/models"), std::string_view("/name"),
+            std::string_view("/fork"), std::string_view("/tree"),
+            std::string_view("/compact"), std::string_view("/skills")}) {
         if (b.starts_with(partial))
           result.emplace_back(b);
       }

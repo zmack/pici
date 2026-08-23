@@ -2,6 +2,7 @@
 
 #include "core/agent.h"
 #include "core/event_types.h"
+#include "core/memory_stats.h"
 #include "core/session/agent_session.h"
 
 #include <chrono>
@@ -37,6 +38,16 @@ struct SessionCompositionReport {
   std::size_t tool_use_bytes{0};
   std::size_t tool_result_bytes{0};
   std::size_t other_bytes{0};
+};
+
+// Allocator-level heap attribution for one session (plan §Design 2/4):
+// bytes currently allocated live out of the session's jemalloc arena.
+// nullopt when memory stats are unavailable (glibc allocator, no
+// PI_CPP_MEMSTATS build). Independent of SessionCompositionReport — wire
+// bytes vs. heap bytes, never nested (§Design 3).
+struct SessionHeapReport {
+  std::string label;
+  std::optional<ArenaStats> arena;
 };
 
 // Single-pass JSON-wire-size composition of a transcript. Shared by
@@ -272,6 +283,18 @@ public:
   std::vector<std::pair<std::string, SessionCompositionReport>>
   composition_reports() const;
 
+  // Allocator-level per-session accounting. The root arena is acquired once
+  // and lives for the whole process; child tasks each acquire an arena
+  // before their AgentSession is constructed and release it back to the
+  // recycle pool after close. Empty when memory stats are unavailable.
+  std::vector<SessionHeapReport> heap_reports() const;
+
+  // Acquire (first call only) the root arena and bind it to the calling
+  // thread — invoke on the main thread before the interactive loop so all
+  // its later allocations land in "root" instead of "shared" (§Design 2).
+  // Idempotent; no-op when memory stats are unavailable.
+  void bind_root_arena();
+
   AgentWaitResult wait(const AgentWaitRequest &request,
                        std::stop_token stop_token = {}) const;
 
@@ -282,6 +305,26 @@ public:
 
 private:
   struct Task;
+
+  // ─── Per-session memory accounting (plan: session-memory-stats.md) ──────
+  //
+  // Each session owns a dedicated jemalloc arena so allocations made by the
+  // threads actually running its turns are attributed to it rather than
+  // smeared into a process-wide "shared" bucket. Three wiring rules, all
+  // from §Design 2:
+  //
+  // 1. Bind BEFORE construction. make_task() acquires the child's arena and
+  //    binds it on the spawning thread before owned_session is constructed,
+  //    so inherit_arena() captures it for every thread spawned downstream.
+  // 2. Inherit across EVERY spawn point in the turn path — the runner jthread
+  //    here, Agent::launch_worker_locked, and EventStream::start_worker. A
+  //    turn does not run on the thread that requested it; a missed wrap site
+  //    silently drops that work into "shared" instead of erroring.
+  // 3. No destroy, only purge-and-recycle. release_task_arena() runs strictly
+  //    after the runner thread is joined in close_tasks(); jemalloc's
+  //    arena.<i>.destroy contract is unsatisfiable here because parents read
+  //    child results after close.
+  static void release_task_arena(Task &task);
   struct WorkItem {
     std::vector<AgentMessageEnvelope> messages;
     bool mailbox_delivery{false};
@@ -307,6 +350,13 @@ private:
   std::size_t pending_spawns_{0};
   bool shutting_down_{false};
   std::stop_source shutdown_source_;
+
+  // Root session's dedicated arena (§Design 2/4). Acquired exactly once —
+  // by bind_root_arena() or lazily by heap_reports(), whichever comes first
+  // — and bound on the main thread for the life of the process. mutable so
+  // the const heap_reports() can perform lazy acquisition under mutex_;
+  // nullopt when memory stats are unavailable.
+  mutable std::optional<SessionArena> root_arena_;
 
   std::shared_ptr<Task> find_task_locked(const AgentTaskId &target) const;
   static AgentTaskSnapshot snapshot(const std::shared_ptr<Task> &task);

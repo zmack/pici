@@ -661,6 +661,65 @@ permission layers gate what loaded instructions can actually do.
 Use `/skills` to list the discovered catalog with diagnostics, or
 `--no-skills` / `[skills] disabled = true` to turn the feature off.
 
+## Memory observability (`/memory`)
+
+`/memory` answers "how much memory is in use, per session, and what is it
+spent on" from inside a running pici process. A single process can host the
+root session plus up to 8 child agent-task sessions, all sharing one heap —
+`ps`/`smaps` cannot tell them apart, but per-session jemalloc arenas can.
+
+The command prints two independent panels:
+
+- **heap** — real allocator bytes attributed per session arena, plus a
+  `shared (unattributed)` remainder (background threads, SQLite's single
+  shared connection, anything allocated before binding), allocator resident,
+  and process RSS.
+- **context composition** — escaped-JSON wire sizes of each transcript split
+  by content-block kind (text / tool_result / tool_use / other). This is what
+  tokens are charged for, not a heap measurement.
+
+The panels are deliberately **not nested**: they are different quantities in
+ different units that diverge in both directions. Base64 inflates image JSON
+to ~1.33× the decoded bytes on the heap, while per-turn context snapshots
+deep-copy the whole transcript — real heap for a transcript is plausibly 3–5×
+the wire estimate at peak. Neither number contains the other.
+
+### Enabling the heap panel
+
+The composition panel always works. The heap panel needs jemalloc as the
+process's global allocator plus a build with the accounting code compiled in:
+
+```sh
+# recommended: runtime-only, any build with -DPI_CPP_MEMSTATS=ON
+cmake -B build -DPI_CPP_MEMSTATS=ON && cmake --build build
+LD_PRELOAD=libjemalloc.so.2 ./build/pi-cli
+
+# environments where LD_PRELOAD isn't practical: link-time fallback
+cmake -B build -DPI_CPP_MEMSTATS=ON -DPI_CPP_MEMSTATS_LINK_JEMALLOC=ON
+```
+
+Without an active jemalloc, availability is detected at startup (a canary
+verifies allocations actually move `stats.allocated`) and every accounting
+call degrades to a safe no-op — the heap panel prints a hint instead of wrong
+numbers. The option refuses to configure together with sanitizers (jemalloc's
+malloc override and TSan's interceptors conflict).
+
+### Accuracy caveats
+
+Numbers are good attribution, not audited totals:
+
+- **tcache lag** — freed blocks sitting in a thread's cache still count as
+  allocated until flushed; cross-thread frees are common (main thread freeing
+  loop-worker strings), so a session can read transiently high. Bounded and
+  self-correcting at thread exit; `MALLOC_CONF=tcache:false` trades speed for
+  exactness if needed.
+- **recycled arenas** — task arenas are never destroyed (jemalloc's destroy
+  contract can't be met here since parents read child results after close);
+  they are purged and recycled, so a reused arena may briefly report its
+  previous occupant's stale tail.
+- **shared-resource smear** — whichever session first grows SQLite's page
+  cache or provider TLS buffers gets charged for it.
+
 ## Key Design Decisions
 
 1. **nlohmann/json** — all JSON parsing/serialization via nlohmann/json; JSON Schema validation via pboettch/json-schema-validator

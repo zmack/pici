@@ -1,10 +1,10 @@
 #include "core/agent_task.h"
-#include "core/agent_loop.h"
-
 #include "core/agent.h"
+#include "core/agent_loop.h"
 #include "core/agent_runtime_identity.h"
 #include "core/agent_state.h"
 #include "core/event_types.h"
+#include "core/memory_stats.h"
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/session/agent_session.h"
@@ -17,7 +17,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <exception>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -304,6 +303,11 @@ struct AgentTaskManager::Task {
   std::uint64_t generation{0};
   bool execution_reserved{false};
   bool close_requested{false};
+  // This task's dedicated jemalloc arena (§Design 2). Acquired on the
+  // spawning thread before owned_session is constructed; released back to
+  // the recycle pool in close_tasks() after the runner thread is joined.
+  // nullopt when memory stats are unavailable or acquisition failed.
+  std::optional<SessionArena> arena;
   std::jthread runner;
 };
 
@@ -544,6 +548,28 @@ std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
   task->parent_id = parent->id;
   task->task_name = request.task_name;
   task->depth = parent->depth + 1;
+  // Bind this task's arena BEFORE owned_session construction (§Design 2):
+  // system-prompt assembly, tool-definition copies, and config all allocate
+  // on this (spawning) thread, and the binding must already be current in
+  // TLS here so inherit_arena() captures it for the runner jthread and
+  // everything downstream. The guard restores the spawning thread's previous
+  // context when construction unwinds normally or by exception.
+  const auto task_arena = acquire_session_arena();
+  struct ArenaContextGuard {
+    const std::optional<SessionArena> &bound;
+    explicit ArenaContextGuard(const std::optional<SessionArena> &b)
+        : bound(b) {}
+    ArenaContextGuard(const ArenaContextGuard &) = delete;
+    ArenaContextGuard &operator=(const ArenaContextGuard &) = delete;
+    ~ArenaContextGuard() {
+      if (bound)
+        unbind_current_thread();
+    }
+  } arena_context_guard(task_arena);
+  if (task_arena) {
+    bind_current_thread(*task_arena);
+    task->arena = *task_arena;
+  }
   task->owned_session = std::make_unique<AgentSession>(AgentSession::Config{
       .agent_options = std::move(options),
       .tools = inherit_tools(parent_context, request.requested_tools),
@@ -701,6 +727,11 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
       try {
         task->runner =
             std::jthread([this, task](const std::stop_token &stop_token) {
+              // §Design 2: re-bind the task's arena on the thread that will
+              // actually run its turns; run_task()'s turn loop then reaches
+              // Agent/EventStream spawn points with the context current.
+              if (task->arena)
+                bind_current_thread(*task->arena);
               run_task(task, stop_token);
             });
         pending_task_paths_.erase(task_path);
@@ -732,6 +763,9 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
       task->session->agent().interrupt(TurnAbortReason::shutdown);
       task->runner.join();
     }
+    // Spawn never published the task, so close_tasks() will never see it:
+    // return its arena to the pool here. (Runner already joined above.)
+    release_task_arena(*task);
     if (unregister_endpoint && endpoint_registered) {
       try {
         unregister_endpoint(task_id);
@@ -789,7 +823,8 @@ void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
         }
       }
     } else if (const auto *end = std::get_if<MessageEndEvent>(&event)) {
-      if (const auto *assistant = std::get_if<AssistantMessage>(&end->message)) {
+      if (const auto *assistant =
+              std::get_if<AssistantMessage>(&end->message)) {
         final_message = *assistant;
         // Publish usage for live observability; snapshot() reads it under
         // the same mutex.
@@ -995,8 +1030,8 @@ AgentTaskManager::composition_reports() const {
     }
     result.emplace_back(task->task_path, report);
   }
-  std::ranges::sort(result, {}, &std::pair<std::string,
-                                           SessionCompositionReport>::first);
+  std::ranges::sort(result, {},
+                    &std::pair<std::string, SessionCompositionReport>::first);
   return result;
 }
 
@@ -1259,6 +1294,11 @@ AgentTaskManager::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
   for (const auto &task : tasks)
     if (task->runner.joinable())
       task->runner.join();
+  // §Design 2 rule 3: strictly AFTER every runner thread is joined — freeing
+  // session memory while a runner could still touch it would be a
+  // use-after-free; joined, it is just purge-and-recycle.
+  for (const auto &task : tasks)
+    release_task_arena(*task);
 
   AgentTaskSnapshot target_snapshot;
   std::vector<AgentTaskEvent> closed_events;
@@ -1313,6 +1353,55 @@ AgentTaskManager::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
     emit(event);
   return target_snapshot;
 }
+void AgentTaskManager::release_task_arena(Task &task) {
+  // No-op unless this module handed out an arena for the task (§Design 2:
+  // release unbinds nothing on other threads — runners are already joined by
+  // every caller — purges free pages, and returns the index to the recycle
+  // pool; deliberately no arena.<i>.destroy, see plan §Design 2). Safe to
+  // call twice: release_session_arena() ignores unknown/recycled indices.
+  release_session_arena(task.arena);
+  task.arena.reset();
+}
+
+void AgentTaskManager::bind_root_arena() {
+  std::scoped_lock lock(mutex_);
+  if (!root_arena_.has_value())
+    root_arena_ = acquire_session_arena();
+  if (root_arena_.has_value())
+    bind_current_thread(*root_arena_);
+}
+
+std::vector<SessionHeapReport> AgentTaskManager::heap_reports() const {
+  std::vector<std::shared_ptr<Task>> tasks;
+  {
+    // First caller wins lazy root-arena acquisition: exactly one
+    // acquire_session_arena() runs under mutex_, so no double-acquire.
+    std::scoped_lock lock(mutex_);
+    if (!root_arena_.has_value())
+      root_arena_ = acquire_session_arena();
+    tasks.reserve(tasks_.size());
+    for (const auto &[id, task] : tasks_)
+      tasks.push_back(task);
+  }
+  std::vector<SessionHeapReport> result;
+  if (!memory_stats_available())
+    return result;
+  result.reserve(tasks.size());
+  for (const auto &task : tasks) {
+    SessionHeapReport report;
+    report.label = task->task_path;
+    if (task->id == "root") {
+      if (root_arena_.has_value())
+        report.arena = read_arena_stats(*root_arena_);
+    } else if (const auto &child_arena = task->arena) {
+      report.arena = read_arena_stats(*child_arena);
+    }
+    result.push_back(std::move(report));
+  }
+  std::ranges::sort(result, {}, &SessionHeapReport::label);
+  return result;
+}
+
 AgentTaskSnapshot AgentTaskManager::close(const AgentTaskId &target) {
   std::vector<std::shared_ptr<Task>> closing;
   {

@@ -26,6 +26,7 @@
 #include "core/compaction.h"
 #include "core/event_types.h"
 #include "core/llm_client.h"
+#include "core/memory_stats.h"
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/stream.h"
@@ -470,7 +471,13 @@ void Agent::launch_worker(std::function<void()> worker) {
 
 void Agent::launch_worker_locked(std::function<void()> worker) {
   try {
-    workers_.emplace_back(std::move(worker));
+    // §Design 2: inherit the spawning thread's session-arena context onto the
+    // fresh per-turn jthread — this is the thread that actually allocates
+    // during a turn. Passthrough (zero cost) unless memory stats are enabled;
+    // the wrap happens HERE, on the parent thread, so current_arena() reads
+    // the spawning thread's TLS, and the ArenaInheritor re-binds as the very
+    // first action on the new thread.
+    workers_.emplace_back(inherit_arena(std::move(worker)));
   } catch (...) {
     state_.set_streaming(false);
     state_.set_complete(true);

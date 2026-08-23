@@ -14,10 +14,13 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace pi::core;
@@ -187,13 +190,142 @@ void test_arena_round_trip() {
 }
 #endif // PI_MEMSTATS_HAVE_MALLCTL
 
+// Phase 3 wiring must be safe in EVERY build: bind_root_arena() and
+// heap_reports() are no-ops / return nothing useful without jemalloc, but
+// may never crash.
+void test_heap_reports_safety() {
+  Model model;
+  model.id = "memstats-model";
+  model.api = "unused";
+  model.provider = "unused";
+  Agent::Options options;
+  options.model = model;
+  AgentSession root({.agent_options = options});
+  AgentTaskManager manager(root, options);
+  manager.bind_root_arena();
+  manager.bind_root_arena(); // idempotent
+  const auto heaps = manager.heap_reports();
+  if (!memory_stats_available()) {
+    CHECK(heaps.empty());
+    return;
+  }
+  // With jemalloc active: exactly the root row, with readable stats.
+  CHECK(heaps.size() == 1);
+  CHECK(heaps.front().label == "/root");
+  CHECK(heaps.front().arena.has_value());
+}
+
+#if PI_MEMSTATS_HAVE_MALLCTL
+// THE Phase 3 acceptance test (plan §Phases): spawn a child agent task, run
+// a tool-heavy-equivalent turn on it, and confirm the resulting allocation
+// delta appears in THAT TASK'S ARENA — not the root's, not shared. This is
+// the test that catches the original design's flaw (binding only fixed
+// threads would have dumped nearly everything into shared).
+void test_child_task_arena_attribution() {
+  if (!memory_stats_available()) {
+    std::cerr << "note: skipping arena-attribution test; jemalloc is not the "
+                 "active allocator in this run\n";
+    return;
+  }
+
+  constexpr std::size_t kResponseBytes = 2u << 20; // 2 MiB of live text
+
+  // Serves the child's turn by allocating several MiB ON THE TURN THREAD —
+  // whichever arena that thread is bound to gets charged.
+  class GrowingClient : public LLMClient {
+  public:
+    std::shared_ptr<AssistantMessage>
+    stream(const Model &model, const AgentContext &, const StreamOptions &,
+           AssistantEventCallback, std::stop_token) override {
+      // Burn the bytes then fold them into the response so a chunk survives
+      // in the child's transcript after the turn ends.
+      const std::string text(kResponseBytes, 'x');
+      auto message = std::make_shared<AssistantMessage>();
+      message->api = model.api;
+      message->provider = model.provider;
+      message->model = model.id;
+      message->stop_reason = StopReason::stop;
+      message->content.emplace_back(TextContent{.text = text});
+      return message;
+    }
+    std::string_view provider_name() const override { return "growing-test"; }
+    std::string_view api_id() const override { return "growing-test"; }
+  };
+
+  LLMClientRegistry::instance().register_client(
+      "growing-test", [] { return std::make_shared<GrowingClient>(); });
+
+  Model model;
+  model.id = "growing-model";
+  model.api = "growing-test";
+  model.provider = "growing-test";
+  Agent::Options options;
+  options.model = model;
+  AgentSession root({.agent_options = options});
+  AgentTaskManager manager(root, options);
+  manager.bind_root_arena(); // same call main.cpp makes before the REPL loop
+
+  const auto before = manager.heap_reports();
+  const auto root_before_it =
+      std::ranges::find(before, std::string{"/root"},
+                        &SessionHeapReport::label);
+  CHECK(root_before_it != before.end());
+  const auto root_before =
+      root_before_it->arena ? root_before_it->arena->allocated_bytes : 0;
+
+  const auto spawned =
+      manager.spawn({.task_name = "grow", .prompt = "grow the child arena"});
+
+  AgentTaskSnapshot done;
+  for (int i = 0; i < 200; ++i) {
+    auto snap = manager.get(spawned.id);
+    if (snap && (snap->status == AgentTaskStatusKind::completed ||
+                 snap->status == AgentTaskStatusKind::errored ||
+                 snap->status == AgentTaskStatusKind::interrupted)) {
+      done = *snap;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  CHECK(done.status == AgentTaskStatusKind::completed);
+
+  const auto after = manager.heap_reports();
+  const auto child_it = std::ranges::find(after, spawned.task_path,
+                                          &SessionHeapReport::label);
+  const auto root_after_it =
+      std::ranges::find(after, std::string{"/root"}, &SessionHeapReport::label);
+  CHECK(child_it != after.end());
+  CHECK(root_after_it != after.end());
+  CHECK(child_it->arena.has_value());
+  const auto child_after = child_it->arena->allocated_bytes;
+  const auto root_after = root_after_it->arena
+                              ? root_after_it->arena->allocated_bytes
+                              : root_before;
+  // The child's arena absorbed the multi-MiB turn...
+  CHECK(child_after >= kResponseBytes / 2);
+  // ...while the root stayed roughly flat (bookkeeping noise only).
+  CHECK(root_after - root_before < kResponseBytes / 4);
+
+  // Close joins the runner, purges, and recycles the arena: the task leaves
+  // heap_reports and the release path is crash-free.
+  static_cast<void>(manager.close(spawned.id));
+  const auto post_close = manager.heap_reports();
+  CHECK(std::ranges::find(post_close, spawned.task_path,
+                          &SessionHeapReport::label) == post_close.end());
+  CHECK(std::ranges::find(post_close, std::string{"/root"},
+                          &SessionHeapReport::label) != post_close.end());
+}
+#endif // PI_MEMSTATS_HAVE_MALLCTL
+
 } // namespace
 
 int main() {
   test_composition_split();
   test_stub_safety();
+  test_heap_reports_safety();
 #if PI_MEMSTATS_HAVE_MALLCTL
   test_arena_round_trip();
+  test_child_task_arena_attribution();
 #endif
   if (failed == 0) {
     std::cout << "memory_stats tests passed\n";

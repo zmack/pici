@@ -2,8 +2,8 @@
 
 ## Status
 
-Implementation plan. Phases 1–2 implemented and verified; Phase 3 (arena
-wiring into Agent/EventStream/AgentTaskManager) and Phase 4 not started.
+Implementation plan. All four phases implemented; Phases 1–2 verified and
+committed (`7da239d`), Phases 3–4 verified 2026-08-23, uncommitted.
 Targets the current tree as of 2026-08-22
 (`src/core/agent_task.{h,cpp}` `AgentTaskManager`, `src/core/session/agent_session.{h,cpp}`,
 `src/core/agent.cpp`, `src/core/stream.h`, `src/main.cpp` `cmd_run`).
@@ -37,28 +37,46 @@ text is not reproduced.
   non-jemalloc runs (glibc build stays "unavailable", no crash).
   Note: `test_arena_round_trip` exercises the memory_stats module directly;
   nothing in the agent/task path uses the module until Phase 3.
-- **Phase 3 — not started.** Verified by exhaustive grep (2026-08-22):
-  no `inherit_arena` / `acquire_session_arena` / `bind_current_thread` /
-  `release_session_arena` reference exists in `agent.cpp`, `stream.h`,
-  `agent_task.cpp`, or `main.cpp`. All §Design 2 wiring remains to be done:
-  wrap `Agent::launch_worker_locked`, `EventStream::start_worker`, and
-  `AgentTaskManager::spawn`'s runner jthread; bind-before-
-  `owned_session`-construction; release-after-join on close; root arena
-  bound on the main thread before the interactive loop.
-- **Phase 4 — not started.** Heap panel, `Σ arenas + shared == allocated`
-  consistency check, README section all outstanding.
+- **Phase 3 — done (2026-08-23).** All three spawn points wrapped with
+  `inherit_arena()`: `Agent::launch_worker_locked`, `EventStream::start_worker`,
+  and `AgentTaskManager::spawn`'s runner jthread. Child arenas are acquired in
+  `make_task()` on the spawning thread immediately before `owned_session`
+  construction (guard restores the spawning thread's context on unwind) and
+  released in `close_tasks()` strictly after all runner threads join; the
+  spawn-failure path also releases. Root arena acquired exactly once by
+  `bind_root_arena()` (main thread, before the interactive loop) or lazily by
+  `heap_reports()` under the manager mutex. Acceptance test
+  (`test_child_task_arena_attribution`): a child task whose client allocates a
+  2 MiB response lands ≥ half of it in the child's arena while root stays flat
+  (< quarter); passes under real `LD_PRELOAD=libjemalloc.so.2`. Full suites
+  green in default AND memstats+preload builds (35/35 each).
+- **Phase 4 — done (2026-08-23).** Heap panel added above the composition
+  panel (`format_memory_heap`, main.cpp); shared is computed as
+  `stats.allocated − Σ(session arenas)` per §Design 4's consistency identity,
+  clamped at zero against cross-arena epoch drift. README gained a `/memory`
+  section (two-panel model, enable recipes, accuracy caveats). Verified live
+  in tmux under jemalloc preload: fresh session shows root 0 B / shared
+  1.6 MB / resident 5.2 MB / RSS 25.6 MB; repeated `/memory` stable (no
+  double-acquire). Default build prints only composition + the enable hint.
 
-### Verification gaps before calling this finished
+### Remaining verification notes (post-implementation)
 
-1. Phase 3 implementation + its acceptance test: child-task arena
-   attribution end-to-end (spawn a child agent task in a preloaded
-   memstats build, run a tool-heavy turn, confirm the delta appears in the
-   task's arena, not root/shared). Needs the Phase 4 heap panel to observe
-   via `/memory`, or a temporary debug dump.
-2. Default-renderer TTY check of `/memory` after a completed turn was
-   inconclusive when driven externally from tmux (input-focus quirk);
-   region renderer verified instead. Worth one manual pass in a real
-   terminal.
+1. Phase 3 acceptance (child-task arena attribution) is covered by the
+   automated test above, which runs in CI whenever the memstats build is
+   exercised under preload. A manual interactive pass with a real child task
+   spawned mid-session has not been driven end-to-end from tmux — the REPL
+   currently exposes no interactive task-spawn command, so the automated
+   path (same wiring, same spawn chain) is the evidence.
+2. Default-renderer TTY check of `/memory`: **done** (2026-08-23, tmux +
+   snapshot harness, jemalloc-preloaded memstats build). Both panels render
+   correctly and repeatedly; the previously suspected input-focus quirk did
+   not reproduce. One caveat observed live: after binding at startup, an
+   idle session's root reads exactly 0 B — pre-bound startup allocations
+   were served from jemalloc's default pool before the bind, and tcache
+   serves subsequent small frees/allocs without touching the arena. This is
+   plan §Risks 2 working as documented, not a wiring bug: attribution moves
+   to the right arena under genuine allocation churn (see the acceptance
+   test), and shared absorbs the startup tail.
 
 ## Goal
 
