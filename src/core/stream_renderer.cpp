@@ -691,7 +691,9 @@ private:
     write_best_effort(fd_, bar.data(), bar.size());
   }
 
-  void write_seq(const char *s) const { write_best_effort(fd_, s, std::strlen(s)); }
+  void write_seq(const char *s) const {
+    write_best_effort(fd_, s, std::strlen(s));
+  }
 
   // Cached rendered ANSI for the finalized (complete-block) prefix of content.
   // Populated when BlockBoundaryScanner finds a new stable boundary.  On the
@@ -769,12 +771,9 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
                                              AssistantMessageTextDeltaEvent>) {
                   r.on_text_delta(ae.delta);
 
-                } else if constexpr (std::is_same_v<
-                                         AE,
-                                         AssistantMessageToolCallStartEvent> ||
-                                     std::is_same_v<
-                                         AE,
-                                         AssistantMessageToolCallDeltaEvent>) {
+                } else if constexpr (
+                    std::is_same_v<AE, AssistantMessageToolCallStartEvent> ||
+                    std::is_same_v<AE, AssistantMessageToolCallDeltaEvent>) {
                   if (ae.content_index < ae.partial.content.size()) {
                     if (const auto *tc = std::get_if<ToolCall>(
                             &ae.partial.content[ae.content_index])) {

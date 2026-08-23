@@ -54,7 +54,7 @@
 # dir        = "~/.config/pici/tools"  # --tools-dir  (Lua tool scripts)
 # disabled   = false                   # --no-tools
 # no_builtin = false                   # --no-builtin-tools
-# list       = ["read", "bash", "edit", "write", "grep", "find", "ls"]
+# list       = ["read", "bash", "apply_patch", "edit", "write", "grep", "find", "ls"]
 
 [addons]
 # files = ["~/.config/pici/rewind.lua"]  # --hooks-file (repeatable, loads in order)

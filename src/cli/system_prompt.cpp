@@ -34,6 +34,8 @@ std::string tool_description(std::string_view name) {
     return "Read file contents";
   if (name == "bash")
     return "Execute a shell command";
+  if (name == "apply_patch")
+    return "Apply a multi-file patch atomically";
   if (name == "edit")
     return "Apply an exact edit to a file";
   if (name == "write")
@@ -85,6 +87,8 @@ std::string build_system_prompt(std::string_view custom_prompt,
         "workspace context is needed.\n"
         "- Do not modify files unless the user asks for a change or the task "
         "clearly requires it.\n"
+        "- Prefer apply_patch for multi-file or multi-hunk changes; use "
+        "write for brand-new whole files.\n"
         "- Do not re-read a file after editing or writing it to verify the "
         "change: edit/write fail loudly if the operation did not succeed, so "
         "a successful call already confirms the result.\n"

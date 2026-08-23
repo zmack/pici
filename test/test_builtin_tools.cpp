@@ -81,8 +81,10 @@ static SandboxPolicyPtr disabled_sandbox() {
 
 void test_tool_factories() {
   tests::register_test("Builtin tools: factory names", []() {
-    const auto tools = create_all_tools();
-    CHECK_EQ(tools.size(), std::size_t(7));
+    const auto tools =
+        create_all_tools(std::filesystem::temp_directory_path(),
+                         disabled_sandbox());
+    CHECK_EQ(tools.size(), std::size_t(8));
     CHECK(find_tool(tools, "read"));
     CHECK(find_tool(tools, "bash"));
     CHECK(find_tool(tools, "edit"));
@@ -464,6 +466,23 @@ void test_skill_tool() {
   });
 }
 
+void test_fuzzy_find() {
+  tests::register_test("Find tool: fuzzy mode ranks and tokenizes", []() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      "pici-builtin-tools-fuzzy-find";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "src");
+    std::ofstream(root / "src" / "build_tools.cpp").put('\n');
+    std::ofstream(root / "src" / "other.txt").put('\n');
+    const auto tool = find_tool(create_all_tools(root), "find");
+    const auto result = tool->execute(
+        "1", R"({"pattern":"buildtools cpp","mode":"fuzzy"})", {}, {});
+    CHECK(!result->is_error());
+    CHECK(result->content().find("src/build_tools.cpp") == 0);
+    std::filesystem::remove_all(root);
+  });
+}
+
 int main() {
   test_tool_factories();
   test_file_tools();
@@ -471,6 +490,7 @@ int main() {
   test_gitignore();
   test_image_read();
   test_discovery_tools();
+  test_fuzzy_find();
   test_bash_tool();
   test_skill_tool();
 

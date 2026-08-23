@@ -4,8 +4,8 @@
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
-#include "core/terminal.h"
 #include "core/providers/transform_messages.h"
+#include "core/terminal.h"
 #include "http/http_client.h"
 #include "nlohmann/json_fwd.hpp"
 

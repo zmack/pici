@@ -91,8 +91,8 @@ bool run_allocation_canary() {
     std::free(canary);
     if (!read_ok)
       return false;
-    const auto delta = static_cast<std::int64_t>(after) -
-                       static_cast<std::int64_t>(before);
+    const auto delta =
+        static_cast<std::int64_t>(after) - static_cast<std::int64_t>(before);
     // Tolerate concurrent churn from background threads; demand most of the
     // canary show up as live allocator bytes.
     if (delta >= static_cast<std::int64_t>(kCanaryBytes) / 2)
@@ -108,8 +108,8 @@ void ensure_initialized() {
   std::scoped_lock lock(rt.mutex);
   if (rt.initialized.load(std::memory_order_relaxed))
     return;
-  rt.mallctl = reinterpret_cast<MallctlFn>(
-      dlsym(RTLD_DEFAULT, "mallctl")); // NOLINT(cppcoreguidelines-init-variables)
+  rt.mallctl = reinterpret_cast<MallctlFn>(dlsym(
+      RTLD_DEFAULT, "mallctl")); // NOLINT(cppcoreguidelines-init-variables)
   bool ok = rt.mallctl != nullptr;
   if (ok)
     ok = run_allocation_canary();

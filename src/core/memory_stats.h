@@ -9,7 +9,7 @@
 // Feature gate: PI_MEMSTATS_HAVE_MALLCTL is 1 only when compiled with
 // -DPI_CPP_MEMSTATS_ENABLED on a glibc x86_64/arm64 target — i.e. exactly
 // when dlsym(RTLD_DEFAULT, "mallctl") can possibly resolve.
-#if defined(PI_CPP_MEMSTATS_ENABLED) && defined(__GLIBC__) && \
+#if defined(PI_CPP_MEMSTATS_ENABLED) && defined(__GLIBC__) &&                  \
     (defined(__x86_64__) || defined(__aarch64__))
 #define PI_MEMSTATS_HAVE_MALLCTL 1
 #else
@@ -35,8 +35,7 @@ bool memory_stats_available();
 struct SessionArena {
   unsigned index{0};
 
-  friend bool operator==(const SessionArena &,
-                         const SessionArena &) = default;
+  friend bool operator==(const SessionArena &, const SessionArena &) = default;
 };
 
 // Creates a new jemalloc arena, or reuses one from the recycle pool. Arenas

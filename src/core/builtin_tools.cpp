@@ -1,4 +1,5 @@
 #include "core/builtin_tools.h"
+#include "core/apply_patch.h"
 #include "core/message_types.h"
 #include "core/sandbox.h"
 #include "core/terminal.h"
@@ -21,6 +22,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <queue>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -48,6 +50,7 @@ constexpr std::size_t kMaxBytes = static_cast<const std::size_t>(64 * 1024);
 constexpr std::size_t kReadMaxLines = 2000;
 constexpr int kLsDefaultLimit = 500;
 constexpr int kFindDefaultLimit = 1000;
+constexpr int kFuzzyFindDefaultLimit = 20;
 constexpr int kGrepDefaultLimit = 100;
 // Suggestions appended when the skill tool is called with an unknown name
 // (plans/agent-skills.md §5: cheap miss handling saves a whole retry turn).
@@ -416,6 +419,81 @@ std::string relative_posix(const std::filesystem::path &path,
   }
   auto value = rel.generic_string();
   return value.empty() ? "." : value;
+}
+
+std::optional<int> fuzzy_atom_score(std::string_view candidate,
+                                    std::string_view atom) {
+  if (atom.empty())
+    return 0;
+  if (candidate.empty() || atom.size() > candidate.size())
+    return std::nullopt;
+
+  constexpr int kMissing = std::numeric_limits<int>::min() / 4;
+  const std::size_t n = candidate.size();
+  const std::size_t m = atom.size();
+  std::vector<std::vector<int>> best(n, std::vector<int>(m, kMissing));
+  std::vector<std::vector<int>> ending(n, std::vector<int>(m, kMissing));
+  const auto folded = [](char ch) {
+    return static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  };
+  for (std::size_t i = 0; i < n; ++i) {
+    for (std::size_t j = 0; j < m; ++j) {
+      if (i > 0)
+        best[i][j] = best[i - 1][j];
+      if (folded(candidate[i]) != folded(atom[j]))
+        continue;
+      int prior = j == 0 ? 0 : kMissing;
+      if (j > 0 && i > 0)
+        prior = best[i - 1][j - 1];
+      if (j > 0 && i > 0 && ending[i - 1][j - 1] != kMissing)
+        prior = std::max(prior, ending[i - 1][j - 1] + 1);
+      if (prior == kMissing)
+        continue;
+      int bonus = 0;
+      const bool boundary =
+          i == 0 || candidate[i - 1] == '/' || candidate[i - 1] == '_' ||
+          candidate[i - 1] == '-' || candidate[i - 1] == '.' ||
+          (static_cast<bool>(
+               std::islower(static_cast<unsigned char>(candidate[i - 1]))) &&
+           static_cast<bool>(
+               std::isupper(static_cast<unsigned char>(candidate[i]))));
+      if (boundary)
+        bonus += 2;
+      const auto slash = candidate.rfind('/');
+      if (slash == std::string_view::npos || i > slash)
+        bonus += 1;
+      ending[i][j] = prior + bonus;
+      best[i][j] = ending[i][j];
+      if (i > 0)
+        best[i][j] = std::max(best[i][j], best[i - 1][j]);
+    }
+  }
+  int result = kMissing;
+  for (std::size_t i = 0; i < n; ++i)
+    result = std::max(result, ending[i][m - 1]);
+  return result == kMissing ? std::nullopt : std::optional<int>(result);
+}
+
+std::optional<int> fuzzy_score_path(std::string_view candidate,
+                                    std::string_view query) {
+  int total = 0;
+  std::size_t start = 0;
+  while (start <= query.size()) {
+    const auto end = query.find_first_of(" \t\n\r", start);
+    const auto atom =
+        query.substr(start, end == std::string_view::npos ? query.size() - start
+                                                          : end - start);
+    if (!atom.empty()) {
+      const auto score = fuzzy_atom_score(candidate, atom);
+      if (!score)
+        return std::nullopt;
+      total += *score;
+    }
+    if (end == std::string_view::npos)
+      break;
+    start = end + 1;
+  }
+  return total;
 }
 
 class ReadTool final : public BuiltinTool {
@@ -853,6 +931,45 @@ apply_edits(const std::string &lf_content,
   return result;
 }
 
+class ApplyPatchTool final : public BuiltinTool {
+public:
+  explicit ApplyPatchTool(const std::filesystem::path &cwd)
+      : BuiltinTool(
+            "apply_patch",
+            "Apply a multi-file patch atomically using the *** Begin Patch "
+            "format.",
+            R"json({"type":"object","properties":{"input":{"type":"string","description":"Full patch text starting with *** Begin Patch"}},"required":["input"],"additionalProperties":false})json",
+            cwd, false) {}
+
+  std::shared_ptr<ToolResult>
+  execute(std::string_view, std::string_view args, std::stop_token,
+          ToolUpdateCallback on_update) const override {
+    try {
+      auto json = parse_args(args);
+      if (!json.contains("input") || !json["input"].is_string())
+        throw std::runtime_error("apply_patch requires a string input");
+      ParseDiagnostic diagnostic;
+      auto patch =
+          parse_patch(json["input"].get<std::string>(), true, diagnostic);
+      if (!patch)
+        throw std::runtime_error("Invalid patch at line " +
+                                 std::to_string(diagnostic.line) + ": " +
+                                 diagnostic.message);
+      if (on_update)
+        on_update(
+            std::make_shared<TextToolResult>(json["input"].get<std::string>()));
+      const auto applied = pi::core::apply_patch(cwd(), *patch);
+      const auto count = applied.added.size() + applied.updated.size() +
+                         applied.deleted.size() + applied.moved.size();
+      return std::make_shared<TextToolResult>(
+          "Applied patch: " + std::to_string(count) + " file(s)\n" +
+          applied.unified_diff);
+    } catch (const std::exception &err) {
+      return error_result(err);
+    }
+  }
+};
+
 class EditTool final : public BuiltinTool {
 public:
   explicit EditTool(const std::filesystem::path &cwd)
@@ -996,27 +1113,43 @@ public:
   explicit FindTool(const std::filesystem::path &cwd)
       : BuiltinTool(
             "find",
-            "Search for files by glob pattern. Returns matching file paths "
-            "relative to the search directory.",
-            R"json({"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match files, e.g. '*.cpp' or 'src/**/*.h'"},"path":{"type":"string","description":"Directory to search in (default: current directory)"},"limit":{"type":"number","description":"Maximum number of results (default: 1000)"}},"required":["pattern"],"additionalProperties":false})json",
+            "Search for files by glob pattern, or by fuzzy name match when "
+            "mode is 'fuzzy'. Returns matching file paths relative to the "
+            "search directory, ranked by relevance in fuzzy mode.",
+            R"json({"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern, or fuzzy query when mode is 'fuzzy'"},"path":{"type":"string","description":"Directory to search in (default: current directory)"},"limit":{"type":"number","description":"Maximum number of results (default: 1000)"},"mode":{"type":"string","enum":["glob","fuzzy"],"description":"Search mode (default: glob)"}},"required":["pattern"],"additionalProperties":false})json",
             cwd, true) {}
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
-                                      std::stop_token,
+                                      std::stop_token stop,
                                       ToolUpdateCallback) const override {
     try {
       const auto json = parse_args(args);
       const auto root = resolve_workspace_path(json.value("path", "."));
       const auto pattern = json.value("pattern", std::string{"*"});
-      const auto limit = std::max(1, json.value("limit", kFindDefaultLimit));
-      if (!std::filesystem::is_directory(root)) {
+      const auto mode = json.value("mode", std::string{"glob"});
+      const bool fuzzy = mode == "fuzzy";
+      const auto limit =
+          std::max(1, json.value("limit", fuzzy ? kFuzzyFindDefaultLimit
+                                                : kFindDefaultLimit));
+      if (!std::filesystem::is_directory(root))
         throw std::runtime_error("Not a directory: " + root.string());
-      }
       GitIgnore gi;
       gi.load(cwd());
       if (root != cwd())
         gi.load(root);
-      const std::regex matcher(glob_to_regex(pattern));
+      std::optional<std::regex> matcher;
+      if (!fuzzy)
+        matcher.emplace(glob_to_regex(pattern));
+      struct Match {
+        int score;
+        std::string path;
+      };
+      struct Worse {
+        bool operator()(const Match &a, const Match &b) const {
+          return a.score > b.score || (a.score == b.score && a.path < b.path);
+        }
+      };
+      std::priority_queue<Match, std::vector<Match>, Worse> top;
       std::vector<std::string> results;
       std::error_code ec;
       for (std::filesystem::recursive_directory_iterator it(
@@ -1024,40 +1157,57 @@ public:
                ec),
            end;
            it != end && !ec; it.increment(ec)) {
+        if (stop.stop_requested())
+          break;
         if (it->is_directory(ec) && (should_skip_dir(it->path()) ||
                                      gi.ignored(it->path(), root, true))) {
           it.disable_recursion_pending();
           continue;
         }
-        if (!it->is_regular_file(ec)) {
-          continue;
-        }
-        if (gi.ignored(it->path(), root, false))
+        if (!it->is_regular_file(ec) || gi.ignored(it->path(), root, false))
           continue;
         auto rel = relative_posix(it->path(), root);
-        if (std::regex_match(rel, matcher) ||
-            std::regex_match(it->path().filename().generic_string(), matcher)) {
-          results.push_back(std::move(rel));
-          if (std::cmp_greater_equal(results.size(), limit)) {
-            break;
+        if (!fuzzy) {
+          if (std::regex_match(rel, *matcher) ||
+              std::regex_match(it->path().filename().generic_string(),
+                               *matcher)) {
+            results.push_back(std::move(rel));
+            if (std::cmp_greater_equal(results.size(), limit))
+              break;
           }
+          continue;
         }
+        const auto score = fuzzy_score_path(rel, pattern);
+        if (!score)
+          continue;
+        top.push({*score, std::move(rel)});
+        if (std::cmp_greater(top.size(), limit))
+          top.pop();
       }
-      if (results.empty()) {
+      if (fuzzy) {
+        while (!top.empty()) {
+          results.push_back(std::move(top.top().path));
+          top.pop();
+        }
+        std::ranges::sort(results, [&](const auto &a, const auto &b) {
+          const auto sa = fuzzy_score_path(a, pattern).value_or(0);
+          const auto sb = fuzzy_score_path(b, pattern).value_or(0);
+          return sa > sb || (sa == sb && a < b);
+        });
+      } else {
+        std::ranges::sort(results);
+      }
+      if (results.empty())
         return std::make_shared<TextToolResult>(
             "No files found matching pattern");
-      }
-      std::ranges::sort(results);
       std::ostringstream out;
       for (std::size_t i = 0; i < results.size(); ++i) {
-        if (i > 0) {
+        if (i > 0)
           out << '\n';
-        }
         out << results[i];
       }
-      if (std::cmp_greater_equal(results.size(), limit)) {
+      if (std::cmp_greater_equal(results.size(), limit))
         out << "\n\n[" << limit << " results limit reached]";
-      }
       return std::make_shared<TextToolResult>(
           truncate_head(out.str(), limit, kMaxBytes));
     } catch (const std::exception &err) {
@@ -1368,6 +1518,7 @@ create_coding_tools(const std::filesystem::path &cwd,
   std::vector<std::shared_ptr<const ToolDefinition>> tools;
   tools.push_back(std::make_shared<ReadTool>(cwd));
   tools.push_back(std::make_shared<BashTool>(cwd, std::move(sandbox_policy)));
+  tools.push_back(std::make_shared<ApplyPatchTool>(cwd));
   tools.push_back(std::make_shared<EditTool>(cwd));
   tools.push_back(std::make_shared<WriteTool>(cwd));
   if (skills != nullptr && !skills->skills.empty())

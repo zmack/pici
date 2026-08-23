@@ -458,11 +458,12 @@ AgentTaskManager::inherit_tools(const AgentContext &parent,
         if (!allow_write_tools)
           return false;
         if (child_write_tools_ == ChildWriteTools::core &&
-            (tool->name() == "edit" || tool->name() == "write"))
+            (tool->name() == "edit" || tool->name() == "apply_patch" ||
+             tool->name() == "write"))
           return true;
         return child_write_tools_ == ChildWriteTools::all &&
-               (tool->name() == "edit" || tool->name() == "write" ||
-                tool->name() == "bash");
+               (tool->name() == "edit" || tool->name() == "apply_patch" ||
+                tool->name() == "write" || tool->name() == "bash");
       };
 
   std::vector<std::shared_ptr<const ToolDefinition>> safe;
@@ -482,7 +483,8 @@ AgentTaskManager::inherit_tools(const AgentContext &parent,
     if (it == parent.tools.end() || !can_grant(*it)) {
       if (it != parent.tools.end() && allow_write_tools &&
           child_write_tools_ == ChildWriteTools::none &&
-          (name == "edit" || name == "write" || name == "bash"))
+          (name == "edit" || name == "apply_patch" || name == "write" ||
+           name == "bash"))
         throw AgentTaskError(
             AgentTaskErrorKind::permission_denied,
             "child write tools are disabled; set agents.write_tools to core "

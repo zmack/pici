@@ -425,7 +425,6 @@ std::string_view input_area_background() {
 // session; everything it calls here (kitty_keyboard_enabled,
 // input_area_background) stays in this file's anonymous namespace.
 
-
 std::size_t terminal_columns() {
   // NOLINTNEXTLINE(misc-include-cleaner): ioctl declarations vary by platform.
   struct winsize size {};
