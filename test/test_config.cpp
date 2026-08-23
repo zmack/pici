@@ -87,6 +87,9 @@ list     = ["read", "bash"]
 files = ["/tmp/hook1.lua", "/tmp/hook2.lua"]
 dir   = "/tmp/addons"
 
+[agents]
+write_tools = "core"
+
 [display]
 render  = "markdown"
 verbose = true
@@ -123,6 +126,7 @@ retention_days = 45
     CHECK(cfg.no_context_files);
     CHECK(!cfg.no_skills); // [skills] absent in this fixture
     CHECK_EQ(cfg.sandbox_mode, std::string("disabled"));
+    CHECK_EQ(cfg.agent_write_tools, std::string("core"));
     CHECK(cfg.mailbox_enabled);
     CHECK_EQ(cfg.mailbox_path, std::string("~/custom-mailbox.sqlite3"));
     auto document = load_config_document(p);

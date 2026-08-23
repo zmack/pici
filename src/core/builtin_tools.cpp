@@ -574,7 +574,7 @@ public:
             "Write content to a file. Creates parent directories and "
             "overwrites existing content.",
             R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file to write (relative or absolute)"},"content":{"type":"string","description":"Content to write to the file"}},"required":["path","content"],"additionalProperties":false})json",
-            cwd) {}
+            cwd, true) {}
 
   std::shared_ptr<ToolResult> execute(std::string_view, std::string_view args,
                                       std::stop_token,
@@ -861,7 +861,7 @@ public:
             "Edit a single file using exact text replacement. Each "
             "edits[].oldText must match exactly once.",
             R"json({"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text to replace"},"newText":{"type":"string","description":"Replacement text"}},"required":["oldText","newText"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false})json",
-            cwd) {}
+            cwd, true) {}
 
   ToolArguments
   prepare_arguments(const ToolArguments &arguments) const override {
@@ -1187,7 +1187,7 @@ public:
             "Execute a bash command in the current working directory. Returns "
             "stdout and stderr. Optionally provide timeout in seconds.",
             R"json({"type":"object","properties":{"command":{"type":"string","description":"Bash command to execute"},"timeout":{"type":"number","description":"Timeout in seconds (optional)"}},"required":["command"],"additionalProperties":false})json",
-            cwd),
+            cwd, true),
         sandbox_policy_(std::move(sandbox_policy)) {}
 
   std::shared_ptr<ToolResult>

@@ -105,6 +105,9 @@ struct SpawnAgentRequest {
   std::optional<std::string> model_spec;
   std::vector<std::string> requested_tools;
   bool allow_subagents{false};
+  // Explicit caller opt-in; the manager's configured policy remains the
+  // authoritative upper bound.
+  bool allow_write_tools{false};
 };
 
 struct AgentTaskResult {
@@ -225,6 +228,8 @@ using AgentTaskEvent =
 
 class AgentTaskManager {
 public:
+  enum class ChildWriteTools { none, core, all };
+
   struct Limits {
     std::size_t max_active_executions{4};
     std::size_t max_resident_tasks{8};
@@ -245,7 +250,8 @@ public:
 
   AgentTaskManager(AgentSession &root, Agent::Options child_options);
   AgentTaskManager(AgentSession &root, Agent::Options child_options,
-                   Limits limits, EventCallback on_event = {});
+                   Limits limits, EventCallback on_event = {},
+                   ChildWriteTools child_write_tools = ChildWriteTools::none);
   ~AgentTaskManager() noexcept;
 
   AgentTaskManager(const AgentTaskManager &) = delete;
@@ -338,6 +344,7 @@ private:
   EventCallback on_event_;
   RegisterEndpointCallback register_endpoint_;
   UnregisterEndpointCallback unregister_endpoint_;
+  ChildWriteTools child_write_tools_{ChildWriteTools::none};
 
   mutable std::mutex mutex_;
   mutable std::condition_variable_any changed_;
@@ -369,9 +376,10 @@ private:
                     AgentTaskResult &result, bool &aborted);
   std::vector<Message> inherit_context(const AgentContext &parent,
                                        const ContextInheritance &request) const;
-  static std::vector<std::shared_ptr<const ToolDefinition>>
+  std::vector<std::shared_ptr<const ToolDefinition>>
   inherit_tools(const AgentContext &parent,
-                const std::vector<std::string> &requested);
+                const std::vector<std::string> &requested,
+                bool allow_write_tools) const;
   std::shared_ptr<Task> make_task(const SpawnAgentRequest &request,
                                   const std::shared_ptr<Task> &parent,
                                   std::vector<Message> context,

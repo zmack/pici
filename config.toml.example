@@ -44,6 +44,12 @@
 # system_prompt = "You are a helpful coding assistant."  # --system-prompt
 # thinking      = "off"   # --thinking: off|minimal|low|medium|high|xhigh
 
+[agents]
+# Child agents are read-only by default. "core" permits workspace-confined
+# edit/write when spawn_agent requests allow_write_tools=true.
+# "all" additionally permits bash and requires sandbox.mode != "disabled".
+# write_tools = "none"   # none | core | all
+
 [tools]
 # dir        = "~/.config/pici/tools"  # --tools-dir  (Lua tool scripts)
 # disabled   = false                   # --no-tools

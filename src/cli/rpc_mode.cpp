@@ -356,6 +356,7 @@ void RpcMode::handle(const nlohmann::json &command) {
       if (command.contains("tools"))
         request.requested_tools =
             command.at("tools").get<std::vector<std::string>>();
+      request.allow_write_tools = command.value("allow_write_tools", false);
       response(command, true,
                task_snapshot_json(task_manager_->spawn(request)));
     } else if (type == "list_agents") {

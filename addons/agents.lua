@@ -22,7 +22,7 @@ local function tool(name, description, schema, fn)
   })
 end
 
-tool("spawn_agent", "Start a named asynchronous read-only child agent and return its identity. The returned snapshot includes a `context` object (context_bytes, last/total tokens, context_window) for tracking the child's context growth; poll list_agents/get and close_agent when the child's total_tokens approach its context_window.", {
+tool("spawn_agent", "Start a child agent. Children are read-only by default; write tools require agents.write_tools = core/all and explicit allow_write_tools.", {
   type = "object",
   properties = {
     task_name = {type = "string"},
@@ -30,6 +30,7 @@ tool("spawn_agent", "Start a named asynchronous read-only child agent and return
     context = {type = "object"},
     model = {type = "string"},
     tools = {type = "array", items = {type = "string"}},
+    allow_write_tools = {type = "boolean"},
   },
   required = {"task_name", "message"},
   additionalProperties = false,

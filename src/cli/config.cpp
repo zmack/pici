@@ -525,6 +525,9 @@ void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
   if (auto d = str("addons", "dir"); !d.empty())
     cfg.hooks_dir = expand_tilde(d);
 
+  // [agents]
+  cfg.agent_write_tools = str("agents", "write_tools");
+
   // [display]
   cfg.render = str("display", "render");
   cfg.verbose = boolean("display", "verbose");

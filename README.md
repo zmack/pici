@@ -386,7 +386,23 @@ graph.  Enable it explicitly when working on tracing:
 cmake -B build-otel -DPI_CPP_OTEL_API=ON
 ```
 
-### Lua context access
+### Write-enabled child agents
+
+Child agents are read-only by default. To allow a child to edit or write files,
+add this to `config.toml`:
+
+```toml
+[agents]
+write_tools = "core"
+```
+
+Then the child must explicitly request the grant (`allow_write_tools = true`)
+and request `edit` or `write` in its tool list. `write_tools = "all"` also
+permits `bash`, but requires an enabled sandbox. Child agents do not run the
+root agent's Lua permission hooks; use the config gate and sandbox policy as
+the trust boundary.
+
+
 
 Lua `on_command` hooks receive a fourth argument in addition to the legacy
 `cmd`, `args`, and flattened `transcript` values:

@@ -1230,6 +1230,24 @@ int cmd_run(const cli::Args &args,
   }
   auto sandbox_policy = std::make_shared<core::SandboxPolicy>(sandbox_mode);
 
+  core::AgentTaskManager::ChildWriteTools child_write_tools =
+      core::AgentTaskManager::ChildWriteTools::none;
+  if (args.agent_write_tools == "core")
+    child_write_tools = core::AgentTaskManager::ChildWriteTools::core;
+  else if (args.agent_write_tools == "all")
+    child_write_tools = core::AgentTaskManager::ChildWriteTools::all;
+  else if (!args.agent_write_tools.empty() &&
+           args.agent_write_tools != "none") {
+    std::cerr << "error: invalid agents.write_tools value \""
+              << args.agent_write_tools << "\"; valid: none, core, all\n";
+    return 1;
+  }
+  if (child_write_tools == core::AgentTaskManager::ChildWriteTools::all &&
+      sandbox_mode == core::SandboxMode::disabled) {
+    std::cerr << "error: agents.write_tools=all requires an enabled sandbox\n";
+    return 1;
+  }
+
   std::vector<cli::ContextFile> context_files;
   if (!args.no_context_files) {
     context_files = load_context_files();
@@ -1616,7 +1634,8 @@ int cmd_run(const cli::Args &args,
   }
   auto task_manager = std::make_shared<core::AgentTaskManager>(
       runtime, opts, core::AgentTaskManager::Limits{},
-      core::fan_out_agent_task_callbacks(std::move(task_callbacks)));
+      core::fan_out_agent_task_callbacks(std::move(task_callbacks)),
+      child_write_tools);
   if (mailbox) {
     task_manager->set_endpoint_registration(
         [mailbox](const core::AgentTaskId &task_id,
@@ -1846,6 +1865,7 @@ int cmd_run(const cli::Args &args,
           request.requested_tools =
               v.at("tools").get<std::vector<std::string>>();
         request.allow_subagents = v.value("allow_subagents", false);
+        request.allow_write_tools = v.value("allow_write_tools", false);
         return snapshot_json(task_manager->spawn(request));
       } catch (const core::AgentTaskError &error) {
         return task_error_json(error);

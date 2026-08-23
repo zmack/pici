@@ -313,13 +313,15 @@ struct AgentTaskManager::Task {
 
 AgentTaskManager::AgentTaskManager(AgentSession &root,
                                    Agent::Options child_options)
-    : AgentTaskManager(root, std::move(child_options), Limits{}, {}) {}
+    : AgentTaskManager(root, std::move(child_options), Limits{}, {},
+                       ChildWriteTools::none) {}
 
 AgentTaskManager::AgentTaskManager(AgentSession &root,
                                    Agent::Options child_options, Limits limits,
-                                   EventCallback on_event)
+                                   EventCallback on_event,
+                                   ChildWriteTools child_write_tools)
     : root_(root), child_options_(std::move(child_options)), limits_(limits),
-      on_event_(std::move(on_event)) {
+      on_event_(std::move(on_event)), child_write_tools_(child_write_tools) {
   if (limits_.max_active_executions == 0 || limits_.max_resident_tasks == 0)
     throw AgentTaskError(AgentTaskErrorKind::internal,
                          "task limits must allow at least one task");
@@ -442,10 +444,31 @@ bool AgentTaskManager::valid_task_name(std::string_view name) {
 
 std::vector<std::shared_ptr<const ToolDefinition>>
 AgentTaskManager::inherit_tools(const AgentContext &parent,
-                                const std::vector<std::string> &requested) {
+                                const std::vector<std::string> &requested,
+                                bool allow_write_tools) const {
+  const auto can_grant =
+      [this,
+       allow_write_tools](const std::shared_ptr<const ToolDefinition> &tool) {
+        if (!tool)
+          return false;
+        if (is_child_safe_tool(tool) &&
+            (tool->name() != "edit" && tool->name() != "write" &&
+             tool->name() != "bash"))
+          return true;
+        if (!allow_write_tools)
+          return false;
+        if (child_write_tools_ == ChildWriteTools::core &&
+            (tool->name() == "edit" || tool->name() == "write"))
+          return true;
+        return child_write_tools_ == ChildWriteTools::all &&
+               (tool->name() == "edit" || tool->name() == "write" ||
+                tool->name() == "bash");
+      };
+
   std::vector<std::shared_ptr<const ToolDefinition>> safe;
   for (const auto &tool : parent.tools)
-    if (is_child_safe_tool(tool))
+    if (is_child_safe_tool(tool) && tool->name() != "edit" &&
+        tool->name() != "write" && tool->name() != "bash")
       safe.push_back(tool);
 
   if (requested.empty())
@@ -456,9 +479,17 @@ AgentTaskManager::inherit_tools(const AgentContext &parent,
     auto it = std::ranges::find_if(parent.tools, [&name](const auto &tool) {
       return tool && tool->name() == name;
     });
-    if (it == parent.tools.end() || !is_child_safe_tool(*it))
+    if (it == parent.tools.end() || !can_grant(*it)) {
+      if (it != parent.tools.end() && allow_write_tools &&
+          child_write_tools_ == ChildWriteTools::none &&
+          (name == "edit" || name == "write" || name == "bash"))
+        throw AgentTaskError(
+            AgentTaskErrorKind::permission_denied,
+            "child write tools are disabled; set agents.write_tools to core "
+            "or all");
       throw AgentTaskError(AgentTaskErrorKind::invalid_tool,
                            "tool is not available to child agents: " + name);
+    }
     if (std::ranges::none_of(
             result, [&name](const auto &tool) { return tool->name() == name; }))
       result.push_back(*it);
@@ -572,7 +603,8 @@ std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
   }
   task->owned_session = std::make_unique<AgentSession>(AgentSession::Config{
       .agent_options = std::move(options),
-      .tools = inherit_tools(parent_context, request.requested_tools),
+      .tools = inherit_tools(parent_context, request.requested_tools,
+                             request.allow_write_tools),
       .session_store = nullptr,
   });
   task->session = task->owned_session.get();

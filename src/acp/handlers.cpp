@@ -300,6 +300,7 @@ core::SpawnAgentRequest parse_spawn_request(const nlohmann::json &value) {
   if (value.contains("tools"))
     request.requested_tools = value.at("tools").get<std::vector<std::string>>();
   request.allow_subagents = value.value("allow_subagents", false);
+  request.allow_write_tools = value.value("allow_write_tools", false);
   return request;
 }
 

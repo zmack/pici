@@ -95,6 +95,9 @@ struct Args {
   // nonsensical anyway (it would trigger on every turn).
   double compaction_threshold_pct{0.0};
 
+  // Child-agent write capability: none (default), core, or all.
+  std::string agent_write_tools;
+
   // Config file
   std::string config_path; // Resolved config path selected by CLI/env/defaults.
 

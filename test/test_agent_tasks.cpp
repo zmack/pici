@@ -290,6 +290,20 @@ return {}
   CHECK(!has_tool("arbitrary_addon"));
   identity_manager.shutdown();
 
+  AgentSession write_root({.agent_options = identity_options,
+                           .tools = create_coding_tools()});
+  AgentTaskManager write_manager(
+      write_root, identity_options, AgentTaskManager::Limits{}, {},
+      AgentTaskManager::ChildWriteTools::core);
+  const auto write_child = write_manager.spawn(
+      {.task_name = "writer", .prompt = "write", .requested_tools = {"edit"},
+       .allow_write_tools = true});
+  const auto write_result = wait_terminal(write_manager, write_child);
+  CHECK(write_result.status == AgentTaskStatusKind::completed);
+  CHECK(has_tool("edit"));
+  CHECK(!has_tool("write"));
+  write_manager.shutdown();
+
   AgentTaskManager rollback_manager(identity_root, identity_options);
   bool unregister_called = false;
   rollback_manager.set_endpoint_registration(
