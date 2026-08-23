@@ -480,6 +480,7 @@ add_library(pi-core
     src/core/region_renderer.cpp
     src/core/stream_diagnostics.cpp
     src/core/llm_client.cpp
+    src/core/memory_stats.cpp
     src/core/tool_validation.cpp
     src/core/auth/credential_store.cpp
     src/core/env_api_keys.cpp
@@ -501,6 +502,27 @@ target_include_directories(pi-core PUBLIC
 target_compile_definitions(pi-core PUBLIC
     PI_CPP_VERSION="${PROJECT_VERSION}"
 )
+
+if(PI_CPP_MEMSTATS)
+    # jemalloc's malloc override and TSan's interceptors are mutually
+    # exclusive (plan session-memory-stats.md §Risks 6): fail at configure
+    # time, never at runtime.
+    if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=" OR CMAKE_EXE_LINKER_FLAGS MATCHES "-fsanitize=")
+        message(FATAL_ERROR
+            "PI_CPP_MEMSTATS is incompatible with sanitizer builds: "
+            "jemalloc's malloc override and TSan's malloc interceptors conflict.")
+    endif()
+    target_compile_definitions(pi-core PUBLIC PI_CPP_MEMSTATS_ENABLED)
+    # Primary path is dlsym + LD_PRELOAD (no link step). The optional link-
+    # time fallback exists for environments where LD_PRELOAD isn't practical.
+    option(PI_CPP_MEMSTATS_LINK_JEMALLOC
+        "Link system jemalloc via pkg-config instead of relying on LD_PRELOAD" OFF)
+    if(PI_CPP_MEMSTATS_LINK_JEMALLOC)
+        pkg_check_modules(JEMALLOC REQUIRED IMPORTED_TARGET jemalloc)
+        target_link_libraries(pi-core PUBLIC PkgConfig::JEMALLOC)
+    endif()
+endif()
+
 
 target_link_libraries(pi-core PUBLIC
     nlohmann_json::nlohmann_json
@@ -581,7 +603,7 @@ target_link_libraries(pi-acp PRIVATE pi-core pi-http httplib::httplib tomlpluspl
 if(PI_CPP_BUILD_TESTS)
     enable_testing()
 
-    foreach(test_name IN ITEMS core agent_loop agent agent_tasks compaction stream tool_validation builtin_tools lua_tool markdown terminal skills)
+    foreach(test_name IN ITEMS core agent_loop agent agent_tasks compaction stream tool_validation builtin_tools lua_tool markdown terminal skills memory_stats)
         add_executable(test-${test_name}
             test/test_${test_name}.cpp
         )

@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -27,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -67,6 +69,71 @@ bool is_child_safe_tool(const std::shared_ptr<const ToolDefinition> &tool) {
 
 std::size_t message_bytes(const Message &message) {
   return json::to_json(message).size();
+}
+
+// Content-bucket index for a single content block: 0=text, 1=tool_result,
+// 2=tool_use, 3=other (thinking, images, unknown).
+std::size_t content_bucket(const ContentBlock &block) {
+  if (std::holds_alternative<TextContent>(block))
+    return 0;
+  if (std::holds_alternative<ToolCall>(block))
+    return 2;
+  return 3;
+}
+
+} // namespace
+
+SessionCompositionReport
+composition_report_for_messages(const std::vector<Message> &messages) {
+  // One JSON serialization per message, split by content-block kind in the
+  // same pass (§Design 3: no second transcript walk). Block bytes are each
+  // kind's share of the message's escaped-JSON wire size; message-level
+  // fields (roles, timestamps, usage, tool-call ids) count as "other".
+  // A ToolResultMessage's blocks are the results of tool calls, so its text
+  // blocks count as tool_result bytes.
+  SessionCompositionReport report;
+  report.message_count = messages.size();
+  for (const auto &message : messages) {
+    std::size_t counts[4] = {0, 0, 0, 0};
+    bool is_tool_result = false;
+    const auto classify = [&](const auto &msg) {
+      if constexpr (std::is_same_v<std::decay_t<decltype(msg)>,
+                                   ToolResultMessage>) {
+        is_tool_result = true;
+        for (const auto &inner : msg.content)
+          ++counts[content_bucket(inner)];
+      } else if constexpr (!std::is_same_v<std::decay_t<decltype(msg)>,
+                                           ContextCompactionMessage>) {
+        for (const auto &inner : msg.content)
+          ++counts[content_bucket(inner)];
+      }
+    };
+    std::visit(classify, message);
+    const auto total = message_bytes(message);
+    report.transcript_bytes += total;
+    if (is_tool_result)
+      counts[1] = counts[0]; // text inside a tool result IS the result
+    counts[0] = is_tool_result ? 0 : counts[0];
+    const auto sum = counts[0] + counts[1] + counts[2] + counts[3];
+    if (sum == 0) {
+      report.other_bytes += total; // e.g. contextCompaction payloads
+      continue;
+    }
+    // Proportional share of this message's wire size per bucket, rounded
+    // without overflowing (total can exceed SIZE_MAX/4 with big images).
+    const auto share = [total, sum](std::size_t n) -> std::size_t {
+      return total / sum * n + (total % sum) * n / sum;
+    };
+    const std::size_t text = share(counts[0]);
+    const std::size_t use = share(counts[2]);
+    const std::size_t result_b = share(counts[1]);
+    const std::size_t other = total - text - use - result_b;
+    report.text_bytes += text;
+    report.tool_use_bytes += use;
+    report.tool_result_bytes += result_b;
+    report.other_bytes += other;
+  }
+  return report;
 }
 
 AgentMessageEnvelope message_envelope(Message message) {
@@ -124,8 +191,6 @@ std::vector<Message> normalize_context(std::vector<Message> messages,
   }
   return result;
 }
-
-} // namespace
 
 std::string_view agent_task_status_to_string(AgentTaskStatusKind status) {
   switch (status) {
@@ -881,6 +946,57 @@ AgentTaskManager::list(std::optional<std::string_view> task_path_prefix) const {
     result.push_back(snapshot(task));
   }
   std::ranges::sort(result, {}, &AgentTaskSnapshot::task_path);
+  return result;
+}
+
+SessionCompositionReport
+AgentTaskManager::composition_report(const AgentTaskId &target) const {
+  // Same shape as snapshot(): resolve under the manager mutex, then read the
+  // agent transcript without nesting the task/state locks.
+  std::shared_ptr<Task> task;
+  {
+    std::scoped_lock lock(mutex_);
+    task = find_task_locked(target);
+    if (!task)
+      throw AgentTaskError(AgentTaskErrorKind::not_found, "task not found");
+  }
+  SessionCompositionReport report;
+  if (task->session != nullptr) {
+    try {
+      const auto transcript =
+          task->session->agent().state().snapshot_transcript();
+      report = composition_report_for_messages(transcript.messages);
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+    }
+  }
+  return report;
+}
+
+std::vector<std::pair<std::string, SessionCompositionReport>>
+AgentTaskManager::composition_reports() const {
+  std::vector<std::pair<std::string, SessionCompositionReport>> result;
+  std::vector<std::shared_ptr<Task>> tasks;
+  {
+    std::scoped_lock lock(mutex_);
+    tasks.reserve(tasks_.size());
+    for (const auto &[id, task] : tasks_)
+      tasks.push_back(task);
+  }
+  result.reserve(tasks.size());
+  for (const auto &task : tasks) {
+    SessionCompositionReport report;
+    if (task->session != nullptr) {
+      try {
+        const auto transcript =
+            task->session->agent().state().snapshot_transcript();
+        report = composition_report_for_messages(transcript.messages);
+      } catch (...) { // NOLINT(bugprone-empty-catch)
+      }
+    }
+    result.emplace_back(task->task_path, report);
+  }
+  std::ranges::sort(result, {}, &std::pair<std::string,
+                                           SessionCompositionReport>::first);
   return result;
 }
 

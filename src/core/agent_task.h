@@ -20,10 +20,30 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
 namespace pi::core {
+
+// Per-content-block-kind JSON wire-size split of a session transcript
+// (plan: session-memory-stats.md §Design 3). These are escaped-JSON wire
+// bytes — what the provider request serializes and what tokens are charged
+// for — NOT heap bytes. See the /memory command's composition panel.
+struct SessionCompositionReport {
+  std::size_t message_count{0};
+  std::size_t transcript_bytes{0};
+  std::size_t text_bytes{0};
+  std::size_t tool_use_bytes{0};
+  std::size_t tool_result_bytes{0};
+  std::size_t other_bytes{0};
+};
+
+// Single-pass JSON-wire-size composition of a transcript. Shared by
+// AgentTaskManager::composition_report[s]() and the root session's report
+// built in main.cpp.
+SessionCompositionReport
+composition_report_for_messages(const std::vector<Message> &messages);
 
 using AgentTaskId = std::string;
 
@@ -241,6 +261,16 @@ public:
   AgentTaskSnapshot interrupt(const AgentTaskId &target,
                               AgentInterruptReason reason);
   AgentTaskSnapshot close(const AgentTaskId &target);
+
+  // Content-composition report for one live task (§Design 3). Reads the
+  // task's transcript in a single pass; safe for any live task id including
+  // "root". Throws AgentTaskError(not_found) for unknown ids.
+  SessionCompositionReport composition_report(const AgentTaskId &target) const;
+
+  // Content-composition reports for every live task (root included), ordered
+  // by task_path like list(). Never throws.
+  std::vector<std::pair<std::string, SessionCompositionReport>>
+  composition_reports() const;
 
   AgentWaitResult wait(const AgentWaitRequest &request,
                        std::stop_token stop_token = {}) const;

@@ -10,6 +10,8 @@
 #include <format>
 #include <functional>
 #include <iomanip>
+#include <locale>
+#include <numeric>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -55,6 +57,7 @@
 #include "core/mailbox/mailbox_coordinator.h"
 #include "core/mailbox/mailbox_types.h"
 #include "core/message_types.h"
+#include "core/memory_stats.h"
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/providers/faux_control.h"
@@ -949,6 +952,79 @@ std::string format_usage(const CostAccumulator &last,
     ss << "  (cost unknown)";
   ss << "\n";
   return ss.str();
+}
+
+// ─── /memory (plan: session-memory-stats.md) ────────────────────────────
+
+std::string format_memory_bytes(std::uint64_t bytes) {
+  // Same shape as format_tokens: fixed width, human-scaled units.
+  std::ostringstream ss;
+  ss.imbue(std::locale::classic());
+  if (bytes >= 1024 * 1024)
+    ss << std::fixed << std::setprecision(1)
+       << static_cast<double>(bytes) / (1024.0 * 1024.0) << " MB";
+  else if (bytes >= 1024)
+    ss << std::fixed << std::setprecision(1) << static_cast<double>(bytes) /
+              1024.0 << " KB";
+  else
+    ss << bytes << " B";
+  return ss.str();
+}
+
+// Content-composition panel (§Design 3): escaped-JSON wire sizes split by
+// content-block kind, for the root session plus every live child task.
+std::string
+format_memory_composition(const core::AgentSession &session,
+                          const core::AgentTaskManager &tasks) {
+  struct Row {
+    std::string label;
+    core::SessionCompositionReport report;
+  };
+  std::vector<Row> rows;
+  rows.emplace_back("root", core::composition_report_for_messages(
+                                  session.agent().state().messages()));
+  for (auto &[path, report] : tasks.composition_reports()) {
+    if (path == "/root")
+      continue; // root already reported from the live AgentSession above
+    rows.emplace_back(path, report);
+  }
+
+  const auto label_width = std::accumulate(
+      rows.begin(), rows.end(), std::size_t{7}, [](std::size_t acc,
+                                                    const Row &row) {
+        return std::max(acc, row.label.size());
+      });
+  std::ostringstream ss;
+  ss << "\n=== context composition (JSON wire bytes — what you pay tokens "
+        "for) ===\n";
+  ss << std::left << std::setw(static_cast<int>(label_width)) << "session"
+     << "  " << std::right << std::setw(10) << "transcript"
+     << std::setw(10) << "text"
+     << std::setw(13) << "tool_result" << std::setw(10) << "tool_use"
+     << std::setw(9) << "other\n";
+  for (const auto &row : rows) {
+    ss << std::left << std::setw(static_cast<int>(label_width))
+       << row.label.substr(0, label_width) << "  " << std::right
+       << std::setw(10) << format_memory_bytes(row.report.transcript_bytes)
+       << std::setw(10) << format_memory_bytes(row.report.text_bytes)
+       << std::setw(13) << format_memory_bytes(row.report.tool_result_bytes)
+       << std::setw(10) << format_memory_bytes(row.report.tool_use_bytes)
+       << std::setw(9) << format_memory_bytes(row.report.other_bytes) << "\n";
+  }
+  ss.flush();
+  return ss.str();
+}
+
+std::string format_memory(const core::AgentSession &session,
+                          const core::AgentTaskManager &tasks) {
+  auto out = format_memory_composition(session, tasks);
+  if (!core::memory_stats_available()) {
+    out +=
+        "\nheap panel unavailable: run with jemalloc as the global allocator "
+        "to enable it\n(e.g. LD_PRELOAD=libjemalloc.so.2 pi-cli, or build "
+        "with -DPI_CPP_MEMSTATS=ON and -DPI_CPP_MEMSTATS_LINK_JEMALLOC=ON)\n";
+  }
+  return out;
 }
 
 std::vector<cli::ContextFile> load_context_files() {
@@ -1940,7 +2016,8 @@ int cmd_run(const cli::Args &args,
            {std::string_view("/exit"), std::string_view("/quit"),
             std::string_view("/tools"), std::string_view("/addons"),
             std::string_view("/reload-addons"), std::string_view("/usage"),
-            std::string_view("/model"), std::string_view("/models"),
+            std::string_view("/memory"), std::string_view("/model"),
+            std::string_view("/models"),
             std::string_view("/name"), std::string_view("/fork"),
             std::string_view("/tree"), std::string_view("/compact"),
             std::string_view("/skills")}) {
@@ -2353,6 +2430,10 @@ int cmd_run(const cli::Args &args,
     if (line == "/usage") {
       renderer->on_command_output(
           format_usage(last_turn, session, has_current_pricing()));
+      continue;
+    }
+    if (line == "/memory") {
+      renderer->on_command_output(format_memory(runtime, *task_manager));
       continue;
     }
     if (line.starts_with("/name ") || line == "/name") {
