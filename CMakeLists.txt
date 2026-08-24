@@ -613,6 +613,10 @@ if(PI_CPP_BUILD_TESTS)
         add_test(NAME test-${test_name} COMMAND test-${test_name})
     endforeach()
 
+    add_executable(test-subagent-activity test/test_subagent_activity.cpp)
+    target_link_libraries(test-subagent-activity PRIVATE pi-core)
+    add_test(NAME test-subagent-activity COMMAND test-subagent-activity)
+
     add_executable(test-region-renderer test/test_region_renderer.cpp)
     target_link_libraries(test-region-renderer PRIVATE pi-core)
     add_test(NAME test-region-renderer COMMAND test-region-renderer)
@@ -812,11 +816,18 @@ if(CLANG_TIDY_BIN)
             COMMAND ${RUN_CLANG_TIDY_BIN}
                 -clang-tidy-binary ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                # Debian's clang 18 frontend supports concepts but does not
+                # define the feature-test macro that libstdc++'s C++23
+                # <expected> header uses to expose std::expected.
+                -extra-arg=-D__cpp_concepts=202002L
+                -extra-arg=-Wno-builtin-macro-redefined
                 -quiet
                 -j ${PI_CPP_NPROC}
                 ${TIDY_SOURCES}
             COMMAND ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                -extra-arg=-D__cpp_concepts=202002L
+                -extra-arg=-Wno-builtin-macro-redefined
                 -quiet
                 -checks=-clang-analyzer-*
                 ${TIDY_HANDLERS_SOURCE}
@@ -828,12 +839,16 @@ if(CLANG_TIDY_BIN)
             COMMAND ${RUN_CLANG_TIDY_BIN}
                 -clang-tidy-binary ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                -extra-arg=-D__cpp_concepts=202002L
+                -extra-arg=-Wno-builtin-macro-redefined
                 -quiet
                 -fix
                 -j ${PI_CPP_NPROC}
                 ${TIDY_SOURCES}
             COMMAND ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                -extra-arg=-D__cpp_concepts=202002L
+                -extra-arg=-Wno-builtin-macro-redefined
                 -quiet
                 -fix
                 -checks=-clang-analyzer-*
@@ -846,10 +861,14 @@ if(CLANG_TIDY_BIN)
         add_custom_target(tidy
             COMMAND ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                -extra-arg=-D__cpp_concepts=202002L
+                -extra-arg=-Wno-builtin-macro-redefined
                 -quiet
                 ${TIDY_SOURCES}
             COMMAND ${CLANG_TIDY_BIN}
                 -p ${CMAKE_BINARY_DIR}
+                -extra-arg=-D__cpp_concepts=202002L
+                -extra-arg=-Wno-builtin-macro-redefined
                 -quiet
                 -checks=-clang-analyzer-*
                 ${TIDY_HANDLERS_SOURCE}

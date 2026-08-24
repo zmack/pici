@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pi::core {
 
@@ -21,6 +22,13 @@ struct RendererRequest {
   RequestPresentation presentation;
   std::string text;
   std::size_t non_text_attachments{0};
+};
+
+struct SubagentPaneRow {
+  std::string id;
+  std::string name;
+  std::string status;
+  std::string last_activity;
 };
 
 enum class RendererErrorKind {
@@ -146,6 +154,11 @@ public:
   // renderers may own this row and paint it inside their compositor.
   virtual bool owns_status_line() const { return false; }
   virtual void set_status_line(const std::optional<std::string> &text) {}
+
+  // Full-screen renderers may reserve a fixed band for live child-agent
+  // activity. Scrollback-safe renderers intentionally leave this disabled.
+  virtual bool owns_subagent_pane() const { return false; }
+  virtual void set_subagent_pane(const std::vector<SubagentPaneRow> &) {}
 
   // The controlling terminal's dimensions changed. Renderers that paint a
   // fixed layout (status lines, alt-screen content) should recompute and

@@ -25,6 +25,7 @@ public:
   void drain(Renderer &renderer);
 
   std::vector<std::string> recent(const AgentTaskId &id) const;
+  std::vector<SubagentPaneRow> pane_rows() const;
   std::string summary() const;
 
 private:

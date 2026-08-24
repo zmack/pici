@@ -1,4 +1,5 @@
 #include "cli/system_prompt.h"
+#include "core/skills.h"
 
 #include <chrono>
 #include <cstddef>

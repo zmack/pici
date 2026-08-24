@@ -2,11 +2,21 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <filesystem>
 #include <fstream>
+#include <ios>
+#include <iterator>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <system_error>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace pi::core {
 namespace {
@@ -25,7 +35,7 @@ std::vector<std::string> split_lines(std::string_view text) {
     out.pop_back();
   return out;
 }
-std::string trim(std::string s) {
+std::string trim(const std::string &s) {
   const auto first = s.find_first_not_of(" \t");
   if (first == std::string::npos)
     return {};
@@ -38,12 +48,12 @@ std::string rstrip(std::string s) {
   return s;
 }
 std::string normalized(std::string s) {
-  s = trim(std::move(s));
+  s = trim(s);
   std::string out;
   for (std::size_t i = 0; i < s.size(); ++i) {
     if (s[i] == '\xE2' && i + 2 < s.size()) { // common UTF-8 punctuation
-      const unsigned char b = static_cast<unsigned char>(s[i + 1]);
-      const unsigned char c = static_cast<unsigned char>(s[i + 2]);
+      const auto b = static_cast<unsigned char>(s[i + 1]);
+      const auto c = static_cast<unsigned char>(s[i + 2]);
       if (b == 0x80 && (c == 0x98 || c == 0x99)) {
         out += '\'';
         i += 2;
@@ -85,13 +95,14 @@ bool seek(const std::vector<std::string> &lines,
     for (std::size_t i = start; i + pattern.size() <= lines.size(); ++i) {
       bool ok = true;
       for (std::size_t j = 0; j < pattern.size(); ++j) {
-        auto a = lines[i + j], b = pattern[j];
+        auto a = lines[i + j];
+        auto b = pattern[j];
         if (rung == 1) {
           a = rstrip(std::move(a));
           b = rstrip(std::move(b));
         } else if (rung == 2) {
-          a = trim(std::move(a));
-          b = trim(std::move(b));
+          a = trim(a);
+          b = trim(b);
         } else if (rung == 3) {
           a = normalized(std::move(a));
           b = normalized(std::move(b));
@@ -138,7 +149,8 @@ std::optional<Patch> parse_patch(std::string_view text, bool lenient,
                                  ParseDiagnostic &error) {
   const auto lines = split_lines(text);
   Patch patch;
-  bool begun = false, ended = false;
+  bool begun = false;
+  bool ended = false;
   UpdateFile *current_update = nullptr;
   UpdateFileChunk *chunk = nullptr;
   AddFile *current_add = nullptr;
@@ -155,24 +167,24 @@ std::optional<Patch> parse_patch(std::string_view text, bool lenient,
         begun = true;
       if (begun)
         continue;
-      else if (!lenient || line.rfind("***", 0) == 0) {
+      if (!lenient || line.starts_with("***")) {
         fail(error, n + 1, "expected *** Begin Patch");
         return std::nullopt;
-      } else
-        continue;
+      }
+      continue;
     }
     if (line == "*** End Patch") {
       ended = true;
       break;
     }
-    if (line.rfind("*** Add File:", 0) == 0) {
+    if (line.starts_with("*** Add File:")) {
       patch.hunks.emplace_back(AddFile{marker_path(line, "*** Add File:"), {}});
       current_add = &std::get<AddFile>(patch.hunks.back());
       current_update = nullptr;
       chunk = nullptr;
       continue;
     }
-    if (line.rfind("*** Delete File:", 0) == 0) {
+    if (line.starts_with("*** Delete File:")) {
       patch.hunks.emplace_back(
           DeleteFile{marker_path(line, "*** Delete File:")});
       current_add = nullptr;
@@ -180,7 +192,7 @@ std::optional<Patch> parse_patch(std::string_view text, bool lenient,
       chunk = nullptr;
       continue;
     }
-    if (line.rfind("*** Update File:", 0) == 0) {
+    if (line.starts_with("*** Update File:")) {
       patch.hunks.emplace_back(
           UpdateFile{marker_path(line, "*** Update File:"), {}, {}});
       current_update = &std::get<UpdateFile>(patch.hunks.back());
@@ -188,19 +200,19 @@ std::optional<Patch> parse_patch(std::string_view text, bool lenient,
       chunk = nullptr;
       continue;
     }
-    if (line.rfind("*** Move to:", 0) == 0 && current_update) {
+    if (line.starts_with("*** Move to:") && (current_update != nullptr)) {
       current_update->move_path = marker_path(line, "*** Move to:");
       continue;
     }
-    if (line == "*** End of File" && chunk) {
+    if (line == "*** End of File" && (chunk != nullptr)) {
       chunk->anchored_to_eof = true;
       continue;
     }
-    if (current_add && !raw.empty() && raw[0] == '+') {
+    if ((current_add != nullptr) && !raw.empty() && raw[0] == '+') {
       current_add->lines.push_back(raw.substr(1));
       continue;
     }
-    if (current_update && line.rfind("@@", 0) == 0) {
+    if ((current_update != nullptr) && line.starts_with("@@")) {
       current_update->chunks.push_back({});
       chunk = &current_update->chunks.back();
       auto ctx = trim(line.substr(2));
@@ -208,7 +220,7 @@ std::optional<Patch> parse_patch(std::string_view text, bool lenient,
         chunk->change_context = std::move(ctx);
       continue;
     }
-    if (current_update && chunk && !raw.empty() &&
+    if ((current_update != nullptr) && (chunk != nullptr) && !raw.empty() &&
         (raw[0] == '+' || raw[0] == '-' || raw[0] == ' ')) {
       if (raw[0] == '-')
         chunk->old_lines.push_back(raw.substr(1));
@@ -230,7 +242,8 @@ std::optional<Patch> parse_patch(std::string_view text, bool lenient,
     return std::nullopt;
   }
   for (const auto &h : patch.hunks)
-    if (const auto *a = std::get_if<AddFile>(&h); a && a->lines.empty()) {
+    if (const auto *a = std::get_if<AddFile>(&h);
+        (a != nullptr) && a->lines.empty()) {
       fail(error, 0, "Add File has no content");
       return std::nullopt;
     }

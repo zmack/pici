@@ -37,6 +37,7 @@ constexpr int kMaxToolBodyLines = 4;
 // draft's row count changes — see kMaxComposerRows in core/terminal.h,
 // which readline's own input renderer caps its painted rows to as well.
 constexpr int kComposerRows = static_cast<int>(kMaxComposerRows);
+constexpr int kSubagentPaneRows = 5;
 
 std::string with_sgr_reset(std::string line) {
   if (!line.ends_with("\033[0m"))
@@ -652,10 +653,11 @@ bool write_all(int fd, std::string_view data) {
   return true;
 }
 
-std::string scroll_region_sequence(int height) {
-  if (height < kComposerRows + 2)
+std::string scroll_region_sequence(int height, int pane_rows = 0) {
+  if (height < kComposerRows + pane_rows + 2)
     return {};
-  return "\033[1;" + std::to_string(height - 1 - kComposerRows) + "r";
+  return "\033[1;" + std::to_string(height - 1 - kComposerRows - pane_rows) +
+         "r";
 }
 
 class RegionRenderer final : public Renderer {
@@ -703,6 +705,8 @@ public:
     state_.last_usage = {};
     state_.start_new_text_block = true;
     state_.hide_cursor_on_frame = true;
+    state_.pane_rows_reserved =
+        state_.subagent_rows.empty() ? 0 : kSubagentPaneRows;
     // Pin the row geometry render_frame() uses for the whole turn to
     // whatever the terminal's height is right now -- see the State::
     // turn_layout_height comment below for why.
@@ -1149,6 +1153,25 @@ public:
   }
 
   bool owns_status_line() const override { return true; }
+  bool owns_subagent_pane() const override { return true; }
+
+  void set_subagent_pane(const std::vector<SubagentPaneRow> &rows) override {
+    bool paint_now = false;
+    {
+      std::scoped_lock lock(mutex_);
+      state_.subagent_rows = rows;
+      // A child can spawn while the root turn is already streaming.  The
+      // paint loop treats a pane-height change like a resize and forces a
+      // full row repaint, so reserve the band immediately instead of waiting
+      // until the next turn (which would make the supposedly live pane stale).
+      state_.pane_rows_reserved = rows.empty() ? 0 : kSubagentPaneRows;
+      state_.revision = ++revision_;
+      mark_dirty_locked();
+      paint_now = !turn_active_;
+    }
+    if (paint_now)
+      paint_idle_synchronously();
+  }
 
   void set_status_line(const std::optional<std::string> &text) override {
     bool paint_now = false;
@@ -1278,6 +1301,8 @@ private:
     std::string status_text;
     bool has_error{false};
     std::optional<std::string> custom_status_line;
+    std::vector<SubagentPaneRow> subagent_rows;
+    int pane_rows_reserved{0};
     TokenUsage last_usage;
     // The terminal height render_frame() must use for the content/status
     // area's row math (content_rows, scroll_region_sequence's DECSTBM
@@ -1430,7 +1455,9 @@ private:
     const int height = snapshot.turn_layout_height != 0
                            ? snapshot.turn_layout_height
                            : term_height(fd_);
-    const int content_rows = std::max(0, height - 1 - kComposerRows);
+    const int pane_rows = snapshot.pane_rows_reserved;
+    const int content_rows =
+        std::max(0, height - 1 - kComposerRows - pane_rows);
     if (content_rows < 1)
       return;
 
@@ -1448,19 +1475,23 @@ private:
       scroll_offset = state_.scroll_offset_rows;
     }
 
-    const bool layout_changed = width != last_width_ || height != last_height_;
+    const bool layout_changed = width != last_width_ ||
+                                height != last_height_ ||
+                                pane_rows != last_pane_rows_;
     if (layout_changed) {
       last_frame_lines_.clear();
       last_width_ = width;
       last_height_ = height;
+      last_pane_rows_ = pane_rows;
     }
 
     std::string output;
     if (layout_changed)
-      output += scroll_region_sequence(height);
+      output += scroll_region_sequence(height, pane_rows);
     if (snapshot.hide_cursor_on_frame)
       output += "\033[?25l";
     output += diff_region_rows(last_frame_lines_, rows);
+    output += subagent_pane_sequence(snapshot, width, height, pane_rows);
     output += status_sequence(snapshot, width, height, scroll_offset,
                               frame.max_scroll_rows);
     if (!output.empty() && !write_all(fd_, output)) {
@@ -1593,6 +1624,27 @@ private:
     return bar;
   }
 
+  static std::string subagent_pane_sequence(const State &snapshot, int width,
+                                            int height, int pane_rows) {
+    if (pane_rows == 0 || width < 1)
+      return {};
+    std::string out;
+    const int first = height - kComposerRows - pane_rows;
+    for (int i = 0; i < pane_rows; ++i) {
+      out += "\033[" + std::to_string(first + i) + ";1H\033[2K\033[2m";
+      if (i < static_cast<int>(snapshot.subagent_rows.size())) {
+        const auto &row = snapshot.subagent_rows[static_cast<std::size_t>(i)];
+        std::string text =
+            row.last_activity.empty()
+                ? row.name + "  " + row.status
+                : row.name + "  " + row.status + "  " + row.last_activity;
+        out += truncate_ansi_line(text, width);
+      }
+      out += "\033[0m";
+    }
+    return out;
+  }
+
   int fd_;
   std::mutex mutex_;
   State state_;
@@ -1605,6 +1657,7 @@ private:
   std::vector<std::string> last_frame_lines_;
   int last_width_{0};
   int last_height_{0};
+  int last_pane_rows_{0};
   int last_resize_generation_{0};
   std::jthread paint_thread_;
 };

@@ -2,6 +2,7 @@
 #include "core/apply_patch.h"
 #include "core/message_types.h"
 #include "core/sandbox.h"
+#include "core/skills.h"
 #include "core/terminal.h"
 #include "nlohmann/json_fwd.hpp"
 
@@ -926,16 +927,18 @@ apply_edits(const std::string &lf_content,
     auto r = fuzzy_find(base, old_text);
     if (!r.found) {
       const auto hint = near_miss_hint(lf_content, old_text);
-      if (edits.size() == 1)
-        throw std::runtime_error("Could not find the text in " + path +
-                                 ". The old text must match exactly including "
-                                 "all whitespace and newlines." +
-                                 hint);
-      throw std::runtime_error("Could not find edits[" + std::to_string(i) +
-                               "] in " + path +
-                               ". The oldText must match exactly including all "
-                               "whitespace and newlines." +
-                               hint);
+      std::string message;
+      if (edits.size() == 1) {
+        message = "Could not find the text in " + path +
+                  ". The old text must match exactly including all whitespace "
+                  "and newlines.";
+      } else {
+        message = "Could not find edits[" + std::to_string(i) + "] in " + path +
+                  ". The oldText must match exactly including all whitespace "
+                  "and newlines.";
+      }
+      message += hint;
+      throw std::runtime_error(message);
     }
     auto occ = count_occurrences(base, old_text);
     if (occ > 1) {
@@ -1257,7 +1260,7 @@ public:
       }
       if (fuzzy) {
         while (!top.empty()) {
-          results.push_back(std::move(top.top().path));
+          results.push_back(top.top().path);
           top.pop();
         }
         std::ranges::sort(results, [&](const auto &a, const auto &b) {
@@ -1624,7 +1627,8 @@ std::vector<std::shared_ptr<const ToolDefinition>>
 create_all_tools(const std::filesystem::path &cwd,
                  SandboxPolicyPtr sandbox_policy,
                  std::shared_ptr<const SkillCatalog> skills) {
-  auto tools = create_coding_tools(cwd, std::move(sandbox_policy), skills);
+  auto tools =
+      create_coding_tools(cwd, std::move(sandbox_policy), std::move(skills));
   tools.push_back(std::make_shared<GrepTool>(cwd));
   tools.push_back(std::make_shared<FindTool>(cwd));
   tools.push_back(std::make_shared<LsTool>(cwd));

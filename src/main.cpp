@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -965,7 +966,7 @@ std::string format_memory_bytes(std::uint64_t bytes) {
   // Same shape as format_tokens: fixed width, human-scaled units.
   std::ostringstream ss;
   ss.imbue(std::locale::classic());
-  if (bytes >= 1024 * 1024)
+  if (bytes >= static_cast<std::uint64_t>(1024 * 1024))
     ss << std::fixed << std::setprecision(1)
        << static_cast<double>(bytes) / (1024.0 * 1024.0) << " MB";
   else if (bytes >= 1024)

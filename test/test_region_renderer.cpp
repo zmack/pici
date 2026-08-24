@@ -715,6 +715,89 @@ void test_composer_rows_reserved_in_region_mode() {
          "rows");
 }
 
+void test_subagent_pane_is_reserved_in_region_mode() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates subagent-pane capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    expect(renderer->owns_subagent_pane(),
+           "region renderer advertises subagent pane support");
+    renderer->on_turn_start();
+    renderer->on_text_delta("root-transcript-content");
+    renderer->set_subagent_pane({
+        {.id = "child-1",
+         .name = "research",
+         .status = "running",
+         .last_activity = "tool started"}});
+    // Region rendering is coalesced on a background paint thread while a
+    // turn is active; give that frame a chance to reach the capture pipe.
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    renderer->on_turn_end();
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+
+  expect(output.find("research") != std::string::npos,
+         "subagent name is rendered in the reserved pane");
+  expect(output.find("running") != std::string::npos,
+         "subagent status is rendered in the reserved pane");
+  expect(output.find("tool started") != std::string::npos,
+         "subagent activity is rendered in the reserved pane");
+  expect(output.find("root-transcript-content") != std::string::npos,
+         "root transcript remains rendered separately");
+}
+
+void test_subagent_pane_is_rendered_in_viewport_mode() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates viewport-pane capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_viewport_renderer(fds[1]);
+    expect(renderer->owns_subagent_pane(),
+           "viewport renderer advertises subagent pane support");
+    renderer->on_turn_start();
+    renderer->on_text_delta("viewport-transcript-content");
+    renderer->set_subagent_pane({
+        {.id = "child-1",
+         .name = "research",
+         .status = "running",
+         .last_activity = "tool started"}});
+    renderer->on_turn_end();
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[512];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+
+  expect(output.find("research") != std::string::npos,
+         "viewport renders the subagent name");
+  expect(output.find("running") != std::string::npos,
+         "viewport renders the subagent status");
+  expect(output.find("tool started") != std::string::npos,
+         "viewport renders the subagent activity");
+  expect(output.find("viewport-transcript-content") != std::string::npos,
+         "viewport keeps transcript content visible");
+}
+
 // prepare_for_prompt() -- called by the interactive loop immediately before
 // every readline() call -- must re-anchor the composer's reserved rows
 // regardless of what ran just before it (a real turn, a between-turn
@@ -1437,6 +1520,8 @@ int main() {
   test_tool_call_streaming_interleaved_calls_stay_isolated();
   test_region_factory_lifecycle();
   test_composer_rows_reserved_in_region_mode();
+  test_subagent_pane_is_reserved_in_region_mode();
+  test_subagent_pane_is_rendered_in_viewport_mode();
   test_prepare_for_prompt_reanchors_composer();
   test_intermediate_turn_end_does_not_blank_composer();
   test_force_full_repaint_reissues_every_row();

@@ -1419,7 +1419,7 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
   // instance to exactly this call, as before.
   std::optional<TerminalRawMode> local_raw;
   TerminalRawMode *raw = external_raw_mode;
-  if (!raw) {
+  if (raw == nullptr) {
     local_raw.emplace();
     raw = &*local_raw;
   }
@@ -1473,12 +1473,12 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
       // state instead of committing a trailing newline. The submitted text
       // itself is still returned below — only the on-screen box is emptied.
       renderer.redraw(std::string{}, 0, false);
-      if (!external_raw_mode)
+      if (external_raw_mode == nullptr)
         raw->leave();
       std::cout << std::flush;
     } else {
       renderer.redraw(buf, cursor, false);
-      if (!external_raw_mode)
+      if (external_raw_mode == nullptr)
         raw->leave();
       std::cout << "\r\n" << std::flush;
     }

@@ -10,6 +10,7 @@
 #include "core/session/agent_session.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <concepts>
@@ -93,18 +94,18 @@ composition_report_for_messages(const std::vector<Message> &messages) {
   SessionCompositionReport report;
   report.message_count = messages.size();
   for (const auto &message : messages) {
-    std::size_t counts[4] = {0, 0, 0, 0};
+    std::array<std::size_t, 4> counts{0, 0, 0, 0};
     bool is_tool_result = false;
     const auto classify = [&](const auto &msg) {
       if constexpr (std::is_same_v<std::decay_t<decltype(msg)>,
                                    ToolResultMessage>) {
         is_tool_result = true;
         for (const auto &inner : msg.content)
-          ++counts[content_bucket(inner)];
+          ++counts.at(content_bucket(inner));
       } else if constexpr (!std::is_same_v<std::decay_t<decltype(msg)>,
                                            ContextCompactionMessage>) {
         for (const auto &inner : msg.content)
-          ++counts[content_bucket(inner)];
+          ++counts.at(content_bucket(inner));
       }
     };
     std::visit(classify, message);

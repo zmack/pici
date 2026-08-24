@@ -1,9 +1,7 @@
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <type_traits>
 #include <utility>
 
 // Feature gate: PI_MEMSTATS_HAVE_MALLCTL is 1 only when compiled with
@@ -11,9 +9,9 @@
 // when dlsym(RTLD_DEFAULT, "mallctl") can possibly resolve.
 #if defined(PI_CPP_MEMSTATS_ENABLED) && defined(__GLIBC__) &&                  \
     (defined(__x86_64__) || defined(__aarch64__))
-#define PI_MEMSTATS_HAVE_MALLCTL 1
+#define PI_MEMSTATS_HAVE_MALLCTL 1 // NOLINT(cppcoreguidelines-macro-usage)
 #else
-#define PI_MEMSTATS_HAVE_MALLCTL 0
+#define PI_MEMSTATS_HAVE_MALLCTL 0 // NOLINT(cppcoreguidelines-macro-usage)
 #endif
 
 // Per-session allocator-level memory accounting (plan:

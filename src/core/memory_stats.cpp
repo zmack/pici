@@ -1,17 +1,12 @@
 #include "core/memory_stats.h"
 
-#include <dlfcn.h>
+#include <bits/types/struct_rusage.h>
+#include <optional>
 #include <sys/resource.h>
 
-#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <new>
-#include <set>
-#include <string>
-#include <vector>
 
 namespace pi::core {
 
@@ -269,7 +264,10 @@ ProcessMemorySnapshot read_process_snapshot() {
   struct rusage usage {};
   if (getrusage(RUSAGE_SELF, &usage) == 0)
     snapshot.rss_bytes =
-        static_cast<std::uint64_t>(usage.ru_maxrss) * 1024u; // Linux: KiB
+        static_cast<std::uint64_t>(
+            usage
+                .ru_maxrss) * // NOLINT(cppcoreguidelines-pro-type-union-access)
+        1024U; // NOLINT(cppcoreguidelines-pro-type-union-access) Linux: KiB
 #if PI_MEMSTATS_HAVE_MALLCTL
   ensure_initialized();
   auto &rt = runtime();

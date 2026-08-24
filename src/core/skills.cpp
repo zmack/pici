@@ -1,10 +1,18 @@
 #include "core/skills.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <expected>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <map>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
 
 namespace pi::core {
 
@@ -58,12 +66,10 @@ std::vector<std::string_view> split_lines(std::string_view text) {
 bool valid_skill_name(std::string_view name) {
   if (name.empty() || name.size() > kSkillMaxNameLength)
     return false;
-  for (const char c : name) {
-    if (!(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '-' &&
-        c != '_')
-      return false;
-  }
-  return true;
+  return std::ranges::all_of(name, [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' ||
+           c == '_';
+  });
 }
 
 // Strip one layer of matching quotes around a scalar value.
@@ -207,7 +213,8 @@ void collect_skill_dirs(const std::filesystem::path &root,
   std::function<void(const std::filesystem::path &, int)> walk =
       [&](const std::filesystem::path &dir, int depth) {
         std::error_code dec;
-        std::filesystem::directory_iterator it(dir, dec), end;
+        std::filesystem::directory_iterator it(dir, dec);
+        std::filesystem::directory_iterator end;
         if (dec) {
           diagnostics.push_back("skills: cannot read directory '" +
                                 dir.string() + "': " + dec.message());
