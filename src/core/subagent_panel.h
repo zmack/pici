@@ -2,6 +2,9 @@
 
 #include "core/subagent_activity.h"
 
+#include <memory>
+#include <mutex>
+
 namespace pi::core {
 class SubagentPanel {
 public:
@@ -12,6 +15,12 @@ public:
   void unmount();
   ~SubagentPanel();
 private:
+  struct CallbackState {
+    std::mutex mutex;
+    bool mounted{false};
+  };
+
   SubagentActivityBridge &bridge_;
+  std::shared_ptr<CallbackState> callback_state_;
 };
 } // namespace pi::core
