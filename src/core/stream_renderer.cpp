@@ -47,6 +47,24 @@ int count_trailing_newlines(std::string_view s) {
   return n;
 }
 
+// on_command_output() text (help text, tables, slash-command results) is
+// already fully formatted and must render byte-for-byte -- but
+// ViewportRenderer::repaint() still runs the whole buffer through
+// render_visible_markdown() for ANSI styling. A bare CommonMark paragraph
+// collapses every internal '\n' to a single space (softbreak), silently
+// destroying anything that depends on line structure -- most visibly a
+// box-drawn table going through format_ascii_table(). Wrapping in a fenced
+// code block makes cmark treat the text as a literal, preserving it exactly
+// (verified empirically; mirrors the identical helper in region_renderer.cpp).
+std::string fence_command_output(std::string_view text) {
+  std::string wrapped = "```\n";
+  wrapped.append(text);
+  if (text.empty() || text.back() != '\n')
+    wrapped += '\n';
+  wrapped += "```\n";
+  return wrapped;
+}
+
 std::string format_tokens(std::uint64_t n) {
   std::ostringstream ss;
   if (n >= 1'000'000) {
@@ -471,7 +489,7 @@ public:
     if (!raw_buffer_.empty() && raw_buffer_.back() != '\n')
       raw_buffer_ += '\n';
     raw_buffer_ += '\n';
-    raw_buffer_.append(text.data(), text.size());
+    raw_buffer_.append(fence_command_output(text));
     scanner_ = {};
     fin_cache_ = {};
     scroll_offset_rows_ = 0;

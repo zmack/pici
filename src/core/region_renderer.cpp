@@ -39,6 +39,23 @@ constexpr int kMaxToolBodyLines = 4;
 constexpr int kComposerRows = static_cast<int>(kMaxComposerRows);
 constexpr int kSubagentPaneRows = 5;
 
+// on_command_output() text (help text, tables, slash-command results) is
+// already fully formatted and must render byte-for-byte -- but the block it
+// lands in still goes through render_visible_markdown() for its ANSI
+// styling. A bare CommonMark paragraph collapses every internal '\n' to a
+// single space (softbreak), silently destroying anything that depends on
+// line structure -- most visibly a box-drawn table going through
+// format_ascii_table(). Wrapping in a fenced code block makes cmark treat
+// the text as a literal, preserving it exactly (verified empirically).
+std::string fence_command_output(std::string_view text) {
+  std::string wrapped = "```\n";
+  wrapped.append(text);
+  if (text.empty() || text.back() != '\n')
+    wrapped += '\n';
+  wrapped += "```\n";
+  return wrapped;
+}
+
 std::string with_sgr_reset(std::string line) {
   if (!line.ends_with("\033[0m"))
     line += "\033[0m";
@@ -1064,7 +1081,7 @@ public:
         auto &block = std::get<RegionTextBlock>(turn.blocks.back()).raw;
         if (!block.empty() && !block.ends_with('\n'))
           block.push_back('\n');
-        block.append(text.data(), text.size());
+        block.append(fence_command_output(text));
       } else {
         state_.turns.emplace_back();
         auto &turn = state_.turns.back();
@@ -1075,7 +1092,7 @@ public:
         auto &block = std::get<RegionTextBlock>(turn.blocks.back()).raw;
         if (!block.empty() && !block.ends_with('\n'))
           block.push_back('\n');
-        block.append(text.data(), text.size());
+        block.append(fence_command_output(text));
       }
       state_.revision = ++revision_;
       mark_dirty_locked();

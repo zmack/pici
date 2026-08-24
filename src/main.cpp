@@ -979,13 +979,41 @@ std::string format_memory_bytes(std::uint64_t bytes) {
 
 std::string format_ascii_table(const std::vector<std::string> &headers,
                                const std::vector<std::vector<std::string>> &rows,
-                               const std::vector<bool> &right_aligned) {
+                               const std::vector<bool> &right_aligned,
+                               int max_width = 0) {
   std::vector<std::size_t> widths(headers.size());
   for (std::size_t i = 0; i < headers.size(); ++i)
     widths[i] = headers[i].size();
   for (const auto &row : rows)
     for (std::size_t i = 0; i < widths.size() && i < row.size(); ++i)
       widths[i] = std::max(widths[i], row[i].size());
+
+  // Keep the box intact instead of relying on the terminal to wrap long
+  // rows.  The latter makes every subsequent row appear misaligned.  The
+  // table overhead is three columns per cell plus the two border edges.
+  if (max_width > 0 && !widths.empty()) {
+    const auto overhead = 3 * widths.size() + 1;
+    const auto available = max_width > static_cast<int>(overhead)
+                               ? static_cast<std::size_t>(max_width) - overhead
+                               : widths.size();
+    while (std::accumulate(widths.begin(), widths.end(), std::size_t{0}) >
+           available) {
+      auto widest = std::max_element(widths.begin(), widths.end());
+      if (*widest <= 1)
+        break;
+      --*widest;
+    }
+  }
+
+  const auto fit = [](std::string value, std::size_t width) {
+    if (value.size() <= width)
+      return value;
+    if (width <= 3)
+      return value.substr(0, width);
+    value.resize(width - 3);
+    value += "...";
+    return value;
+  };
 
   std::ostringstream ss;
   const auto border = [&] {
@@ -997,7 +1025,8 @@ std::string format_ascii_table(const std::vector<std::string> &headers,
   const auto line = [&](const std::vector<std::string> &cells) {
     ss << '|';
     for (std::size_t i = 0; i < widths.size(); ++i) {
-      const std::string value = i < cells.size() ? cells[i] : std::string{};
+      const std::string value = fit(i < cells.size() ? cells[i] : std::string{},
+                                    widths[i]);
       ss << ' ';
       if (i < right_aligned.size() && right_aligned[i])
         ss << std::right << std::setw(static_cast<int>(widths[i])) << value;
@@ -1046,7 +1075,9 @@ std::string format_memory_composition(const core::AgentSession &session,
   ss << "Context composition (JSON wire bytes; estimated input size)\n";
   ss << format_ascii_table({"session", "transcript", "text", "tool result",
                             "tool use", "other"},
-                           table_rows, {false, true, true, true, true, true});
+                           table_rows, {false, true, true, true, true, true},
+                           core::term_width(STDOUT_FILENO));
+  ss << '\n';
   return ss.str();
 }
 
@@ -1087,7 +1118,9 @@ std::string format_memory_heap(const core::AgentTaskManager &tasks) {
     table_rows.push_back({"allocator resident",
                           format_memory_bytes(*snapshot.allocator_resident_bytes)});
   table_rows.push_back({"process RSS", format_memory_bytes(snapshot.rss_bytes)});
-  ss << format_ascii_table({"session", "allocated"}, table_rows, {false, true});
+  ss << format_ascii_table({"session", "allocated"}, table_rows, {false, true},
+                           core::term_width(STDOUT_FILENO));
+  ss << '\n';
   return ss.str();
 }
 

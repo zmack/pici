@@ -798,6 +798,93 @@ void test_subagent_pane_is_rendered_in_viewport_mode() {
          "viewport keeps transcript content visible");
 }
 
+// on_command_output() text (e.g. /memory's format_ascii_table() output) is
+// already fully formatted and must render byte-for-byte. Both region and
+// viewport re-render command-output blocks through render_visible_markdown()
+// for ANSI styling, and a bare CommonMark paragraph collapses every internal
+// '\n' to a single space (softbreak) -- silently destroying a box-drawn
+// table's line structure. Regression test for the fence-wrapping fix in
+// RegionRenderer::on_command_output().
+void test_command_output_table_survives_region_rendering() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates command-output capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_region_renderer(fds[1]);
+    renderer->on_command_output("+------+-----------+\n"
+                                "| session | allocated |\n"
+                                "+------+-----------+\n"
+                                "| root | 1.2 MB    |\n"
+                                "+------+-----------+\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[4096];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+
+  // The bug collapses every row onto one line, so the border sequence would
+  // appear only once. A correctly preserved table paints each border row at
+  // its own absolute cursor position -- assert more than one distinct
+  // "\033[<row>;1H...+------+" occurrence rather than just substring
+  // presence, so a regression back to one squished line still fails.
+  std::size_t border_rows = 0;
+  std::size_t pos = 0;
+  while ((pos = output.find("+------+-----------+", pos)) != std::string::npos) {
+    ++border_rows;
+    pos += 1;
+  }
+  expect(border_rows >= 3,
+         "table borders appear as separate painted rows, not squished into one");
+  expect(output.find("| root | 1.2 MB    |") != std::string::npos,
+         "a data row survives intact with its internal spacing");
+}
+
+void test_command_output_table_survives_viewport_rendering() {
+  int fds[2]{};
+  const bool pipe_ok = ::pipe(fds) == 0;
+  expect(pipe_ok, "pipe creates command-output capture fd");
+  if (!pipe_ok)
+    return;
+  {
+    auto renderer = pi::core::make_viewport_renderer(fds[1]);
+    renderer->on_command_output("+------+-----------+\n"
+                                "| session | allocated |\n"
+                                "+------+-----------+\n"
+                                "| root | 1.2 MB    |\n"
+                                "+------+-----------+\n");
+  }
+  ::close(fds[1]);
+  std::string output;
+  char buffer[4096];
+  for (;;) {
+    const auto count = ::read(fds[0], buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(fds[0]);
+
+  std::size_t border_rows = 0;
+  std::size_t pos = 0;
+  while ((pos = output.find("+------+-----------+", pos)) != std::string::npos) {
+    ++border_rows;
+    pos += 1;
+  }
+  expect(border_rows >= 3,
+         "table borders appear as separate lines, not squished into one");
+  expect(output.find("| root | 1.2 MB    |") != std::string::npos,
+         "a data row survives intact with its internal spacing");
+}
+
 // prepare_for_prompt() -- called by the interactive loop immediately before
 // every readline() call -- must re-anchor the composer's reserved rows
 // regardless of what ran just before it (a real turn, a between-turn
@@ -1522,6 +1609,8 @@ int main() {
   test_composer_rows_reserved_in_region_mode();
   test_subagent_pane_is_reserved_in_region_mode();
   test_subagent_pane_is_rendered_in_viewport_mode();
+  test_command_output_table_survives_region_rendering();
+  test_command_output_table_survives_viewport_rendering();
   test_prepare_for_prompt_reanchors_composer();
   test_intermediate_turn_end_does_not_blank_composer();
   test_force_full_repaint_reissues_every_row();
