@@ -1,12 +1,18 @@
 #include "core/memory_stats.h"
 
 #include <bits/types/struct_rusage.h>
+#include <dlfcn.h>
 #include <optional>
 #include <sys/resource.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace pi::core {
 

@@ -133,6 +133,10 @@ struct AgentTaskContextInfo {
 
 struct AgentTaskSnapshot {
   AgentTaskId id;
+  // Effective model used by this task.  Keeping this in the live snapshot
+  // makes the subagent UI/API honest when the parent switches providers.
+  std::string model_provider;
+  std::string model_id;
   std::string task_path;
   std::optional<AgentTaskId> parent_id;
   std::string task_name;

@@ -143,7 +143,13 @@ void SubagentActivityBridge::drain(Renderer &renderer) {
       std::scoped_lock lock(mutex_);
       name = names_[activity.id];
     }
-    renderer.on_command_output(activity.line + "\n");
+    // Scrollback-safe renderers do not own a fixed pane, so include the
+    // task name in every update.  Tool/message events only carry the task id;
+    // omitting the name made the fallback UI impossible to attribute when
+    // more than one child was running.
+    const auto label = name.empty() ? activity.id : name;
+    renderer.on_command_output("[subagent " + label + "] " + activity.line +
+                               "\n");
   }
 }
 

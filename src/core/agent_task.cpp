@@ -398,13 +398,15 @@ AgentTaskManager::snapshot(const std::shared_ptr<Task> &task) {
   // lock order is never nested here.
   if (task->session != nullptr) {
     try {
+      const auto &model = task->session->agent().state().model();
+      result.model_provider = model.provider;
+      result.model_id = model.id;
       const auto transcript =
           task->session->agent().state().snapshot_transcript();
       auto &info = *result.context_info;
       info.message_count = transcript.messages.size();
       for (const auto &message : transcript.messages)
         info.context_bytes += message_bytes(message);
-      const auto &model = task->session->agent().state().model();
       if (model.context_window != 0)
         info.context_window = model.context_window;
       // State momentarily unavailable: keep zeros rather than fail get/list.

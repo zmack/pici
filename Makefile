@@ -6,23 +6,28 @@ STRIP ?= strip
 
 BUILD_DIR ?= build
 RELEASE_BUILD_DIR ?= build-release
+RELEASE_JEMALLOC_BUILD_DIR ?= build-release-jemalloc
 TSAN_BUILD_DIR ?= build-tsan
 BUILD_PARALLEL ?= --parallel
 
 COMMON_CONFIGURE_FLAGS ?= -DPI_CPP_OTEL_API=OFF
 DEV_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Debug
 RELEASE_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Release
+RELEASE_JEMALLOC_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Release \
+	-DPI_CPP_MEMSTATS=ON \
+	-DPI_CPP_MEMSTATS_LINK_JEMALLOC=ON
 TSAN_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Debug \
 	-DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
 	-DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
 
-.PHONY: help configure dev release strip-release lint format format-check test tsan check clean clean-release clean-tsan
+.PHONY: help configure dev release release-jemalloc strip-release lint format format-check test tsan check clean clean-release clean-release-jemalloc clean-tsan
 
 help:
 	@printf '%s\n' \
 		'Targets:' \
 		'  make dev          Configure and build pi-cli + pi-acp in $(BUILD_DIR)' \
 		'  make release      Configure and build pi-cli + pi-acp in $(RELEASE_BUILD_DIR)' \
+		'  make release-jemalloc Configure and build a Release tree with jemalloc memory stats in $(RELEASE_JEMALLOC_BUILD_DIR)' \
 		'  make strip-release Strip symbols from $(RELEASE_BUILD_DIR)/{pi-cli,pi-acp}' \
 		'  make lint         Run the CMake clang-tidy target' \
 		'  make format       Run the CMake clang-format target' \
@@ -35,7 +40,7 @@ help:
 		'  make clean-tsan   Remove $(TSAN_BUILD_DIR)' \
 		'' \
 		'Variables:' \
-		'  BUILD_DIR=build-dev RELEASE_BUILD_DIR=build-release TSAN_BUILD_DIR=build-tsan BUILD_PARALLEL=--parallel'
+		'  BUILD_DIR=build-dev RELEASE_BUILD_DIR=build-release RELEASE_JEMALLOC_BUILD_DIR=build-release-jemalloc TSAN_BUILD_DIR=build-tsan BUILD_PARALLEL=--parallel'
 
 configure:
 	$(CMAKE) -B $(BUILD_DIR) $(COMMON_CONFIGURE_FLAGS) $(DEV_CONFIGURE_FLAGS)
@@ -46,6 +51,10 @@ dev: configure
 release:
 	$(CMAKE) -B $(RELEASE_BUILD_DIR) $(COMMON_CONFIGURE_FLAGS) $(RELEASE_CONFIGURE_FLAGS)
 	$(CMAKE) --build $(RELEASE_BUILD_DIR) --target pi-cli pi-acp $(BUILD_PARALLEL)
+
+release-jemalloc:
+	$(CMAKE) -B $(RELEASE_JEMALLOC_BUILD_DIR) $(COMMON_CONFIGURE_FLAGS) $(RELEASE_JEMALLOC_CONFIGURE_FLAGS)
+	$(CMAKE) --build $(RELEASE_JEMALLOC_BUILD_DIR) --target pi-cli pi-acp $(BUILD_PARALLEL)
 
 strip-release: release
 	$(STRIP) --strip-all $(RELEASE_BUILD_DIR)/pi-cli
@@ -87,6 +96,9 @@ clean:
 
 clean-release:
 	$(CMAKE) -E rm -rf $(RELEASE_BUILD_DIR)
+
+clean-release-jemalloc:
+	$(CMAKE) -E rm -rf $(RELEASE_JEMALLOC_BUILD_DIR)
 
 clean-tsan:
 	$(CMAKE) -E rm -rf $(TSAN_BUILD_DIR)

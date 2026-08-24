@@ -22,7 +22,7 @@ local function tool(name, description, schema, fn)
   })
 end
 
-tool("spawn_agent", "Start a child agent. Children are read-only by default; write tools require agents.write_tools = core/all and explicit allow_write_tools. There is a fixed cap on live direct children per parent; once it's hit, spawn_agent fails with 'parent child limit reached (N/limit)' until you wait_agent or close_agent an existing child to free a slot -- don't just retry with a new task_name.", {
+tool("spawn_agent", "Start a child agent. Canonical usage omits model so the child reuses the parent session's effective model/provider; only set model when intentionally overriding it. Children are read-only by default; write tools require agents.write_tools = core/all and explicit allow_write_tools. There is a fixed cap on live direct children per parent; once it's hit, spawn_agent fails with 'parent child limit reached (N/limit)' until you wait_agent or close_agent an existing child to free a slot -- don't just retry with a new task_name.", {
   type = "object",
   properties = {
     task_name = {type = "string"},

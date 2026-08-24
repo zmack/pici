@@ -977,6 +977,46 @@ std::string format_memory_bytes(std::uint64_t bytes) {
   return ss.str();
 }
 
+std::string format_ascii_table(const std::vector<std::string> &headers,
+                               const std::vector<std::vector<std::string>> &rows,
+                               const std::vector<bool> &right_aligned) {
+  std::vector<std::size_t> widths(headers.size());
+  for (std::size_t i = 0; i < headers.size(); ++i)
+    widths[i] = headers[i].size();
+  for (const auto &row : rows)
+    for (std::size_t i = 0; i < widths.size() && i < row.size(); ++i)
+      widths[i] = std::max(widths[i], row[i].size());
+
+  std::ostringstream ss;
+  const auto border = [&] {
+    ss << '+';
+    for (const auto width : widths)
+      ss << std::string(width + 2, '-') << '+';
+    ss << '\n';
+  };
+  const auto line = [&](const std::vector<std::string> &cells) {
+    ss << '|';
+    for (std::size_t i = 0; i < widths.size(); ++i) {
+      const std::string value = i < cells.size() ? cells[i] : std::string{};
+      ss << ' ';
+      if (i < right_aligned.size() && right_aligned[i])
+        ss << std::right << std::setw(static_cast<int>(widths[i])) << value;
+      else
+        ss << std::left << std::setw(static_cast<int>(widths[i])) << value;
+      ss << '|' ;
+    }
+    ss << '\n';
+  };
+
+  border();
+  line(headers);
+  border();
+  for (const auto &row : rows)
+    line(row);
+  border();
+  return ss.str();
+}
+
 // Content-composition panel (§Design 3): escaped-JSON wire sizes split by
 // content-block kind, for the root session plus every live child task.
 std::string format_memory_composition(const core::AgentSession &session,
@@ -994,28 +1034,19 @@ std::string format_memory_composition(const core::AgentSession &session,
     rows.emplace_back(path, report);
   }
 
-  const auto label_width =
-      std::accumulate(rows.begin(), rows.end(), std::size_t{7},
-                      [](std::size_t acc, const Row &row) {
-                        return std::max(acc, row.label.size());
-                      });
+  std::vector<std::vector<std::string>> table_rows;
+  table_rows.reserve(rows.size());
+  for (const auto &row : rows)
+    table_rows.push_back({row.label, format_memory_bytes(row.report.transcript_bytes),
+                          format_memory_bytes(row.report.text_bytes),
+                          format_memory_bytes(row.report.tool_result_bytes),
+                          format_memory_bytes(row.report.tool_use_bytes),
+                          format_memory_bytes(row.report.other_bytes)});
   std::ostringstream ss;
-  ss << "\n=== context composition (JSON wire bytes — what you pay tokens "
-        "for) ===\n";
-  ss << std::left << std::setw(static_cast<int>(label_width)) << "session"
-     << "  " << std::right << std::setw(10) << "transcript" << std::setw(10)
-     << "text" << std::setw(13) << "tool_result" << std::setw(10) << "tool_use"
-     << std::setw(9) << "other\n";
-  for (const auto &row : rows) {
-    ss << std::left << std::setw(static_cast<int>(label_width))
-       << row.label.substr(0, label_width) << "  " << std::right
-       << std::setw(10) << format_memory_bytes(row.report.transcript_bytes)
-       << std::setw(10) << format_memory_bytes(row.report.text_bytes)
-       << std::setw(13) << format_memory_bytes(row.report.tool_result_bytes)
-       << std::setw(10) << format_memory_bytes(row.report.tool_use_bytes)
-       << std::setw(9) << format_memory_bytes(row.report.other_bytes) << "\n";
-  }
-  ss.flush();
+  ss << "Context composition (JSON wire bytes; estimated input size)\n";
+  ss << format_ascii_table({"session", "transcript", "text", "tool result",
+                            "tool use", "other"},
+                           table_rows, {false, true, true, true, true, true});
   return ss.str();
 }
 
@@ -1029,65 +1060,46 @@ std::string format_memory_heap(const core::AgentTaskManager &tasks) {
     return {};
   const auto snapshot = core::read_process_snapshot();
 
-  const auto label_width = std::accumulate(
-      heaps.begin(), heaps.end(), std::size_t{22},
-      [](std::size_t acc, const core::SessionHeapReport &report) {
-        return std::max(acc, report.label.size());
-      });
+  std::vector<std::vector<std::string>> table_rows;
+  table_rows.reserve(heaps.size() + 3);
   std::ostringstream ss;
-  ss << "\n=== heap (real allocator bytes) ===\n";
-  ss << std::left << std::setw(static_cast<int>(label_width)) << "session"
-     << "  " << std::right << std::setw(11) << "allocated\n";
+  ss << "Heap (live allocator bytes)\n";
   std::uint64_t arena_sum = 0;
   for (const auto &report : heaps) {
-    ss << std::left << std::setw(static_cast<int>(label_width))
-       << report.label.substr(0, label_width) << "  ";
+    std::string allocated = "n/a";
     if (report.arena) {
       arena_sum += report.arena->allocated_bytes;
-      ss << std::right << std::setw(11)
-         << format_memory_bytes(report.arena->allocated_bytes);
-    } else {
-      ss << std::right << std::setw(11) << "n/a";
+      allocated = format_memory_bytes(report.arena->allocated_bytes);
     }
-    ss << "\n";
+    table_rows.push_back({report.label, std::move(allocated)});
   }
-  ss << std::setfill('-') << std::setw(static_cast<int>(label_width) + 13) << ""
-     << std::setfill(' ') << "\n";
   // §Design 4's internal-consistency identity: shared is DEFINED as
   // stats.allocated − Σ(session arenas); both are live-malloc-byte
   // quantities in the same units. Clamp tiny negative drift from reading
   // different arenas across separate epoch refreshes.
-  ss << std::left << std::setw(static_cast<int>(label_width))
-     << "shared (unattributed)" << "  " << std::right << std::setw(11);
+  std::string shared = "n/a";
   if (snapshot.allocator_allocated_bytes)
-    ss << format_memory_bytes(snapshot.allocator_allocated_bytes > arena_sum
-                                  ? *snapshot.allocator_allocated_bytes -
-                                        arena_sum
-                                  : 0);
-  else
-    ss << "n/a";
-  ss << "\n";
+    shared = format_memory_bytes(snapshot.allocator_allocated_bytes > arena_sum
+                                      ? *snapshot.allocator_allocated_bytes - arena_sum
+                                      : 0);
+  table_rows.push_back({"shared (unattributed)", std::move(shared)});
   if (snapshot.allocator_resident_bytes)
-    ss << std::left << std::setw(static_cast<int>(label_width))
-       << "allocator resident" << "  " << std::right << std::setw(11)
-       << format_memory_bytes(*snapshot.allocator_resident_bytes) << "\n";
-  ss << std::left << std::setw(static_cast<int>(label_width)) << "process RSS"
-     << "  " << std::right << std::setw(11)
-     << format_memory_bytes(snapshot.rss_bytes) << "\n";
-  ss.flush();
+    table_rows.push_back({"allocator resident",
+                          format_memory_bytes(*snapshot.allocator_resident_bytes)});
+  table_rows.push_back({"process RSS", format_memory_bytes(snapshot.rss_bytes)});
+  ss << format_ascii_table({"session", "allocated"}, table_rows, {false, true});
   return ss.str();
 }
 
 std::string format_memory(const core::AgentSession &session,
                           const core::AgentTaskManager &tasks) {
-  std::string out;
+  std::string out = "Memory\n======\n";
   if (core::memory_stats_available())
     out += format_memory_heap(tasks);
   else
-    out +=
-        "\nheap panel unavailable: run with jemalloc as the global allocator "
-        "to enable it\n(e.g. LD_PRELOAD=libjemalloc.so.2 pi-cli, or build "
-        "with -DPI_CPP_MEMSTATS=ON and -DPI_CPP_MEMSTATS_LINK_JEMALLOC=ON)\n";
+    out += "Heap: unavailable (jemalloc is not the active allocator)\n"
+           "  Enable with LD_PRELOAD=libjemalloc.so.2 or build with "
+           "-DPI_CPP_MEMSTATS=ON -DPI_CPP_MEMSTATS_LINK_JEMALLOC=ON\n\n";
   out += format_memory_composition(session, tasks);
   return out;
 }
@@ -1250,8 +1262,8 @@ int cmd_run(const cli::Args &args,
   }
   if (child_write_tools == core::AgentTaskManager::ChildWriteTools::all &&
       sandbox_mode == core::SandboxMode::disabled) {
-    std::cerr << "error: agents.write_tools=all requires an enabled sandbox\n";
-    return 1;
+    std::cerr << "warning: agents.write_tools=all with sandboxing disabled; "
+                 "child agents get unrestricted bash access\n";
   }
 
   std::vector<cli::ContextFile> context_files;
@@ -1707,6 +1719,8 @@ int cmd_run(const cli::Args &args,
         {"id", snapshot.id},
         {"task_path", snapshot.task_path},
         {"task_name", snapshot.task_name},
+        {"model_provider", snapshot.model_provider},
+        {"model", snapshot.model_id},
         {"status", core::agent_task_status_to_string(snapshot.status)},
         {"child_count", snapshot.child_count},
         {"queued_message_count", snapshot.queued_message_count},
