@@ -754,6 +754,8 @@ void test_subagent_pane_is_reserved_in_region_mode() {
          "subagent status is rendered in the reserved pane");
   expect(output.find("tool started") != std::string::npos,
          "subagent activity is rendered in the reserved pane");
+  expect(output.find("─") != std::string::npos,
+         "horizontal separator is rendered above the subagent pane");
   expect(output.find("root-transcript-content") != std::string::npos,
          "root transcript remains rendered separately");
 }

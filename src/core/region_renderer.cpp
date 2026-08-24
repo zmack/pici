@@ -38,6 +38,9 @@ constexpr int kMaxToolBodyLines = 4;
 // which readline's own input renderer caps its painted rows to as well.
 constexpr int kComposerRows = static_cast<int>(kMaxComposerRows);
 constexpr int kSubagentPaneRows = 5;
+constexpr int kSubagentSeparatorRows = 1;
+constexpr int kSubagentReservedRows =
+    kSubagentSeparatorRows + kSubagentPaneRows;
 
 // on_command_output() text (help text, tables, slash-command results) is
 // already fully formatted and must render byte-for-byte -- but the block it
@@ -725,7 +728,7 @@ public:
     state_.start_new_text_block = true;
     state_.hide_cursor_on_frame = true;
     state_.pane_rows_reserved =
-        state_.subagent_rows.empty() ? 0 : kSubagentPaneRows;
+        state_.subagent_rows.empty() ? 0 : kSubagentReservedRows;
     // Pin the row geometry render_frame() uses for the whole turn to
     // whatever the terminal's height is right now -- see the State::
     // turn_layout_height comment below for why.
@@ -1183,7 +1186,7 @@ public:
       // paint loop treats a pane-height change like a resize and forces a
       // full row repaint, so reserve the band immediately instead of waiting
       // until the next turn (which would make the supposedly live pane stale).
-      state_.pane_rows_reserved = rows.empty() ? 0 : kSubagentPaneRows;
+       state_.pane_rows_reserved = rows.empty() ? 0 : kSubagentReservedRows;
       state_.revision = ++revision_;
       mark_dirty_locked();
       paint_now = !turn_active_;
@@ -1649,14 +1652,24 @@ private:
       return {};
     std::string out;
     const int first = height - kComposerRows - pane_rows;
-    for (int i = 0; i < pane_rows; ++i) {
-      out += "\033[" + std::to_string(first + i) + ";1H\033[2K\033[2m";
-      if (i < static_cast<int>(snapshot.subagent_rows.size())) {
-        const auto &row = snapshot.subagent_rows[static_cast<std::size_t>(i)];
+    out += "\033[" + std::to_string(first) + ";1H\033[2K\033[2m";
+    // The separator occupies the first row of the reserved pane band.
+    constexpr std::string_view kSeparator = "─";
+    for (int column = 0; column < width; ++column)
+      out += kSeparator;
+    out += "\033[0m";
+    for (int i = kSubagentSeparatorRows; i < pane_rows; ++i) {
+      const int row = first + i;
+      out += "\033[" + std::to_string(row) + ";1H\033[2K\033[2m";
+      const int pane_index = i - kSubagentSeparatorRows;
+      if (pane_index < static_cast<int>(snapshot.subagent_rows.size())) {
+        const auto &pane_row =
+            snapshot.subagent_rows[static_cast<std::size_t>(pane_index)];
         std::string text =
-            row.last_activity.empty()
-                ? row.name + "  " + row.status
-                : row.name + "  " + row.status + "  " + row.last_activity;
+            pane_row.last_activity.empty()
+                ? pane_row.name + "  " + pane_row.status
+                : pane_row.name + "  " + pane_row.status + "  " +
+                      pane_row.last_activity;
         out += truncate_ansi_line(text, width);
       }
       out += "\033[0m";
