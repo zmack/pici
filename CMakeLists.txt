@@ -469,6 +469,7 @@ add_library(pi-core
     src/core/agent.cpp
     src/core/agent_task.cpp
     src/core/subagent_activity.cpp
+    src/core/subagent_panel.cpp
     src/core/compaction.cpp
     src/core/builtin_tools.cpp
     src/core/apply_patch.cpp
@@ -616,6 +617,10 @@ if(PI_CPP_BUILD_TESTS)
     add_executable(test-subagent-activity test/test_subagent_activity.cpp)
     target_link_libraries(test-subagent-activity PRIVATE pi-core)
     add_test(NAME test-subagent-activity COMMAND test-subagent-activity)
+
+    add_executable(test-subagent-panel test/test_subagent_panel.cpp)
+    target_link_libraries(test-subagent-panel PRIVATE pi-core)
+    add_test(NAME test-subagent-panel COMMAND test-subagent-panel)
 
     add_executable(test-region-renderer test/test_region_renderer.cpp)
     target_link_libraries(test-region-renderer PRIVATE pi-core)

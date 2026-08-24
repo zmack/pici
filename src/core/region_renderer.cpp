@@ -680,7 +680,9 @@ std::string scroll_region_sequence(int height, int pane_rows = 0) {
 class RegionRenderer final : public Renderer {
 public:
   explicit RegionRenderer(int fd)
-      : fd_(fd), alt_screen_(fd), last_resize_generation_(resize_generation()),
+      : fd_(fd), alt_screen_(fd),
+        main_thread_id_(std::this_thread::get_id()),
+        last_resize_generation_(resize_generation()),
         paint_thread_([this](const std::stop_token &st) { paint_loop(st); }) {
     install_resize_handler();
     const auto scroll_region = scroll_region_sequence(term_height(fd_));
@@ -1186,7 +1188,7 @@ public:
       mark_dirty_locked();
       paint_now = !turn_active_;
     }
-    if (paint_now)
+    if (paint_now && std::this_thread::get_id() == main_thread_id_)
       paint_idle_synchronously();
   }
 
@@ -1663,6 +1665,7 @@ private:
   }
 
   int fd_;
+  const std::thread::id main_thread_id_;
   std::mutex mutex_;
   State state_;
   std::condition_variable cv_;

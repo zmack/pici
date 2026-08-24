@@ -75,6 +75,7 @@
 #include "core/stream_diagnostics.h"
 #include "core/stream_renderer.h"
 #include "core/subagent_activity.h"
+#include "core/subagent_panel.h"
 #include "core/terminal.h"
 #include "nlohmann/json_fwd.hpp"
 #include <nlohmann/json.hpp>
@@ -2122,6 +2123,9 @@ int cmd_run(const cli::Args &args,
                                                  initial_project_label);
 
   auto renderer = make_renderer(args);
+  core::SubagentPanel subagent_panel(*activity);
+  const bool panel_mounted = renderer->owns_subagent_pane();
+  subagent_panel.mount(*renderer);
 
   // §Design 2: bind the root session's arena on this (main) thread before
   // the interactive loop; everything the root session allocates from here on
@@ -2274,7 +2278,9 @@ int cmd_run(const cli::Args &args,
     auto result = run_turn(
         runtime, input, *renderer, args.verbose, stream_diagnostics,
         hook_runtime, build_ui_context,
-        (isatty(STDIN_FILENO) != 0 && !args.print_mode) ? activity : nullptr);
+        (isatty(STDIN_FILENO) != 0 && !args.print_mode && !panel_mounted)
+            ? activity
+            : nullptr);
     return result;
   };
 
@@ -2302,8 +2308,9 @@ int cmd_run(const cli::Args &args,
         accumulate(run_message_turn(
             runtime, std::move(messages), *renderer, args.verbose,
             stream_diagnostics, hook_runtime, build_ui_context,
-            (isatty(STDIN_FILENO) != 0 && !args.print_mode) ? activity
-                                                            : nullptr));
+            (isatty(STDIN_FILENO) != 0 && !args.print_mode && !panel_mounted)
+                ? activity
+                : nullptr));
       }
       autonomous_budget.record();
     }

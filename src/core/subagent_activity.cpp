@@ -40,8 +40,13 @@ std::string status_word(AgentTaskStatusKind status) {
 SubagentActivityBridge::SubagentActivityBridge(WakeCallback wake)
     : wake_(std::move(wake)) {}
 
+void SubagentActivityBridge::set_pane_wake(WakeCallback cb) {
+  std::scoped_lock lock(mutex_);
+  pane_wake_ = std::move(cb);
+}
+
 void SubagentActivityBridge::enqueue(AgentTaskId id, std::string line) {
-  WakeCallback wake;
+  WakeCallback wake, pane_wake;
   {
     std::scoped_lock lock(mutex_);
     auto &history = history_[id];
@@ -50,9 +55,12 @@ void SubagentActivityBridge::enqueue(AgentTaskId id, std::string line) {
       history.pop_front();
     pending_.push_back(Activity{std::move(id), std::move(line)});
     wake = wake_;
+    pane_wake = pane_wake_;
   }
   if (wake)
     wake();
+  if (pane_wake)
+    pane_wake();
 }
 
 void SubagentActivityBridge::observe(const AgentTaskEvent &event) {

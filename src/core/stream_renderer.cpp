@@ -380,14 +380,12 @@ public:
     write_seq("\033[?25l"      // hide cursor while the viewport is streaming
               "\033[H\033[J"); // home + erase content region
     paint_status();
-    paint_subagent_pane();
   }
 
   void on_resize() override {
     set_scroll_region();
     repaint();
     paint_status();
-    paint_subagent_pane();
   }
 
   void on_text_delta(std::string_view delta) override {
@@ -396,7 +394,7 @@ public:
   }
 
   void on_scroll(RendererScrollCommand command) override {
-    const int content_rows = std::max(1, term_height(fd_) - 2 - pane_rows());
+    const int content_rows = std::max(1, term_height(fd_) - 2);
     const int page_rows = std::max(1, content_rows - 1);
 
     switch (command) {
@@ -424,15 +422,6 @@ public:
   }
 
   bool owns_status_line() const override { return true; }
-  bool owns_subagent_pane() const override { return true; }
-
-  void set_subagent_pane(const std::vector<SubagentPaneRow> &rows) override {
-    subagent_rows_ = rows;
-    set_scroll_region();
-    repaint();
-    paint_subagent_pane();
-  }
-
   void set_status_line(const std::optional<std::string> &text) override {
     custom_status_line_ = text;
     paint_status();
@@ -544,16 +533,13 @@ private:
     }
   }
 
-  int pane_rows() const { return subagent_rows_.empty() ? 0 : 5; }
-
-  // Scroll region covers rows 1..h-2 (content only), less the pane.
-  // The pane is immediately above the status bar; row h is readline's prompt.
+  // Scroll region covers rows 1..h-2 (content only).
   void set_scroll_region() {
     const int h = term_height(fd_);
-    if (h < 3 + pane_rows())
+    if (h < 3)
       return; // degenerate terminal: no room for content+status+input
     std::string s = "\033[1;";
-    s += std::to_string(h - 2 - pane_rows());
+    s += std::to_string(h - 2);
     s += 'r';
     write_seq(s.c_str());
   }
@@ -561,7 +547,7 @@ private:
   void repaint() {
     const int w = term_width(fd_);
     const int h = term_height(fd_);
-    const int content_rows = h - 2 - pane_rows();
+    const int content_rows = h - 2;
     if (content_rows <= 0)
       return;
 
@@ -665,7 +651,6 @@ private:
 
     write_best_effort(fd_, frame.data(), frame.size());
     paint_status();
-    paint_subagent_pane();
   }
 
   void paint_status() {
@@ -728,29 +713,6 @@ private:
     write_best_effort(fd_, bar.data(), bar.size());
   }
 
-  void paint_subagent_pane() {
-    const int w = term_width(fd_);
-    const int h = term_height(fd_);
-    const int rows = pane_rows();
-    if (rows == 0 || w < 1)
-      return;
-    std::string out;
-    const int first = h - 1 - rows;
-    for (int i = 0; i < rows; ++i) {
-      out += "\033[" + std::to_string(first + i) + ";1H\033[2K\033[2m";
-      if (i < static_cast<int>(subagent_rows_.size())) {
-        const auto &row = subagent_rows_[static_cast<std::size_t>(i)];
-        std::string text =
-            row.last_activity.empty()
-                ? row.name + "  " + row.status
-                : row.name + "  " + row.status + "  " + row.last_activity;
-        out += truncate_ansi_line(text, w);
-      }
-      out += "\033[0m";
-    }
-    write_best_effort(fd_, out.data(), out.size());
-  }
-
   void write_seq(const char *s) const {
     write_best_effort(fd_, s, std::strlen(s));
   }
@@ -779,7 +741,6 @@ private:
   TokenUsage last_usage_;
   int scroll_offset_rows_{0};
   int max_scroll_rows_{0};
-  std::vector<SubagentPaneRow> subagent_rows_;
   BlockBoundaryScanner scanner_;
   FinCache fin_cache_;
 };

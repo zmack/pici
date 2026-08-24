@@ -21,6 +21,8 @@ public:
 
   explicit SubagentActivityBridge(WakeCallback wake = {});
 
+  void set_pane_wake(WakeCallback cb);
+
   void observe(const AgentTaskEvent &event);
   void drain(Renderer &renderer);
 
@@ -43,6 +45,7 @@ private:
   std::unordered_map<AgentTaskId, std::string> names_;
   std::unordered_map<AgentTaskId, AgentTaskStatusKind> statuses_;
   WakeCallback wake_;
+  WakeCallback pane_wake_;
 };
 
 } // namespace pi::core
