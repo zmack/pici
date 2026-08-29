@@ -38,6 +38,7 @@
 #include "cli/args.h"
 #include "cli/config.h"
 #include "cli/faux_control_mode.h"
+#include "cli/mailbox_runtime.h"
 #include "cli/model_selector.h"
 #include "cli/readline.h"
 #include "cli/rpc_mode.h"
@@ -95,104 +96,6 @@ std::filesystem::path bundled_mailbox_addon_path() {
   // The project currently has no install target; keep the bundled addon next
   // to its source tree until runtime resource packaging is introduced.
   return std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "mailbox.lua";
-}
-
-bool is_mailbox_tool(std::string_view name) {
-  return name == "agents_list" || name == "agents_send" ||
-         name == "agents_request" || name == "agents_reply" ||
-         name == "agents_inbox" || name == "agents_close";
-}
-
-struct MailboxTaskObserver {
-  std::mutex mutex;
-  std::weak_ptr<core::MailboxCoordinator> coordinator;
-
-  void observe(const core::AgentTaskEvent &event) {
-    std::shared_ptr<core::MailboxCoordinator> current;
-    {
-      std::scoped_lock lock(mutex);
-      current = coordinator.lock();
-    }
-    if (current)
-      current->observe_task_event(event);
-  }
-
-  void detach() {
-    std::scoped_lock lock(mutex);
-    coordinator.reset();
-  }
-};
-
-struct MailboxLifecycleGuard {
-  std::shared_ptr<core::AgentTaskManager> task_manager;
-  std::shared_ptr<MailboxTaskObserver> observer;
-  std::shared_ptr<core::MailboxCoordinator> coordinator;
-  std::shared_ptr<core::MailboxDeliveryTargets> delivery;
-  MailboxLifecycleGuard(std::shared_ptr<core::AgentTaskManager> manager,
-                        std::shared_ptr<MailboxTaskObserver> value,
-                        std::shared_ptr<core::MailboxCoordinator> native,
-                        std::shared_ptr<core::MailboxDeliveryTargets> target)
-      : task_manager(std::move(manager)), observer(std::move(value)),
-        coordinator(std::move(native)), delivery(std::move(target)) {}
-  MailboxLifecycleGuard(const MailboxLifecycleGuard &) = delete;
-  MailboxLifecycleGuard &operator=(const MailboxLifecycleGuard &) = delete;
-  MailboxLifecycleGuard(MailboxLifecycleGuard &&) = delete;
-  MailboxLifecycleGuard &operator=(MailboxLifecycleGuard &&) = delete;
-  ~MailboxLifecycleGuard() noexcept {
-    if (task_manager) {
-      try {
-        task_manager->shutdown();
-      } catch (...) {
-        static_cast<void>(0);
-      }
-    }
-    if (coordinator)
-      coordinator->detach_delivery();
-    delivery.reset();
-    if (observer)
-      observer->detach();
-    if (coordinator)
-      coordinator->stop();
-  }
-};
-
-struct RootRunningGuard {
-  std::shared_ptr<core::MailboxCoordinator> coordinator;
-  explicit RootRunningGuard(std::shared_ptr<core::MailboxCoordinator> value)
-      : coordinator(std::move(value)) {}
-  RootRunningGuard(const RootRunningGuard &) = delete;
-  RootRunningGuard &operator=(const RootRunningGuard &) = delete;
-  RootRunningGuard(RootRunningGuard &&) = delete;
-  RootRunningGuard &operator=(RootRunningGuard &&) = delete;
-  ~RootRunningGuard() noexcept {
-    if (coordinator) {
-      try {
-        coordinator->set_root_running(false);
-      } catch (...) {
-        static_cast<void>(0);
-      }
-    }
-  }
-};
-
-std::string local_hostname() {
-  std::array<char, 256> buffer{};
-  if (::gethostname(buffer.data(), buffer.size() - 1) == 0) {
-    buffer.back() = '\0';
-    return {buffer.data()};
-  }
-  return "local";
-}
-
-std::string workspace_identity(const std::filesystem::path &workspace_path) {
-  std::uint64_t hash = 1469598103934665603ULL;
-  for (const auto character : workspace_path.string()) {
-    hash ^= static_cast<unsigned char>(character);
-    hash *= 1099511628211ULL;
-  }
-  std::ostringstream result;
-  result << "workspace-" << std::hex << hash;
-  return result.str();
 }
 
 std::string format_tools(
@@ -1367,9 +1270,34 @@ int cmd_run(const cli::Args &args,
   };
   opts.verbose = args.verbose;
 
+  std::shared_ptr<core::MailboxCoordinator> mailbox;
+  if (args.mailbox_enabled) {
+    try {
+      const auto launch = cli::resolve_mailbox_launch_options(
+          args, model, std::filesystem::current_path());
+      mailbox = cli::start_mailbox(launch);
+      if (args.verbose) {
+        const auto &options = launch.coordinator;
+        std::cerr << "mailbox enabled: path=" << launch.resolved_path
+                  << " workspace_id=" << options.store.workspace_id
+                  << " workspace_path=" << launch.workspace_path
+                  << " process_id=" << options.process_id
+                  << " agent_id=" << options.root_agent_id
+                  << " lease_ms=" << options.store.claim_lease_ms
+                  << " poll_ms=" << options.poll_interval.count()
+                  << " schema=1\n";
+      }
+    } catch (const core::MailboxError &error) {
+      std::cerr << "mailbox disabled: "
+                << core::mailbox_error_code_to_string(error.code()) << ": "
+                << error.what() << "\n";
+    } catch (const std::exception &error) {
+      std::cerr << "mailbox disabled: " << error.what() << "\n";
+    }
+  }
+
   // Load and compose Lua hooks
   std::vector<std::shared_ptr<core::LuaHooks>> hooks_list_saved;
-  bool auto_mailbox_addon_loaded = false;
   auto load_hooks = [&](bool allow_auto_mailbox =
                             true) -> std::shared_ptr<core::LuaHooks> {
     std::vector<std::shared_ptr<core::LuaHooks>> hooks_list;
@@ -1419,10 +1347,9 @@ int cmd_run(const cli::Args &args,
           std::filesystem::exists(mailbox_entry, mailbox_entry_error) ||
           mailbox_addon_explicit;
     }
-    if (allow_auto_mailbox && args.mailbox_enabled && !mailbox_addon_explicit) {
+    if (allow_auto_mailbox && mailbox && !mailbox_addon_explicit) {
       try {
         hooks_list.push_back(core::load_lua_hooks(bundled_mailbox, true));
-        auto_mailbox_addon_loaded = true;
         if (args.verbose)
           std::cerr << "[hooks: " << bundled_mailbox << "]\n";
       } catch (const std::exception &e) {
@@ -1519,6 +1446,7 @@ int cmd_run(const cli::Args &args,
                            .threshold_pct = args.compaction_threshold_pct > 0.0
                                                 ? args.compaction_threshold_pct
                                                 : 0.85}});
+  cli::MailboxRuntime mailbox_runtime(mailbox);
   auto &agent = runtime.agent();
   std::function<void(const std::string &)> faux_tool_registrar;
   if (scripted_registry) {
@@ -1594,150 +1522,22 @@ int cmd_run(const cli::Args &args,
     return 0;
   }
 
-  std::shared_ptr<core::MailboxCoordinator> mailbox;
-  if (args.mailbox_enabled) {
-    std::filesystem::path workspace_path;
-    try {
-      workspace_path =
-          std::filesystem::weakly_canonical(std::filesystem::current_path());
-    } catch (...) {
-      workspace_path = std::filesystem::current_path();
-    }
-    const auto settings = args.config_document ? args.config_document->mailbox
-                                               : cli::MailboxSettings{};
-    std::filesystem::path mailbox_path =
-        args.mailbox_path.empty() ? settings.path
-                                  : std::filesystem::path(args.mailbox_path);
-    if (mailbox_path.empty())
-      mailbox_path = cli::default_mailbox_path(
-          args.config_path.empty() ? cli::default_config_path()
-                                   : std::filesystem::path(args.config_path));
-    const auto resolved_mailbox_path = mailbox_path;
-    const auto now = [] {
-      return std::chrono::duration_cast<std::chrono::milliseconds>(
-                 std::chrono::system_clock::now().time_since_epoch())
-          .count();
-    };
-    core::MailboxCoordinatorOptions mailbox_options;
-    mailbox_options.store.path = std::move(mailbox_path);
-    mailbox_options.store.workspace_id = workspace_identity(workspace_path);
-    mailbox_options.store.workspace_path = workspace_path.string();
-    mailbox_options.store.scope = settings.scope == "global"
-                                      ? core::MailboxScope::global
-                                      : core::MailboxScope::workspace;
-    mailbox_options.store.claim_lease_ms = settings.claim_lease_ms;
-    mailbox_options.store.retention_days = settings.retention_days;
-    mailbox_options.store.clock = now;
-    mailbox_options.store.id_generator = [] {
-      return core::generate_session_id();
-    };
-    mailbox_options.process_id = core::generate_session_id();
-    mailbox_options.root_agent_id = core::generate_session_id();
-    mailbox_options.provider = model.provider;
-    mailbox_options.model_id = model.id;
-    mailbox_options.hostname = local_hostname();
-    mailbox_options.heartbeat_interval =
-        std::chrono::milliseconds(settings.heartbeat_interval_ms);
-    mailbox_options.stale_after =
-        std::chrono::milliseconds(settings.stale_after_ms);
-    mailbox_options.poll_interval =
-        std::chrono::milliseconds(settings.poll_interval_ms);
-    mailbox_options.cleanup_interval = std::chrono::hours(1);
-    try {
-      mailbox = std::make_shared<core::MailboxCoordinator>(mailbox_options);
-      if (args.verbose)
-        std::cerr << "mailbox enabled: path=" << resolved_mailbox_path
-                  << " workspace_id=" << mailbox_options.store.workspace_id
-                  << " workspace_path=" << workspace_path
-                  << " process_id=" << mailbox_options.process_id
-                  << " agent_id=" << mailbox_options.root_agent_id
-                  << " lease_ms=" << settings.stale_after_ms
-                  << " poll_ms=" << settings.poll_interval_ms << " schema=1\n";
-    } catch (const core::MailboxError &error) {
-      std::cerr << "mailbox disabled: "
-                << core::mailbox_error_code_to_string(error.code()) << ": "
-                << error.what() << "\n";
-      mailbox.reset();
-    } catch (const std::exception &error) {
-      std::cerr << "mailbox disabled: " << error.what() << "\n";
-      mailbox.reset();
-    }
-    if (!mailbox && auto_mailbox_addon_loaded) {
-      std::erase_if(hooks->registered_tools, [](const auto &tool) {
-        return tool && is_mailbox_tool(tool->name());
-      });
-      auto_mailbox_addon_loaded = false;
-      {
-        std::scoped_lock lock(hook_runtime->mutex);
-        hook_runtime->hooks = hooks;
-      }
-      if (args.faux_control_socket.empty())
-        apply_hook_tools();
-    }
-  }
-  auto mailbox_wake = std::make_shared<cli::ReadlineWake>();
+  auto repl_wake = std::make_shared<cli::ReadlineWake>();
   auto activity = std::make_shared<core::SubagentActivityBridge>(
-      [mailbox_wake] { static_cast<void>(mailbox_wake->notify()); });
-  auto mailbox_observer = std::make_shared<MailboxTaskObserver>();
-  mailbox_observer->coordinator = mailbox;
+      [repl_wake] { static_cast<void>(repl_wake->notify()); });
   auto task_callbacks = std::vector<core::AgentTaskEventCallback>{};
   task_callbacks.emplace_back([activity](const core::AgentTaskEvent &event) {
     activity->observe(event);
   });
-  if (mailbox)
-    task_callbacks.emplace_back(
-        [mailbox_observer](const core::AgentTaskEvent &event) {
-          mailbox_observer->observe(event);
-        });
+  if (auto callback = mailbox_runtime.task_event_callback())
+    task_callbacks.emplace_back(std::move(callback));
   auto task_manager = std::make_shared<core::AgentTaskManager>(
       runtime, opts, core::AgentTaskManager::Limits{},
       core::fan_out_agent_task_callbacks(std::move(task_callbacks)),
       child_write_tools);
-  if (mailbox) {
-    task_manager->set_endpoint_registration(
-        [mailbox](const core::AgentTaskId &task_id,
-                  const std::string &task_path,
-                  const std::optional<core::AgentTaskId> &parent_id) {
-          return mailbox->register_subagent(task_id, task_path, parent_id);
-        },
-        [mailbox](const core::AgentTaskId &task_id) {
-          mailbox->unregister_subagent(task_id);
-        });
-  }
-  auto mailbox_delivery = std::make_shared<core::MailboxDeliveryTargets>();
-
-  mailbox_delivery->root =
-      [&runtime](std::vector<core::AgentMessageEnvelope> messages) {
-        runtime.agent().steer_envelopes(std::move(messages));
-        return true;
-      };
-  mailbox_delivery->subagent =
-      [task_manager](const std::string &, const std::string &task_id,
-                     std::vector<core::AgentMessageEnvelope> messages) {
-        try {
-          task_manager->steer_envelopes(task_id, std::move(messages));
-          return true;
-        } catch (const core::AgentTaskError &) {
-          return false;
-        } catch (...) {
-          return false;
-        }
-      };
-  mailbox_delivery->drop_queued = [&runtime, task_manager] {
-    runtime.agent().clear_mailbox_steering_queue();
-    task_manager->drop_mailbox_envelopes();
-  };
-  mailbox_delivery->drop_root_queued = [&runtime] {
-    runtime.agent().clear_mailbox_steering_queue();
-  };
-  mailbox_delivery->root_wake = [mailbox_wake] {
-    if (mailbox_wake)
-      static_cast<void>(mailbox_wake->notify());
-  };
-  if (mailbox)
-    mailbox->attach_delivery(mailbox_delivery);
-  MailboxLifecycleGuard mailbox_lifecycle{task_manager, mailbox_observer,
-                                          mailbox, mailbox_delivery};
+  mailbox_runtime.connect(runtime, task_manager, [repl_wake] {
+    static_cast<void>(repl_wake->notify());
+  });
   auto compat_counter = std::make_shared<std::atomic_uint64_t>(0);
 
   auto task_error_json = [](const core::AgentTaskError &error) {
@@ -2085,12 +1885,11 @@ int cmd_run(const cli::Args &args,
     }
   }
 
-  if (mailbox) {
-    const auto identity =
-        mailbox->activate_root(current_session_id, current_session_name);
-    agent.set_runtime_identity(identity);
+  if (const auto identity = mailbox_runtime.activate_root(
+          current_session_id, current_session_name)) {
+    agent.set_runtime_identity(*identity);
     const auto current_model = agent.state().model();
-    mailbox->set_model(current_model.provider, current_model.id);
+    mailbox_runtime.set_model(current_model.provider, current_model.id);
   }
 
   configure_hooks();
@@ -2270,11 +2069,8 @@ int cmd_run(const cli::Args &args,
   // Run a turn and persist all new messages to the session file.
   auto run_and_persist = [&](const std::string &input) {
     core::TerminalTitleActivityGuard title_activity(title_controller);
-    if (mailbox) {
-      mailbox->set_root_running(true);
-      mailbox->pump_inbox();
-    }
-    RootRunningGuard running_guard{mailbox};
+    auto mailbox_turn = mailbox_runtime.begin_root_turn();
+    mailbox_runtime.pump_inbox();
     auto result = run_turn(
         runtime, input, *renderer, args.verbose, stream_diagnostics,
         hook_runtime, build_ui_context,
@@ -2288,12 +2084,12 @@ int cmd_run(const cli::Args &args,
   core::MailboxAutonomousTurnBudget autonomous_budget;
   bool autonomous_budget_exhausted = false;
   auto run_idle_mailbox_turns = [&] {
-    if (!mailbox || autonomous_budget_exhausted)
+    if (!mailbox_runtime.enabled() || autonomous_budget_exhausted)
       return;
     while (autonomous_budget.can_run()) {
       std::vector<core::AgentMessageEnvelope> messages;
       try {
-        messages = mailbox->claim_idle_root_turn(kAutonomousBatchLimit);
+        messages = mailbox_runtime.claim_idle_root_turn(kAutonomousBatchLimit);
       } catch (const std::exception &error) {
         if (args.verbose)
           std::cerr << "[mailbox autonomous turn unavailable: " << error.what()
@@ -2304,7 +2100,7 @@ int cmd_run(const cli::Args &args,
         return;
       {
         core::TerminalTitleActivityGuard title_activity(title_controller);
-        RootRunningGuard running_guard{mailbox};
+        auto mailbox_turn = mailbox_runtime.adopt_root_turn();
         accumulate(run_message_turn(
             runtime, std::move(messages), *renderer, args.verbose,
             stream_diagnostics, hook_runtime, build_ui_context,
@@ -2408,9 +2204,8 @@ int cmd_run(const cli::Args &args,
     const std::string_view readline_status =
         renderer->owns_status_line() || !status_line ? std::string_view{}
                                                      : *status_line;
-    const int readline_wake_fd = mailbox_wake && !autonomous_budget_exhausted
-                                     ? mailbox_wake->read_fd()
-                                     : -1;
+    const int readline_wake_fd =
+        repl_wake && !autonomous_budget_exhausted ? repl_wake->read_fd() : -1;
     // Full-screen renderers (currently only --render region) echo the
     // submitted request in their own scrolling history, so the readline box
     // should empty immediately on submit instead of leaving the typed text
@@ -2432,8 +2227,8 @@ int cmd_run(const cli::Args &args,
       run_idle_mailbox_turns();
       continue;
     }
-    if (autonomous_budget_exhausted && mailbox_wake)
-      mailbox_wake->drain();
+    if (autonomous_budget_exhausted && repl_wake)
+      repl_wake->drain();
     activity->drain(*renderer);
     autonomous_budget.reset();
     autonomous_budget_exhausted = false;
@@ -2563,8 +2358,7 @@ int cmd_run(const cli::Args &args,
       try {
         const auto result = runtime.set_model(*resolution.model,
                                               agent.state().thinking_level());
-        if (mailbox)
-          mailbox->set_model(result.current.provider, result.current.id);
+        mailbox_runtime.set_model(result.current.provider, result.current.id);
         configure_hooks();
         {
           std::scoped_lock lock(effective_context_mutex);
@@ -2605,6 +2399,7 @@ int cmd_run(const cli::Args &args,
       } else {
         store->set_name(current_session_id, name);
         current_session_name = name;
+        mailbox_runtime.set_session_name(name);
         std::cerr << "[session name: " << name << "]\n";
       }
       continue;
@@ -2639,12 +2434,11 @@ int cmd_run(const cli::Args &args,
       }
       current_session_id = result.selected_session_id;
       current_session_name = loaded->header.name;
-      if (mailbox)
-        mailbox->drop_queued_delivery();
+      mailbox_runtime.drop_queued_delivery();
       runtime.activate_session(*loaded);
-      if (mailbox)
-        agent.set_runtime_identity(
-            mailbox->activate_root(current_session_id, current_session_name));
+      if (const auto identity = mailbox_runtime.activate_root(
+              current_session_id, current_session_name))
+        agent.set_runtime_identity(*identity);
       if (runtime.last_warning())
         std::cerr << "warning: " << *runtime.last_warning() << "\n";
       configure_hooks();
@@ -2666,13 +2460,12 @@ int cmd_run(const cli::Args &args,
       const auto current_model = agent.state().model();
       fresh_hdr.model = current_model.id;
       fresh_hdr.provider = current_model.provider;
-      if (mailbox)
-        mailbox->drop_queued_delivery();
+      mailbox_runtime.drop_queued_delivery();
       current_session_id = runtime.create_session(fresh_hdr);
       current_session_name.reset();
-      if (mailbox)
-        agent.set_runtime_identity(
-            mailbox->activate_root(current_session_id, current_session_name));
+      if (const auto identity = mailbox_runtime.activate_root(
+              current_session_id, current_session_name))
+        agent.set_runtime_identity(*identity);
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();
@@ -2690,13 +2483,12 @@ int cmd_run(const cli::Args &args,
       child_hdr.provider = current_model.provider;
       child_hdr.parent_id = current_session_id;
       child_hdr.parent_offset = agent.state().messages().size();
-      if (mailbox)
-        mailbox->drop_queued_delivery();
+      mailbox_runtime.drop_queued_delivery();
       current_session_id = runtime.fork_session(child_hdr);
       current_session_name.reset();
-      if (mailbox)
-        agent.set_runtime_identity(
-            mailbox->activate_root(current_session_id, current_session_name));
+      if (const auto identity = mailbox_runtime.activate_root(
+              current_session_id, current_session_name))
+        agent.set_runtime_identity(*identity);
       {
         std::scoped_lock lock(effective_context_mutex);
         effective_context.reset();

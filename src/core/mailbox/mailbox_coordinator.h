@@ -91,6 +91,7 @@ public:
   activate_root(std::string session_id,
                 std::optional<std::string> session_name = {});
   void deactivate_root();
+  void set_session_name(std::string session_name);
   void set_root_running(bool running);
   void set_model(std::string provider, std::string model_id);
   void observe_task_event(const AgentTaskEvent &event);

@@ -251,6 +251,21 @@ void MailboxCoordinator::deactivate_root() {
   }
 }
 
+void MailboxCoordinator::set_session_name(std::string session_name) {
+  std::string root_agent_id;
+  {
+    std::scoped_lock lock(mutex_);
+    if (!root_active_)
+      return;
+    root_agent_id = active_root_agent_id_;
+  }
+  store_->update_agent(
+      AgentUpdate{.agent_id = root_agent_id, .session_name = session_name});
+  std::scoped_lock lock(mutex_);
+  if (root_active_ && active_root_agent_id_ == root_agent_id)
+    session_name_ = std::move(session_name);
+}
+
 void MailboxCoordinator::set_root_running(bool running) {
   std::string status;
   std::string root_agent_id;

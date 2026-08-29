@@ -582,6 +582,7 @@ add_executable(pi-cli
     src/main.cpp
     src/cli/args.cpp
     src/cli/config.cpp
+    src/cli/mailbox_runtime.cpp
     src/cli/readline.cpp
     src/cli/wrap.cpp
     src/cli/vim_mode.cpp
@@ -677,6 +678,14 @@ if(PI_CPP_BUILD_TESTS)
     target_include_directories(test-config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json)
     add_test(NAME test-config COMMAND test-config)
+
+    add_executable(test-mailbox-runtime
+        test/test_mailbox_runtime.cpp
+        src/cli/mailbox_runtime.cpp
+        src/cli/config.cpp
+        src/cli/args.cpp)
+    target_link_libraries(test-mailbox-runtime PRIVATE pi-core tomlplusplus::tomlplusplus)
+    add_test(NAME test-mailbox-runtime COMMAND test-mailbox-runtime)
 
     add_executable(test-mailbox-store test/test_mailbox_store.cpp)
     target_include_directories(test-mailbox-store PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

@@ -90,6 +90,10 @@ int main() {
     const auto root_a = coordinator.activate_root("session-a", "first");
     CHECK(coordinator.status().root_active);
     CHECK_EQ(coordinator.status().session_id.value(), std::string("session-a"));
+    coordinator.set_session_name("renamed");
+    CHECK_EQ(coordinator.status().session_name.value(), std::string("renamed"));
+    CHECK_EQ(coordinator.self(root_a).session_name.value(),
+             std::string("renamed"));
     CHECK_EQ(coordinator.self(root_a).agent_id, root_a.agent_id);
     CHECK_EQ(coordinator.self(root_a).session_id, root_a.session_id);
     CHECK_EQ(coordinator.self(root_a).lease_expires_at_ms,
