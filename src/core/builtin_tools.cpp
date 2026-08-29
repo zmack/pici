@@ -47,7 +47,7 @@
 namespace pi::core {
 namespace {
 
-constexpr std::size_t kMaxBytes = static_cast<const std::size_t>(64 * 1024);
+constexpr std::size_t kMaxBytes = static_cast<std::size_t>(64 * 1024);
 constexpr std::size_t kReadMaxLines = 2000;
 constexpr int kLsDefaultLimit = 500;
 constexpr int kFindDefaultLimit = 1000;

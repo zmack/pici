@@ -160,12 +160,15 @@ nlohmann::json event_to_json(const AgentEvent &event) {
       },
       event);
 
-  const auto &base = std::visit(
-      [](const auto &value) -> const EventBase & { return value; }, event);
+  const auto [base_type, base_sequence, base_timestamp] = std::visit(
+      [](const auto &value) {
+        return std::tuple{value.type, value.sequence, value.timestamp};
+      },
+      event);
   return nlohmann::json{{"type", "event"},
-                        {"event", event_type_to_string(base.type)},
-                        {"sequence", base.sequence},
-                        {"timestamp", base.timestamp},
+                        {"event", event_type_to_string(base_type)},
+                        {"sequence", base_sequence},
+                        {"timestamp", base_timestamp},
                         {"data", std::move(data)}};
 }
 

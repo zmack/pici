@@ -135,46 +135,6 @@ std::string make_run_id() {
   return "run-" + std::to_string(ts) + "-" + std::to_string(++gRunCounter);
 }
 
-// Extract plain text from a pici AssistantMessage's content blocks.
-std::string assistant_text(const core::AssistantMessage &am) {
-  std::string text;
-  for (const auto &block : am.content) {
-    if (const auto *tc = std::get_if<core::TextContent>(&block))
-      text += tc->text;
-  }
-  return text;
-}
-
-// Extract plain text from a pici ToolResultMessage.
-std::string tool_result_text(const core::ToolResultMessage &tr) {
-  std::string text;
-  for (const auto &block : tr.content) {
-    if (const auto *tc = std::get_if<core::TextContent>(&block))
-      text += tc->text;
-  }
-  return text;
-}
-
-// Convert all messages accumulated during a run into ACP output messages.
-std::vector<Message>
-messages_from_run(const std::string &agent_name,
-                  const std::string &accumulated_text,
-                  const std::vector<core::ToolResultMessage> &tool_results) {
-  std::vector<Message> out;
-  if (!accumulated_text.empty()) {
-    out.push_back({.role = agent_name,
-                   .parts = {{.content_type = std::string{"text/plain"},
-                              .content = accumulated_text}}});
-  }
-  for (const auto &tr : tool_results) {
-    auto text = "[tool:" + tr.tool_name + "] " + tool_result_text(tr);
-    out.push_back({.role = agent_name,
-                   .parts = {{.content_type = std::string{"text/plain"},
-                              .content = std::move(text)}}});
-  }
-  return out;
-}
-
 class SyncRenderer final : public core::Renderer {
 public:
   void on_text_delta(std::string_view d) override { accumulated_ += d; }

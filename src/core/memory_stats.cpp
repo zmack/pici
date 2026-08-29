@@ -123,10 +123,6 @@ bool mallctl_purge_arena(unsigned index) {
   return runtime().mallctl(name.c_str(), nullptr, nullptr, nullptr, 0) == 0;
 }
 
-#else // !PI_MEMSTATS_HAVE_MALLCTL
-
-void ensure_initialized() {}
-
 #endif
 
 } // namespace

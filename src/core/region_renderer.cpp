@@ -683,8 +683,7 @@ std::string scroll_region_sequence(int height, int pane_rows = 0) {
 class RegionRenderer final : public Renderer {
 public:
   explicit RegionRenderer(int fd)
-      : fd_(fd), alt_screen_(fd),
-        main_thread_id_(std::this_thread::get_id()),
+      : fd_(fd), main_thread_id_(std::this_thread::get_id()), alt_screen_(fd),
         last_resize_generation_(resize_generation()),
         paint_thread_([this](const std::stop_token &st) { paint_loop(st); }) {
     install_resize_handler();

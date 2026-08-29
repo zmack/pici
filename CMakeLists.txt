@@ -454,6 +454,17 @@ if(NOT CURL_FOUND)
     FetchContent_MakeAvailable(curl)
 endif()
 
+# ─── warnings ───
+# -Wmissing-field-initializers fires on every partial designated initializer
+# (Foo{.field = x}), which is this codebase's normal style, not a defect.
+# -Wunused-parameter fires on the many intentionally-unused parameters in
+# virtual overrides (already suppressed as an editor diagnostic in .clangd).
+set(PI_CPP_WARNING_FLAGS
+    -Wall -Wextra
+    -Wno-missing-field-initializers
+    -Wno-unused-parameter
+)
+
 # ─── libpi-core ───
 add_library(pi-core
     src/core/mailbox/mailbox_bindings.cpp
@@ -501,6 +512,8 @@ add_library(pi-core
 target_include_directories(pi-core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+
+target_compile_options(pi-core PRIVATE ${PI_CPP_WARNING_FLAGS})
 
 target_compile_definitions(pi-core PUBLIC
     PI_CPP_VERSION="${PROJECT_VERSION}"
@@ -583,6 +596,7 @@ target_link_libraries(pi-cli PRIVATE pi-core pi-http tomlplusplus::tomlplusplus)
 target_compile_definitions(pi-cli PRIVATE
     PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
+target_compile_options(pi-cli PRIVATE ${PI_CPP_WARNING_FLAGS})
 
 # ─── pi-acp (ACP server) ───
 add_executable(pi-acp
@@ -601,6 +615,7 @@ add_executable(pi-acp
 )
 target_include_directories(pi-acp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pi-acp PRIVATE pi-core pi-http httplib::httplib tomlplusplus::tomlplusplus)
+target_compile_options(pi-acp PRIVATE ${PI_CPP_WARNING_FLAGS})
 
 # ─── Tests ───
 if(PI_CPP_BUILD_TESTS)
@@ -768,6 +783,7 @@ add_library(pi-http
 target_include_directories(pi-http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pi-http PUBLIC pi-core CURL::libcurl OpenSSL::Crypto
                                      httplib::httplib)
+target_compile_options(pi-http PRIVATE ${PI_CPP_WARNING_FLAGS})
 
 # ─── clang-tidy ───────────────────────────────────────────────────────────────
 

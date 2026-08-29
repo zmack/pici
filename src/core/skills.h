@@ -13,8 +13,7 @@ namespace pi::core {
 inline constexpr size_t kSkillMaxNameLength = 64;
 inline constexpr size_t kSkillMaxDescriptionLength = 1024;
 inline constexpr size_t kSkillMaxShortDescriptionLength = 256;
-inline constexpr size_t kSkillMaxBodyBytes =
-    static_cast<const size_t>(128 * 1024);
+inline constexpr size_t kSkillMaxBodyBytes = static_cast<size_t>(128 * 1024);
 inline constexpr size_t kSkillMaxPerRoot = 256;
 inline constexpr size_t kSkillMaxTotal = 512;
 

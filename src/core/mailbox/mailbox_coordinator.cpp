@@ -88,9 +88,9 @@ fan_out_agent_task_callbacks(std::vector<AgentTaskEventCallback> callbacks) {
 }
 
 MailboxCoordinator::MailboxCoordinator(MailboxCoordinatorOptions options)
-    : options_(std::move(options)), provider_(options_.provider),
-      model_id_(options_.model_id),
+    : options_(std::move(options)),
       active_root_agent_id_(options_.root_agent_id),
+      provider_(options_.provider), model_id_(options_.model_id),
       lifetime_(std::make_shared<Lifetime>()) {
   if (options_.process_id.empty() || options_.root_agent_id.empty())
     throw MailboxError(MailboxErrorCode::invalid_message,

@@ -47,10 +47,12 @@ void reject_symlink(const std::filesystem::path &path);
 // the actual return type selects the right behavior at compile time without
 // depending on ambient _GNU_SOURCE state, and unlike strerror(), both forms
 // are thread-safe.
-std::string strerror_r_result(char *message, const std::array<char, 256> &) {
+[[maybe_unused]] std::string strerror_r_result(char *message,
+                                               const std::array<char, 256> &) {
   return {message};
 }
-std::string strerror_r_result(int rc, const std::array<char, 256> &buffer) {
+[[maybe_unused]] std::string
+strerror_r_result(int rc, const std::array<char, 256> &buffer) {
   return rc == 0 ? std::string(buffer.data()) : "errno " + std::to_string(rc);
 }
 
