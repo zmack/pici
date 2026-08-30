@@ -4,7 +4,15 @@
 >
 > Scope: names, ownership, lifetimes, state boundaries, and subsystem interactions
 >
-> Last reviewed: 2026-08-29
+> Last reviewed: 2026-08-30
+
+> **Object-structure authority:** `docs/object-taxonomy.md` is normative for
+> object archetypes, names, ownership, state authority, and dependency
+> direction. This lexicon remains normative for semantic terms such as
+> session, activation, turn, transcript, and acknowledgement. Where
+> migration-era names below (for example `ModelRegistry`, `AuthResolver`, or
+> `AgentTaskManager`) disagree with the object taxonomy, the taxonomy wins and
+> the old name describes current migration debt only.
 
 This document defines what Pici's architectural words mean and how the named
 things are intended to interact. It is not a promise that every current C++
@@ -32,18 +40,19 @@ shared runtime recommended by that review.
 Frontend (CLI, JSONL RPC, ACP)
     |
     v
-SessionRuntime                         one active durable session
-    +-- Agent                          one live executor activation
-    |    +-- AgentState                mutable execution state
-    |    +-- AgentLoop                 bounded execution state machine
-    +-- SessionStore                   durable conversation journals
-    +-- AgentTaskManager               owned child-task tree
-    +-- MailboxCoordinator             durable cross-activation delivery
-    +-- AddonRuntime                   Lua policy/customization
-    +-- tools, auth, model selection, compaction policy
-         |
-         v
-Provider client -> remote model API
+PiciProcess
+    +-- ModelCatalog -> Provider -> discovery/inference/auth bindings
+    +-- Authentication
+    +-- Mailbox
+    +-- SessionStore / MailboxStore / CredentialStore
+    +-- SessionRuntime[0..N]            one live durable-session activation
+        +-- Agent                       one live executor activation
+        |   +-- AgentState              mutable execution state
+        |   +-- AgentLoop[0..1]         bounded agent-run operation
+        |   +-- TaskTree
+        |       +-- Task -> child SessionRuntime
+        +-- MailboxAttachment[0..1]
+        +-- AddonAdapter[0..1]
 
 Typed TranscriptMessages and AgentEvents cross these boundaries.
 Renderers and wire adapters observe events; they do not own agent behavior.
@@ -62,43 +71,51 @@ become agent input.
 
 ```text
 PiciProcess
-+-- shared ModelRegistry, provider factories, AuthResolver, configuration
++-- ModelCatalog
+|   +-- Provider[1..N]
+|       +-- discovery binding
+|       +-- inference binding
+|       +-- authentication binding
++-- Authentication
++-- Mailbox
++-- SessionStore, MailboxStore, CredentialStore
++-- reusable adapter implementations
 +-- zero or more SessionRuntimes
-    +-- active Session identity and SessionStore reference
-    +-- one Agent activation
+    +-- active Session identity and references to process facilities
+    +-- Agent
     |   +-- AgentState
     |   +-- current AgentLoop worker, if running
-    |   +-- steering/follow-up queues
-    +-- AgentTaskManager
-    |   +-- child Tasks
-    |       +-- child SessionRuntime (or bounded equivalent)
-    |           +-- child Agent activation
-    +-- mailbox runtime/coordinator attachment
-    +-- AddonRuntime/composed hooks
-    +-- effective tools, sandbox, model, and compaction policy
+    |   +-- TaskTree
+    |       +-- Task[0..N]
+    |           +-- child SessionRuntime
+    +-- MailboxAttachment[0..1]
+    +-- AddonAdapter/composed hooks[0..1]
 
 FrontendAdapter
 +-- owns protocol/UI state
-+-- creates or obtains a SessionRuntime
++-- obtains a SessionRuntime from PiciProcess
 +-- translates external input to AgentInput
-+-- translates AgentEvents to UI or wire output
++-- owns renderer/serializer output adapters
 ```
 
 | Thing | Intended owner | Lifetime | Must not own |
 |---|---|---|---|
-| `PiciProcess` | executable/service host | process | one global active session |
-| `SessionRuntime` | frontend/runtime host | active binding | UI or protocol responses |
+| `PiciProcess` | executable host | process | one global active session |
+| `ModelCatalog` | `PiciProcess` | process | active session selection |
+| `Authentication` | `PiciProcess` | process | transcripts or presentation |
+| `Mailbox` | `PiciProcess` | process | session transcript or task tree |
+| `SessionRuntime` | `PiciProcess`/runtime host | active session binding | UI or protocol responses |
 | Session data | `SessionStore` | durable | threads, clients, renderers |
-| Agent activation | `SessionRuntime` or child runtime | live activation | durable store |
+| `Agent` activation | `SessionRuntime` | live activation | durable store |
 | `AgentState` | `Agent` | activation | frontend state |
 | `AgentLoop` worker | `Agent` | one agent run | durable session identity |
-| `AgentTaskManager` | `SessionRuntime` | root runtime | root frontend |
-| Child task | `AgentTaskManager` | spawn through close | parent frontend |
-| `MailboxCoordinator` | runtime/product service | attachment | transcript |
-| `MailboxStore` | mailbox service | connection | live agents |
-| Add-on runtime/hooks | `SessionRuntime` | binding/reload generation | security/thread ownership |
+| `TaskTree` | `Agent` | activation | parent frontend or mailbox |
+| Child task | `TaskTree` | spawn through close | parent frontend |
+| `MailboxAttachment` | `SessionRuntime` | session activation | mailbox store or process mailbox |
+| `MailboxStore` | `Mailbox` | process/store connection | live agents |
+| Add-on adapter/hooks | `SessionRuntime` | binding/reload generation | security/thread ownership |
 | `Renderer` | frontend | UI/output | transcript truth or execution policy |
-| `ModelRegistry` | shared process services | immutable configuration | active selection |
+| `Provider` | `ModelCatalog` | catalog generation | shared adapter implementation |
 
 Destruction follows inverse dependency order. Child tasks close before mailbox
 observers disconnect; delivery disconnects before the coordinator dies; agent
@@ -281,18 +298,21 @@ transitions. Add-ons own optional policy/customization within those contracts.
 ### Models, providers, and auth
 
 A **model** is an effective provider-neutral offering descriptor. **Model
-selection** is intent resolved to one model. The immutable **model registry**
-owns the effective catalog; a runtime owns active selection. A model is not a
-live client.
+selection** is intent resolved to one model. The process-owned **model catalog**
+owns the effective inventory and publishes immutable views; an agent owns the
+active selection. A model is not a live client.
 
-A **provider** is the service/operator namespace and auth policy. An **API
+A **provider** is a service/operator namespace and one catalog-owned definition
+with explicit discovery, inference, and authentication bindings. An **API
 protocol** is a request/stream dialect; providers and protocols are not
-one-to-one. An **LLM client** adapts a protocol between effective context/wire
-requests and typed response messages/events. It does not select models,
-persist, or render.
+one-to-one. An **inference adapter** adapts a protocol between effective
+context/wire requests and typed response messages/events. It does not select
+models, persist, or render.
 
-The **authentication resolver** obtains request credentials under provider
-policy. Credentials never enter transcripts, mailbox payloads, or presentation
+The process-owned **authentication** aggregate obtains request credentials
+through the selected provider's authentication binding. OAuth is a
+provider-selected adapter, not an independent peer aggregate. Credentials
+never enter transcripts, mailbox payloads, catalog views, or presentation
 events.
 
 ### Tasks and mailbox
@@ -301,16 +321,17 @@ events.
 
 A **task** is managed delegated work with task ID/path, parent, lifecycle,
 result, limits, queues, and—while resident—a child runtime/activation. It is
-not its child agent. The **task tree** is the ownership hierarchy rooted at one
-runtime. Task IDs do not replace `agent_id` for routing or `session_id` for
-durability.
+not its child agent. The **task tree** is owned by one agent; resident tasks own
+their child session runtimes. Task IDs do not replace `agent_id` for routing
+or `session_id` for durability.
 
 #### Mailbox / presence / target
 
 The **mailbox** is durable discovery and at-least-once delivery among sessions
 and activations. It includes presence, entries, leases, acknowledgement, wait
 notifications, retention, and cleanup. It is neither transcript nor in-memory
-steering queue.
+steering queue. The process owns the mailbox aggregate; a session runtime owns
+only its move-only mailbox attachment.
 
 `ProcessRecord` and `AgentRecord` are leased **presence records**, not
 owners. Expiry means “not known live,” not “session deleted.” A **mailbox
@@ -457,19 +478,16 @@ must be called **ACP message**, **ACP run**, and **ACP agent profile/manifest**.
 | Current name | Intended name/concept | Reason |
 |---|---|---|
 | `core::Message` | `TranscriptMessage` | separates history from mailbox/ACP |
-| `MailboxMessage` | `MailboxEntry` | durable coordination record |
-| `MailboxMessageKind` | `MailboxEntryKind` | kind belongs to an entry |
-| `MailboxBody` | `MailboxPayload` | avoids body/wire ambiguity |
-| mailbox `message_id` | `entry_id` | avoids cross-domain ID collision |
-| `reply_to_message_id` | `reply_to_entry_id` | explicit correlation domain |
-| `SendRequest` | `EnqueueMailboxEntryRequest` | avoids request-kind collision |
-| `SendReceipt` | `MailboxEnqueueReceipt` | names the commit |
-| `AgentMessageEnvelope` | `AgentInput` | transient input + provenance/callback |
-| `MessageAcceptanceCallback` | `InputAcceptanceCallback` | commits input acceptance |
-| `AgentMessageSource` | `InputSource` | source describes input admission |
+| `ModelRegistry` | `ModelCatalog` | owns inventory merge, refresh, and immutable projections |
+| `ProviderDefinition` | `Provider` | catalog-owned definition with three explicit bindings |
+| `AuthResolver` | `Authentication` | process aggregate, not a request helper |
+| `AgentTaskManager` | `TaskTree` | agent-owned delegation hierarchy |
+| `MailboxCoordinator` | `Mailbox` | process aggregate and durable routing authority |
+| `MailboxRuntime` | `MailboxAttachment` | per-session binding, not the mailbox owner |
+| `ModelSelector` | `ModelPicker` | bounded operation over a catalog projection |
 | `RequestPresentation` | `InputProvenance` + presentation | separates runtime from UI |
-| `AgentSession` | grow/fold into `SessionRuntime` | owns agent and switches sessions |
-| `cli::MailboxRuntime` | runtime mailbox attachment | shared product behavior |
+| `agent_session.{h,cpp}` | `session_runtime.{h,cpp}` | file should name its declared object |
+| missing composition root | `PiciProcess` | owns process aggregates and opens runtimes |
 | `acp::Message` | qualify / internal `AcpMessage` | avoids transcript collision |
 | `acp::Run` | always **ACP run** | differs from agent run and turn |
 | ACP `agent_name` | agent profile name | not a live activation |
@@ -481,38 +499,31 @@ wire compatibility where required.
 ## Review findings against the target
 
 The code is directionally aligned through typed messages/events, distinct
-`Agent` and `AgentState`, append-only sessions, mailbox leases/acks, task
-identities, provider-neutral clients, and the native/Lua mechanism-policy
-split. Main deviations:
+`Agent` and `AgentState`, an extracted `SessionRuntime`, append-only
+sessions, mailbox leases/acks, task identities, provider-neutral clients, and
+the native/Lua mechanism-policy split. Main remaining deviations are:
 
-- `cmd_run()` in `src/main.cpp` still assembles model/auth, hooks, tools,
-  session, mailbox, tasks, rendering, commands, and REPL lifecycle. This is the
-  missing `SessionRuntime` identified by `pici-architecture.html`.
-- `AgentSession` sounds like one stable session but owns an `Agent` and can
-  activate different durable sessions.
-- `cli::MailboxRuntime` correctly isolates mailbox wiring, but root/task
-  delivery policy belongs in shared runtime code.
-- ACP constructs a separate session path and globally serializes durable runs.
-  Use shared construction and per-session execution ownership.
+- `ModelRegistry` has no provider-report refresh lifecycle or immutable
+  generation projection.
+- `ProviderDefinition` does not yet carry explicit discovery, inference, and
+  authentication bindings.
+- `AuthResolver` and Codex OAuth have not yet become the provider-bound
+  `Authentication` aggregate.
+- There is no `PiciProcess` composition root shared by frontends.
+- `SessionRuntime` still owns `AgentTaskManager`; the target `Agent` owns its
+  `TaskTree`.
+- `MailboxCoordinator` still has singular-root assumptions; the target process
+  mailbox supports multiple per-session attachments.
+- The native model selector exchanges catalog pointers and concrete models
+  instead of `ModelCatalogView` and `ModelKey` values.
 - `pi-core` is a link boundary, not a strict domain boundary. Split it only
   after ownership is explicit.
-- `RequestPresentation` contains runtime provenance, not just presentation.
-- `delivered_at_ms` lacks a defined write-side transition.
-- README's opening architecture inventory describes the original kernel rather
-  than the current product runtime.
 
 ## Migration sequence
 
-1. Adopt this vocabulary in new plans, comments, tests, and non-wire APIs.
-2. Characterize construction, switching, mailbox accept/ack timing, task
-   teardown, and frontend parity.
-3. Introduce a shared `SessionRuntime` and factory; move mailbox wiring there.
-4. Make CLI, JSONL RPC, and ACP thin adapters over it.
-5. Incrementally rename `TranscriptMessage`, `AgentInput`, and
-   `MailboxEntry`, using compatibility aliases only where useful.
-6. Split provenance from presentation; define or remove delivered time.
-7. Replace ACP's global run mutex with per-session execution ownership after
-   the runtime boundary exists.
+Follow `plans/object-taxonomy-migration.md`, one phase per delegated task. Its
+dependency order is normative for the remaining structural migration; older
+plans are historical context where they disagree.
 
 ## Code-review checklist
 

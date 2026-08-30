@@ -1,6 +1,15 @@
 ## General Info
 This is an agentic cli in c++ using cmake.
 
+## Architecture Taxonomy
+
+Before architectural work, read `AGENTS.md`, `docs/object-taxonomy.md`,
+`docs/architecture-lexicon.md`, and `plans/object-taxonomy-migration.md`. The
+object taxonomy is normative for names, ownership, state authority, and
+dependency direction; it overrides migration-era implementation names and
+older diagrams. New code must use the target nouns and one of the standard
+archetypes defined there.
+
 For C++ test work, read [docs/testing-with-googletest.md](docs/testing-with-googletest.md)
 for the repository's GoogleTest patterns, test commands, and boundary-safety
 guidance.

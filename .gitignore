@@ -44,6 +44,8 @@ docs/
 docs/*
 !docs/pi-gap-analysis.md
 !docs/architecture-lexicon.md
+!docs/object-taxonomy.md
+!docs/pici-object-archetypes.html
 
 # Dependencies (install via package manager)
 # Don't commit system deps

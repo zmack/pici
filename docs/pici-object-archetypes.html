@@ -1,0 +1,1373 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A visual proposal for Pici's object archetypes, containment rules, and model catalog architecture.">
+  <title>Pici object model — fewer nouns, firmer boundaries</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f4f0e8;
+      --panel: #fffdf8;
+      --ink: #17211e;
+      --muted: #61706a;
+      --line: #d1d4cd;
+      --shadow: 0 18px 50px rgba(26, 42, 36, .09);
+      --runtime: #6046a2;
+      --runtime-soft: #e9e2f8;
+      --aggregate: #14665a;
+      --aggregate-soft: #dceee9;
+      --store: #326988;
+      --store-soft: #dcebf3;
+      --adapter: #a65327;
+      --adapter-soft: #f5e2d7;
+      --operation: #9b403c;
+      --operation-soft: #f4dfdd;
+      --projection: #827018;
+      --projection-soft: #f2eccb;
+      --value: #59635f;
+      --value-soft: #e7e9e7;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --serif: Iowan Old Style, Charter, "Bitstream Charter", Georgia, serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 64px; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 9% 3%, rgba(20, 102, 90, .12), transparent 28rem),
+        radial-gradient(circle at 94% 12%, rgba(96, 70, 162, .10), transparent 25rem),
+        linear-gradient(rgba(23, 33, 30, .025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 33, 30, .025) 1px, transparent 1px),
+        var(--paper);
+      background-size: auto, auto, 32px 32px, 32px 32px, auto;
+      font: 16px/1.6 var(--sans);
+    }
+
+    a { color: inherit; text-underline-offset: 3px; }
+    code, .mono { font-family: var(--mono); }
+    code {
+      padding: .12rem .32rem;
+      border: 1px solid rgba(23, 33, 30, .09);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, .62);
+      font-size: .9em;
+    }
+    p { margin: 0 0 1rem; }
+    ul { margin: .7rem 0 0; padding-left: 1.15rem; }
+    li { margin: .34rem 0; }
+
+    .shell { width: min(1320px, calc(100% - 32px)); margin: 0 auto; }
+    .hero { padding: clamp(64px, 10vw, 128px) 0 54px; }
+    .eyebrow {
+      color: var(--adapter);
+      font: 750 .76rem/1 var(--mono);
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3 { font-family: var(--serif); letter-spacing: -.025em; }
+    h1 {
+      max-width: 1040px;
+      margin: 16px 0 22px;
+      font-size: clamp(3.2rem, 8vw, 7.4rem);
+      font-weight: 600;
+      line-height: .91;
+    }
+    h1 em { color: var(--aggregate); font-style: normal; }
+    .lede {
+      max-width: 880px;
+      color: #35443f;
+      font: 1.28rem/1.62 var(--serif);
+    }
+    .thesis {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 18px;
+      max-width: 1040px;
+      margin-top: 30px;
+      padding: 20px 24px;
+      border: 1px solid #b9d2ca;
+      border-left: 5px solid var(--aggregate);
+      border-radius: 0 14px 14px 0;
+      background: var(--aggregate-soft);
+    }
+    .thesis b { color: var(--aggregate); font: 800 1.25rem var(--mono); }
+    .thesis p { margin: 0; font-family: var(--serif); font-size: 1.08rem; }
+
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      overflow-x: auto;
+      border-block: 1px solid rgba(97, 112, 106, .25);
+      background: rgba(244, 240, 232, .93);
+      backdrop-filter: blur(14px);
+    }
+    nav .shell { display: flex; gap: 24px; }
+    nav a {
+      flex: 0 0 auto;
+      padding: 14px 0 12px;
+      color: var(--muted);
+      font: 750 .72rem var(--mono);
+      letter-spacing: .06em;
+      text-decoration: none;
+      text-transform: uppercase;
+    }
+    nav a:hover { color: var(--aggregate); }
+
+    main { padding: 18px 0 88px; }
+    section {
+      padding: 54px 0;
+      border-bottom: 1px solid rgba(97, 112, 106, .24);
+    }
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(260px, .8fr) 1.7fr;
+      gap: 34px;
+      align-items: end;
+      margin-bottom: 30px;
+    }
+    h2 { margin: 0; font-size: clamp(2.1rem, 4vw, 3.8rem); line-height: 1; }
+    .section-head p { max-width: 760px; margin: 0; color: var(--muted); }
+    h3 { margin: 0 0 9px; font-size: 1.4rem; line-height: 1.14; }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 0; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .58);
+      color: var(--muted);
+      font: 700 .68rem var(--mono);
+      text-transform: uppercase;
+    }
+    .pill::before { width: 8px; height: 8px; border-radius: 50%; background: currentColor; content: ""; }
+    .pill.runtime { color: var(--runtime); }
+    .pill.aggregate { color: var(--aggregate); }
+    .pill.store { color: var(--store); }
+    .pill.adapter { color: var(--adapter); }
+    .pill.operation { color: var(--operation); }
+    .pill.projection { color: var(--projection); }
+    .pill.value { color: var(--value); }
+
+    .cards { display: grid; gap: 16px; }
+    .cards.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .cards.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      position: relative;
+      overflow: hidden;
+      min-height: 250px;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-top: 6px solid var(--value);
+      border-radius: 14px;
+      background: rgba(255, 253, 248, .82);
+      box-shadow: var(--shadow);
+    }
+    .card::after {
+      position: absolute;
+      right: -28px;
+      bottom: -45px;
+      color: rgba(23, 33, 30, .04);
+      font: 800 8rem/1 var(--mono);
+      content: attr(data-mark);
+      pointer-events: none;
+    }
+    .card.runtime { border-top-color: var(--runtime); }
+    .card.aggregate { border-top-color: var(--aggregate); }
+    .card.store { border-top-color: var(--store); }
+    .card.adapter { border-top-color: var(--adapter); }
+    .card.operation { border-top-color: var(--operation); }
+    .card.projection { border-top-color: var(--projection); }
+    .card.value { border-top-color: var(--value); }
+    .kind {
+      display: block;
+      margin-bottom: 10px;
+      font: 800 .7rem var(--mono);
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+    .runtime .kind { color: var(--runtime); }
+    .aggregate .kind { color: var(--aggregate); }
+    .store .kind { color: var(--store); }
+    .adapter .kind { color: var(--adapter); }
+    .operation .kind { color: var(--operation); }
+    .projection .kind { color: var(--projection); }
+    .value .kind { color: var(--value); }
+    .card p { color: var(--muted); font-size: .91rem; }
+    .card strong { color: var(--ink); }
+
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+    .callout {
+      padding: 22px 24px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 253, 248, .75);
+    }
+    .callout h3 { font-family: var(--sans); font-size: 1.05rem; }
+    .callout.good { border-left: 5px solid var(--aggregate); }
+    .callout.bad { border-left: 5px solid var(--adapter); }
+    .callout p:last-child { margin-bottom: 0; }
+
+    .diagram-scroll { overflow-x: auto; padding: 3px 2px 20px; }
+    .containment {
+      min-width: 1080px;
+      padding: 24px;
+      border: 1px solid #b9bdb7;
+      border-radius: 20px;
+      background: rgba(255, 253, 248, .8);
+      box-shadow: var(--shadow);
+    }
+    .process-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: baseline;
+      padding-bottom: 16px;
+      border-bottom: 2px solid var(--ink);
+    }
+    .process-label strong { font: 800 1rem var(--mono); }
+    .process-label span { color: var(--muted); font-size: .84rem; }
+    .process-grid {
+      display: grid;
+      grid-template-columns: 1.35fr .85fr .85fr 1.15fr;
+      gap: 14px;
+      margin-top: 16px;
+      align-items: start;
+    }
+    .node {
+      position: relative;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--value);
+      border-radius: 11px;
+      background: var(--panel);
+    }
+    .node.aggregate { border-top-color: var(--aggregate); background: linear-gradient(180deg, var(--aggregate-soft), var(--panel) 52%); }
+    .node.store { border-top-color: var(--store); background: linear-gradient(180deg, var(--store-soft), var(--panel) 52%); }
+    .node.adapter { border-top-color: var(--adapter); background: linear-gradient(180deg, var(--adapter-soft), var(--panel) 52%); }
+    .node.runtime { border-top-color: var(--runtime); background: linear-gradient(180deg, var(--runtime-soft), var(--panel) 42%); }
+    .node h3 { font: 800 .92rem var(--mono); }
+    .node p { margin: 0; color: var(--muted); font-size: .82rem; }
+    .node small { display: block; margin-top: 8px; color: var(--value); font: .68rem/1.45 var(--mono); }
+    .inner {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px dashed var(--line);
+    }
+    .mini {
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--value);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, .7);
+      font-size: .76rem;
+    }
+    .mini.aggregate { border-left-color: var(--aggregate); }
+    .mini.store { border-left-color: var(--store); }
+    .mini.adapter { border-left-color: var(--adapter); }
+    .mini.operation { border-left-color: var(--operation); }
+    .mini.projection { border-left-color: var(--projection); }
+    .mini b { display: block; font-family: var(--mono); }
+    .session-node { grid-column: 1 / -1; margin-top: 2px; }
+    .session-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 9px; margin-top: 14px; }
+
+    .boundary-map { min-width: 1040px; display: grid; grid-template-columns: .72fr 2fr 1.2fr; gap: 16px; align-items: stretch; }
+    .boundary-column { display: grid; gap: 10px; align-content: start; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 253, 248, .78); }
+    .boundary-column.external { border-top: 5px solid var(--value); }
+    .boundary-column.frontend { border-top: 5px solid var(--adapter); }
+    .boundary-column.domain { border-top: 5px solid var(--runtime); }
+    .boundary-column > h3 { font: 800 .9rem var(--mono); }
+    .boundary-column > p { color: var(--muted); font-size: .84rem; }
+    .actor { display: grid; place-items: center; min-height: 86px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--value-soft); text-align: center; font: 750 .76rem var(--mono); }
+    .frontend-case { padding: 13px; border: 1px solid #dfbfae; border-radius: 9px; background: rgba(255, 255, 255, .72); }
+    .frontend-case h4 { margin: 0 0 8px; color: var(--adapter); font: 800 .76rem var(--mono); }
+    .frontend-case-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .port { padding: 9px; border-radius: 7px; background: var(--adapter-soft); color: #63351e; font-size: .73rem; }
+    .port b { display: block; font-family: var(--mono); }
+    .domain-call { padding: 12px; border: 1px solid #c5bcdf; border-radius: 9px; background: var(--runtime-soft); font-size: .78rem; }
+    .domain-call b { display: block; font-family: var(--mono); }
+    .boundary-note { grid-column: 1 / -1; padding: 13px 16px; border-left: 5px solid var(--adapter); background: var(--adapter-soft); font-size: .88rem; }
+    .contract-table td:nth-child(1) { width: 15%; }
+    .contract-table td:nth-child(2) { width: 15%; }
+    .contract-table td:nth-child(3), .contract-table td:nth-child(4), .contract-table td:nth-child(5) { width: 23.33%; }
+    .relationship-key { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+    .relationship-key span { padding: 5px 9px; border-radius: 999px; background: var(--value-soft); font: 700 .68rem var(--mono); }
+    .blueprint-frame {
+      min-width: 1120px;
+      padding: 12px;
+      border: 1px solid #b9bdb7;
+      border-radius: 20px;
+      background: rgba(255, 253, 248, .88);
+      box-shadow: var(--shadow);
+    }
+    .blueprint-frame svg { display: block; width: 100%; height: auto; }
+    .bp-process { fill: rgba(255, 253, 248, .36); stroke: var(--ink); stroke-width: 2; }
+    .bp-cluster { fill: rgba(255, 255, 255, .52); stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 7 5; }
+    .bp-runtime { fill: var(--runtime-soft); stroke: var(--runtime); stroke-width: 2.5; }
+    .bp-aggregate { fill: var(--aggregate-soft); stroke: var(--aggregate); stroke-width: 2; }
+    .bp-store { fill: var(--store-soft); stroke: var(--store); stroke-width: 2; }
+    .bp-adapter { fill: var(--adapter-soft); stroke: var(--adapter); stroke-width: 2; }
+    .bp-operation { fill: var(--operation-soft); stroke: var(--operation); stroke-width: 1.7; }
+    .bp-projection { fill: var(--projection-soft); stroke: var(--projection); stroke-width: 1.7; }
+    .bp-value { fill: var(--value-soft); stroke: var(--value); stroke-width: 1.5; }
+    .bp-title { fill: var(--ink); font: 800 15px var(--mono); }
+    .bp-label { fill: var(--ink); font: 750 12px var(--mono); }
+    .bp-copy { fill: var(--muted); font: 11px var(--sans); }
+    .bp-scope-label { fill: var(--muted); font: 750 11px var(--mono); letter-spacing: 1px; }
+    .bp-calls { fill: none; stroke: var(--ink); stroke-width: 2; marker-end: url(#arrow-call); }
+    .bp-events { fill: none; stroke: var(--adapter); stroke-width: 2; stroke-dasharray: 7 5; marker-end: url(#arrow-event); }
+    .bp-persists { fill: none; stroke: var(--store); stroke-width: 2.3; marker-end: url(#arrow-store); }
+    .bp-contains { fill: none; stroke: var(--runtime); stroke-width: 1.7; stroke-dasharray: 3 4; marker-end: url(#arrow-runtime); }
+    .bp-edge-label { paint-order: stroke; stroke: var(--panel); stroke-width: 5px; stroke-linejoin: round; font: 700 10px var(--mono); }
+    .bp-edge-label.call { fill: var(--ink); }
+    .bp-edge-label.event { fill: var(--adapter); }
+    .bp-edge-label.store { fill: var(--store); }
+    .line-legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0 0; }
+    .line-legend span { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font: 700 .68rem var(--mono); }
+    .line-sample { width: 30px; height: 0; border-top: 2px solid var(--ink); }
+    .line-sample.event { border-color: var(--adapter); border-top-style: dashed; }
+    .line-sample.store { border-color: var(--store); border-top-width: 3px; }
+    .line-sample.contains { border-color: var(--runtime); border-top-style: dotted; }
+
+    .sequence-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .focus-views { display: grid; gap: 18px; }
+    .focus-panel {
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255, 253, 248, .88);
+      box-shadow: var(--shadow);
+    }
+    .focus-panel-head { display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: start; margin-bottom: 18px; }
+    .focus-panel-head h3 { margin: 0 0 4px; font: 800 1.15rem var(--sans); }
+    .focus-panel-head p { margin: 0; color: var(--muted); font-size: .88rem; }
+    .view-number { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; color: #fff; background: var(--ink); font: 800 .78rem var(--mono); }
+    .ownership-shell { display: grid; gap: 12px; padding: 16px; border: 2px solid var(--ink); border-radius: 14px; }
+    .ownership-title { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; font: 800 .82rem var(--mono); }
+    .ownership-title span { color: var(--muted); font: 500 .74rem var(--sans); }
+    .ownership-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; }
+    .owned-box { position: relative; padding: 13px; border: 1.5px solid var(--line); border-radius: 10px; background: #fff; font: 800 .73rem var(--mono); }
+    .owned-box small { display: block; margin-top: 5px; color: var(--muted); font: 500 .7rem/1.35 var(--sans); }
+    .owned-box.aggregate { border-color: var(--aggregate); background: var(--aggregate-soft); }
+    .owned-box.store { border-color: var(--store); background: var(--store-soft); }
+    .owned-box.adapter { border-color: var(--adapter); background: var(--adapter-soft); }
+    .owned-box.runtime { border-color: var(--runtime); background: var(--runtime-soft); }
+    .session-owned { display: grid; grid-template-columns: 1fr 2.2fr 1fr; gap: 10px; margin-top: 10px; }
+    .nested-agent { padding: 13px; border: 2px solid var(--aggregate); border-radius: 10px; background: var(--aggregate-soft); }
+    .agent-parts { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: 8px; margin-top: 10px; }
+    .agent-part { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.7); font: 700 .69rem var(--mono); }
+    .nested-task { border-color: var(--aggregate); }
+    .cardinality { float: right; padding: 3px 7px; border-radius: 999px; color: var(--muted); background: rgba(255,255,255,.72); font: 750 .64rem var(--mono); }
+    .contract-rails { display: grid; gap: 9px; }
+    .contract-rail { display: grid; grid-template-columns: 1fr minmax(230px, .85fr) 1fr; gap: 9px; align-items: center; }
+    .contract-end, .contract-link { padding: 11px 13px; border-radius: 9px; font-size: .76rem; }
+    .contract-end { border: 1px solid var(--line); background: #fff; font: 750 .72rem var(--mono); }
+    .contract-link { position: relative; border: 1px dashed var(--runtime); color: var(--runtime); background: var(--runtime-soft); text-align: center; font: 800 .68rem/1.35 var(--mono); }
+    .contract-link::before, .contract-link::after { position: absolute; top: 50%; transform: translateY(-50%); color: var(--runtime); content: "→"; }
+    .contract-link::before { left: -9px; }
+    .contract-link::after { right: -9px; }
+    .focus-split { display: grid; grid-template-columns: 1.15fr .85fr; gap: 18px; }
+    .authority-list { display: grid; gap: 7px; }
+    .authority-row { display: grid; grid-template-columns: 1fr 1fr 1.25fr; gap: 7px; }
+    .authority-row > * { padding: 9px 10px; border-radius: 7px; background: var(--value-soft); font-size: .72rem; }
+    .authority-row.header > * { color: #fff; background: var(--ink); font: 750 .66rem var(--mono); }
+    .binding-table { width: 100%; border-collapse: separate; border-spacing: 5px; }
+    .binding-table th, .binding-table td { padding: 8px; border-radius: 6px; text-align: left; font-size: .68rem; vertical-align: top; }
+    .binding-table th { color: #fff; background: var(--ink); font: 750 .62rem var(--mono); }
+    .binding-table td { background: var(--adapter-soft); }
+    .binding-note { margin: 12px 0 0; padding: 10px 12px; border-left: 4px solid var(--adapter); background: var(--adapter-soft); font-size: .76rem; }
+    .sequence {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 253, 248, .8);
+      box-shadow: var(--shadow);
+    }
+    .sequence h3 { font-family: var(--sans); font-size: 1.05rem; }
+    .sequence > p { color: var(--muted); font-size: .87rem; }
+    .seq-flow { display: grid; gap: 7px; margin-top: 14px; counter-reset: seq; }
+    .seq-step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 32px 116px 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      border-left: 5px solid var(--value);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .72);
+      font-size: .78rem;
+    }
+    .seq-step::before { counter-increment: seq; content: counter(seq, decimal-leading-zero); color: var(--muted); font: 750 .72rem var(--mono); }
+    .seq-step:not(:last-child)::after { position: absolute; left: 23px; bottom: -11px; z-index: 2; content: "↓"; color: var(--ink); font-weight: 900; }
+    .seq-step.runtime { border-left-color: var(--runtime); }
+    .seq-step.aggregate { border-left-color: var(--aggregate); }
+    .seq-step.store { border-left-color: var(--store); }
+    .seq-step.adapter { border-left-color: var(--adapter); }
+    .seq-step.operation { border-left-color: var(--operation); }
+    .seq-step.projection { border-left-color: var(--projection); }
+    .seq-step.value { border-left-color: var(--value); }
+    .seq-who { font: 750 .7rem/1.4 var(--mono); }
+    .seq-action { color: var(--muted); }
+    .seq-action strong { color: var(--ink); }
+    .flow {
+      min-width: 1040px;
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 9px;
+      align-items: stretch;
+    }
+    .step {
+      position: relative;
+      min-height: 155px;
+      padding: 16px 14px;
+      border: 1px solid var(--line);
+      border-top: 5px solid var(--value);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+    .step:not(:last-child)::after {
+      position: absolute;
+      z-index: 3;
+      top: 58px;
+      right: -15px;
+      color: var(--ink);
+      font: 900 1rem var(--mono);
+      content: "→";
+    }
+    .step.aggregate { border-top-color: var(--aggregate); }
+    .step.adapter { border-top-color: var(--adapter); }
+    .step.operation { border-top-color: var(--operation); }
+    .step.projection { border-top-color: var(--projection); }
+    .step.runtime { border-top-color: var(--runtime); }
+    .step.value { border-top-color: var(--value); }
+    .step b { display: block; margin-bottom: 7px; font: 800 .78rem/1.3 var(--mono); }
+    .step span { color: var(--muted); font-size: .78rem; }
+
+    .contract {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 18px;
+      align-items: stretch;
+      margin-top: 18px;
+    }
+    .contract-box {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+    }
+    .contract-box.input { border-top: 5px solid var(--projection); }
+    .contract-box.output { border-top: 5px solid var(--value); }
+    .contract-arrow { display: grid; place-items: center; color: var(--operation); font: 900 1.5rem var(--mono); }
+    .contract-box h3 { font: 800 1rem var(--mono); }
+    .contract-box p { color: var(--muted); font-size: .9rem; }
+
+    .decision {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      counter-reset: question;
+    }
+    .question {
+      position: relative;
+      min-height: 210px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 253, 248, .82);
+    }
+    .question::before {
+      counter-increment: question;
+      content: "0" counter(question);
+      display: block;
+      margin-bottom: 12px;
+      color: var(--aggregate);
+      font: 800 1.35rem var(--mono);
+    }
+    .question h3 { font-family: var(--sans); font-size: 1rem; }
+    .question p { color: var(--muted); font-size: .86rem; }
+    .answer { color: var(--ink); font: 750 .76rem/1.45 var(--mono); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      background: rgba(255, 253, 248, .68);
+      font-size: .9rem;
+    }
+    th {
+      padding: 11px 13px;
+      color: var(--muted);
+      background: #e8e6df;
+      text-align: left;
+      font: 750 .68rem var(--mono);
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    td { padding: 13px; border-top: 1px solid var(--line); vertical-align: top; }
+    td:first-child { font-family: var(--mono); font-weight: 700; }
+    tr:hover td { background: rgba(255, 255, 255, .58); }
+    .debt { color: var(--adapter); font-weight: 750; }
+    .keep { color: var(--aggregate); font-weight: 750; }
+
+    .rules {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .rule {
+      display: grid;
+      grid-template-columns: 45px 1fr;
+      gap: 14px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(255, 253, 248, .76);
+    }
+    .rule b { color: var(--aggregate); font: 800 1.25rem var(--mono); }
+    .rule p { margin: 0; color: var(--muted); font-size: .9rem; }
+    .rule strong { color: var(--ink); }
+
+    footer { padding: 36px 0 70px; color: var(--muted); font-size: .84rem; }
+
+    @media (max-width: 980px) {
+      .section-head, .cards.four, .cards.three, .decision, .focus-split { grid-template-columns: 1fr 1fr; }
+      .section-head { align-items: start; }
+    }
+    @media (max-width: 680px) {
+      .shell { width: min(100% - 20px, 1320px); }
+      .hero { padding-top: 54px; }
+      .thesis { grid-template-columns: 1fr; }
+      .section-head, .cards.four, .cards.three, .split, .decision, .rules, .contract, .focus-split, .ownership-row, .session-owned, .agent-parts, .contract-rail { grid-template-columns: 1fr; }
+      .sequence-grid { grid-template-columns: 1fr; }
+      .contract-link::before { content: "↓"; left: 50%; top: -9px; }
+      .contract-link::after { content: "↓"; right: auto; left: 50%; top: auto; bottom: -15px; }
+      .contract-arrow { transform: rotate(90deg); }
+      table { font-size: .82rem; }
+      th, td { padding: 9px; }
+    }
+    @media print {
+      nav { display: none; }
+      body { background: white; }
+      .hero { padding-top: 30px; }
+      .card, .containment, .question { box-shadow: none; break-inside: avoid; }
+      section { break-before: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero shell">
+    <div class="eyebrow">Pici architecture proposal · 30 August 2026</div>
+    <h1>Fewer nouns.<br><em>Firmer boundaries.</em></h1>
+    <p class="lede">A deliberately small object model for Pici. It does not turn every existing class suffix into architecture. It identifies where state lives, who owns it, what crosses a boundary, and which objects exist only for one operation.</p>
+    <div class="thesis">
+      <b>4 + 3</b>
+      <p><strong>Four long-lived archetypes:</strong> runtime, aggregate, store, adapter. <strong>Three transient shapes:</strong> operation, projection, value. Domain names say what a thing is; archetypes say how it lives.</p>
+    </div>
+    <div class="legend" aria-label="Archetype color legend">
+      <span class="pill runtime">Runtime</span>
+      <span class="pill aggregate">Aggregate</span>
+      <span class="pill store">Store</span>
+      <span class="pill adapter">Adapter</span>
+      <span class="pill operation">Operation</span>
+      <span class="pill projection">Projection</span>
+      <span class="pill value">Value</span>
+    </div>
+  </header>
+
+  <nav aria-label="Document sections"><div class="shell">
+    <a href="#archetypes">Archetypes</a>
+    <a href="#containment">Containment</a>
+    <a href="#blueprint">End state</a>
+    <a href="#interactions">Interactions</a>
+    <a href="#models">Model system</a>
+    <a href="#picker">Picker contract</a>
+    <a href="#session">Session path</a>
+    <a href="#naming">Naming test</a>
+    <a href="#migration">Current names</a>
+  </div></nav>
+
+  <main class="shell">
+    <section id="archetypes">
+      <div class="section-head">
+        <h2>The object archetypes</h2>
+        <p>Only four categories describe long-lived objects. The other three describe things passed between them. A type does not earn a new architectural noun merely because it has methods.</p>
+      </div>
+
+      <div class="cards four">
+        <article class="card runtime" data-mark="R">
+          <span class="kind">Long-lived · Runtime</span>
+          <h3>A live activation scope</h3>
+          <p>Owns mutable objects, workers, cancellation, and teardown whose lifetimes match one externally meaningful activation.</p>
+          <p><strong>Pici use:</strong> <code>SessionRuntime</code>, the live incarnation of a durable session.</p>
+          <p><strong>Constraint:</strong> do not use “runtime” for arbitrary mutable helpers.</p>
+        </article>
+        <article class="card aggregate" data-mark="A">
+          <span class="kind">Long-lived · Aggregate</span>
+          <h3>A domain consistency boundary</h3>
+          <p>Owns related in-memory state and enforces the invariants that must change together. Exposes domain operations.</p>
+          <p><strong>Pici use:</strong> model catalog, authentication, mailbox, agent, task tree.</p>
+          <p><strong>Naming:</strong> use the domain name; never add an <code>Aggregate</code> suffix.</p>
+        </article>
+        <article class="card store" data-mark="S">
+          <span class="kind">Long-lived · Store</span>
+          <h3>A durable authority</h3>
+          <p>Owns durable reads, writes, transactions, synchronization, schema, and migration for one persistence boundary.</p>
+          <p><strong>Pici use:</strong> <code>SessionStore</code>, <code>MailboxStore</code>, <code>CredentialStore</code>.</p>
+          <p><strong>Constraint:</strong> a replaceable cache is not a store.</p>
+        </article>
+        <article class="card adapter" data-mark="↔">
+          <span class="kind">Long-lived · Adapter</span>
+          <h3>An external boundary</h3>
+          <p>Translates domain values to or from a wire protocol, terminal, interpreter, or remote provider.</p>
+          <p><strong>Pici use:</strong> CLI, ACP, JSONL RPC, provider protocols, OAuth. A renderer is a nested output adapter used by a frontend.</p>
+          <p><strong>Constraint:</strong> adapters do not own domain policy or durable truth.</p>
+        </article>
+      </div>
+
+      <div class="cards three" style="margin-top:16px">
+        <article class="card operation" data-mark="▶">
+          <span class="kind">Transient · Operation</span>
+          <h3>One bounded execution</h3>
+          <p>Has a start, result, failure behavior, and optional cancellation. It is owned by a runtime or aggregate.</p>
+          <p><strong>Examples:</strong> agent run, catalog refresh, model pick, compaction.</p>
+        </article>
+        <article class="card projection" data-mark="▤">
+          <span class="kind">Transient · Projection</span>
+          <h3>A consumer-shaped read model</h3>
+          <p>Derived and read-only. It may be immutable and point-in-time, but “snapshot” is a qualifier rather than its architectural identity.</p>
+          <p><strong>Examples:</strong> model catalog view, session listing, task status view.</p>
+        </article>
+        <article class="card value" data-mark="◇">
+          <span class="kind">Transient · Value</span>
+          <h3>Typed data without a lifecycle</h3>
+          <p>May carry identity, configuration, intent, results, or observations. It owns no threads, persistence, or network behavior.</p>
+          <p><strong>Examples:</strong> model key, model, request auth, provider report.</p>
+        </article>
+      </div>
+
+      <div class="split" style="margin-top:18px">
+        <aside class="callout good">
+          <h3>The rule</h3>
+          <p>Domain names explain responsibility. Archetypes explain ownership and lifetime. <code>ModelCatalog</code> is an aggregate; it does not need to be called <code>ModelCatalogAggregate</code>.</p>
+        </aside>
+        <aside class="callout bad">
+          <h3>What this rejects</h3>
+          <p><code>Service</code>, <code>Coordinator</code>, <code>Manager</code>, <code>Registry</code>, <code>Resolver</code>, and <code>Controller</code> are not architecture by default. They may describe private implementation techniques, not top-level boundaries.</p>
+        </aside>
+      </div>
+    </section>
+
+    <section id="containment">
+      <div class="section-head">
+        <h2>Where everything lives</h2>
+        <p>The OS process is the top owner. Process-owned aggregates and adapters outlive individual session activations. A session runtime owns only the mutable objects tied to that activated session.</p>
+      </div>
+
+      <div class="diagram-scroll">
+        <div class="containment" role="img" aria-label="Pici process and session containment diagram">
+          <div class="process-label">
+            <strong>PiciProcess</strong>
+            <span>process-lifetime owner · composition and shutdown</span>
+          </div>
+          <div class="process-grid">
+            <article class="node aggregate">
+              <h3>ModelCatalog</h3>
+              <p>Owns the effective provider and model inventory, discovery generations, merge rules, and refresh state.</p>
+              <div class="inner">
+                <div class="mini value"><b>Provider</b>Identity and explicit discovery, inference, and authentication bindings.</div>
+                <div class="mini projection"><b>ModelCatalogView</b>Immutable consumer-shaped catalog generation.</div>
+                <div class="mini operation"><b>Catalog refresh</b>Bounded, cancellable discovery and publication.</div>
+              </div>
+            </article>
+
+            <article class="node aggregate">
+              <h3>Authentication</h3>
+              <p>Follows each provider's auth binding; owns isolation, runtime overrides, availability, and refresh coordination while using the process-owned credential store.</p>
+              <div class="inner">
+                <div class="mini store"><b>CredentialStore</b>Process-owned durable OAuth credentials.</div>
+                <div class="mini value"><b>RequestAuth</b>Provider-scoped credential value returned to one request.</div>
+              </div>
+            </article>
+
+            <article class="node aggregate">
+              <h3>Mailbox</h3>
+              <p>Owns delivery, claim, lease, routing, and acknowledgement invariants across activations while using the process-owned mailbox store.</p>
+              <div class="inner">
+                <div class="mini store"><b>MailboxStore</b>Process-owned durable entries and presence.</div>
+                <div class="mini operation"><b>Delivery</b>Claim, route, accept, acknowledge.</div>
+              </div>
+            </article>
+
+            <article class="node adapter">
+              <h3>Boundary adapters</h3>
+              <p>Translate external boundaries. Containment determines which conversation each adapter belongs to.</p>
+              <div class="inner">
+                <div class="mini adapter"><b>CLI adapter</b>Owns input/editor, commands, model-picker operation, and a renderer output strategy.</div>
+                <div class="mini adapter"><b>JSONL RPC / ACP adapters</b>Own wire parsing and wire serialization/SSE output.</div>
+                <div class="mini adapter"><b>Provider-bound adapters</b>Each Provider binds discovery, inference, and authentication behavior.</div>
+              </div>
+            </article>
+
+            <article class="node runtime session-node">
+              <h3>SessionRuntime</h3>
+              <p>The live incarnation of one durable session. References process-owned facilities; owns only session-activation state.</p>
+              <div class="session-grid">
+                <div class="mini aggregate" style="grid-column:span 2"><b>Agent</b>Live transcript, active model, queues, cancellation, and one agent run.
+                  <div class="inner">
+                    <div class="mini aggregate"><b>TaskTree</b>Agent-owned task identity, hierarchy, child-runtime lifecycle, limits, and results.</div>
+                  </div>
+                </div>
+                <div class="mini adapter"><b>Add-on adapter</b>Lua interpreter and extension boundary for this activation.</div>
+                <div class="mini value"><b>Mailbox attachment</b>Address and delivery binding to the process mailbox.</div>
+              </div>
+              <small>REFERENCES → ModelCatalog · Authentication · SessionStore · Mailbox · protocol adapters</small>
+            </article>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout good">
+        <h3>Why <code>Runtime</code> survives</h3>
+        <p>It is restricted to a live counterpart of a durable or externally identified scope. <code>SessionRuntime</code> qualifies. <code>HookRuntime</code> and <code>MemoryStatsRuntime</code> do not; they should become domain objects or private implementation state.</p>
+      </div>
+    </section>
+
+    <section id="blueprint">
+      <div class="section-head">
+        <h2>The intended end state</h2>
+        <p>The architecture is shown as five separate questions: ownership, contracts, state authority, provider bindings, and operations over time. No line or box is asked to carry more than one meaning.</p>
+      </div>
+
+      <div class="focus-views">
+        <article class="focus-panel">
+          <div class="focus-panel-head">
+            <span class="view-number">1</span>
+            <div><h3>Ownership and cardinality</h3><p>This view answers only: who creates, contains, and destroys each object?</p></div>
+          </div>
+          <div class="ownership-shell">
+            <div class="ownership-title">PiciProcess <span>composition root · one per process</span></div>
+            <div class="ownership-row">
+              <div class="owned-box aggregate">ModelCatalog <span class="cardinality">1</span><small>Owns provider definitions and the merged model inventory.</small></div>
+              <div class="owned-box aggregate">Authentication <span class="cardinality">1</span><small>Resolves request-scoped credentials.</small></div>
+              <div class="owned-box aggregate">Mailbox <span class="cardinality">1</span><small>Routes entries to live session attachments.</small></div>
+              <div class="owned-box store">Stores <span class="cardinality">1 each</span><small>Session, mailbox, and credential durability.</small></div>
+              <div class="owned-box adapter">Boundary adapters <span class="cardinality">1..N</span><small>CLI, RPC, ACP, and protocol implementations.</small></div>
+            </div>
+            <div class="owned-box runtime">
+              SessionRuntime <span class="cardinality">0..N</span>
+              <small>One live activation of one durable session.</small>
+              <div class="session-owned">
+                <div class="owned-box adapter">Add-on adapter <span class="cardinality">0..1</span><small>Lua extension boundary.</small></div>
+                <div class="nested-agent">
+                  Agent <span class="cardinality">1</span>
+                  <div class="agent-parts">
+                    <div class="agent-part">AgentState<br><small>model · transcript · tools</small></div>
+                    <div class="agent-part">Agent run<br><small>0..1 active operation</small></div>
+                    <div class="agent-part nested-task">TaskTree <span class="cardinality">1</span><br><small>0..N Task → child SessionRuntime ↻</small></div>
+                  </div>
+                </div>
+                <div class="owned-box">Mailbox attachment <span class="cardinality">0..1</span><small>Address and activation binding.</small></div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="focus-panel">
+          <div class="focus-panel-head">
+            <span class="view-number">2</span>
+            <div><h3>Named contracts</h3><p>These are the stable seams. Implementations may change from native to Lua without changing the objects on either end.</p></div>
+          </div>
+          <div class="contract-rails">
+            <div class="contract-rail"><div class="contract-end">Frontend adapter</div><div class="contract-link">Session contract<br>prompt · select model · compact · events</div><div class="contract-end">SessionRuntime</div></div>
+            <div class="contract-rail"><div class="contract-end">SessionRuntime</div><div class="contract-link">Catalog contract<br>view · resolve · refresh status</div><div class="contract-end">ModelCatalog</div></div>
+            <div class="contract-rail"><div class="contract-end">SessionRuntime</div><div class="contract-link">Persistence contract<br>append · replay · metadata commit</div><div class="contract-end">SessionStore</div></div>
+            <div class="contract-rail"><div class="contract-end">Mailbox</div><div class="contract-link">Input-admission contract<br>route · accept · acknowledge</div><div class="contract-end">SessionRuntime</div></div>
+            <div class="contract-rail"><div class="contract-end">Agent</div><div class="contract-link">Inference contract<br>context · auth · typed events</div><div class="contract-end">Provider.inference</div></div>
+            <div class="contract-rail"><div class="contract-end">Agent</div><div class="contract-link">Delegation contract<br>spawn · message · interrupt · wait · result</div><div class="contract-end">TaskTree</div></div>
+          </div>
+        </article>
+
+        <div class="focus-split">
+          <article class="focus-panel">
+            <div class="focus-panel-head">
+              <span class="view-number">3</span>
+              <div><h3>State authority</h3><p>For every fact, one live object is authoritative and one durable location may preserve it.</p></div>
+            </div>
+            <div class="authority-list">
+              <div class="authority-row header"><span>Fact</span><span>Live authority</span><span>Durable authority</span></div>
+              <div class="authority-row"><span>Current model</span><span>AgentState</span><span>SessionStore</span></div>
+              <div class="authority-row"><span>Transcript</span><span>AgentState while active</span><span>SessionStore</span></div>
+              <div class="authority-row"><span>Model inventory</span><span>ModelCatalog</span><span>Config + replaceable cache</span></div>
+              <div class="authority-row"><span>Credentials</span><span>Authentication</span><span>CredentialStore / environment</span></div>
+              <div class="authority-row"><span>Mailbox entries</span><span>Mailbox operation</span><span>MailboxStore</span></div>
+              <div class="authority-row"><span>Task status</span><span>Agent-owned TaskTree</span><span>Parent session journal, if recorded</span></div>
+            </div>
+          </article>
+
+          <article class="focus-panel">
+            <div class="focus-panel-head">
+              <span class="view-number">4</span>
+              <div><h3>Provider binding matrix</h3><p>A provider selects three capabilities; the adapter classes themselves remain reusable.</p></div>
+            </div>
+            <table class="binding-table">
+              <thead><tr><th>Provider shape</th><th>Discovery</th><th>Inference</th><th>Authentication</th></tr></thead>
+              <tbody>
+                <tr><td>OpenAI</td><td>provider report</td><td>OpenAI protocol</td><td>API key</td></tr>
+                <tr><td>OpenAI Codex</td><td>curated / reported</td><td>Codex Responses</td><td>Codex OAuth</td></tr>
+                <tr><td>DeepSeek · Groq · xAI · Cerebras · OpenRouter · Fireworks</td><td>provider report where supported</td><td>OpenAI-compatible</td><td>API key</td></tr>
+                <tr><td>Google · Meta · Meta Chat</td><td>provider report where supported</td><td>selected protocol</td><td>API key</td></tr>
+                <tr><td>Custom / local</td><td>configured or reported</td><td>configured protocol</td><td>none or API key</td></tr>
+              </tbody>
+            </table>
+            <p class="binding-note"><strong>Ownership rule:</strong> the Provider definition owns the binding choices. A concrete OAuth, discovery, or inference adapter may be shared and process-owned.</p>
+          </article>
+        </div>
+      </div>
+
+      <!-- The former combined graph is retained as non-rendered source context. The focused views above are normative. -->
+      <div class="diagram-scroll" hidden aria-hidden="true">
+        <div class="blueprint-frame">
+          <svg viewBox="0 0 1420 920" role="img" aria-labelledby="blueprint-title blueprint-desc">
+            <title id="blueprint-title">Pici intended end-state object architecture</title>
+            <desc id="blueprint-desc">The Pici process owns process aggregates, stores, boundary adapters, and session runtimes. A session runtime owns an agent, and that agent owns its task tree and child task runtimes. The model catalog owns provider definitions; each provider binds discovery, inference, and authentication adapters.</desc>
+            <defs>
+              <marker id="arrow-call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#17211e"/></marker>
+              <marker id="arrow-event" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#a65327"/></marker>
+              <marker id="arrow-store" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#326988"/></marker>
+              <marker id="arrow-runtime" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#6046a2"/></marker>
+            </defs>
+
+            <rect class="bp-process" x="18" y="18" width="1384" height="884" rx="22"/>
+            <text class="bp-title" x="44" y="50">PiciProcess</text>
+            <text class="bp-copy" x="160" y="50">composition · process-lifetime ownership · ordered shutdown</text>
+
+            <rect class="bp-aggregate" x="390" y="72" width="250" height="126" rx="13"/>
+            <text class="bp-title" x="410" y="101">ModelCatalog</text>
+            <text class="bp-copy" x="410" y="124">providers · model layers · generations</text>
+            <text class="bp-copy" x="410" y="143">refresh · merge · lookup · resolution</text>
+            <rect class="bp-projection" x="410" y="158" width="210" height="27" rx="7"/>
+            <text class="bp-label" x="430" y="177">ModelCatalogView</text>
+
+            <rect class="bp-aggregate" x="674" y="72" width="226" height="126" rx="13"/>
+            <text class="bp-title" x="694" y="101">Authentication</text>
+            <text class="bp-copy" x="694" y="124">provider isolation · availability</text>
+            <text class="bp-copy" x="694" y="143">runtime keys · OAuth refresh</text>
+            <rect class="bp-value" x="694" y="158" width="186" height="27" rx="7"/>
+            <text class="bp-label" x="721" y="177">RequestAuth</text>
+
+            <rect class="bp-aggregate" x="934" y="72" width="226" height="126" rx="13"/>
+            <text class="bp-title" x="954" y="101">Mailbox</text>
+            <text class="bp-copy" x="954" y="124">claim · lease · route · deliver</text>
+            <text class="bp-copy" x="954" y="143">acknowledge · presence</text>
+            <rect class="bp-value" x="954" y="158" width="186" height="27" rx="7"/>
+            <text class="bp-label" x="977" y="177">MailboxEntry</text>
+
+            <rect class="bp-cluster" x="44" y="232" width="286" height="456" rx="16"/>
+            <text class="bp-scope-label" x="64" y="258">FRONTEND ADAPTERS</text>
+
+            <rect class="bp-adapter" x="64" y="276" width="246" height="145" rx="12"/>
+            <text class="bp-title" x="84" y="305">CLI adapter</text>
+            <text class="bp-copy" x="84" y="326">input · commands · signals · output</text>
+            <rect class="bp-operation" x="82" y="344" width="100" height="57" rx="8"/>
+            <text class="bp-label" x="93" y="367">ModelPicker</text>
+            <text class="bp-copy" x="93" y="385">one operation</text>
+            <rect class="bp-adapter" x="192" y="344" width="100" height="57" rx="8"/>
+            <text class="bp-label" x="207" y="367">Renderer</text>
+            <text class="bp-copy" x="207" y="385">output half</text>
+
+            <rect class="bp-adapter" x="64" y="440" width="246" height="88" rx="12"/>
+            <text class="bp-title" x="84" y="469">JSONL RPC adapter</text>
+            <text class="bp-copy" x="84" y="491">parse commands ↔ serialize results/events</text>
+
+            <rect class="bp-adapter" x="64" y="548" width="246" height="88" rx="12"/>
+            <text class="bp-title" x="84" y="577">ACP adapter</text>
+            <text class="bp-copy" x="84" y="599">HTTP resources ↔ JSON and SSE</text>
+
+            <rect class="bp-runtime" x="370" y="238" width="590" height="450" rx="18"/>
+            <text class="bp-title" x="394" y="269">SessionRuntime</text>
+            <text class="bp-copy" x="540" y="269">one live durable-session activation</text>
+
+            <rect class="bp-aggregate" x="400" y="300" width="526" height="280" rx="13"/>
+            <text class="bp-title" x="420" y="329">Agent</text>
+            <text class="bp-copy" x="475" y="329">owns execution state, one active run, and its delegated task tree</text>
+
+            <rect class="bp-value" x="420" y="354" width="205" height="64" rx="8"/>
+            <text class="bp-label" x="438" y="378">AgentState</text>
+            <text class="bp-copy" x="438" y="399">transcript · active model · tools</text>
+
+            <rect class="bp-operation" x="420" y="444" width="205" height="76" rx="8"/>
+            <text class="bp-label" x="438" y="470">Agent run</text>
+            <text class="bp-copy" x="438" y="491">turns · tools · steering · result</text>
+
+            <rect class="bp-aggregate" x="655" y="354" width="250" height="202" rx="11"/>
+            <text class="bp-title" x="675" y="383">TaskTree</text>
+            <text class="bp-copy" x="675" y="404">agent-owned hierarchy · limits · results</text>
+            <rect class="bp-runtime" x="675" y="430" width="210" height="100" rx="10"/>
+            <text class="bp-label" x="692" y="458">Task → Child SessionRuntime</text>
+            <text class="bp-copy" x="692" y="480">separate session · child Agent</text>
+            <text class="bp-copy" x="692" y="499">which owns its own TaskTree</text>
+
+            <rect class="bp-adapter" x="400" y="605" width="160" height="53" rx="9"/>
+            <text class="bp-label" x="420" y="628">Add-on adapter</text>
+            <text class="bp-copy" x="420" y="646">Lua boundary</text>
+
+            <rect class="bp-value" x="580" y="605" width="180" height="53" rx="9"/>
+            <text class="bp-label" x="600" y="628">Mailbox attachment</text>
+            <text class="bp-copy" x="600" y="646">session / activation address</text>
+
+            <rect class="bp-value" x="780" y="605" width="146" height="53" rx="9"/>
+            <text class="bp-label" x="799" y="628">Session identity</text>
+            <text class="bp-copy" x="799" y="646">durable key</text>
+
+            <rect class="bp-cluster" x="1010" y="232" width="350" height="456" rx="16"/>
+            <text class="bp-scope-label" x="1030" y="258">PROVIDER BINDING</text>
+
+            <rect class="bp-value" x="1027" y="276" width="326" height="326" rx="13"/>
+            <text class="bp-title" x="1047" y="305">Provider</text>
+            <text class="bp-copy" x="1118" y="305">identity · endpoint · three explicit bindings</text>
+
+            <rect class="bp-adapter" x="1045" y="328" width="290" height="70" rx="10"/>
+            <text class="bp-label" x="1063" y="354">Discovery binding</text>
+            <text class="bp-copy" x="1063" y="376">adapter → ProviderModelReport</text>
+
+            <rect class="bp-adapter" x="1045" y="417" width="290" height="70" rx="10"/>
+            <text class="bp-label" x="1063" y="443">Inference binding</text>
+            <text class="bp-copy" x="1063" y="465">protocol adapter → typed events</text>
+
+            <rect class="bp-adapter" x="1045" y="506" width="290" height="70" rx="10"/>
+            <text class="bp-label" x="1063" y="532">Authentication binding</text>
+            <text class="bp-copy" x="1063" y="554">none · API key · provider OAuth adapter</text>
+
+            <rect class="bp-value" x="1030" y="620" width="310" height="42" rx="9"/>
+            <text class="bp-label" x="1120" y="646">Remote provider</text>
+
+            <rect class="bp-store" x="390" y="770" width="230" height="88" rx="12"/>
+            <text class="bp-title" x="410" y="799">SessionStore</text>
+            <text class="bp-copy" x="410" y="822">journals · replay · metadata commits</text>
+
+            <rect class="bp-store" x="675" y="770" width="230" height="88" rx="12"/>
+            <text class="bp-title" x="695" y="799">MailboxStore</text>
+            <text class="bp-copy" x="695" y="822">entries · leases · presence · acks</text>
+
+            <rect class="bp-store" x="960" y="770" width="230" height="88" rx="12"/>
+            <text class="bp-title" x="980" y="799">CredentialStore</text>
+            <text class="bp-copy" x="980" y="822">durable OAuth credentials</text>
+
+            <path class="bp-calls" d="M 310 356 L 370 356"/>
+            <text class="bp-edge-label call" x="322" y="346">calls</text>
+            <path class="bp-events" d="M 370 392 L 310 392"/>
+            <text class="bp-edge-label event" x="319" y="412">events</text>
+
+            <path class="bp-calls" d="M 498 238 L 498 198"/>
+            <text class="bp-edge-label call" x="508" y="224">resolve</text>
+
+            <path class="bp-contains" d="M 640 98 C 805 62 925 268 1027 295"/>
+            <text class="bp-edge-label call" x="818" y="132">owns Provider definition</text>
+            <path class="bp-calls" d="M 640 142 C 800 155 900 363 1045 363"/>
+            <text class="bp-edge-label call" x="820" y="228">Provider.discovery</text>
+
+            <path class="bp-calls" d="M 594 300 C 620 220 705 214 755 198"/>
+            <text class="bp-edge-label call" x="617" y="235">request auth</text>
+            <path class="bp-calls" d="M 625 481 C 790 481 875 452 1045 452"/>
+            <text class="bp-edge-label call" x="800" y="470">Provider.inference</text>
+            <path class="bp-calls" d="M 900 132 C 988 132 990 541 1045 541"/>
+            <text class="bp-edge-label call" x="960" y="352">Provider.authentication</text>
+
+            <path class="bp-calls" d="M 1047 198 C 1010 245 940 631 760 631"/>
+            <text class="bp-edge-label call" x="939" y="506">route to session attachment</text>
+            <path class="bp-calls" d="M 580 631 C 548 621 530 597 530 580"/>
+            <text class="bp-edge-label call" x="482" y="608">admit input</text>
+
+            <path class="bp-contains" d="M 780 412 L 780 430"/>
+            <text class="bp-edge-label call" x="790" y="427">Task owns child runtime</text>
+
+            <path class="bp-persists" d="M 506 688 L 506 770"/>
+            <text class="bp-edge-label store" x="516" y="737">journal</text>
+            <path class="bp-persists" d="M 1047 198 C 1047 708 790 700 790 770"/>
+            <text class="bp-edge-label store" x="864" y="715">entries</text>
+            <path class="bp-persists" d="M 788 198 C 788 720 1075 705 1075 770"/>
+            <text class="bp-edge-label store" x="989" y="715">credentials</text>
+
+            <path class="bp-calls" d="M 1190 398 L 1190 620"/>
+            <path class="bp-calls" d="M 1210 487 L 1210 620"/>
+            <path class="bp-calls" d="M 1230 576 L 1230 620"/>
+          </svg>
+        </div>
+      </div>
+
+      <div class="line-legend" hidden aria-hidden="true">
+        <span><i class="line-sample"></i>calls / requests behavior</span>
+        <span><i class="line-sample event"></i>emits typed events or results</span>
+        <span><i class="line-sample store"></i>commits durable state</span>
+        <span><i class="line-sample contains"></i>owns subordinate lifetime</span>
+      </div>
+
+      <div class="section-head" style="margin-top:44px">
+        <h2 style="font-size:clamp(1.8rem,3vw,2.8rem)">5 · Operations over time</h2>
+        <p>The views above define structure; these sequences show the contracts in use without implying ownership.</p>
+      </div>
+
+      <div class="sequence-grid">
+        <article class="sequence">
+          <h3>1 · Prompt to streamed output</h3>
+          <p>The frontend admits intent; the session and agent own behavior; the renderer only presents returned facts.</p>
+          <div class="seq-flow">
+            <div class="seq-step adapter"><span class="seq-who">Frontend adapter</span><span class="seq-action"><strong>Uses the Session contract</strong> to admit input.</span></div>
+            <div class="seq-step runtime"><span class="seq-who">SessionRuntime</span><span class="seq-action"><strong>Validates activation</strong> and starts an agent run.</span></div>
+            <div class="seq-step aggregate"><span class="seq-who">Agent</span><span class="seq-action"><strong>Snapshots model/context</strong> and owns cancellation.</span></div>
+            <div class="seq-step aggregate"><span class="seq-who">Authentication</span><span class="seq-action"><strong>Returns RequestAuth</strong> scoped to the selected provider.</span></div>
+            <div class="seq-step adapter"><span class="seq-who">Provider.inference</span><span class="seq-action"><strong>Uses the inference binding</strong> and emits typed assistant events.</span></div>
+            <div class="seq-step adapter"><span class="seq-who">Renderer / serializer</span><span class="seq-action"><strong>Presents events</strong> as terminal output, JSONL, or SSE.</span></div>
+          </div>
+        </article>
+
+        <article class="sequence">
+          <h3>2 · Discover, pick, and select</h3>
+          <p>Discovery changes the process catalog. Selection changes one idle session. They are separate commit points.</p>
+          <div class="seq-flow">
+            <div class="seq-step aggregate"><span class="seq-who">Catalog contract</span><span class="seq-action"><strong>Starts refresh</strong> for discovery-enabled providers.</span></div>
+            <div class="seq-step adapter"><span class="seq-who">Provider.discovery</span><span class="seq-action"><strong>Returns a provider report</strong> from provider-specific wire data.</span></div>
+            <div class="seq-step aggregate"><span class="seq-who">ModelCatalog</span><span class="seq-action"><strong>Merges layers</strong> and publishes a new catalog view.</span></div>
+            <div class="seq-step operation"><span class="seq-who">ModelPicker</span><span class="seq-action"><strong>Reads the view</strong> and returns a ModelKey.</span></div>
+            <div class="seq-step runtime"><span class="seq-who">SessionRuntime</span><span class="seq-action"><strong>Resolves and validates</strong> the key while idle.</span></div>
+            <div class="seq-step store"><span class="seq-who">SessionStore</span><span class="seq-action"><strong>Commits selection</strong> before live state installs it.</span></div>
+          </div>
+        </article>
+
+        <article class="sequence">
+          <h3>3 · Mailbox delivery</h3>
+          <p>The mailbox belongs to the process. The session runtime owns the attachment. The agent receives only admitted input.</p>
+          <div class="seq-flow">
+            <div class="seq-step store"><span class="seq-who">MailboxStore</span><span class="seq-action"><strong>Holds an available entry</strong> addressed to a session, optionally pinned to an activation.</span></div>
+            <div class="seq-step aggregate"><span class="seq-who">Mailbox</span><span class="seq-action"><strong>Claims under lease</strong> and resolves the live delivery target.</span></div>
+            <div class="seq-step value"><span class="seq-who">Input admission</span><span class="seq-action"><strong>Admits the entry</strong> through the matching SessionRuntime.</span></div>
+            <div class="seq-step aggregate"><span class="seq-who">Agent</span><span class="seq-action"><strong>Accepts AgentInput</strong> with mailbox provenance; it never claims the mailbox itself.</span></div>
+            <div class="seq-step runtime"><span class="seq-who">SessionRuntime</span><span class="seq-action"><strong>Runs or queues work</strong> at the appropriate safe boundary.</span></div>
+            <div class="seq-step aggregate"><span class="seq-who">Mailbox</span><span class="seq-action"><strong>Acknowledges after acceptance</strong>; answering and completion remain separate.</span></div>
+          </div>
+        </article>
+
+        <article class="sequence">
+          <h3>4 · Spawn and complete a child task</h3>
+          <p>The task tree owns child lifetime. A child runtime owns separate mutable state and normally a separate durable session.</p>
+          <div class="seq-flow">
+            <div class="seq-step aggregate"><span class="seq-who">Agent</span><span class="seq-action"><strong>Uses the Delegation contract</strong> through its TaskTree with explicit context, model, tools, and limits.</span></div>
+            <div class="seq-step aggregate"><span class="seq-who">TaskTree</span><span class="seq-action"><strong>Validates limits</strong> and creates task identity.</span></div>
+            <div class="seq-step runtime"><span class="seq-who">Child SessionRuntime</span><span class="seq-action"><strong>Owns child activation</strong>, state, cancellation, and session binding.</span></div>
+            <div class="seq-step aggregate"><span class="seq-who">Child Agent</span><span class="seq-action"><strong>Executes independently</strong> using shared process facilities.</span></div>
+            <div class="seq-step aggregate"><span class="seq-who">TaskTree</span><span class="seq-action"><strong>Owns status/result</strong> and emits task events to observers.</span></div>
+            <div class="seq-step value"><span class="seq-who">Task result</span><span class="seq-action"><strong>Returns explicitly</strong>; it never silently splices into the parent transcript.</span></div>
+          </div>
+        </article>
+      </div>
+    </section>
+    <section id="interactions">
+      <div class="section-head">
+        <h2>Interactions and call direction</h2>
+        <p>Containment answers “who owns this?”; arrows answer “who may call whom?” Frontends initiate domain operations. Domain objects emit typed facts and results. Output adapters present those facts but never drive domain state by parsing presentation.</p>
+      </div>
+
+      <div class="diagram-scroll">
+        <div class="boundary-map" role="img" aria-label="Frontend adapter, renderer, and session runtime interaction diagram">
+          <div class="boundary-column external">
+            <h3>External actors</h3>
+            <p>People and protocol clients outside Pici.</p>
+            <div class="actor">Terminal user</div>
+            <div class="actor">JSONL client</div>
+            <div class="actor">ACP HTTP client</div>
+          </div>
+
+          <div class="boundary-column frontend">
+            <h3>Frontend adapters</h3>
+            <p>Each frontend owns one complete bidirectional conversation: accepting external intent and presenting domain output.</p>
+            <div class="frontend-case">
+              <h4>CLI adapter</h4>
+              <div class="frontend-case-grid">
+                <div class="port"><b>Input side</b>Arguments, readline, commands, signals, model-pick operation.</div>
+                <div class="port"><b>Output side: Renderer</b>Consumes typed events and command results; paints the terminal.</div>
+              </div>
+            </div>
+            <div class="frontend-case">
+              <h4>JSONL RPC adapter</h4>
+              <div class="frontend-case-grid">
+                <div class="port"><b>Input side</b>Parses command objects and validates wire fields.</div>
+                <div class="port"><b>Output side</b>Serializes responses and typed events as JSONL.</div>
+              </div>
+            </div>
+            <div class="frontend-case">
+              <h4>ACP adapter</h4>
+              <div class="frontend-case-grid">
+                <div class="port"><b>Input side</b>Maps HTTP resources and bodies to runtime operations.</div>
+                <div class="port"><b>Output side</b>Maps results and events to JSON responses and SSE.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="boundary-column domain">
+            <h3>Shared domain</h3>
+            <p>All frontends call the same behavior. None gets a private version of session or agent semantics.</p>
+            <div class="domain-call"><b>SessionRuntime</b>Activation, selection, persistence, compaction, prompts.</div>
+            <div class="domain-call"><b>ModelCatalog</b>Catalog views, refresh, lookup, resolution.</div>
+            <div class="domain-call"><b>Mailbox</b>Delivery and coordination operations.</div>
+            <div class="domain-call"><b>Typed events/results</b>Facts returned to the owning frontend adapter.</div>
+          </div>
+
+          <div class="boundary-note"><strong>Renderer versus frontend adapter:</strong> both cross the presentation boundary, but at different containment levels. The frontend adapter owns the full input/output interaction. A renderer is the CLI adapter’s replaceable output half. It never accepts commands, creates sessions, resolves models, or calls the agent.</div>
+        </div>
+      </div>
+
+      <div class="relationship-key" aria-label="Relationship definitions">
+        <span>CONTAINS = owns lifetime</span>
+        <span>REFERENCES = borrows longer-lived object</span>
+        <span>CALLS = requests behavior</span>
+        <span>EMITS = returns typed fact</span>
+      </div>
+
+      <table class="contract-table">
+        <thead><tr><th>Object</th><th>Contained by</th><th>Owns / decides</th><th>Calls or references</th><th>Returns / emits — and never does</th></tr></thead>
+        <tbody>
+          <tr><td>PiciProcess</td><td>Operating system</td><td>Process composition, startup order, process-lifetime ownership, shutdown order.</td><td>Constructs process aggregates, stores, adapters, and session runtimes.</td><td>Returns the executable exit status. It does not contain session-specific mutable state directly.</td></tr>
+          <tr><td>Frontend adapter</td><td>PiciProcess</td><td>External syntax, connection/UI state, input admission, output encoding, and frontend-specific lifecycle.</td><td>Obtains a session runtime; calls shared session, catalog, task, and mailbox operations.</td><td>Produces terminal or wire output. It never reimplements agent/session policy.</td></tr>
+          <tr><td>Renderer</td><td>CLI adapter</td><td>Terminal layout, status painting, scrolling, and human-readable formatting.</td><td>Receives typed events, command results, and presentation values from its frontend.</td><td>Writes terminal output. It never accepts domain commands or mutates runtime state.</td></tr>
+          <tr><td>ModelPicker</td><td>CLI adapter; one invocation</td><td>Filtering, navigation, temporary modal state, and cancellation for one pick.</td><td>Reads a catalog view; may request refresh through a narrow callback.</td><td>Returns a model key or cancellation. It never commits selection or receives credentials.</td></tr>
+          <tr><td>SessionRuntime</td><td>PiciProcess, or a parent Agent's TaskTree for a child</td><td>One active session binding, agent lifecycle, idle-only transitions, and session commit ordering.</td><td>References model catalog, authentication, stores, mailbox, and provider bindings.</td><td>Emits operation results and agent events. It never owns process-global catalog/auth truth.</td></tr>
+          <tr><td>SessionStore</td><td>PiciProcess</td><td>Durable session journals, append/replay rules, metadata writes, and persistence synchronization.</td><td>Filesystem and serialization details internal to the store.</td><td>Returns records and commit results. It never owns a live agent or renderer.</td></tr>
+          <tr><td>ModelCatalog</td><td>PiciProcess</td><td>Provider/model layers, merge precedence, generations, refresh state, lookup and resolution invariants.</td><td>Owns Provider definitions; invokes their discovery bindings using request auth.</td><td>Publishes catalog views and effective models. It never changes active sessions implicitly.</td></tr>
+          <tr><td>Provider</td><td>ModelCatalog</td><td>Provider identity, endpoint, and explicit discovery, inference, and authentication bindings.</td><td>References reusable adapter implementations selected by those bindings.</td><td>Describes how to reach one provider. It never owns credentials, sessions, or catalog merge policy.</td></tr>
+          <tr><td>Discovery adapter</td><td>Bound through Provider; implementation may be shared</td><td>Provider-specific endpoint, pagination, response parsing, and wire diagnostics.</td><td>Receives provider configuration and request-scoped authentication.</td><td>Returns a provider report. It never merges catalog layers or persists credentials.</td></tr>
+          <tr><td>ModelCatalogView</td><td>Produced by ModelCatalog</td><td>No decisions; immutable consumer-oriented model/provider summaries for one generation.</td><td>Read by frontends, picker, RPC/ACP listing, and lookup callers.</td><td>Returns stable read data. It performs no I/O, refresh, or mutation.</td></tr>
+          <tr><td>Authentication</td><td>PiciProcess</td><td>Provider credential isolation, availability, runtime overrides, and OAuth refresh coordination.</td><td>Follows the selected Provider's authentication binding; uses CredentialStore and the bound provider OAuth adapter when required.</td><td>Returns request-scoped auth. It never chooses an OAuth dialect independently or exposes secrets.</td></tr>
+          <tr><td>Mailbox</td><td>PiciProcess</td><td>Claim, lease, routing, delivery, acknowledgement, and live-presence invariants.</td><td>Uses mailbox store and references addressable session runtimes.</td><td>Emits typed delivery results. It never treats an entry as transcript until runtime admission.</td></tr>
+          <tr><td>Agent</td><td>SessionRuntime</td><td>Live transcript, active model, run exclusivity, steering/follow-up queues, cancellation, and its TaskTree.</td><td>Starts agent-run and delegated-task operations using shared process facilities.</td><td>Emits typed agent events and final results. It never owns the durable session journal.</td></tr>
+          <tr><td>TaskTree</td><td>Agent</td><td>That agent's task hierarchy, child runtime lifetimes, limits, queues, status, and results.</td><td>Creates child session runtimes using dependencies supplied by the parent runtime.</td><td>Emits task events/results. It closes with its owning agent and never becomes the parent transcript.</td></tr>
+          <tr><td>Protocol adapter</td><td>Bound through Provider; implementation may be shared</td><td>Provider wire request construction, transport invocation, stream parsing, and response translation.</td><td>Receives effective model, prepared context, tools, request auth, and cancellation.</td><td>Emits typed assistant events/results. It never selects models or persists sessions.</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <section id="models">
+      <div class="section-head">
+        <h2>The model subsystem</h2>
+        <p>One process-owned aggregate presents one coherent model inventory. Provider reporting, caching, merging, resolution, and publication stay behind that boundary instead of becoming separate top-level “services.”</p>
+      </div>
+
+      <div class="diagram-scroll">
+        <div class="flow" role="img" aria-label="Model discovery and catalog publication flow">
+          <div class="step aggregate"><b>ModelCatalog</b><span>Starts a refresh for selected providers.</span></div>
+          <div class="step operation"><b>Catalog refresh</b><span>Runs bounded, cancellable queries with partial-failure handling.</span></div>
+          <div class="step adapter"><b>Discovery adapter</b><span>Calls the provider-specific endpoint and parses its wire response.</span></div>
+          <div class="step value"><b>Provider report</b><span>Normalized observations plus authority and freshness metadata.</span></div>
+          <div class="step aggregate"><b>Merge invariants</b><span>Combines built-in, reported, and configured layers.</span></div>
+          <div class="step projection"><b>ModelCatalogView</b><span>Immutable generation for lookup, listing, and presentation.</span></div>
+          <div class="step runtime"><b>SessionRuntime</b><span>Uses the catalog only when activating or explicitly selecting.</span></div>
+        </div>
+      </div>
+
+      <div class="cards three">
+        <article class="card aggregate" data-mark="M">
+          <span class="kind">Aggregate · ModelCatalog</span>
+          <h3>One public boundary</h3>
+          <p>Owns provider definitions, catalog layers, current generation, merge precedence, refresh state, and model resolution.</p>
+          <p>Its report cache is private because cache mechanics are not a domain boundary.</p>
+        </article>
+        <article class="card value" data-mark="P">
+          <span class="kind">Entity/value · Provider</span>
+          <h3>Configuration, not a god object</h3>
+          <p>Contains provider identity and endpoint plus explicit discovery, inference, and authentication bindings.</p>
+          <p>Bindings may share implementations, but behavior is always selected through the Provider.</p>
+        </article>
+        <article class="card adapter" data-mark="↔">
+          <span class="kind">Adapter · Protocol</span>
+          <h3>Inference stays separate</h3>
+          <p>Builds provider requests and translates streamed responses. Multiple providers may share one inference protocol adapter.</p>
+          <p>It does not discover or select models.</p>
+        </article>
+      </div>
+
+      <aside class="callout bad" style="margin-top:18px">
+        <h3>“Supported” must always be qualified</h3>
+        <p><strong>Reported</strong> means a provider advertised it. <strong>Known</strong> means it exists in the catalog. <strong>Selectable</strong> means it resolves into an effective model. <strong>Request-usable</strong> additionally means its protocol and authentication are available. These are different facts.</p>
+      </aside>
+    </section>
+
+    <section id="picker">
+      <div class="section-head">
+        <h2>The picker is an operation</h2>
+        <p>The picker is not another subsystem and does not own catalog truth. Native V1 and a later Lua UI implement the same bounded input/output contract.</p>
+      </div>
+
+      <div class="contract">
+        <div class="contract-box input">
+          <span class="kind" style="color:var(--projection)">Projection in</span>
+          <h3>ModelCatalogView</h3>
+          <p>Safe model summaries, provider summaries, current generation, provenance, discovery state, and authentication availability.</p>
+        </div>
+        <div class="contract-arrow">→</div>
+        <div class="contract-box output">
+          <span class="kind" style="color:var(--value)">Value out</span>
+          <h3>ModelKey or cancellation</h3>
+          <p>The picker returns intent. It does not return a copied effective model or directly mutate the active session.</p>
+        </div>
+      </div>
+
+      <div class="split" style="margin-top:18px">
+        <article class="callout good">
+          <h3>Native V1 owns</h3>
+          <ul>
+            <li>Terminal raw mode and cleanup</li>
+            <li>Alternate-screen ownership</li>
+            <li>Filtering, navigation, and viewport state</li>
+            <li>Refresh progress presentation</li>
+          </ul>
+        </article>
+        <article class="callout good">
+          <h3>Future Lua UI may own</h3>
+          <ul>
+            <li>Layout and row formatting</li>
+            <li>Sorting and interaction policy</li>
+            <li>Provider tabs and custom badges</li>
+            <li>The same projection-in / key-out contract</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="callout bad" style="margin-top:14px">
+        <h3>Neither picker owns</h3>
+        <p>Credentials, network concurrency, catalog merging, model resolution, idle-state validation, durable session metadata, or the active model transition. Those remain native aggregate/runtime behavior.</p>
+      </div>
+    </section>
+
+    <section id="session">
+      <div class="section-head">
+        <h2>Selection to provider request</h2>
+        <p>Each arrow crosses one explicit contract. The catalog resolves identity, the session commits selection, authentication supplies request credentials, and a protocol adapter owns the wire.</p>
+      </div>
+
+      <div class="diagram-scroll">
+        <div class="flow" role="img" aria-label="Model selection to provider request flow">
+          <div class="step operation"><b>ModelPicker</b><span>User chooses from a projection.</span></div>
+          <div class="step value"><b>ModelKey</b><span>Canonical provider and model identity.</span></div>
+          <div class="step aggregate"><b>ModelCatalog</b><span>Resolves the key against its current generation.</span></div>
+          <div class="step runtime"><b>SessionRuntime</b><span>Checks idle state, persists the key, installs the model.</span></div>
+          <div class="step aggregate"><b>Agent</b><span>Copies the effective model at turn start.</span></div>
+          <div class="step aggregate"><b>Authentication</b><span>Produces provider-scoped request auth.</span></div>
+          <div class="step adapter"><b>Protocol adapter</b><span>Builds and performs the provider request.</span></div>
+        </div>
+      </div>
+
+      <div class="split">
+        <aside class="callout good">
+          <h3>Catalog refresh is process-scoped</h3>
+          <p>Installing a new catalog generation never changes an active session implicitly. It affects later lookup, activation, picking, and explicit selection.</p>
+        </aside>
+        <aside class="callout good">
+          <h3>A turn is request-scoped</h3>
+          <p>Each turn retains immutable model, context, and credential values. A refresh or later model switch cannot mutate an in-flight provider request.</p>
+        </aside>
+      </div>
+    </section>
+
+    <section id="naming">
+      <div class="section-head">
+        <h2>The naming test</h2>
+        <p>Before adding a top-level object, answer these questions in order. If none applies, it is probably a value, a private helper, or a method—not a new architecture noun.</p>
+      </div>
+
+      <div class="decision">
+        <article class="question">
+          <h3>Does it represent one live activation scope?</h3>
+          <p>It owns workers, cancellation, mutable members, and teardown tied to a durable or externally meaningful identity.</p>
+          <div class="answer">YES → RUNTIME</div>
+        </article>
+        <article class="question">
+          <h3>Does it enforce one set of domain invariants?</h3>
+          <p>Related state must change consistently behind one API and one ownership boundary.</p>
+          <div class="answer">YES → DOMAIN-NAMED AGGREGATE</div>
+        </article>
+        <article class="question">
+          <h3>Is it the durable authority?</h3>
+          <p>It owns persistent reads, writes, transaction rules, schema, and migrations.</p>
+          <div class="answer">YES → STORE</div>
+        </article>
+        <article class="question">
+          <h3>Does it cross an external boundary?</h3>
+          <p>It translates a wire protocol, terminal, remote endpoint, file format, or interpreter boundary.</p>
+          <div class="answer">YES → ADAPTER</div>
+        </article>
+      </div>
+
+      <div class="cards three" style="margin-top:16px">
+        <article class="card operation" data-mark="1">
+          <span class="kind">Otherwise · bounded behavior</span>
+          <h3>Operation</h3>
+          <p>If it has a start and result, make it an operation owned by one of the four long-lived archetypes.</p>
+        </article>
+        <article class="card projection" data-mark="R">
+          <span class="kind">Otherwise · derived read data</span>
+          <h3>Projection</h3>
+          <p>If it exists for a reader and is derived from owned state, make it a projection.</p>
+        </article>
+        <article class="card value" data-mark="V">
+          <span class="kind">Otherwise · typed data</span>
+          <h3>Value or private helper</h3>
+          <p>If it has no independent lifecycle or authority, keep it as data or an implementation detail.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="migration">
+      <div class="section-head">
+        <h2>How current names map</h2>
+        <p>This is direction-setting, not a flag-day rename. Existing names are evidence about the implementation, not automatic candidates for the lexicon.</p>
+      </div>
+
+      <table>
+        <thead><tr><th>Current name</th><th>Archetype</th><th>Target concept</th><th>Direction</th></tr></thead>
+        <tbody>
+          <tr><td>SessionRuntime</td><td>Runtime</td><td>Live durable-session activation</td><td class="keep">Keep</td></tr>
+          <tr><td>ModelRegistry</td><td>Projection today</td><td>Effective <code>ModelCatalogView</code>; mutable orchestration belongs in <code>ModelCatalog</code></td><td class="debt">Split by responsibility</td></tr>
+          <tr><td>LLMClient</td><td>Adapter</td><td>Inference protocol adapter</td><td class="debt">Adopt concept first</td></tr>
+          <tr><td>AuthResolver</td><td>Aggregate</td><td>Authentication</td><td class="debt">Resolver is a method, not the boundary</td></tr>
+          <tr><td>MailboxCoordinator</td><td>Aggregate</td><td>Mailbox domain behavior using <code>MailboxStore</code></td><td class="debt">Fold into domain boundary</td></tr>
+          <tr><td>AgentTaskManager</td><td>Aggregate</td><td>Task tree</td><td class="debt">Manager is not the domain</td></tr>
+          <tr><td>CmdRunSession</td><td>Adapter implementation</td><td>Interactive CLI adapter</td><td class="debt">Session naming is misleading</td></tr>
+          <tr><td>Renderer</td><td>Adapter</td><td>Typed events to terminal presentation</td><td class="keep">Keep concrete domain term</td></tr>
+          <tr><td>HookRuntime</td><td>Private state / adapter</td><td>Session-owned add-on boundary</td><td class="debt">Runtime is too strong</td></tr>
+          <tr><td>MemoryStatsRuntime</td><td>Private helper or operation</td><td>Memory sampler/collector</td><td class="debt">Runtime is too strong</td></tr>
+          <tr><td>SessionStore</td><td>Store</td><td>Durable session authority</td><td class="keep">Keep</td></tr>
+          <tr><td>CredentialStore</td><td>Store</td><td>Durable credential authority</td><td class="keep">Keep</td></tr>
+        </tbody>
+      </table>
+
+      <div class="rules" style="margin-top:20px">
+        <article class="rule"><b>01</b><p><strong>Containment before naming.</strong> State who owns an object and when it dies before choosing its name.</p></article>
+        <article class="rule"><b>02</b><p><strong>One authority per fact.</strong> Aggregate state, durable state, and projections must not compete as truth.</p></article>
+        <article class="rule"><b>03</b><p><strong>Operations do not become subsystems.</strong> Refresh, pick, resolve, and compact remain bounded work.</p></article>
+        <article class="rule"><b>04</b><p><strong>Adapters do not decide policy.</strong> They translate boundaries and return typed facts or failures.</p></article>
+        <article class="rule"><b>05</b><p><strong>Projections are disposable.</strong> Consumers can retain a generation, but owners may publish a newer one.</p></article>
+        <article class="rule"><b>06</b><p><strong>Implementation helpers stay private.</strong> A map of factories does not automatically become a public registry concept.</p></article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="shell">
+    <p><strong>Status:</strong> architecture proposal for discussion. Intended to inform updates to <code>docs/architecture-lexicon.md</code> and the model discovery/selection implementation plan.</p>
+  </footer>
+</body>
+</html>
