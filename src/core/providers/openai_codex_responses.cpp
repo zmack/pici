@@ -554,179 +554,217 @@ void OpenAICodexResponsesParser::process_event(std::string_view event_name,
     return;
   }
   if (type == "response.output_item.added") {
-    const auto index = event.value("output_index", 0);
-    const auto item = event.value("item", Json::object());
-    const auto item_type = item.value("type", "");
-    Slot slot{.content_index = result_->content.size(),
-              .type = item_type,
-              .item_id = item.value("id", ""),
-              .call_id = item.value("call_id", ""),
-              .partial_arguments = item.value("arguments", ""),
-              .open = true};
-    if (item_type == "message") {
-      result_->content.emplace_back(TextContent{});
-      if (on_event_)
-        on_event_(AssistantMessageTextStartEvent{
-            .content_index = slot.content_index, .partial = *result_});
-    } else if (item_type == "reasoning") {
-      result_->content.emplace_back(ThinkingContent{});
-      if (on_event_)
-        on_event_(AssistantMessageThinkingStartEvent{
-            .content_index = slot.content_index, .partial = *result_});
-    } else if (item_type == "function_call") {
-      std::string item_id;
-      if (!slot.item_id.empty()) {
-        item_id = slot.item_id.starts_with("fc_") ? slot.item_id
-                                                  : "fc_" + slot.item_id;
-      }
-      ToolCall call{.id = slot.call_id.empty() ? item_id : slot.call_id,
-                    .name = item.value("name", "")};
-      if (!item_id.empty() && !slot.call_id.empty())
-        call.id += "|" + item_id;
-      result_->content.emplace_back(std::move(call));
-      std::get<ToolCall>(result_->content.back()).partial_json =
-          slot.partial_arguments;
-      if (on_event_)
-        on_event_(AssistantMessageToolCallStartEvent{
-            .content_index = slot.content_index, .partial = *result_});
-    } else {
-      return;
-    }
-    slots_[index] = std::move(slot);
-    if (!slots_[index].item_id.empty())
-      item_slots_[slots_[index].item_id] = index;
+    handle_output_item_added(event);
     return;
   }
-  auto slot_for = [&](const Json &source) -> Slot * {
-    const auto item_id = source.value("item_id", "");
-    if (!item_id.empty()) {
-      if (auto it = item_slots_.find(item_id); it != item_slots_.end())
-        return &slots_[it->second];
-    }
-    return &slots_[source.value("output_index", 0)];
-  };
   if (type == "response.output_text.delta" ||
       type == "response.refusal.delta" ||
       type == "response.reasoning_summary_text.delta" ||
       type == "response.reasoning_text.delta") {
-    auto *slot = slot_for(event);
-    const auto delta = event.value("delta", "");
-    if (slot->type == "message") {
-      auto &text = std::get<TextContent>(result_->content[slot->content_index]);
-      text.text += delta;
-      if (on_event_ && !delta.empty())
-        on_event_(
-            AssistantMessageTextDeltaEvent{.content_index = slot->content_index,
-                                           .delta = delta,
-                                           .partial = *result_});
-    } else if (slot->type == "reasoning") {
-      auto &thinking =
-          std::get<ThinkingContent>(result_->content[slot->content_index]);
-      thinking.thinking += delta;
-      if (on_event_ && !delta.empty())
-        on_event_(AssistantMessageThinkingDeltaEvent{.content_index =
-                                                         slot->content_index,
-                                                     .delta = delta,
-                                                     .partial = *result_});
-    }
+    handle_text_delta(event);
     return;
   }
   if (type == "response.reasoning_summary_part.done") {
-    auto *slot = slot_for(event);
-    if (slot->type == "reasoning") {
-      auto &thinking =
-          std::get<ThinkingContent>(result_->content[slot->content_index]);
-      thinking.thinking += "\n\n";
-      if (on_event_)
-        on_event_(AssistantMessageThinkingDeltaEvent{.content_index =
-                                                         slot->content_index,
-                                                     .delta = "\n\n",
-                                                     .partial = *result_});
-    }
+    handle_reasoning_summary_part_done(event);
     return;
   }
   if (type == "response.function_call_arguments.delta") {
-    auto *slot = slot_for(event);
-    const auto delta = event.value("delta", "");
-    slot->partial_arguments += delta;
-    auto &call = std::get<ToolCall>(result_->content[slot->content_index]);
-    call.partial_json = slot->partial_arguments;
-    if (on_event_ && !delta.empty())
-      on_event_(AssistantMessageToolCallDeltaEvent{.content_index =
-                                                       slot->content_index,
-                                                   .delta = delta,
-                                                   .partial = *result_});
+    handle_function_call_arguments_delta(event);
     return;
   }
   if (type == "response.function_call_arguments.done") {
-    auto *slot = slot_for(event);
-    slot->partial_arguments = event.value("arguments", slot->partial_arguments);
+    handle_function_call_arguments_done(event);
     return;
   }
   if (type == "response.output_item.done") {
-    auto index = event.value("output_index", 0);
-    auto it = slots_.find(index);
-    if (it == slots_.end()) {
-      const auto item_id = event.value("item_id", "");
-      if (auto item_it = item_slots_.find(item_id);
-          item_it != item_slots_.end()) {
-        index = item_it->second;
-        it = slots_.find(index);
-      }
-    }
-    if (it == slots_.end()) {
-      Json added = event;
-      added["type"] = "response.output_item.added";
-      added["output_index"] = index;
-      process_event("response.output_item.added", added);
-      it = slots_.find(index);
-    }
-    if (it != slots_.end()) {
-      const auto item = event.value("item", Json::object());
-      close_slot(it->second, &item);
-    }
+    handle_output_item_done(event);
     return;
   }
   if (type == "response.completed" || type == "response.done" ||
       type == "response.incomplete" || type == "response.failed") {
-    terminal_seen_ = true;
-    result_->response_id =
-        response->value("id", result_->response_id.value_or(""));
-    parse_usage(response->value("usage", Json::object()));
-    for (auto &[index, slot] : slots_)
-      close_slot(slot);
-    if (type == "response.incomplete") {
-      const auto reason = response->value("incomplete_details", Json::object())
-                              .value("reason", "");
-      result_->stop_reason = reason == "max_output_tokens" ? StopReason::length
-                                                           : StopReason::error;
-      if (result_->stop_reason == StopReason::error)
-        result_->error_message =
-            reason.empty() ? "OpenAI response incomplete" : reason;
-    } else if (type == "response.failed") {
-      result_->stop_reason = StopReason::error;
-      result_->error_message = safe_text(
-          response->value("error", Json::object()), "OpenAI response failed");
-    } else {
-      bool has_tool = false;
-      for (const auto &content : result_->content)
-        has_tool = has_tool || std::holds_alternative<ToolCall>(content);
-      result_->stop_reason = has_tool ? StopReason::tool_use : StopReason::stop;
-    }
-    if (result_->stop_reason == StopReason::error)
-      emit_error();
-    else if (on_event_)
-      on_event_(AssistantMessageDoneEvent{.reason = result_->stop_reason,
-                                          .message = *result_});
+    handle_terminal_event(type, *response);
     return;
   }
   if (type == "error") {
-    auto message = safe_text(event.value("error", Json::object()), "");
-    if (message.empty())
-      message =
-          event.value("message", event.value("code", "OpenAI response error"));
-    fail(message);
+    handle_error_event(event);
   }
+}
+
+OpenAICodexResponsesParser::Slot *
+OpenAICodexResponsesParser::slot_for(const Json &source) {
+  const auto item_id = source.value("item_id", "");
+  if (!item_id.empty()) {
+    if (auto it = item_slots_.find(item_id); it != item_slots_.end())
+      return &slots_[it->second];
+  }
+  return &slots_[source.value("output_index", 0)];
+}
+
+void OpenAICodexResponsesParser::handle_output_item_added(const Json &event) {
+  const auto index = event.value("output_index", 0);
+  const auto item = event.value("item", Json::object());
+  const auto item_type = item.value("type", "");
+  Slot slot{.content_index = result_->content.size(),
+            .type = item_type,
+            .item_id = item.value("id", ""),
+            .call_id = item.value("call_id", ""),
+            .partial_arguments = item.value("arguments", ""),
+            .open = true};
+  if (item_type == "message") {
+    result_->content.emplace_back(TextContent{});
+    if (on_event_)
+      on_event_(AssistantMessageTextStartEvent{
+          .content_index = slot.content_index, .partial = *result_});
+  } else if (item_type == "reasoning") {
+    result_->content.emplace_back(ThinkingContent{});
+    if (on_event_)
+      on_event_(AssistantMessageThinkingStartEvent{
+          .content_index = slot.content_index, .partial = *result_});
+  } else if (item_type == "function_call") {
+    std::string item_id;
+    if (!slot.item_id.empty()) {
+      item_id =
+          slot.item_id.starts_with("fc_") ? slot.item_id : "fc_" + slot.item_id;
+    }
+    ToolCall call{.id = slot.call_id.empty() ? item_id : slot.call_id,
+                  .name = item.value("name", "")};
+    if (!item_id.empty() && !slot.call_id.empty())
+      call.id += "|" + item_id;
+    result_->content.emplace_back(std::move(call));
+    std::get<ToolCall>(result_->content.back()).partial_json =
+        slot.partial_arguments;
+    if (on_event_)
+      on_event_(AssistantMessageToolCallStartEvent{
+          .content_index = slot.content_index, .partial = *result_});
+  } else {
+    return;
+  }
+  slots_[index] = std::move(slot);
+  if (!slots_[index].item_id.empty())
+    item_slots_[slots_[index].item_id] = index;
+}
+
+void OpenAICodexResponsesParser::handle_text_delta(const Json &event) {
+  auto *slot = slot_for(event);
+  const auto delta = event.value("delta", "");
+  if (slot->type == "message") {
+    auto &text = std::get<TextContent>(result_->content[slot->content_index]);
+    text.text += delta;
+    if (on_event_ && !delta.empty())
+      on_event_(
+          AssistantMessageTextDeltaEvent{.content_index = slot->content_index,
+                                         .delta = delta,
+                                         .partial = *result_});
+  } else if (slot->type == "reasoning") {
+    auto &thinking =
+        std::get<ThinkingContent>(result_->content[slot->content_index]);
+    thinking.thinking += delta;
+    if (on_event_ && !delta.empty())
+      on_event_(AssistantMessageThinkingDeltaEvent{.content_index =
+                                                       slot->content_index,
+                                                   .delta = delta,
+                                                   .partial = *result_});
+  }
+}
+
+void OpenAICodexResponsesParser::handle_reasoning_summary_part_done(
+    const Json &event) {
+  auto *slot = slot_for(event);
+  if (slot->type == "reasoning") {
+    auto &thinking =
+        std::get<ThinkingContent>(result_->content[slot->content_index]);
+    thinking.thinking += "\n\n";
+    if (on_event_)
+      on_event_(AssistantMessageThinkingDeltaEvent{.content_index =
+                                                       slot->content_index,
+                                                   .delta = "\n\n",
+                                                   .partial = *result_});
+  }
+}
+
+void OpenAICodexResponsesParser::handle_function_call_arguments_delta(
+    const Json &event) {
+  auto *slot = slot_for(event);
+  const auto delta = event.value("delta", "");
+  slot->partial_arguments += delta;
+  auto &call = std::get<ToolCall>(result_->content[slot->content_index]);
+  call.partial_json = slot->partial_arguments;
+  if (on_event_ && !delta.empty())
+    on_event_(
+        AssistantMessageToolCallDeltaEvent{.content_index = slot->content_index,
+                                           .delta = delta,
+                                           .partial = *result_});
+}
+
+void OpenAICodexResponsesParser::handle_function_call_arguments_done(
+    const Json &event) {
+  auto *slot = slot_for(event);
+  slot->partial_arguments = event.value("arguments", slot->partial_arguments);
+}
+
+void OpenAICodexResponsesParser::handle_output_item_done(const Json &event) {
+  auto index = event.value("output_index", 0);
+  auto it = slots_.find(index);
+  if (it == slots_.end()) {
+    const auto item_id = event.value("item_id", "");
+    if (auto item_it = item_slots_.find(item_id);
+        item_it != item_slots_.end()) {
+      index = item_it->second;
+      it = slots_.find(index);
+    }
+  }
+  if (it == slots_.end()) {
+    Json added = event;
+    added["type"] = "response.output_item.added";
+    added["output_index"] = index;
+    process_event("response.output_item.added", added);
+    it = slots_.find(index);
+  }
+  if (it != slots_.end()) {
+    const auto item = event.value("item", Json::object());
+    close_slot(it->second, &item);
+  }
+}
+
+void OpenAICodexResponsesParser::handle_terminal_event(const std::string &type,
+                                                       const Json &response) {
+  terminal_seen_ = true;
+  result_->response_id =
+      response.value("id", result_->response_id.value_or(""));
+  parse_usage(response.value("usage", Json::object()));
+  for (auto &[index, slot] : slots_)
+    close_slot(slot);
+  if (type == "response.incomplete") {
+    const auto reason = response.value("incomplete_details", Json::object())
+                            .value("reason", "");
+    result_->stop_reason =
+        reason == "max_output_tokens" ? StopReason::length : StopReason::error;
+    if (result_->stop_reason == StopReason::error)
+      result_->error_message =
+          reason.empty() ? "OpenAI response incomplete" : reason;
+  } else if (type == "response.failed") {
+    result_->stop_reason = StopReason::error;
+    result_->error_message = safe_text(response.value("error", Json::object()),
+                                       "OpenAI response failed");
+  } else {
+    bool has_tool = false;
+    for (const auto &content : result_->content)
+      has_tool = has_tool || std::holds_alternative<ToolCall>(content);
+    result_->stop_reason = has_tool ? StopReason::tool_use : StopReason::stop;
+  }
+  if (result_->stop_reason == StopReason::error)
+    emit_error();
+  else if (on_event_)
+    on_event_(AssistantMessageDoneEvent{.reason = result_->stop_reason,
+                                        .message = *result_});
+}
+
+void OpenAICodexResponsesParser::handle_error_event(const Json &event) {
+  auto message = safe_text(event.value("error", Json::object()), "");
+  if (message.empty())
+    message =
+        event.value("message", event.value("code", "OpenAI response error"));
+  fail(message);
 }
 
 void OpenAICodexResponsesParser::feed_line(std::string_view line) {

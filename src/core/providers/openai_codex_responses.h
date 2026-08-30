@@ -42,6 +42,17 @@ private:
   void reconcile_text(Slot &slot, std::string text);
   void parse_usage(const nlohmann::json &usage);
 
+  Slot *slot_for(const nlohmann::json &source);
+  void handle_output_item_added(const nlohmann::json &event);
+  void handle_text_delta(const nlohmann::json &event);
+  void handle_reasoning_summary_part_done(const nlohmann::json &event);
+  void handle_function_call_arguments_delta(const nlohmann::json &event);
+  void handle_function_call_arguments_done(const nlohmann::json &event);
+  void handle_output_item_done(const nlohmann::json &event);
+  void handle_terminal_event(const std::string &type,
+                             const nlohmann::json &response);
+  void handle_error_event(const nlohmann::json &event);
+
   Model model_;
   AssistantEventCallback on_event_;
   std::shared_ptr<AssistantMessage> result_;
