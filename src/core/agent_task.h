@@ -392,6 +392,25 @@ private:
                                   std::optional<AgentRuntimeIdentity> identity);
   AgentTaskSnapshot close_tasks(std::vector<std::shared_ptr<Task>> tasks);
   static bool valid_task_name(std::string_view name);
+
+  // Result of reserve_spawn(): everything spawn() needs to construct and
+  // launch the new task, plus the state reserve_spawn() already reserved
+  // under mutex_ (pending_task_paths_/pending_children_/pending_spawns_/
+  // active_executions_) on the caller's behalf.
+  struct SpawnReservation {
+    std::shared_ptr<Task> parent;
+    AgentTaskId task_id;
+    std::string task_path;
+    std::vector<Message> context;
+    RegisterEndpointCallback register_endpoint;
+    UnregisterEndpointCallback unregister_endpoint;
+  };
+  // Validates the spawn request against the parent/limits and reserves a
+  // slot for it, throwing AgentTaskError on any failure. Split out of
+  // spawn() purely to shrink that function's branch count; behavior
+  // (including exactly what gets reserved under mutex_) is unchanged from
+  // the inline version it replaced.
+  SpawnReservation reserve_spawn(const SpawnAgentRequest &request);
 };
 
 } // namespace pi::core

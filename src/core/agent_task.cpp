@@ -624,6 +624,76 @@ std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
   return task;
 }
 
+AgentTaskManager::SpawnReservation
+AgentTaskManager::reserve_spawn(const SpawnAgentRequest &request) {
+  SpawnReservation reservation;
+  std::scoped_lock lock(mutex_);
+  if (shutting_down_)
+    throw AgentTaskError(AgentTaskErrorKind::shutting_down,
+                         "agent task manager is shutting down");
+  reservation.parent =
+      find_task_locked(request.parent_id.empty() ? "root" : request.parent_id);
+  if (!reservation.parent)
+    throw AgentTaskError(AgentTaskErrorKind::not_found,
+                         "parent task not found");
+  const auto &parent = reservation.parent;
+  {
+    std::scoped_lock parent_lock(parent->mutex);
+    if (parent->status == AgentTaskStatusKind::closing ||
+        parent->status == AgentTaskStatusKind::shutdown)
+      throw AgentTaskError(AgentTaskErrorKind::invalid_state,
+                           "parent task is closed");
+    const auto pending_children_it = pending_children_.find(parent->id);
+    const auto pending_children = pending_children_it == pending_children_.end()
+                                      ? std::size_t{0}
+                                      : pending_children_it->second;
+    if (parent->children.size() + pending_children >=
+        limits_.max_direct_children)
+      throw AgentTaskError(
+          AgentTaskErrorKind::residency_limit,
+          "parent child limit reached (" +
+              std::to_string(parent->children.size() + pending_children) + "/" +
+              std::to_string(limits_.max_direct_children) +
+              " direct children); call wait_agent or close_agent on an "
+              "existing child before spawning more");
+    for (const auto &child_id : parent->children) {
+      const auto child = tasks_.at(child_id);
+      if (child->task_name == request.task_name)
+        throw AgentTaskError(AgentTaskErrorKind::duplicate_name,
+                             "sibling task name already exists");
+    }
+    if (parent->depth + 1 > limits_.max_nesting_depth)
+      throw AgentTaskError(AgentTaskErrorKind::depth_limit,
+                           "agent nesting depth limit reached");
+  }
+  if (tasks_.size() - 1 + pending_spawns_ >= limits_.max_resident_tasks)
+    throw AgentTaskError(AgentTaskErrorKind::residency_limit,
+                         "resident child task limit reached");
+  if (active_executions_ >= limits_.max_active_executions)
+    throw AgentTaskError(AgentTaskErrorKind::execution_limit,
+                         "active child execution limit reached");
+
+  reservation.task_id = "agent_" + std::to_string(next_id_++);
+  reservation.task_path = parent->task_path + "/" + request.task_name;
+  const auto &task_path = reservation.task_path;
+  if (tasks_.contains(reservation.task_id) ||
+      pending_task_paths_.contains(task_path) ||
+      std::ranges::any_of(tasks_, [&task_path](const auto &entry) {
+        return entry.second->task_path == task_path;
+      }))
+    throw AgentTaskError(AgentTaskErrorKind::duplicate_name,
+                         "task identity already exists");
+  auto parent_context = parent->session->agent().context_snapshot();
+  reservation.context = inherit_context(parent_context, request.context);
+  reservation.register_endpoint = register_endpoint_;
+  reservation.unregister_endpoint = unregister_endpoint_;
+  pending_task_paths_.insert(task_path);
+  ++pending_children_[parent->id];
+  ++pending_spawns_;
+  ++active_executions_;
+  return reservation;
+}
+
 AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
   if (!valid_task_name(request.task_name))
     throw AgentTaskError(
@@ -634,76 +704,13 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
                          "spawn prompt must not be empty");
 
   AgentTaskSnapshot result;
-  std::shared_ptr<Task> parent;
-  AgentTaskId task_id;
-  std::string task_path;
-  std::vector<Message> context;
-  RegisterEndpointCallback register_endpoint;
-  UnregisterEndpointCallback unregister_endpoint;
-  {
-    std::scoped_lock lock(mutex_);
-    if (shutting_down_)
-      throw AgentTaskError(AgentTaskErrorKind::shutting_down,
-                           "agent task manager is shutting down");
-    parent = find_task_locked(request.parent_id.empty() ? "root"
-                                                        : request.parent_id);
-    if (!parent)
-      throw AgentTaskError(AgentTaskErrorKind::not_found,
-                           "parent task not found");
-    {
-      std::scoped_lock parent_lock(parent->mutex);
-      if (parent->status == AgentTaskStatusKind::closing ||
-          parent->status == AgentTaskStatusKind::shutdown)
-        throw AgentTaskError(AgentTaskErrorKind::invalid_state,
-                             "parent task is closed");
-      const auto pending_children_it = pending_children_.find(parent->id);
-      const auto pending_children =
-          pending_children_it == pending_children_.end()
-              ? std::size_t{0}
-              : pending_children_it->second;
-      if (parent->children.size() + pending_children >=
-          limits_.max_direct_children)
-        throw AgentTaskError(
-            AgentTaskErrorKind::residency_limit,
-            "parent child limit reached (" +
-                std::to_string(parent->children.size() + pending_children) +
-                "/" + std::to_string(limits_.max_direct_children) +
-                " direct children); call wait_agent or close_agent on an "
-                "existing child before spawning more");
-      for (const auto &child_id : parent->children) {
-        const auto child = tasks_.at(child_id);
-        if (child->task_name == request.task_name)
-          throw AgentTaskError(AgentTaskErrorKind::duplicate_name,
-                               "sibling task name already exists");
-      }
-      if (parent->depth + 1 > limits_.max_nesting_depth)
-        throw AgentTaskError(AgentTaskErrorKind::depth_limit,
-                             "agent nesting depth limit reached");
-    }
-    if (tasks_.size() - 1 + pending_spawns_ >= limits_.max_resident_tasks)
-      throw AgentTaskError(AgentTaskErrorKind::residency_limit,
-                           "resident child task limit reached");
-    if (active_executions_ >= limits_.max_active_executions)
-      throw AgentTaskError(AgentTaskErrorKind::execution_limit,
-                           "active child execution limit reached");
-
-    task_id = "agent_" + std::to_string(next_id_++);
-    task_path = parent->task_path + "/" + request.task_name;
-    if (tasks_.contains(task_id) || pending_task_paths_.contains(task_path) ||
-        std::ranges::any_of(tasks_, [&task_path](const auto &entry) {
-          return entry.second->task_path == task_path;
-        }))
-      throw AgentTaskError(AgentTaskErrorKind::duplicate_name,
-                           "task identity already exists");
-    auto parent_context = parent->session->agent().context_snapshot();
-    context = inherit_context(parent_context, request.context);
-    register_endpoint = register_endpoint_;
-    unregister_endpoint = unregister_endpoint_;
-    pending_task_paths_.insert(task_path);
-    ++pending_children_[parent->id];
-    ++pending_spawns_;
-    ++active_executions_;
-  }
+  auto reservation = reserve_spawn(request);
+  const auto &parent = reservation.parent;
+  const auto &task_id = reservation.task_id;
+  const auto &task_path = reservation.task_path;
+  auto &context = reservation.context;
+  const auto &register_endpoint = reservation.register_endpoint;
+  const auto &unregister_endpoint = reservation.unregister_endpoint;
 
   std::optional<AgentRuntimeIdentity> identity;
   bool endpoint_registered = false;
