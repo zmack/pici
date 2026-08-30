@@ -42,6 +42,24 @@ private:
   void start_compact(const nlohmann::json &command,
                      core::CompactionTrigger trigger);
 
+  void handle_prompt(const nlohmann::json &command);
+  void handle_steer_or_follow_up(const nlohmann::json &command,
+                                 const std::string &type);
+  void handle_abort(const nlohmann::json &command);
+  void handle_spawn_agent(const nlohmann::json &command);
+  void handle_list_agents(const nlohmann::json &command);
+  void handle_agent_target_command(const nlohmann::json &command,
+                                   const std::string &type);
+  void handle_interrupt_agent(const nlohmann::json &command);
+  void handle_close_agent(const nlohmann::json &command);
+  void handle_list_models(const nlohmann::json &command);
+  void handle_set_model(const nlohmann::json &command);
+  void handle_get_state(const nlohmann::json &command);
+  void handle_get_messages(const nlohmann::json &command);
+  void handle_set_thinking_level(const nlohmann::json &command);
+  void handle_session_command(const nlohmann::json &command,
+                              const std::string &type);
+
   core::SessionRuntime &session_;
   core::AgentTaskManager *task_manager_{nullptr};
   std::shared_ptr<auth::AuthResolver> auth_resolver_;

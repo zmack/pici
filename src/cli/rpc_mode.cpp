@@ -282,6 +282,290 @@ void RpcMode::start_wait(const nlohmann::json &command) {
       });
 }
 
+void RpcMode::handle_prompt(const nlohmann::json &command) {
+  if (!command.contains("message") || !command["message"].is_string() ||
+      command["message"].get<std::string>().empty()) {
+    response(command, false, nullptr,
+             "prompt requires a non-empty string message");
+    return;
+  }
+  start_prompt(command, command["message"].get<std::string>());
+}
+
+void RpcMode::handle_steer_or_follow_up(const nlohmann::json &command,
+                                        const std::string &type) {
+  if (!command.contains("message") || !command["message"].is_string()) {
+    response(command, false, nullptr, type + " requires a string message");
+    return;
+  }
+  core::UserMessage message;
+  message.content.emplace_back(
+      core::TextContent{.text = command["message"].get<std::string>()});
+  if (type == "steer")
+    session_.agent().steer({std::move(message)});
+  else
+    session_.agent().follow_up({std::move(message)});
+  response(command, true);
+}
+
+void RpcMode::handle_abort(const nlohmann::json &command) {
+  session_.agent().interrupt(
+      rpc_abort_reason(command.value("reason", std::string("user"))));
+  response(command, true,
+           {{"reason", command.value("reason", std::string("user"))}});
+}
+
+void RpcMode::handle_spawn_agent(const nlohmann::json &command) {
+  if (task_manager_ == nullptr) {
+    response(command, false, nullptr, "agent task manager is unavailable");
+    return;
+  }
+  core::SpawnAgentRequest request;
+  request.parent_id = command.value("parent_id", std::string{});
+  request.task_name = command.value("task_name", std::string{});
+  request.prompt = command.value("message", std::string{});
+  if (command.contains("context")) {
+    const auto &context = command.at("context");
+    const auto mode =
+        rpc_context_mode(context.value("mode", std::string("none")));
+    if (!mode)
+      throw core::AgentTaskError(core::AgentTaskErrorKind::invalid_context,
+                                 "invalid context inheritance mode");
+    request.context.mode = *mode;
+    if (context.contains("through"))
+      request.context.through = context.at("through").get<std::size_t>();
+    if (context.contains("recent_count"))
+      request.context.recent_count =
+          context.at("recent_count").get<std::size_t>();
+  }
+  if (command.contains("model") && !command.at("model").is_null())
+    request.model_spec = command.at("model").get<std::string>();
+  if (command.contains("system_prompt") &&
+      !command.at("system_prompt").is_null())
+    request.system_prompt = command.at("system_prompt").get<std::string>();
+  if (command.contains("tools"))
+    request.requested_tools =
+        command.at("tools").get<std::vector<std::string>>();
+  request.allow_write_tools = command.value("allow_write_tools", false);
+  response(command, true, task_snapshot_json(task_manager_->spawn(request)));
+}
+
+void RpcMode::handle_list_agents(const nlohmann::json &command) {
+  if (task_manager_ == nullptr) {
+    response(command, false, nullptr, "agent task manager is unavailable");
+    return;
+  }
+  const auto prefix = command.value("path_prefix", std::string{});
+  nlohmann::json agents = nlohmann::json::array();
+  for (const auto &snapshot : task_manager_->list(
+           prefix.empty() ? std::optional<std::string_view>{}
+                          : std::optional<std::string_view>{prefix}))
+    agents.push_back(task_snapshot_json(snapshot));
+  response(command, true, {{"agents", std::move(agents)}});
+}
+
+void RpcMode::handle_agent_target_command(const nlohmann::json &command,
+                                          const std::string &type) {
+  if (task_manager_ == nullptr) {
+    response(command, false, nullptr, "agent task manager is unavailable");
+    return;
+  }
+  const auto target = command.value("target", std::string{});
+  auto message = rpc_message(command);
+  const auto snapshot = type == "send_agent"
+                            ? task_manager_->send_message(target, message)
+                            : task_manager_->follow_up(target, message);
+  response(command, true, task_snapshot_json(snapshot));
+}
+
+void RpcMode::handle_interrupt_agent(const nlohmann::json &command) {
+  if (task_manager_ == nullptr) {
+    response(command, false, nullptr, "agent task manager is unavailable");
+    return;
+  }
+  const auto reason =
+      rpc_interrupt_reason(command.value("reason", std::string("user")));
+  if (!reason)
+    throw core::AgentTaskError(core::AgentTaskErrorKind::invalid_context,
+                               "invalid interrupt reason");
+  response(command, true,
+           task_snapshot_json(task_manager_->interrupt(
+               command.value("target", std::string{}), *reason)));
+}
+
+void RpcMode::handle_close_agent(const nlohmann::json &command) {
+  if (task_manager_ == nullptr) {
+    response(command, false, nullptr, "agent task manager is unavailable");
+    return;
+  }
+  response(command, true,
+           task_snapshot_json(
+               task_manager_->close(command.value("target", std::string{}))));
+}
+
+void RpcMode::handle_list_models(const nlohmann::json &command) {
+  const auto registry = session_.model_registry();
+  if (!registry) {
+    response(command, false, nullptr, "model registry is unavailable");
+    return;
+  }
+  const auto filter = command.value("filter", std::string{});
+  nlohmann::json models = nlohmann::json::array();
+  for (const auto *model : registry->search(filter))
+    models.push_back(model_summary(*model, *registry, auth_resolver_));
+  response(command, true, {{"models", std::move(models)}});
+}
+
+void RpcMode::handle_set_model(const nlohmann::json &command) {
+  if (run_active_ || session_.agent().is_streaming()) {
+    response(command, false, nullptr, "model switching requires an idle agent");
+    return;
+  }
+  const auto model_id = command.value("model", std::string{});
+  if (model_id.empty()) {
+    response(command, false, nullptr, "set_model requires a model");
+    return;
+  }
+  core::ModelSelection selection{.model = model_id, .source = "rpc"};
+  if (command.contains("provider") && command.at("provider").is_string())
+    selection.provider = command.at("provider").get<std::string>();
+  const auto resolution = session_.resolve_model(selection);
+  if (!resolution) {
+    response(command, false, nullptr, resolution.error);
+    return;
+  }
+  // resolution's operator bool() is defined as model.has_value(), so the
+  // !resolution check above already guarantees model is set here.
+  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+  const auto &selected_model = resolution.model.value();
+  if (auth_resolver_ && auth_resolver_->availability(selected_model.provider) ==
+                            pi::auth::AuthAvailability::missing) {
+    response(command, false, nullptr,
+             "missing authentication for provider '" + selected_model.provider +
+                 "'");
+    return;
+  }
+  auto requested = session_.agent().state().thinking_level();
+  if (command.contains("thinking_level")) {
+    const auto parsed =
+        parse_thinking(command.at("thinking_level").get<std::string>());
+    if (!parsed) {
+      response(command, false, nullptr, "invalid thinking level");
+      return;
+    }
+    requested = *parsed;
+  }
+  const auto result = session_.set_model(selected_model, requested);
+  nlohmann::json data = {{"previous", as_json(result.previous)},
+                         {"current", as_json(result.current)},
+                         {"thinking_level", core::thinking_level_to_string(
+                                                result.thinking_level)}};
+  if (result.warning)
+    data["warning"] = *result.warning;
+  response(command, true, std::move(data));
+}
+
+void RpcMode::handle_get_state(const nlohmann::json &command) {
+  const auto messages = session_.agent().state().messages();
+  nlohmann::json tools = nlohmann::json::array();
+  for (const auto &tool : session_.agent().state().tools())
+    tools.push_back(tool->name());
+  nlohmann::json state = nlohmann::json::object();
+  state["model"] = as_json(session_.agent().state().model());
+  state["thinking_level"] =
+      core::thinking_level_to_string(session_.agent().state().thinking_level());
+  state["sandbox_mode"] =
+      std::string(core::sandbox_mode_to_string(session_.sandbox_mode()));
+  state["is_streaming"] = session_.agent().is_streaming();
+  if (const auto &id = session_.active_session_id())
+    state["session_id"] = *id;
+  else
+    state["session_id"] = nullptr;
+  if (const auto name = session_.agent().state().session_name())
+    state["session_name"] = *name;
+  else
+    state["session_name"] = nullptr;
+  state["message_count"] = messages.size();
+  state["tools"] = std::move(tools);
+  response(command, true, std::move(state));
+}
+
+void RpcMode::handle_get_messages(const nlohmann::json &command) {
+  nlohmann::json messages = nlohmann::json::array();
+  for (const auto &message : session_.agent().state().messages())
+    messages.push_back(as_json(message));
+  response(command, true, {{"messages", std::move(messages)}});
+}
+
+void RpcMode::handle_set_thinking_level(const nlohmann::json &command) {
+  const auto level = command.value("level", std::string{});
+  const auto parsed = parse_thinking(level);
+  if (!parsed) {
+    response(command, false, nullptr, "invalid thinking level");
+    return;
+  }
+  session_.agent().state().set_thinking_level(*parsed);
+  response(command, true);
+}
+
+void RpcMode::handle_session_command(const nlohmann::json &command,
+                                     const std::string &type) {
+  if (run_active_ || session_.agent().is_streaming()) {
+    response(command, false, nullptr, "session changes require an idle agent");
+    return;
+  }
+  if (type == "new_session") {
+    const auto model = session_.agent().state().model();
+    core::SessionHeader header{.id = core::generate_session_id(),
+                               .created = std::chrono::system_clock::to_time_t(
+                                   std::chrono::system_clock::now()),
+                               .model = model.id,
+                               .provider = model.provider};
+    const auto id = session_.create_session(std::move(header));
+    response(command, true, {{"session_id", id}});
+  } else if (type == "switch_session") {
+    const auto id = command.value("session_id", std::string{});
+    if (id.empty() || !session_.activate_session(id)) {
+      response(command, false, nullptr, "session not found");
+      return;
+    }
+    if (const auto record = session_.load_session(id);
+        record && record->header.name)
+      session_.agent().state().set_session_name(*record->header.name);
+    response(command, true, {{"session_id", id}});
+  } else if (type == "fork") {
+    const auto parent = session_.active_session_id();
+    if (!parent) {
+      response(command, false, nullptr, "no active session to fork");
+      return;
+    }
+    const auto model = session_.agent().state().model();
+    core::SessionHeader header{.id = core::generate_session_id(),
+                               .parent_id = parent,
+                               .parent_offset =
+                                   session_.agent().state().messages().size(),
+                               .created = std::chrono::system_clock::to_time_t(
+                                   std::chrono::system_clock::now()),
+                               .model = model.id,
+                               .provider = model.provider};
+    const auto id = session_.fork_session(std::move(header));
+    response(command, true,
+             {{"session_id", id}, {"parent_session_id", *parent}});
+  } else {
+    const auto name = command.value("name", std::string{});
+    const auto id = session_.active_session_id();
+    if (name.empty() || !id || session_.session_store() == nullptr) {
+      response(
+          command, false, nullptr,
+          "set_session_name requires an active session and non-empty name");
+      return;
+    }
+    session_.session_store()->set_name(*id, name);
+    session_.agent().state().set_session_name(name);
+    response(command, true);
+  }
+}
+
 void RpcMode::handle(const nlohmann::json &command) {
   if (!command.is_object() || !command.contains("type") ||
       !command["type"].is_string()) {
@@ -295,271 +579,41 @@ void RpcMode::handle(const nlohmann::json &command) {
   const auto type = command["type"].get<std::string>();
   try {
     if (type == "prompt") {
-      if (!command.contains("message") || !command["message"].is_string() ||
-          command["message"].get<std::string>().empty()) {
-        response(command, false, nullptr,
-                 "prompt requires a non-empty string message");
-        return;
-      }
-      start_prompt(command, command["message"].get<std::string>());
+      handle_prompt(command);
     } else if (type == "steer" || type == "follow_up") {
-      if (!command.contains("message") || !command["message"].is_string()) {
-        response(command, false, nullptr, type + " requires a string message");
-        return;
-      }
-      core::UserMessage message;
-      message.content.emplace_back(
-          core::TextContent{.text = command["message"].get<std::string>()});
-      if (type == "steer")
-        session_.agent().steer({std::move(message)});
-      else
-        session_.agent().follow_up({std::move(message)});
-      response(command, true);
+      handle_steer_or_follow_up(command, type);
     } else if (type == "abort") {
-      session_.agent().interrupt(
-          rpc_abort_reason(command.value("reason", std::string("user"))));
-      response(command, true,
-               {{"reason", command.value("reason", std::string("user"))}});
+      handle_abort(command);
     } else if (type == "compact") {
       // Only manual compaction is exposed over RPC in this phase; automatic
       // pre-turn/context-window-retry triggers are the agent loop's own
       // decision (plan Phase 5), not something an external client requests.
       start_compact(command, core::CompactionTrigger::manual);
     } else if (type == "spawn_agent") {
-      if (task_manager_ == nullptr) {
-        response(command, false, nullptr, "agent task manager is unavailable");
-        return;
-      }
-      core::SpawnAgentRequest request;
-      request.parent_id = command.value("parent_id", std::string{});
-      request.task_name = command.value("task_name", std::string{});
-      request.prompt = command.value("message", std::string{});
-      if (command.contains("context")) {
-        const auto &context = command.at("context");
-        const auto mode =
-            rpc_context_mode(context.value("mode", std::string("none")));
-        if (!mode)
-          throw core::AgentTaskError(core::AgentTaskErrorKind::invalid_context,
-                                     "invalid context inheritance mode");
-        request.context.mode = *mode;
-        if (context.contains("through"))
-          request.context.through = context.at("through").get<std::size_t>();
-        if (context.contains("recent_count"))
-          request.context.recent_count =
-              context.at("recent_count").get<std::size_t>();
-      }
-      if (command.contains("model") && !command.at("model").is_null())
-        request.model_spec = command.at("model").get<std::string>();
-      if (command.contains("system_prompt") &&
-          !command.at("system_prompt").is_null())
-        request.system_prompt = command.at("system_prompt").get<std::string>();
-      if (command.contains("tools"))
-        request.requested_tools =
-            command.at("tools").get<std::vector<std::string>>();
-      request.allow_write_tools = command.value("allow_write_tools", false);
-      response(command, true,
-               task_snapshot_json(task_manager_->spawn(request)));
+      handle_spawn_agent(command);
     } else if (type == "list_agents") {
-      if (task_manager_ == nullptr) {
-        response(command, false, nullptr, "agent task manager is unavailable");
-        return;
-      }
-      const auto prefix = command.value("path_prefix", std::string{});
-      nlohmann::json agents = nlohmann::json::array();
-      for (const auto &snapshot : task_manager_->list(
-               prefix.empty() ? std::optional<std::string_view>{}
-                              : std::optional<std::string_view>{prefix}))
-        agents.push_back(task_snapshot_json(snapshot));
-      response(command, true, {{"agents", std::move(agents)}});
+      handle_list_agents(command);
     } else if (type == "send_agent" || type == "follow_up_agent") {
-      if (task_manager_ == nullptr) {
-        response(command, false, nullptr, "agent task manager is unavailable");
-        return;
-      }
-      const auto target = command.value("target", std::string{});
-      auto message = rpc_message(command);
-      const auto snapshot = type == "send_agent"
-                                ? task_manager_->send_message(target, message)
-                                : task_manager_->follow_up(target, message);
-      response(command, true, task_snapshot_json(snapshot));
+      handle_agent_target_command(command, type);
     } else if (type == "wait_agents") {
       start_wait(command);
     } else if (type == "interrupt_agent") {
-      if (task_manager_ == nullptr) {
-        response(command, false, nullptr, "agent task manager is unavailable");
-        return;
-      }
-      const auto reason =
-          rpc_interrupt_reason(command.value("reason", std::string("user")));
-      if (!reason)
-        throw core::AgentTaskError(core::AgentTaskErrorKind::invalid_context,
-                                   "invalid interrupt reason");
-      response(command, true,
-               task_snapshot_json(task_manager_->interrupt(
-                   command.value("target", std::string{}), *reason)));
+      handle_interrupt_agent(command);
     } else if (type == "close_agent") {
-      if (task_manager_ == nullptr) {
-        response(command, false, nullptr, "agent task manager is unavailable");
-        return;
-      }
-      response(command, true,
-               task_snapshot_json(task_manager_->close(
-                   command.value("target", std::string{}))));
+      handle_close_agent(command);
     } else if (type == "list_models") {
-      const auto registry = session_.model_registry();
-      if (!registry) {
-        response(command, false, nullptr, "model registry is unavailable");
-        return;
-      }
-      const auto filter = command.value("filter", std::string{});
-      nlohmann::json models = nlohmann::json::array();
-      for (const auto *model : registry->search(filter))
-        models.push_back(model_summary(*model, *registry, auth_resolver_));
-      response(command, true, {{"models", std::move(models)}});
+      handle_list_models(command);
     } else if (type == "set_model") {
-      if (run_active_ || session_.agent().is_streaming()) {
-        response(command, false, nullptr,
-                 "model switching requires an idle agent");
-        return;
-      }
-      const auto model_id = command.value("model", std::string{});
-      if (model_id.empty()) {
-        response(command, false, nullptr, "set_model requires a model");
-        return;
-      }
-      core::ModelSelection selection{.model = model_id, .source = "rpc"};
-      if (command.contains("provider") && command.at("provider").is_string())
-        selection.provider = command.at("provider").get<std::string>();
-      const auto resolution = session_.resolve_model(selection);
-      if (!resolution) {
-        response(command, false, nullptr, resolution.error);
-        return;
-      }
-      // resolution's operator bool() is defined as model.has_value(), so the
-      // !resolution check above already guarantees model is set here.
-      // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-      const auto &selected_model = resolution.model.value();
-      if (auth_resolver_ &&
-          auth_resolver_->availability(selected_model.provider) ==
-              pi::auth::AuthAvailability::missing) {
-        response(command, false, nullptr,
-                 "missing authentication for provider '" +
-                     selected_model.provider + "'");
-        return;
-      }
-      auto requested = session_.agent().state().thinking_level();
-      if (command.contains("thinking_level")) {
-        const auto parsed =
-            parse_thinking(command.at("thinking_level").get<std::string>());
-        if (!parsed) {
-          response(command, false, nullptr, "invalid thinking level");
-          return;
-        }
-        requested = *parsed;
-      }
-      const auto result = session_.set_model(selected_model, requested);
-      nlohmann::json data = {{"previous", as_json(result.previous)},
-                             {"current", as_json(result.current)},
-                             {"thinking_level", core::thinking_level_to_string(
-                                                    result.thinking_level)}};
-      if (result.warning)
-        data["warning"] = *result.warning;
-      response(command, true, std::move(data));
+      handle_set_model(command);
     } else if (type == "get_state") {
-      const auto messages = session_.agent().state().messages();
-      nlohmann::json tools = nlohmann::json::array();
-      for (const auto &tool : session_.agent().state().tools())
-        tools.push_back(tool->name());
-      nlohmann::json state = nlohmann::json::object();
-      state["model"] = as_json(session_.agent().state().model());
-      state["thinking_level"] = core::thinking_level_to_string(
-          session_.agent().state().thinking_level());
-      state["sandbox_mode"] =
-          std::string(core::sandbox_mode_to_string(session_.sandbox_mode()));
-      state["is_streaming"] = session_.agent().is_streaming();
-      if (const auto &id = session_.active_session_id())
-        state["session_id"] = *id;
-      else
-        state["session_id"] = nullptr;
-      if (const auto name = session_.agent().state().session_name())
-        state["session_name"] = *name;
-      else
-        state["session_name"] = nullptr;
-      state["message_count"] = messages.size();
-      state["tools"] = std::move(tools);
-      response(command, true, std::move(state));
+      handle_get_state(command);
     } else if (type == "get_messages") {
-      nlohmann::json messages = nlohmann::json::array();
-      for (const auto &message : session_.agent().state().messages())
-        messages.push_back(as_json(message));
-      response(command, true, {{"messages", std::move(messages)}});
+      handle_get_messages(command);
     } else if (type == "set_thinking_level") {
-      const auto level = command.value("level", std::string{});
-      const auto parsed = parse_thinking(level);
-      if (!parsed) {
-        response(command, false, nullptr, "invalid thinking level");
-        return;
-      }
-      session_.agent().state().set_thinking_level(*parsed);
-      response(command, true);
+      handle_set_thinking_level(command);
     } else if (type == "new_session" || type == "switch_session" ||
                type == "fork" || type == "set_session_name") {
-      if (run_active_ || session_.agent().is_streaming()) {
-        response(command, false, nullptr,
-                 "session changes require an idle agent");
-        return;
-      }
-      if (type == "new_session") {
-        const auto model = session_.agent().state().model();
-        core::SessionHeader header{.id = core::generate_session_id(),
-                                   .created =
-                                       std::chrono::system_clock::to_time_t(
-                                           std::chrono::system_clock::now()),
-                                   .model = model.id,
-                                   .provider = model.provider};
-        const auto id = session_.create_session(std::move(header));
-        response(command, true, {{"session_id", id}});
-      } else if (type == "switch_session") {
-        const auto id = command.value("session_id", std::string{});
-        if (id.empty() || !session_.activate_session(id)) {
-          response(command, false, nullptr, "session not found");
-          return;
-        }
-        if (const auto record = session_.load_session(id);
-            record && record->header.name)
-          session_.agent().state().set_session_name(*record->header.name);
-        response(command, true, {{"session_id", id}});
-      } else if (type == "fork") {
-        const auto parent = session_.active_session_id();
-        if (!parent) {
-          response(command, false, nullptr, "no active session to fork");
-          return;
-        }
-        const auto model = session_.agent().state().model();
-        core::SessionHeader header{
-            .id = core::generate_session_id(),
-            .parent_id = parent,
-            .parent_offset = session_.agent().state().messages().size(),
-            .created = std::chrono::system_clock::to_time_t(
-                std::chrono::system_clock::now()),
-            .model = model.id,
-            .provider = model.provider};
-        const auto id = session_.fork_session(std::move(header));
-        response(command, true,
-                 {{"session_id", id}, {"parent_session_id", *parent}});
-      } else {
-        const auto name = command.value("name", std::string{});
-        const auto id = session_.active_session_id();
-        if (name.empty() || !id || session_.session_store() == nullptr) {
-          response(
-              command, false, nullptr,
-              "set_session_name requires an active session and non-empty name");
-          return;
-        }
-        session_.session_store()->set_name(*id, name);
-        session_.agent().state().set_session_name(name);
-        response(command, true);
-      }
+      handle_session_command(command, type);
     } else {
       response(command, false, nullptr, "unknown command: " + type);
     }
