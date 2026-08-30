@@ -105,7 +105,7 @@ public:
 
   void on_message_end(const core::TokenUsage &) override {
     if (in_message_) {
-      Message msg;
+      AcpMessage msg;
       msg.role = agent_name_;
       msg.parts.push_back(
           {.content_type = "text/plain", .content = accumulated_});

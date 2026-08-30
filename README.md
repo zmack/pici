@@ -47,19 +47,47 @@ and covers only the original agent-loop kernel.
 
 ## Project Structure
 
+Selected files, grouped per `docs/architecture-lexicon.md`'s three layers: a
+transport-agnostic kernel, the product runtime built on it, and the
+frontends that drive it. Not an exhaustive inventory — providers, tools,
+renderers, and other supporting files live under the same directories.
+
+**Kernel** (`src/core/`) — the diagram above, unchanged by the
+`SessionRuntime` migration below:
+
 | File(s) | Lines | Purpose |
 |---------|-------|---------|
-| `message_types.h/.cpp` | 947 | Message types, content blocks, model, tools, built-in JSON |
-| `event_types.h/.cpp` | 290 | Event types (agent, turn, message, tool events) |
-| `stream.h` | 325 | Thread-safe `EventStream` — blocking iterator, callbacks, drain |
-| `agent_state.h` | 193 | Thread-safe agent state: transcript, tools, model, stop token |
-| `agent_loop.h/.cpp` | 942 | Core loop: LLM call → tools → repeat |
-| `agent.h/.cpp` | 252 | High-level `Agent` API: prompt, continue, steer, abort |
-| `llm_client.h/.cpp` | 92 | Abstract LLM provider with stub fallback |
-| `main.cpp` | 203 | CLI entry with demo tool |
-| `test/` | ~1500 | Self-hosted test harness (no Catch2) |
+| `message_types.h/.cpp` | ~770 | `TranscriptMessage` variant (aliased `Message`), content blocks, `Model`, tool types |
+| `event_types.h/.cpp` | ~550 | `AgentEvent` variant: turn/message/tool events |
+| `stream.h` | 360 | Thread-safe `EventStream` — blocking iterator, callbacks, drain |
+| `agent_state.h` | 299 | Thread-safe agent state: transcript, tools, model, stop token |
+| `agent_loop.h/.cpp` | ~1550 | Core loop: LLM call → tools → repeat; `AgentInput`/`InputProvenance` |
+| `agent.h/.cpp` | ~1020 | High-level `Agent` API: prompt, continue, steer, compact, abort |
 
-**Total: ~3,300 lines of C++**
+**Product runtime** (`src/core/session/`, `src/core/mailbox/`) — task and
+mailbox delivery, consolidated under `SessionRuntime` ownership by this
+migration per the lexicon's ownership table:
+
+| File(s) | Lines | Purpose |
+|---------|-------|---------|
+| `session/agent_session.h/.cpp` | ~700 | `SessionRuntime`: owns the root `Agent`, `AgentTaskManager`, and `MailboxRuntime` attachment |
+| `session/mailbox_runtime.h/.cpp` | ~300 | Attaches a `MailboxCoordinator` to a root session, task manager, and wake callback |
+| `agent_task.h/.cpp` | ~1940 | `AgentTaskManager`: subagent spawn/steer/interrupt/close, task-tree ownership |
+| `mailbox/*.h/.cpp` | ~3500 | `MailboxCoordinator`/`MailboxStore`: claim/deliver/acknowledge, SQLite-backed |
+
+**Frontends** — CLI, JSONL RPC, and ACP, each a thin adapter over the shared
+runtime above:
+
+| File(s) | Lines | Purpose |
+|---------|-------|---------|
+| `cli/session_runtime*.h/.cpp` | ~800 | Shared model/auth/sandbox resolution and `SessionRuntime` construction, used by both `main.cpp` and `acp/` |
+| `main.cpp` | ~2250 | CLI entry: arg parsing, `cmd_run()`, REPL/renderer wiring |
+| `cli/*` (rest) | ~5850 | REPL, renderers, JSONL RPC mode, mailbox launch config, hooks |
+| `acp/*.h/.cpp` | ~1520 | ACP HTTP server: `/agents`, `/runs`, `/tasks/*` |
+| `test/` | ~24000 | Self-hosted test harness (no Catch2) |
+
+**Total: ~42,600 lines of C++ in `src/`, ~24,000 in `test/`** (~66,700
+combined; the tables above are highlights, not a sum of these totals)
 
 ## Core Types
 

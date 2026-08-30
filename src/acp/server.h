@@ -18,6 +18,9 @@
 namespace pi::acp {
 
 struct ServerConfig {
+  // ACP agent profile name this server advertises in its manifest -- not an
+  // activation or session identity (a durable session/SessionRuntime is a
+  // separate concept; see plans/session-runtime-migration.md Phase 6).
   std::string agent_name{"pi"};
   std::string agent_description{"pi-cpp coding agent"};
   core::Agent::Options agent_opts;

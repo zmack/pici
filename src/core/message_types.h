@@ -133,8 +133,14 @@ struct ContextCompactionMessage {
   std::int64_t timestamp{0};
 };
 
-using Message = std::variant<UserMessage, AssistantMessage, ToolResultMessage,
-                             ContextCompactionMessage>;
+using TranscriptMessage =
+    std::variant<UserMessage, AssistantMessage, ToolResultMessage,
+                 ContextCompactionMessage>;
+
+// Compatibility alias kept indefinitely per docs/architecture-lexicon.md's
+// "Usage rules": wire code and tests reference `Message` pervasively enough
+// that a repo-wide rename would be pure churn for no behavioral gain.
+using Message = TranscriptMessage;
 
 enum class ThinkingLevel {
   off,

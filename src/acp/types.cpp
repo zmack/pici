@@ -15,18 +15,18 @@ void from_json(const nlohmann::json &j, MessagePart &p) {
   p.content = j.value("content", "");
 }
 
-void to_json(nlohmann::json &j, const Message &m) {
+void to_json(nlohmann::json &j, const AcpMessage &m) {
   j = {{"role", m.role}, {"parts", m.parts}};
 }
 
-void from_json(const nlohmann::json &j, Message &m) {
+void from_json(const nlohmann::json &j, AcpMessage &m) {
   m.role = j.value("role", "user");
   m.parts = j.value("parts", std::vector<MessagePart>{});
 }
 
 void from_json(const nlohmann::json &j, RunCreateRequest &r) {
   r.agent_name = j.value("agent_name", "");
-  r.input = j.value("input", std::vector<Message>{});
+  r.input = j.value("input", std::vector<AcpMessage>{});
   if (j.contains("session_id") && j["session_id"].is_string())
     r.session_id = j["session_id"].get<std::string>();
   if (j.contains("provider") && j["provider"].is_string())
