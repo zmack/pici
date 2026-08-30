@@ -1393,6 +1393,155 @@ void TerminalRawMode::leave() {
   }
 }
 
+namespace {
+
+enum class EscapeAction { none, redraw, submit, wake };
+
+// Handles one '\x1b'-prefixed key event: reads the rest of the escape
+// sequence and applies its effect to buf/cursor/vim_engine. Split out of
+// readline()'s main loop purely to shrink that function's branch count;
+// behavior is unchanged from the inline version it replaced.
+EscapeAction handle_escape_key(int wake_fd, const ControlFn &control_fn,
+                               std::string &buf, std::size_t &cursor,
+                               VimEngine &vim_engine, bool vim_mode) {
+  const auto escape = read_escape_sequence(wake_fd);
+  if (escape.wake)
+    return EscapeAction::wake;
+  if (vim_mode) {
+    // Escape always cancels an in-progress d/c operator, matching
+    // real Vim -- regardless of whether this turns out to be a bare
+    // Escape or the start of some other escape sequence (a fast
+    // typist landing on an arrow key right after 'd', say).
+    vim_engine.cancel_pending();
+    if (escape.sequence.empty()) {
+      // Bare Escape (read_escape_sequence's short poll window timed
+      // out with nothing following): enter Normal mode. Idempotent
+      // if already there. No buffer/cursor change, so no redraw.
+      vim_engine.set_mode(VimMode::Normal);
+      return EscapeAction::none;
+    }
+  }
+  if (escape.sequence == "\r") {
+    // Alt+Enter (legacy ESC + \r, distinguishable now that ICRNL is
+    // cleared): insert a newline instead of submitting.
+    buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor), '\n');
+    ++cursor;
+    return EscapeAction::redraw;
+  }
+  if (const auto enter_kind = classify_csi_u_enter(escape.sequence);
+      enter_kind != CsiUEnterKind::none) {
+    // Enter via the Kitty keyboard protocol's "CSI u" key-report
+    // encoding (active once RawMode::enter has confirmed support and
+    // pushed the "disambiguate escape codes" flag): codepoint 13 with
+    // the Shift modifier bit set means Shift+Enter, handled exactly
+    // like Alt+Enter above; without it -- or with no modifier section
+    // at all, which the protocol allows omitting when nothing is
+    // held -- it's plain Enter and submits exactly like a raw '\r'
+    // does.
+    if (enter_kind == CsiUEnterKind::shift) {
+      buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor), '\n');
+      ++cursor;
+      return EscapeAction::redraw;
+    }
+    return EscapeAction::submit;
+  }
+  if (escape.sequence == "[200~") {
+    // Bracketed paste: the block between start/end markers is always
+    // an inert insert, regardless of embedded \n/\r — it must never
+    // submit, even if the pasted text ends in a newline.
+    auto paste = read_bracketed_paste(wake_fd);
+    if (!paste.content.empty()) {
+      buf.insert(cursor, paste.content);
+      cursor += paste.content.size();
+    }
+    if (paste.wake)
+      return EscapeAction::wake;
+    return EscapeAction::redraw;
+  }
+  if (escape.sequence == "b") {
+    // Alt+B (legacy ESC + 'b', same encoding family as Alt+Enter
+    // above): word-left. Second binding for the same operation as
+    // Ctrl+Left, for terminals/multiplexers that don't pass the CSI
+    // modifier form through cleanly.
+    cursor = previous_word_boundary(buf, cursor);
+    return EscapeAction::redraw;
+  }
+  if (escape.sequence == "f") {
+    // Alt+F: word-right, mirroring Alt+B above.
+    cursor = next_word_boundary(buf, cursor);
+    return EscapeAction::redraw;
+  }
+  if (handle_escape_sequence(escape.sequence, control_fn, buf, cursor))
+    return EscapeAction::redraw;
+  return EscapeAction::none;
+}
+
+// Handles one plain (non-escape, non-vim-Normal-mode) input byte: Tab
+// completion, the Emacs-style Ctrl+A/E/W/U/K/Y bindings, Backspace, and
+// ordinary insertion. Split out of readline()'s main loop purely to shrink
+// that function's branch count; behavior is unchanged from the inline
+// version it replaced.
+void handle_control_byte(unsigned char c, const CompleteFn &complete_fn,
+                         std::string &buf, std::size_t &cursor,
+                         std::string &kill_buffer, InputRenderer &renderer) {
+  if (c == '\t') { // Tab — complete
+    if (complete_fn) {
+      auto candidates = complete_fn(buf);
+      apply_completions(renderer, buf, std::move(candidates));
+      cursor = buf.size();
+    }
+  } else if (c == '\x7f' || c == '\x08') { // Backspace / DEL
+    if (cursor > 0) {
+      const auto start = previous_utf8_offset(buf, cursor);
+      buf.erase(start, cursor - start);
+      cursor = start;
+      renderer.redraw(buf, cursor);
+    }
+  } else if (c == '\x01') { // Ctrl+A — line start (same as Home)
+    cursor = line_start(buf, cursor);
+    renderer.redraw(buf, cursor);
+  } else if (c == '\x05') { // Ctrl+E — line end (same as End)
+    cursor = line_end(buf, cursor);
+    renderer.redraw(buf, cursor);
+  } else if (c == '\x17') { // Ctrl+W — delete word behind cursor
+    const auto start = previous_word_boundary(buf, cursor);
+    if (start < cursor) {
+      kill_buffer.assign(buf, start, cursor - start);
+      buf.erase(start, cursor - start);
+      cursor = start;
+      renderer.redraw(buf, cursor);
+    }
+  } else if (c == '\x15') { // Ctrl+U — kill to line start
+    const auto start = line_start(buf, cursor);
+    if (start < cursor) {
+      kill_buffer.assign(buf, start, cursor - start);
+      buf.erase(start, cursor - start);
+      cursor = start;
+      renderer.redraw(buf, cursor);
+    }
+  } else if (c == '\x0b') { // Ctrl+K — kill to line end
+    const auto end = line_end(buf, cursor);
+    if (end > cursor) {
+      kill_buffer.assign(buf, cursor, end - cursor);
+      buf.erase(cursor, end - cursor);
+      renderer.redraw(buf, cursor);
+    }
+  } else if (c == '\x19') { // Ctrl+Y — yank last kill
+    if (!kill_buffer.empty()) {
+      buf.insert(cursor, kill_buffer);
+      cursor += kill_buffer.size();
+      renderer.redraw(buf, cursor);
+    }
+  } else if (c >= 0x20 || (c & 0x80U) != 0U) {
+    buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor),
+               static_cast<char>(c));
+    ++cursor;
+    renderer.redraw(buf, cursor);
+  }
+}
+
+} // namespace
+
 ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
                         const ControlFn &control_fn,
                         std::string_view status_line,
@@ -1601,127 +1750,20 @@ ReadlineResult readline(std::string_view prompt, const CompleteFn &complete_fn,
       }
 
       if (c == '\x1b') {
-        const auto escape = read_escape_sequence(wake_fd);
-        if (escape.wake)
+        switch (handle_escape_key(wake_fd, control_fn, buf, cursor, vim_engine,
+                                  vim_mode)) {
+        case EscapeAction::wake:
           return finish(ReadlineExit::mailbox_wake);
-        if (vim_mode) {
-          // Escape always cancels an in-progress d/c operator, matching
-          // real Vim -- regardless of whether this turns out to be a bare
-          // Escape or the start of some other escape sequence (a fast
-          // typist landing on an arrow key right after 'd', say).
-          vim_engine.cancel_pending();
-          if (escape.sequence.empty()) {
-            // Bare Escape (read_escape_sequence's short poll window timed
-            // out with nothing following): enter Normal mode. Idempotent
-            // if already there. No buffer/cursor change, so no redraw.
-            vim_engine.set_mode(VimMode::Normal);
-            continue;
-          }
+        case EscapeAction::submit:
+          return finish(ReadlineExit::submitted);
+        case EscapeAction::redraw:
+          renderer.redraw(buf, cursor);
+          break;
+        case EscapeAction::none:
+          break;
         }
-        if (escape.sequence == "\r") {
-          // Alt+Enter (legacy ESC + \r, distinguishable now that ICRNL is
-          // cleared): insert a newline instead of submitting.
-          buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor), '\n');
-          ++cursor;
-          renderer.redraw(buf, cursor);
-        } else if (const auto enter_kind =
-                       classify_csi_u_enter(escape.sequence);
-                   enter_kind != CsiUEnterKind::none) {
-          // Enter via the Kitty keyboard protocol's "CSI u" key-report
-          // encoding (active once RawMode::enter has confirmed support and
-          // pushed the "disambiguate escape codes" flag): codepoint 13 with
-          // the Shift modifier bit set means Shift+Enter, handled exactly
-          // like Alt+Enter above; without it -- or with no modifier section
-          // at all, which the protocol allows omitting when nothing is
-          // held -- it's plain Enter and submits exactly like a raw '\r'
-          // does.
-          if (enter_kind == CsiUEnterKind::shift) {
-            buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor), '\n');
-            ++cursor;
-            renderer.redraw(buf, cursor);
-          } else {
-            return finish(ReadlineExit::submitted);
-          }
-        } else if (escape.sequence == "[200~") {
-          // Bracketed paste: the block between start/end markers is always
-          // an inert insert, regardless of embedded \n/\r — it must never
-          // submit, even if the pasted text ends in a newline.
-          auto paste = read_bracketed_paste(wake_fd);
-          if (!paste.content.empty()) {
-            buf.insert(cursor, paste.content);
-            cursor += paste.content.size();
-          }
-          if (paste.wake)
-            return finish(ReadlineExit::mailbox_wake);
-          renderer.redraw(buf, cursor);
-        } else if (escape.sequence == "b") {
-          // Alt+B (legacy ESC + 'b', same encoding family as Alt+Enter
-          // above): word-left. Second binding for the same operation as
-          // Ctrl+Left, for terminals/multiplexers that don't pass the CSI
-          // modifier form through cleanly.
-          cursor = previous_word_boundary(buf, cursor);
-          renderer.redraw(buf, cursor);
-        } else if (escape.sequence == "f") {
-          // Alt+F: word-right, mirroring Alt+B above.
-          cursor = next_word_boundary(buf, cursor);
-          renderer.redraw(buf, cursor);
-        } else if (handle_escape_sequence(escape.sequence, control_fn, buf,
-                                          cursor)) {
-          renderer.redraw(buf, cursor);
-        }
-      } else if (c == '\t') { // Tab — complete
-        if (complete_fn) {
-          auto candidates = complete_fn(buf);
-          apply_completions(renderer, buf, std::move(candidates));
-          cursor = buf.size();
-        }
-      } else if (c == '\x7f' || c == '\x08') { // Backspace / DEL
-        if (cursor > 0) {
-          const auto start = previous_utf8_offset(buf, cursor);
-          buf.erase(start, cursor - start);
-          cursor = start;
-          renderer.redraw(buf, cursor);
-        }
-      } else if (c == '\x01') { // Ctrl+A — line start (same as Home)
-        cursor = line_start(buf, cursor);
-        renderer.redraw(buf, cursor);
-      } else if (c == '\x05') { // Ctrl+E — line end (same as End)
-        cursor = line_end(buf, cursor);
-        renderer.redraw(buf, cursor);
-      } else if (c == '\x17') { // Ctrl+W — delete word behind cursor
-        const auto start = previous_word_boundary(buf, cursor);
-        if (start < cursor) {
-          kill_buffer.assign(buf, start, cursor - start);
-          buf.erase(start, cursor - start);
-          cursor = start;
-          renderer.redraw(buf, cursor);
-        }
-      } else if (c == '\x15') { // Ctrl+U — kill to line start
-        const auto start = line_start(buf, cursor);
-        if (start < cursor) {
-          kill_buffer.assign(buf, start, cursor - start);
-          buf.erase(start, cursor - start);
-          cursor = start;
-          renderer.redraw(buf, cursor);
-        }
-      } else if (c == '\x0b') { // Ctrl+K — kill to line end
-        const auto end = line_end(buf, cursor);
-        if (end > cursor) {
-          kill_buffer.assign(buf, cursor, end - cursor);
-          buf.erase(cursor, end - cursor);
-          renderer.redraw(buf, cursor);
-        }
-      } else if (c == '\x19') { // Ctrl+Y — yank last kill
-        if (!kill_buffer.empty()) {
-          buf.insert(cursor, kill_buffer);
-          cursor += kill_buffer.size();
-          renderer.redraw(buf, cursor);
-        }
-      } else if (c >= 0x20 || (c & 0x80U) != 0U) {
-        buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(cursor),
-                   static_cast<char>(c));
-        ++cursor;
-        renderer.redraw(buf, cursor);
+      } else {
+        handle_control_byte(c, complete_fn, buf, cursor, kill_buffer, renderer);
       }
 
       // If both descriptors were ready, input wins for this iteration. A
