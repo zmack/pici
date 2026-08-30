@@ -602,149 +602,111 @@ OpenAICompatibleClient::build_request_json(const Model &model,
   return params;
 }
 
-std::shared_ptr<AssistantMessage>
-OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
-                               const StreamOptions &options,
-                               AssistantEventCallback on_event,
-                               std::stop_token stop_tok) {
+namespace {
 
-  auto result = std::make_shared<AssistantMessage>();
-  result->api = model.api;
-  result->provider = model.provider;
-  result->model = model.id;
-  result->stop_reason = StopReason::stop;
-  result->timestamp = now_ms();
+// The two mutually-exclusive request modes stream() used to inline directly:
+// a plain HTTP request/response for compat.uses_non_streaming providers, and
+// an SSE stream for everyone else. Split out purely to shrink stream()'s
+// branch count; behavior is unchanged from the inline versions they replace.
 
-  auto compat = detect_compat(model);
-  auto request_json = build_request_json(model, context, options);
-  auto request_body = request_json.dump(2);
-
-  if (options.verbose) {
-    std::string dbg = "[request] POST ";
-    dbg += base_url_.empty() ? model.base_url : base_url_;
-    dbg += "/chat/completions\n";
-    dbg += request_json.dump(2);
-    dbg += '\n';
-    write_best_effort(STDERR_FILENO, dbg.data(), dbg.size());
+std::shared_ptr<AssistantMessage> perform_non_streaming_request(
+    const std::string &url, const std::string &request_body,
+    const std::map<std::string, std::string> &headers,
+    const StreamOptions &options, std::stop_token stop_tok,
+    std::shared_ptr<AssistantMessage> result,
+    const AssistantEventCallback &on_event) {
+  auto auth = options.auth;
+  if (!auth && options.api_key) {
+    auth = RequestAuth{.kind = AuthKind::api_key,
+                       .bearer_token = options.api_key,
+                       .source = "legacy-api-key"};
   }
-
-  request_body = request_json.dump();
-
-  std::map<std::string, std::string> headers = model.headers;
-  merge_headers_case_insensitive(headers, options.headers);
-  headers["Content-Type"] = "application/json";
-  headers["Accept"] =
-      compat.uses_non_streaming ? "application/json" : "text/event-stream";
-
-  std::string url = base_url_.empty() ? model.base_url : base_url_;
-  if (!url.empty() && url.back() == '/')
-    url.pop_back();
-  if (url.empty()) {
-    result->stop_reason = StopReason::error;
-    result->error_message =
-        "Missing base URL for provider '" + model.provider + "' / model '" +
-        model.id +
-        "'. Set --base-url or use a known provider prefix "
-        "(e.g. openrouter/<model> requires provider to map to "
-        "https://openrouter.ai/api/v1, or pass --base-url "
-        "https://openrouter.ai/api/v1).";
+  auto response = HttpClient::post_authenticated(
+      url, request_body, headers, auth, options.timeout_ms, stop_tok);
+  if (!response || response->status_code < 200 ||
+      response->status_code >= 300 || stop_tok.stop_requested()) {
+    result->stop_reason =
+        stop_tok.stop_requested() ? StopReason::aborted : StopReason::error;
+    result->error_message = stop_tok.stop_requested() ? "Request was aborted"
+                                                      : "LLM request failed";
+    if (response) {
+      auto err = nlohmann::json::parse(response->body, nullptr, false);
+      if (!err.is_discarded() && err.contains("error")) {
+        const auto &error = err["error"];
+        if (error.is_object()) {
+          // result->error_message was unconditionally set a few lines
+          // above in this branch.
+          // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+          const auto &previous_message = *result->error_message;
+          result->error_message = error.value("message", previous_message);
+        } else if (error.is_string()) {
+          result->error_message = error.get<std::string>();
+        }
+      } else if (!response->body.empty()) {
+        result->error_message = response->body;
+      }
+    }
     if (on_event)
       on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
                                           .error = *result});
     return result;
   }
-  url += "/chat/completions";
 
-  if (on_event)
-    on_event(AssistantMessageStartEvent{*result});
-
-  if (compat.uses_non_streaming) {
-    auto auth = options.auth;
-    if (!auth && options.api_key) {
-      auth = RequestAuth{.kind = AuthKind::api_key,
-                         .bearer_token = options.api_key,
-                         .source = "legacy-api-key"};
-    }
-    auto response = HttpClient::post_authenticated(
-        url, request_body, headers, auth, options.timeout_ms, stop_tok);
-    if (!response || response->status_code < 200 ||
-        response->status_code >= 300 || stop_tok.stop_requested()) {
-      result->stop_reason =
-          stop_tok.stop_requested() ? StopReason::aborted : StopReason::error;
-      result->error_message = stop_tok.stop_requested() ? "Request was aborted"
-                                                        : "LLM request failed";
-      if (response) {
-        auto err = nlohmann::json::parse(response->body, nullptr, false);
-        if (!err.is_discarded() && err.contains("error")) {
-          const auto &error = err["error"];
-          if (error.is_object()) {
-            // result->error_message was unconditionally set a few lines
-            // above in this branch.
-            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-            const auto &previous_message = *result->error_message;
-            result->error_message = error.value("message", previous_message);
-          } else if (error.is_string()) {
-            result->error_message = error.get<std::string>();
-          }
-        } else if (!response->body.empty()) {
-          result->error_message = response->body;
-        }
-      }
-      if (on_event)
-        on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
-                                            .error = *result});
-      return result;
-    }
-
-    auto body = nlohmann::json::parse(response->body, nullptr, false);
-    if (body.is_discarded() || !body.contains("choices") ||
-        !body["choices"].is_array() || body["choices"].empty()) {
-      result->stop_reason = StopReason::error;
-      result->error_message = "LLM response did not contain choices";
-      if (on_event)
-        on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
-                                            .error = *result});
-      return result;
-    }
-
-    if (auto id_it = body.find("id"); id_it != body.end() && id_it->is_string())
-      result->response_id = id_it->get<std::string>();
-    if (auto usage_it = body.find("usage");
-        usage_it != body.end() && usage_it->is_object()) {
-      parse_chunk_usage(*usage_it, result->usage);
-    }
-
-    const auto &choice = body["choices"][0];
-    if (auto fr_it = choice.find("finish_reason");
-        fr_it != choice.end() && !fr_it->is_null()) {
-      result->stop_reason =
-          OpenAICompatibleClient::map_finish_reason(fr_it->get<std::string>());
-    }
-
-    std::string text;
-    if (auto msg_it = choice.find("message"); msg_it != choice.end()) {
-      if (auto content_it = msg_it->find("content");
-          content_it != msg_it->end() && content_it->is_string()) {
-        text = content_it->get<std::string>();
-      }
-    }
-    if (!text.empty()) {
-      result->content.emplace_back(TextContent{.text = text});
-      if (on_event) {
-        on_event(AssistantMessageTextStartEvent{.content_index = 0,
-                                                .partial = *result});
-        on_event(AssistantMessageTextDeltaEvent{
-            .content_index = 0, .delta = text, .partial = *result});
-        on_event(AssistantMessageTextEndEvent{
-            .content_index = 0, .content = text, .partial = *result});
-      }
-    }
+  auto body = nlohmann::json::parse(response->body, nullptr, false);
+  if (body.is_discarded() || !body.contains("choices") ||
+      !body["choices"].is_array() || body["choices"].empty()) {
+    result->stop_reason = StopReason::error;
+    result->error_message = "LLM response did not contain choices";
     if (on_event)
-      on_event(AssistantMessageDoneEvent{.reason = result->stop_reason,
-                                         .message = *result});
+      on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
+                                          .error = *result});
     return result;
   }
 
+  if (auto id_it = body.find("id"); id_it != body.end() && id_it->is_string())
+    result->response_id = id_it->get<std::string>();
+  if (auto usage_it = body.find("usage");
+      usage_it != body.end() && usage_it->is_object()) {
+    parse_chunk_usage(*usage_it, result->usage);
+  }
+
+  const auto &choice = body["choices"][0];
+  if (auto fr_it = choice.find("finish_reason");
+      fr_it != choice.end() && !fr_it->is_null()) {
+    result->stop_reason =
+        OpenAICompatibleClient::map_finish_reason(fr_it->get<std::string>());
+  }
+
+  std::string text;
+  if (auto msg_it = choice.find("message"); msg_it != choice.end()) {
+    if (auto content_it = msg_it->find("content");
+        content_it != msg_it->end() && content_it->is_string()) {
+      text = content_it->get<std::string>();
+    }
+  }
+  if (!text.empty()) {
+    result->content.emplace_back(TextContent{.text = text});
+    if (on_event) {
+      on_event(AssistantMessageTextStartEvent{.content_index = 0,
+                                              .partial = *result});
+      on_event(AssistantMessageTextDeltaEvent{
+          .content_index = 0, .delta = text, .partial = *result});
+      on_event(AssistantMessageTextEndEvent{
+          .content_index = 0, .content = text, .partial = *result});
+    }
+  }
+  if (on_event)
+    on_event(AssistantMessageDoneEvent{.reason = result->stop_reason,
+                                       .message = *result});
+  return result;
+}
+
+std::shared_ptr<AssistantMessage> perform_streaming_request(
+    const std::string &url, const std::string &request_body,
+    const std::map<std::string, std::string> &headers,
+    const StreamOptions &options, std::stop_token stop_tok,
+    std::shared_ptr<AssistantMessage> result,
+    const AssistantEventCallback &on_event) {
   StreamingState state{.result = result,
                        .on_event = on_event,
                        .diagnostics = options.diagnostics};
@@ -818,12 +780,13 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
   // Some providers (observed via OpenRouter) can return an HTTP-200
   // streaming response whose body never actually carries a finish_reason,
   // content delta, or usage event -- no transport error, just nothing.
-  // result->stop_reason is left at its StopReason::stop default (line
-  // ~615) in that case, so without this check the turn would silently end
-  // as if the model had chosen to say nothing. A legitimate empty
-  // completion still bills at least the input tokens for the prompt that
-  // was sent, so all-zero usage alongside empty content is the fingerprint
-  // of a dropped/empty stream, not a real "model said nothing" turn.
+  // result->stop_reason is left at its StopReason::stop default (set in
+  // stream() before either request path runs) in that case, so without
+  // this check the turn would silently end as if the model had chosen to
+  // say nothing. A legitimate empty completion still bills at least the
+  // input tokens for the prompt that was sent, so all-zero usage alongside
+  // empty content is the fingerprint of a dropped/empty stream, not a real
+  // "model said nothing" turn.
   if (result->content.empty() && result->usage.input == 0 &&
       result->usage.output == 0 && result->usage.total_tokens == 0) {
     result->stop_reason = StopReason::error;
@@ -840,6 +803,72 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
     on_event(AssistantMessageDoneEvent{.reason = result->stop_reason,
                                        .message = *result});
   return result;
+}
+
+} // namespace
+
+std::shared_ptr<AssistantMessage>
+OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
+                               const StreamOptions &options,
+                               AssistantEventCallback on_event,
+                               std::stop_token stop_tok) {
+
+  auto result = std::make_shared<AssistantMessage>();
+  result->api = model.api;
+  result->provider = model.provider;
+  result->model = model.id;
+  result->stop_reason = StopReason::stop;
+  result->timestamp = now_ms();
+
+  auto compat = detect_compat(model);
+  auto request_json = build_request_json(model, context, options);
+  auto request_body = request_json.dump(2);
+
+  if (options.verbose) {
+    std::string dbg = "[request] POST ";
+    dbg += base_url_.empty() ? model.base_url : base_url_;
+    dbg += "/chat/completions\n";
+    dbg += request_json.dump(2);
+    dbg += '\n';
+    write_best_effort(STDERR_FILENO, dbg.data(), dbg.size());
+  }
+
+  request_body = request_json.dump();
+
+  std::map<std::string, std::string> headers = model.headers;
+  merge_headers_case_insensitive(headers, options.headers);
+  headers["Content-Type"] = "application/json";
+  headers["Accept"] =
+      compat.uses_non_streaming ? "application/json" : "text/event-stream";
+
+  std::string url = base_url_.empty() ? model.base_url : base_url_;
+  if (!url.empty() && url.back() == '/')
+    url.pop_back();
+  if (url.empty()) {
+    result->stop_reason = StopReason::error;
+    result->error_message =
+        "Missing base URL for provider '" + model.provider + "' / model '" +
+        model.id +
+        "'. Set --base-url or use a known provider prefix "
+        "(e.g. openrouter/<model> requires provider to map to "
+        "https://openrouter.ai/api/v1, or pass --base-url "
+        "https://openrouter.ai/api/v1).";
+    if (on_event)
+      on_event(AssistantMessageErrorEvent{.reason = result->stop_reason,
+                                          .error = *result});
+    return result;
+  }
+  url += "/chat/completions";
+
+  if (on_event)
+    on_event(AssistantMessageStartEvent{*result});
+
+  if (compat.uses_non_streaming)
+    return perform_non_streaming_request(url, request_body, headers, options,
+                                         stop_tok, result, on_event);
+
+  return perform_streaming_request(url, request_body, headers, options,
+                                   stop_tok, result, on_event);
 }
 
 } // namespace pi::core
