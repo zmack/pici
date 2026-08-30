@@ -822,17 +822,45 @@ if(PI_CPP_BUILD_TESTS)
     )
     add_test(NAME test-frontend-parity COMMAND test-frontend-parity)
 
-    # Characterization tests for cmd_run() (src/main.cpp): drives the real
-    # compiled pi-cli binary as a subprocess, since everything in main.cpp
-    # currently lives in one anonymous namespace with internal linkage and
-    # can't be linked into a test binary directly. See test_cmd_run.cpp's
-    # file comment.
+    # End-to-end characterization tests for cmd_run() (src/cli/cmd_run_session.h):
+    # drives the real compiled pi-cli binary as a subprocess, exercising
+    # argument parsing, config-file resolution, and process exit codes -- the
+    # things only a real process boundary observes. See test_cmd_run.cpp's
+    # file comment. test-cmd_run_repl below covers REPL slash-command logic
+    # in-process instead, against a mocked Renderer.
     add_executable(test-cmd_run test/test_cmd_run.cpp)
     target_compile_definitions(test-cmd_run PRIVATE
         PI_CLI_BINARY="$<TARGET_FILE:pi-cli>"
     )
     add_dependencies(test-cmd_run pi-cli)
     add_test(NAME test-cmd_run COMMAND test-cmd_run)
+
+    # Unit tests for CmdRunSession's REPL slash-command dispatch, in-process
+    # against a gmock MockRenderer -- see test_cmd_run_repl.cpp's file
+    # comment. Needs the same cli/*.cpp sources as pi-cli itself, since
+    # cli/cmd_run_session.h (header-only) pulls in the same dependency graph.
+    add_executable(test-cmd_run_repl
+        test/test_cmd_run_repl.cpp
+        src/cli/args.cpp
+        src/cli/config.cpp
+        src/cli/mailbox_runtime.cpp
+        src/cli/session_runtime.cpp
+        src/cli/session_runtime_bundle.cpp
+        src/cli/readline.cpp
+        src/cli/wrap.cpp
+        src/cli/vim_mode.cpp
+        src/cli/model_selector.cpp
+        src/cli/rpc_mode.cpp
+        src/cli/faux_control_mode.cpp
+        src/cli/system_prompt.cpp
+        src/cli/tree_selector.cpp
+    )
+    target_include_directories(test-cmd_run_repl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-cmd_run_repl PRIVATE pi-core pi-http tomlplusplus::tomlplusplus)
+    target_compile_definitions(test-cmd_run_repl PRIVATE
+        PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    add_test(NAME test-cmd_run_repl COMMAND test-cmd_run_repl)
 
     # Link every automated C++ test with gtest_main. test-markdown-display is
     # a manual demo and is deliberately excluded.
@@ -847,7 +875,7 @@ if(PI_CPP_BUILD_TESTS)
         test-mailbox-bindings test-credential_store test-openai_codex_oauth
         test-openai_codex_responses test-sandbox test-system_prompt test-rpc_mode
         test-faux_control_mode test-readline test-wrap test-vim-mode test-acp
-        test-frontend-parity test-cmd_run
+        test-frontend-parity test-cmd_run test-cmd_run_repl
     )
     foreach(test_target IN LISTS PI_CPP_GTEST_TEST_TARGETS)
         target_link_libraries(${test_target} PRIVATE GTest::gtest_main
