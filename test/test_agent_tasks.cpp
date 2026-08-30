@@ -5,6 +5,7 @@
 #include "core/providers/faux.h"
 #include "core/session/agent_session.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -19,6 +20,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <variant>
 
 using namespace pi::core;
 
@@ -196,7 +198,7 @@ int main() {
   model.provider = "faux";
   Agent::Options options;
   options.model = model;
-  AgentSession root({.agent_options = options});
+  SessionRuntime root({.agent_options = options});
   AgentTaskManager manager(root, options);
   auto observed_identity =
       std::make_shared<std::optional<AgentRuntimeIdentity>>();
@@ -246,7 +248,7 @@ return {}
   identity_tools.insert(identity_tools.end(),
                         addon_hooks->registered_tools.begin(),
                         addon_hooks->registered_tools.end());
-  AgentSession identity_root(
+  SessionRuntime identity_root(
       {.agent_options = identity_options, .tools = std::move(identity_tools)});
   AgentTaskManager identity_manager(identity_root, identity_options);
   std::vector<AgentRuntimeIdentity> registered;
@@ -290,7 +292,7 @@ return {}
   CHECK(!has_tool("arbitrary_addon"));
   identity_manager.shutdown();
 
-  AgentSession write_root({.agent_options = identity_options,
+  SessionRuntime write_root({.agent_options = identity_options,
                            .tools = create_coding_tools()});
   AgentTaskManager write_manager(
       write_root, identity_options, AgentTaskManager::Limits{}, {},
@@ -353,7 +355,7 @@ return {}
   CHECK(construction_manager.active_executions() == 0);
   construction_manager.shutdown();
 
-  AgentSession concurrency_root({.agent_options = identity_options});
+  SessionRuntime concurrency_root({.agent_options = identity_options});
   AgentTaskManager concurrency_manager(concurrency_root, identity_options);
   std::mutex registration_mutex;
   std::condition_variable registration_changed;
@@ -416,7 +418,7 @@ return {}
   CHECK(concurrency_manager.active_executions() == 0);
   CHECK(unregister_count == 1);
 
-  AgentSession capacity_root({.agent_options = identity_options});
+  SessionRuntime capacity_root({.agent_options = identity_options});
   AgentTaskManager::Limits capacity_limits;
   capacity_limits.max_direct_children = 2;
   AgentTaskManager capacity_manager(capacity_root, identity_options,
@@ -474,7 +476,7 @@ return {}
   CHECK(capacity_manager.resident_tasks() == 2);
   capacity_manager.shutdown();
 
-  AgentSession parent_root({.agent_options = identity_options});
+  SessionRuntime parent_root({.agent_options = identity_options});
   AgentTaskManager parent_manager(parent_root, identity_options);
   std::mutex parent_mutex;
   std::condition_variable parent_changed;
@@ -532,7 +534,7 @@ return {}
   CHECK(parent_manager.resident_tasks() == 0);
   parent_manager.shutdown();
 
-  AgentSession unregister_root({.agent_options = identity_options});
+  SessionRuntime unregister_root({.agent_options = identity_options});
   AgentTaskManager unregister_manager(unregister_root, identity_options);
   std::mutex unregister_mutex;
   std::condition_variable unregister_changed;
@@ -682,10 +684,10 @@ return {}
   int accepted = 0;
   UserMessage mailbox_message;
   mailbox_message.content.emplace_back(TextContent{.text = "mailbox"});
-  AgentMessageEnvelope mailbox_envelope{
+  AgentInput mailbox_envelope{
       .message = Message{std::move(mailbox_message)},
       .on_accepted = [&accepted] { ++accepted; },
-      .source = AgentMessageSource::mailbox};
+      .presentation = {.source = InputProvenance::Source::mailbox}};
   auto reactivated =
       manager.steer_envelopes(child.id, {std::move(mailbox_envelope)});
   auto third = wait_terminal(manager, reactivated);
@@ -715,7 +717,7 @@ return {}
   interrupt_model.provider = "interrupt-test";
   Agent::Options interrupt_options;
   interrupt_options.model = interrupt_model;
-  AgentSession interrupt_root({.agent_options = interrupt_options});
+  SessionRuntime interrupt_root({.agent_options = interrupt_options});
   AgentTaskManager interrupt_manager(interrupt_root, interrupt_options);
   auto interrupted =
       interrupt_manager.spawn({.task_name = "slow", .prompt = "wait"});
@@ -766,7 +768,7 @@ return {}
   usage_model.context_window = 100000; // declared window must surface
   Agent::Options usage_options;
   usage_options.model = usage_model;
-  AgentSession usage_root({.agent_options = usage_options});
+  SessionRuntime usage_root({.agent_options = usage_options});
   AgentTaskManager usage_manager(usage_root, usage_options);
   auto observed_child =
       usage_manager.spawn({.task_name = "observed", .prompt = "observe"});
@@ -812,6 +814,52 @@ return {}
   CHECK(usage_done.context_info->message_count ==
         mid_turn->context_info->message_count + 1); // + turn-2 assistant
   usage_manager.shutdown();
+
+  // --- Delegated task results never splice into the parent transcript ----
+  // Lexicon delegated-task flow step 6: "Results use task APIs or explicit
+  // mailbox entries; they never silently splice into the parent transcript."
+  // A child's completed result must be visible only through
+  // AgentTaskManager's own snapshot/result API, never appended to the
+  // parent SessionRuntime's own message history.
+  auto splice_client = std::make_shared<FauxClient>(
+      std::vector{response("splice-check distinctive child output")});
+  LLMClientRegistry::instance().register_client(
+      "splice-check", [splice_client] { return splice_client; });
+  Model splice_model;
+  splice_model.id = "splice-model";
+  splice_model.api = "splice-check";
+  splice_model.provider = "splice-check";
+  Agent::Options splice_options;
+  splice_options.model = splice_model;
+  SessionRuntime splice_root({.agent_options = splice_options});
+  AgentTaskManager splice_manager(splice_root, splice_options);
+  CHECK(splice_root.agent().state().messages().size() == std::size_t{0});
+  const auto splice_child = splice_manager.spawn(
+      {.task_name = "splice-child", .prompt = "produce distinctive output"});
+  const auto splice_done = wait_terminal(splice_manager, splice_child);
+  CHECK(splice_done.status == AgentTaskStatusKind::completed);
+  CHECK(splice_done.result.has_value());
+  CHECK(splice_done.result &&
+        splice_done.result->text == "splice-check distinctive child output");
+  // The parent's own transcript must be untouched: no messages appended,
+  // and the child's distinctive text must not appear anywhere in it.
+  CHECK(splice_root.agent().state().messages().size() == std::size_t{0});
+  const bool leaked_into_parent = std::ranges::any_of(
+      splice_root.agent().state().messages(), [](const Message &message) {
+        const auto *assistant = std::get_if<AssistantMessage>(&message);
+        if (assistant == nullptr)
+          return false;
+        for (const auto &block : assistant->content) {
+          const auto *text = std::get_if<TextContent>(&block);
+          if (text != nullptr &&
+              text->text.find("splice-check distinctive child output") !=
+                  std::string::npos)
+            return true;
+        }
+        return false;
+      });
+  CHECK(!leaked_into_parent);
+  splice_manager.shutdown();
 
   if (failed != 0)
     return 1;

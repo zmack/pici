@@ -43,6 +43,7 @@ docs/
 !docs/
 docs/*
 !docs/pi-gap-analysis.md
+!docs/architecture-lexicon.md
 
 # Dependencies (install via package manager)
 # Don't commit system deps

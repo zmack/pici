@@ -507,6 +507,7 @@ add_library(pi-core
     src/core/session/agent_session.cpp
     src/core/session/session_store.cpp
     src/core/session/session_tree.cpp
+    src/core/session/mailbox_runtime.cpp
 )
 
 target_include_directories(pi-core PUBLIC
@@ -583,6 +584,8 @@ add_executable(pi-cli
     src/cli/args.cpp
     src/cli/config.cpp
     src/cli/mailbox_runtime.cpp
+    src/cli/session_runtime.cpp
+    src/cli/session_runtime_bundle.cpp
     src/cli/readline.cpp
     src/cli/wrap.cpp
     src/cli/vim_mode.cpp
@@ -609,6 +612,7 @@ add_executable(pi-acp
     src/acp/handlers.cpp
     src/cli/args.cpp
     src/cli/config.cpp
+    src/cli/session_runtime.cpp
     src/cli/readline.cpp
     src/cli/wrap.cpp
     src/cli/vim_mode.cpp
@@ -617,6 +621,13 @@ add_executable(pi-acp
 target_include_directories(pi-acp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(pi-acp PRIVATE pi-core pi-http httplib::httplib tomlplusplus::tomlplusplus)
 target_compile_options(pi-acp PRIVATE ${PI_CPP_WARNING_FLAGS})
+# cli/session_runtime.cpp's Lua-hook-composition helper needs this even
+# though ACP always calls it with SessionRuntimeCapabilities::enable_hooks
+# off (see cli/session_runtime.h) -- the code path is compiled in either
+# way, just never reached at runtime for ACP.
+target_compile_definitions(pi-acp PRIVATE
+    PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
 
 # ─── Tests ───
 if(PI_CPP_BUILD_TESTS)
@@ -777,8 +788,26 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-acp PRIVATE pi-core pi-http httplib::httplib)
     target_sources(test-acp PRIVATE
         src/acp/server.cpp src/acp/handlers.cpp src/acp/types.cpp
-        src/acp/sse.cpp src/acp/task_events.cpp)
+        src/acp/sse.cpp src/acp/task_events.cpp src/cli/session_runtime.cpp)
+    # See pi-acp's own PI_CPP_SOURCE_DIR comment: session_runtime.cpp's
+    # Lua-hook helper needs this even though it's compiled-but-unreached
+    # here (ACP always calls it with hooks disabled).
+    target_compile_definitions(test-acp PRIVATE
+        PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
     add_test(NAME test-acp COMMAND test-acp)
+
+    add_executable(test-frontend-parity test/test_frontend_parity.cpp)
+    target_include_directories(test-frontend-parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-frontend-parity PRIVATE pi-core pi-http httplib::httplib)
+    target_sources(test-frontend-parity PRIVATE
+        src/acp/server.cpp src/acp/handlers.cpp src/acp/types.cpp
+        src/acp/sse.cpp src/acp/task_events.cpp src/cli/rpc_mode.cpp
+        src/cli/session_runtime.cpp)
+    target_compile_definitions(test-frontend-parity PRIVATE
+        PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    add_test(NAME test-frontend-parity COMMAND test-frontend-parity)
 endif()
 
 add_library(pi-http

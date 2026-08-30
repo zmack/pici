@@ -4,6 +4,12 @@ A C++23 implementation of the [pi-mono](https://github.com/badlogic/pi-mono) cor
 
 ## Architecture
 
+The normative vocabulary, ownership model, and intended subsystem interactions
+are defined in [`docs/architecture-lexicon.md`](docs/architecture-lexicon.md).
+The self-contained [`pici-architecture.html`](pici-architecture.html) is the
+current descriptive architecture review. The compact sketch below is historical
+and covers only the original agent-loop kernel.
+
 ```
 ┌─────────────────────────────────────────────────────┐
 │                     pi-cpp                          │

@@ -2,6 +2,7 @@
 #include "acp/handlers.h"
 #include "acp/task_events.h"
 #include "acp/types.h"
+#include "cli/session_runtime.h"
 #include "core/agent_task.h"
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
@@ -53,12 +54,17 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
     return new httplib::ThreadPool(static_cast<std::size_t>(config.threads));
   };
 
-  auto task_root = std::make_shared<core::AgentSession>(
-      core::AgentSession::Config{.agent_options = config.agent_opts,
-                                 .model_registry = config.model_registry,
-                                 .tools = config.tools,
-                                 .session_store = sessions,
-                                 .sandbox_policy = config.sandbox_policy});
+  // ACP never enables auto-compaction (see cli/session_runtime.h); the
+  // unused cli::Args{} below is only read when that capability is on.
+  auto task_root =
+      std::make_shared<core::AgentSession>(cli::build_agent_session_config(
+          config.agent_opts, config.model_registry, config.tools, sessions,
+          config.sandbox_policy, cli::Args{},
+          cli::SessionRuntimeCapabilities{.enable_mailbox = false,
+                                          .enable_hooks = false,
+                                          .enable_skills = false,
+                                          .enable_context_files = false,
+                                          .enable_auto_compaction = false}));
   auto task_events = std::make_shared<TaskEventHub>();
   auto task_manager = std::make_shared<core::AgentTaskManager>(
       *task_root, config.agent_opts, core::AgentTaskManager::Limits{},

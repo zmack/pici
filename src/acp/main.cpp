@@ -1,6 +1,7 @@
 #include "acp/server.h"
 #include "cli/args.h"
 #include "cli/config.h"
+#include "cli/session_runtime.h"
 #include "cli/system_prompt.h"
 #include "core/auth/auth_resolver.h"
 #include "core/auth_types.h"
@@ -128,49 +129,24 @@ int main(int argc, char *argv[]) noexcept {
     return 1;
   }
 
-  pi::core::Model model;
-  if (!args.model.empty()) {
-    pi::core::ModelSelection selection{.model = args.model, .source = "acp"};
-    if (!args.provider.empty())
-      selection.provider = args.provider;
-    if (!args.base_url.empty())
-      selection.base_url = args.base_url;
-    const auto resolution = registry->resolve(selection);
-    if (!resolution) {
-      std::cerr << "error: " << resolution.error << "\n";
-      return 1;
-    }
-    // resolution's operator bool() is defined as model.has_value(), so the
-    // !resolution check above already guarantees model is set here.
-    model =
-        resolution.model.value(); // NOLINT(bugprone-unchecked-optional-access)
-  } else if (!args.provider.empty()) {
-    const auto *provider = registry->provider(args.provider);
-    if (provider == nullptr) {
-      std::cerr << "error: unknown provider '" << args.provider << "'\n";
-      return 1;
-    }
-    model = {.id = "default",
-             .name = "default",
-             .api = provider->api,
-             .provider = provider->id,
-             .base_url = provider->base_url,
-             .input_capabilities = {"text"},
-             .context_window = 128000,
-             .max_tokens = 4096};
-  } else {
-    model = {.id = "default",
-             .name = "default",
-             .api = "openai-completions",
-             .provider = "local",
-             .base_url = args.base_url.empty() ? "http://127.0.0.1:8080/v1"
-                                               : args.base_url,
-             .input_capabilities = {"text"},
-             .context_window = 128000,
-             .max_tokens = 4096};
+  // Shared with cmd_run()'s (pi-cli's) resolution logic -- see
+  // cli/session_runtime.h. Previously duplicated here with two real
+  // behavioral differences from the CLI, both resolved in the CLI's
+  // (more established) favor by this unification: an unknown --provider
+  // combined with an explicit --base-url now falls through to a
+  // permissive default-model construction instead of always erroring, and
+  // a registry-resolved model's base_url is no longer force-overridden
+  // again after the fact (selection.base_url alone drives it, same as the
+  // CLI). See test/test_frontend_parity.cpp's resolution-parity test.
+  const auto resolution = pi::cli::resolve_model_selection(args, registry);
+  if (!resolution) {
+    std::cerr << "error: " << resolution.error << "\n";
+    return 1;
   }
-  if (!args.base_url.empty())
-    model.base_url = args.base_url;
+  // resolution's operator bool() is defined as model.has_value(), so the
+  // !resolution check above already guarantees model is set here.
+  pi::core::Model model =
+      resolution.model.value(); // NOLINT(bugprone-unchecked-optional-access)
   if (model.provider == "openai-codex" && !args.api_key.empty()) {
     std::cerr << "error: --api-key cannot be used with openai-codex; run "
                  "pi-cli auth login openai-codex\n";
@@ -186,8 +162,6 @@ int main(int argc, char *argv[]) noexcept {
   if (!args.session_dir.empty())
     cfg.session_dir = args.session_dir;
 
-  cfg.agent_opts.model = model;
-  cfg.agent_opts.model_registry = registry;
   auto auth_resolver = std::make_shared<pi::auth::AuthResolver>(registry);
   cfg.auth_resolver = auth_resolver;
   if (!args.api_key.empty())
@@ -200,18 +174,29 @@ int main(int argc, char *argv[]) noexcept {
       return 1;
     }
   }
-  cfg.agent_opts.get_auth =
-      [auth_resolver](
-          std::string_view provider) -> std::optional<pi::core::RequestAuth> {
-    return auth_resolver->resolve(provider);
+
+  // ACP has no mailbox, Lua hooks, skill catalog, context-file discovery,
+  // or auto-compaction -- capabilities all off preserves that scope
+  // exactly instead of gaining it as a side effect of sharing
+  // build_agent_options() with the CLI. See cli/session_runtime.h's file
+  // comment and plans/session-runtime-migration.md Phase 2's
+  // capability-scope decision.
+  pi::cli::SessionRuntimeCapabilities capabilities;
+  capabilities.enable_mailbox = false;
+  capabilities.enable_hooks = false;
+  capabilities.enable_skills = false;
+  capabilities.enable_context_files = false;
+  capabilities.enable_auto_compaction = false;
+
+  pi::cli::AgentOptionsConfig options_config{
+      .args = args,
+      .model = model,
+      .model_registry = registry,
+      .auth_resolver = auth_resolver,
+      .capabilities = capabilities,
   };
-  cfg.agent_opts.get_api_key =
-      [auth_resolver](std::string_view provider) -> std::optional<std::string> {
-    auto auth = auth_resolver->resolve(provider);
-    if (!auth || !auth->bearer_token)
-      return std::nullopt;
-    return auth->bearer_token;
-  };
+  auto options_result = pi::cli::build_agent_options(options_config);
+  cfg.agent_opts = std::move(options_result.options);
 
   // Tools
   if (!args.no_tools) {

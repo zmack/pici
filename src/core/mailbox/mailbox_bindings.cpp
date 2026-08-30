@@ -150,17 +150,16 @@ MailboxTarget parse_target(const nlohmann::json &value) {
                             : std::nullopt};
 }
 
-MailboxMessageKind parse_kind(std::string_view value) {
-  const auto kind = mailbox_message_kind_from_string(value);
+MailboxEntryKind parse_kind(std::string_view value) {
+  const auto kind = mailbox_entry_kind_from_string(value);
   if (!kind)
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "unknown mailbox message kind");
   return *kind;
 }
 
-MailboxMessageKind parse_kind(const nlohmann::json &value,
-                              std::string_view name,
-                              std::string_view default_value) {
+MailboxEntryKind parse_kind(const nlohmann::json &value, std::string_view name,
+                            std::string_view default_value) {
   if (!value.contains(name))
     return parse_kind(default_value);
   if (!value.at(name).is_string())
@@ -169,14 +168,14 @@ MailboxMessageKind parse_kind(const nlohmann::json &value,
   return parse_kind(value.at(name).get<std::string>());
 }
 
-std::vector<MailboxMessageKind> parse_kinds(const nlohmann::json &value) {
+std::vector<MailboxEntryKind> parse_kinds(const nlohmann::json &value) {
   if (!value.contains("kinds"))
-    return {MailboxMessageKind::steer, MailboxMessageKind::note,
-            MailboxMessageKind::request, MailboxMessageKind::reply};
+    return {MailboxEntryKind::steer, MailboxEntryKind::note,
+            MailboxEntryKind::request, MailboxEntryKind::reply};
   if (!value.at("kinds").is_array())
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "kinds must be an array");
-  std::vector<MailboxMessageKind> kinds;
+  std::vector<MailboxEntryKind> kinds;
   for (const auto &kind : value.at("kinds")) {
     if (!kind.is_string())
       throw MailboxError(MailboxErrorCode::invalid_message,
@@ -212,20 +211,20 @@ nlohmann::json agent_json(const AgentRecord &agent) {
   return result;
 }
 
-nlohmann::json message_json(const MailboxMessage &message) {
-  nlohmann::json result{{"message_id", message.message_id},
+nlohmann::json message_json(const MailboxEntry &message) {
+  nlohmann::json result{{"message_id", message.entry_id},
                         {"sender_agent_id", message.sender_agent_id},
                         {"sender_session_id", message.sender_session_id},
                         {"recipient_session_id", message.recipient_session_id},
                         {"workspace_id", message.workspace_id},
-                        {"kind", mailbox_message_kind_to_string(message.kind)},
+                        {"kind", mailbox_entry_kind_to_string(message.kind)},
                         {"text", message.body.text},
                         {"created_at_ms", message.created_at_ms},
                         {"available_at_ms", message.available_at_ms}};
   if (message.recipient_agent_id)
     result["recipient_agent_id"] = *message.recipient_agent_id;
-  if (message.reply_to_message_id)
-    result["reply_to"] = *message.reply_to_message_id;
+  if (message.reply_to_entry_id)
+    result["reply_to"] = *message.reply_to_entry_id;
   if (message.claim_token)
     result["claim_token"] = *message.claim_token;
   if (message.claim_expires_at_ms)
@@ -313,20 +312,19 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
             value, context.actor,
             [&](MailboxCoordinator &coordinator,
                 const AgentRuntimeIdentity &actor) {
-              auto request =
-                  SendRequest{.target = parse_target(value),
-                              .kind = parse_kind(value, "kind", "note"),
-                              .body = {.text = parse_text(value)}};
-              if (request.kind != MailboxMessageKind::note &&
-                  request.kind != MailboxMessageKind::steer)
+              auto request = EnqueueMailboxEntryRequest{
+                  .target = parse_target(value),
+                  .kind = parse_kind(value, "kind", "note"),
+                  .body = {.text = parse_text(value)}};
+              if (request.kind != MailboxEntryKind::note &&
+                  request.kind != MailboxEntryKind::steer)
                 throw MailboxError(MailboxErrorCode::invalid_message,
                                    "send kind must be note or steer");
               if (value.contains("reply_to") && !value.at("reply_to").is_null())
-                request.reply_to_message_id =
-                    required_string(value, "reply_to");
+                request.reply_to_entry_id = required_string(value, "reply_to");
               const auto receipt = coordinator.send(actor, std::move(request));
               return nlohmann::json{
-                  {"message_id", receipt.message_id},
+                  {"message_id", receipt.entry_id},
                   {"recipient_session_id", receipt.recipient_session_id},
                   {"recipient_agent_id",
                    receipt.recipient_agent_id
@@ -351,9 +349,10 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
                 return mailbox_error(MailboxErrorCode::internal,
                                      "mailbox request cancelled");
               const auto receipt = coordinator.send(
-                  actor, SendRequest{.target = target,
-                                     .kind = MailboxMessageKind::request,
-                                     .body = {.text = text}});
+                  actor,
+                  EnqueueMailboxEntryRequest{.target = target,
+                                             .kind = MailboxEntryKind::request,
+                                             .body = {.text = text}});
               const auto deadline = std::chrono::steady_clock::now() +
                                     std::chrono::milliseconds(timeout);
               auto generation = coordinator.status().mailbox.latest_generation;
@@ -365,12 +364,12 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
                 // reply durable and unacknowledged; callers can inspect or
                 // acknowledge it.
                 for (const auto &message : coordinator.inspect(
-                         actor, InboxQuery{.kinds = {MailboxMessageKind::reply},
+                         actor, InboxQuery{.kinds = {MailboxEntryKind::reply},
                                            .limit = 100})) {
-                  if (message.reply_to_message_id == receipt.message_id) {
+                  if (message.reply_to_entry_id == receipt.entry_id) {
                     auto output = message_json(message);
                     output["state"] = "replied";
-                    output["request_id"] = receipt.message_id;
+                    output["request_id"] = receipt.entry_id;
                     return output;
                   }
                 }
@@ -379,7 +378,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
                         deadline - std::chrono::steady_clock::now());
                 if (remaining <= std::chrono::milliseconds::zero())
                   return nlohmann::json{{"state", "pending"},
-                                        {"request_id", receipt.message_id}};
+                                        {"request_id", receipt.entry_id}};
                 const auto change = coordinator.wait(
                     WaitRequest{.after_generation = generation,
                                 .timeout_ms = std::min<std::int64_t>(
@@ -400,8 +399,8 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
                 const AgentRuntimeIdentity &actor) {
               const auto message_id = required_string(value, "message_id");
               const auto text = parse_text(value);
-              const auto receipt = coordinator.reply(actor, message_id,
-                                                     MailboxBody{.text = text});
+              const auto receipt = coordinator.reply(
+                  actor, message_id, MailboxPayload{.text = text});
               if (context.presentation != nullptr && *context.presentation) {
                 (*context.presentation)(MailboxReplyQueuedNotice{
                     .request_message_id = message_id,
@@ -410,7 +409,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
                     .reply_text = text});
               }
               return nlohmann::json{
-                  {"message_id", receipt.message_id},
+                  {"message_id", receipt.entry_id},
                   {"recipient_session_id", receipt.recipient_session_id},
                   {"recipient_agent_id",
                    receipt.recipient_agent_id
@@ -458,7 +457,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
               const auto message_id = required_string(value, "message_id");
               const auto claim_token = required_string(value, "claim_token");
               coordinator.acknowledge(
-                  actor, AcknowledgeRequest{.message_id = message_id,
+                  actor, AcknowledgeRequest{.entry_id = message_id,
                                             .claim_token = claim_token});
               return nlohmann::json{{"message_id", message_id},
                                     {"state", "acknowledged"}};

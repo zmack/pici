@@ -12,10 +12,13 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "core/agent.h"
 #include "core/agent_state.h"
+#include "core/auth_types.h"
+#include "core/event_json.h"
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
@@ -98,6 +101,43 @@ public:
 
 private:
     std::shared_ptr<std::atomic<int>> calls_;
+};
+
+// Blocks inside stream() until release() is called, signalling entered()
+// first so a test can wait for the agent to genuinely be streaming before
+// asserting idle-only rejection (lexicon invariant 10: session/model
+// switches and transcript replacement are idle-only transitions).
+class BlockingClient : public LLMClient {
+public:
+    BlockingClient(std::shared_ptr<std::atomic<bool>> entered,
+                   std::shared_ptr<std::atomic<bool>> release)
+        : entered_(std::move(entered)), release_(std::move(release)) {}
+
+    std::shared_ptr<AssistantMessage> stream(
+        const Model& model,
+        const AgentContext&,
+        const StreamOptions&,
+        AssistantEventCallback,
+        std::stop_token stop_tok) override {
+        entered_->store(true);
+        while (!release_->load() && !stop_tok.stop_requested()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        auto message = std::make_shared<AssistantMessage>();
+        message->api = model.api;
+        message->provider = model.provider;
+        message->model = model.id;
+        message->stop_reason = StopReason::stop;
+        message->content.emplace_back(TextContent{.text = "released"});
+        return message;
+    }
+
+    std::string_view provider_name() const override { return "test"; }
+    std::string_view api_id() const override { return "agent-blocking-test"; }
+
+private:
+    std::shared_ptr<std::atomic<bool>> entered_;
+    std::shared_ptr<std::atomic<bool>> release_;
 };
 
 class ImmediateClient : public LLMClient {
@@ -240,10 +280,10 @@ void test_agent_session_switch_drops_envelope_callbacks() {
         int accepted = 0;
         UserMessage message;
         message.content.push_back(TextContent{.text = "queued"});
-        agent.steer_envelopes({AgentMessageEnvelope{
+        agent.steer_envelopes({AgentInput{
             .message = Message{std::move(message)},
             .on_accepted = [&accepted] { ++accepted; },
-            .source = AgentMessageSource::mailbox,
+            .presentation = {.source = InputProvenance::Source::mailbox},
         }});
 
         agent.set_session_identity("new-session");
@@ -387,8 +427,80 @@ void test_agent_run_lifecycle() {
     });
 }
 
+// Lexicon invariant 10 ("Session activation, model/sandbox changes, and
+// transcript replacement are idle-only transitions") and the "Required
+// flows" idle-only guard documented on Agent::with_idle_transition: a model
+// switch attempted while the agent is genuinely streaming must be rejected,
+// and must succeed once the agent returns to idle. set_model, restore_session,
+// and compact() all share this one guard (with_idle_transition in agent.cpp),
+// so this test exercises the mechanism both SessionRuntime (CLI/RPC) and ACP's
+// per-run SessionRuntime rely on — see plans/session-runtime-migration.md
+// Phase 1 item 2.
+void test_agent_idle_only_model_switch() {
+    tests::register_test(
+        "Agent: model switch rejected while streaming, succeeds once idle",
+        []() {
+            auto entered = std::make_shared<std::atomic<bool>>(false);
+            auto release = std::make_shared<std::atomic<bool>>(false);
+            LLMClientRegistry::instance().register_client(
+                "agent-blocking-test",
+                [entered, release] {
+                    return std::make_shared<BlockingClient>(entered, release);
+                });
+
+            Agent::Options opts;
+            opts.model.id = "test-model";
+            opts.model.api = "agent-blocking-test";
+            opts.model.provider = "test";
+
+            Agent agent(opts);
+            auto stream = agent.prompt("first");
+
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(5);
+            while (!entered->load() &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            CHECK(entered->load());
+            CHECK(agent.is_streaming());
+
+            Model other_model;
+            other_model.id = "other-model";
+            other_model.api = "agent-blocking-test";
+            other_model.provider = "test";
+
+            bool rejected_while_streaming = false;
+            std::string rejection_message;
+            try {
+                static_cast<void>(
+                    agent.set_model(other_model, ThinkingLevel::medium));
+            } catch (const std::runtime_error& error) {
+                rejected_while_streaming = true;
+                rejection_message = error.what();
+            }
+            CHECK(rejected_while_streaming);
+            CHECK(rejection_message.find("idle") != std::string::npos);
+            // Rejection must not have applied the switch.
+            CHECK_EQ(agent.state().model().id, std::string("test-model"));
+
+            release->store(true);
+            for (auto& event : stream) {
+                if (std::holds_alternative<AgentEndEvent>(event))
+                    break;
+            }
+            agent.wait_for_idle();
+            CHECK(!agent.is_streaming());
+
+            const auto switched =
+                agent.set_model(other_model, ThinkingLevel::medium);
+            CHECK_EQ(switched.current.id, std::string("other-model"));
+            CHECK_EQ(agent.state().model().id, std::string("other-model"));
+        });
+}
+
 void test_agent_session_runtime() {
-    tests::register_test("AgentSession: runs and persists through shared runtime", []() {
+    tests::register_test("SessionRuntime: runs and persists through shared runtime", []() {
         LLMClientRegistry::instance().register_client(
             "agent-session-test",
             [] { return std::make_shared<ImmediateClient>(); });
@@ -407,7 +519,7 @@ void test_agent_session_runtime() {
         opts.model.provider = "test";
 
         {
-            AgentSession runtime({.agent_options = opts,
+            SessionRuntime runtime({.agent_options = opts,
                                   .session_store = store});
             SessionHeader header;
             header.id = "runtime-session";
@@ -440,7 +552,7 @@ void test_agent_session_runtime() {
 }
 
 void test_agent_model_switch_and_resume() {
-    tests::register_test("AgentSession: model switch persists and resumes", []() {
+    tests::register_test("SessionRuntime: model switch persists and resumes", []() {
         LLMClientRegistry::instance().register_client(
             "agent-session-switch-test",
             [] { return std::make_shared<ImmediateClient>(); });
@@ -485,7 +597,7 @@ void test_agent_model_switch_and_resume() {
         opts.model_registry = registry;
         opts.thinking_level = ThinkingLevel::high;
 
-        AgentSession runtime({.agent_options = opts,
+        SessionRuntime runtime({.agent_options = opts,
                               .model_registry = registry,
                               .session_store = store});
         SessionHeader header{.id = "switch-session", .model = "model-a",
@@ -501,7 +613,7 @@ void test_agent_model_switch_and_resume() {
         CHECK_EQ(saved->header.provider, "provider-b");
         CHECK_EQ(saved->header.model, "model-b");
 
-        AgentSession resumed({.agent_options = opts,
+        SessionRuntime resumed({.agent_options = opts,
                               .model_registry = registry,
                               .session_store = store});
         resumed.activate_session(*saved);
@@ -512,8 +624,77 @@ void test_agent_model_switch_and_resume() {
     });
 }
 
+// Lexicon invariant 13: "Credentials never enter transcripts, mailbox
+// payloads, or presentation." A resolved secret handed to the agent through
+// get_auth/get_api_key must not end up persisted in the session journal or
+// observed on the AgentEvent stream after an ordinary run. See
+// plans/session-runtime-migration.md Phase 1 item 6.
+void test_agent_credentials_never_leak() {
+    tests::register_test(
+        "SessionRuntime: resolved credentials never appear in transcript or events",
+        []() {
+            const std::string secret = "sk-test-super-secret-credential-value";
+            LLMClientRegistry::instance().register_client(
+                "agent-credentials-test",
+                [] { return std::make_shared<ImmediateClient>(); });
+
+            const auto session_dir =
+                std::filesystem::temp_directory_path() /
+                ("pici-agent-credentials-" +
+                 std::to_string(std::chrono::steady_clock::now()
+                                    .time_since_epoch()
+                                    .count()));
+            auto store = std::make_shared<SessionStore>(session_dir);
+
+            Agent::Options opts;
+            opts.model.id = "test-model";
+            opts.model.api = "agent-credentials-test";
+            opts.model.provider = "test";
+            opts.get_auth = [secret](std::string_view)
+                -> std::optional<RequestAuth> {
+                return RequestAuth{.bearer_token = secret};
+            };
+            opts.get_api_key = [secret](std::string_view)
+                -> std::optional<std::string> { return secret; };
+
+            SessionRuntime runtime(
+                {.agent_options = opts, .session_store = store});
+            SessionHeader header;
+            header.id = "credentials-session";
+            header.created = std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+            header.model = opts.model.id;
+            header.provider = opts.model.provider;
+            runtime.create_session(header);
+
+            std::string observed_event_text;
+            const auto result = runtime.run_prompt(
+                "hello", [&](const AgentEvent& event) {
+                    observed_event_text += event_to_json(event).dump();
+                });
+            CHECK(!result.error.has_value());
+            CHECK(observed_event_text.find(secret) == std::string::npos);
+
+            const auto saved = store->load("credentials-session");
+            CHECK(saved.has_value());
+            for (const auto& message : saved->messages) {
+                if (const auto* assistant =
+                        std::get_if<AssistantMessage>(&message)) {
+                    for (const auto& block : assistant->content) {
+                        if (const auto* text =
+                                std::get_if<TextContent>(&block)) {
+                            CHECK(text->text.find(secret) == std::string::npos);
+                        }
+                    }
+                }
+            }
+
+            std::filesystem::remove_all(session_dir);
+        });
+}
+
 void test_agent_session_create_session_clears() {
-    tests::register_test("AgentSession: create_session clears existing messages", []() {
+    tests::register_test("SessionRuntime: create_session clears existing messages", []() {
         LLMClientRegistry::instance().register_client(
             "agent-session-test",
             [] { return std::make_shared<ImmediateClient>(); });
@@ -532,7 +713,7 @@ void test_agent_session_create_session_clears() {
         opts.model.provider = "test";
 
         {
-            AgentSession runtime({.agent_options = opts,
+            SessionRuntime runtime({.agent_options = opts,
                                   .session_store = store});
 
             SessionHeader header;
@@ -582,9 +763,11 @@ int main() {
     test_agent_reset();
     test_agent_prompt_stream();
     test_agent_run_lifecycle();
+    test_agent_idle_only_model_switch();
     test_agent_session_runtime();
     test_agent_model_switch_and_resume();
     test_agent_session_create_session_clears();
+    test_agent_credentials_never_leak();
 
     tests::print_summary();
 

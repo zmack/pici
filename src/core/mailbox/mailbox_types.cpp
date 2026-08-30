@@ -34,30 +34,30 @@ std::string_view mailbox_error_code_to_string(MailboxErrorCode code) {
 MailboxError::MailboxError(MailboxErrorCode code, std::string_view message)
     : std::runtime_error(std::string(message)), code_(code) {}
 
-std::string_view mailbox_message_kind_to_string(MailboxMessageKind kind) {
+std::string_view mailbox_entry_kind_to_string(MailboxEntryKind kind) {
   switch (kind) {
-  case MailboxMessageKind::steer:
+  case MailboxEntryKind::steer:
     return "steer";
-  case MailboxMessageKind::note:
+  case MailboxEntryKind::note:
     return "note";
-  case MailboxMessageKind::request:
+  case MailboxEntryKind::request:
     return "request";
-  case MailboxMessageKind::reply:
+  case MailboxEntryKind::reply:
     return "reply";
   }
   return "note";
 }
 
-std::optional<MailboxMessageKind>
-mailbox_message_kind_from_string(std::string_view value) {
+std::optional<MailboxEntryKind>
+mailbox_entry_kind_from_string(std::string_view value) {
   if (value == "steer")
-    return MailboxMessageKind::steer;
+    return MailboxEntryKind::steer;
   if (value == "note")
-    return MailboxMessageKind::note;
+    return MailboxEntryKind::note;
   if (value == "request")
-    return MailboxMessageKind::request;
+    return MailboxEntryKind::request;
   if (value == "reply")
-    return MailboxMessageKind::reply;
+    return MailboxEntryKind::reply;
   return std::nullopt;
 }
 

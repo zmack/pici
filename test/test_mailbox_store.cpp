@@ -115,13 +115,13 @@ int main() {
       CHECK(initial_wait.presence_changed);
       CHECK(!initial_wait.messages_changed);
 
-      const auto exact = store.send(SendRequest{
-          .message_id = "exact-message",
+      const auto exact = store.send(EnqueueMailboxEntryRequest{
+          .entry_id = "exact-message",
           .sender_agent_id = "agent-a",
           .sender_session_id = "session-a",
           .target = MailboxTarget{.agent_id = "agent-b"},
           .workspace_id = "workspace-a",
-          .body = MailboxBody{.text = "hello"},
+          .body = MailboxPayload{.text = "hello"},
           .created_at_ms = now,
       });
       CHECK_EQ(exact.recipient_agent_id.value(), std::string("agent-b"));
@@ -140,43 +140,56 @@ int main() {
           .session_id = "session-b", .agent_id = "agent-b", .now_ms = now});
       CHECK_EQ(claimed.messages.size(), std::size_t{1});
       CHECK(claimed.messages.front().claim_token.has_value());
+      // claim() alone is not delivery (docs/architecture-lexicon.md:
+      // "Delivery converts a claimed actionable entry into agent input") --
+      // the raw agents_claim Lua path calls claim() without ever building
+      // agent input, so delivered_at_ms must stay unset until a caller
+      // (MailboxCoordinator's two delivery sites) explicitly calls
+      // mark_delivered().
+      CHECK(!claimed.messages.front().delivered_at_ms.has_value());
+      store.mark_delivered(exact.entry_id, "workspace-a", now);
+      const auto after_mark_delivered = store.inspect(
+          InboxQuery{.session_id = "session-b", .now_ms = now});
+      CHECK_EQ(after_mark_delivered.size(), std::size_t{1});
+      CHECK(after_mark_delivered.front().delivered_at_ms.has_value());
+      CHECK_EQ(*after_mark_delivered.front().delivered_at_ms, now);
       const auto token = *claimed.messages.front().claim_token;
       CHECK(error_code([&] {
               store.acknowledge(
-                  AcknowledgeRequest{.message_id = exact.message_id,
+                  AcknowledgeRequest{.entry_id = exact.entry_id,
                                      .agent_id = "wrong-agent",
                                      .claim_token = token,
                                      .now_ms = now});
             }) == MailboxErrorCode::invalid_claim);
-      store.acknowledge(AcknowledgeRequest{.message_id = exact.message_id,
+      store.acknowledge(AcknowledgeRequest{.entry_id = exact.entry_id,
                                            .agent_id = "agent-b",
                                            .claim_token = token,
                                            .now_ms = now});
-      store.acknowledge(AcknowledgeRequest{.message_id = exact.message_id,
+      store.acknowledge(AcknowledgeRequest{.entry_id = exact.entry_id,
                                            .agent_id = "agent-b",
                                            .claim_token = token,
                                            .now_ms = now});
       CHECK(store.inspect(InboxQuery{.session_id = "session-b", .now_ms = now})
                 .empty());
 
-      const auto session = store.send(SendRequest{
+      const auto session = store.send(EnqueueMailboxEntryRequest{
           .sender_agent_id = "agent-a",
           .sender_session_id = "session-a",
           .target = MailboxTarget{.session_id = "session-b"},
           .workspace_id = "workspace-a",
-          .body = MailboxBody{.text = "durable"},
+          .body = MailboxPayload{.text = "durable"},
           .created_at_ms = now,
       });
       CHECK(!session.recipient_agent_id.has_value());
       store.register_process(process("process-c", "workspace-a", now));
       store.register_agent(agent("agent-c", "process-c", "session-b", now));
       CHECK(error_code([&] {
-              store.send(SendRequest{
+              store.send(EnqueueMailboxEntryRequest{
                   .sender_agent_id = "agent-a",
                   .sender_session_id = "session-a",
                   .target = MailboxTarget{.session_id = "session-b"},
                   .workspace_id = "workspace-a",
-                  .body = MailboxBody{.text = "ambiguous"},
+                  .body = MailboxPayload{.text = "ambiguous"},
                   .created_at_ms = now});
             }) == MailboxErrorCode::ambiguous_target);
       store.close_process("process-b", now);
@@ -190,19 +203,19 @@ int main() {
                    .messages.size(),
                std::size_t{1});
 
-      const auto exclusive = store.send(SendRequest{
+      const auto exclusive = store.send(EnqueueMailboxEntryRequest{
           .sender_agent_id = "agent-a",
           .sender_session_id = "session-a",
           .target = MailboxTarget{.session_id = "session-b"},
           .workspace_id = "workspace-a",
-          .body = MailboxBody{.text = "exclusive"},
+          .body = MailboxPayload{.text = "exclusive"},
           .created_at_ms = now,
       });
       const auto exclusive_claim = store.claim(ClaimRequest{
           .session_id = "session-b", .agent_id = "agent-d", .now_ms = now});
       CHECK_EQ(exclusive_claim.messages.size(), std::size_t{1});
-      CHECK_EQ(exclusive_claim.messages.front().message_id,
-               exclusive.message_id);
+      CHECK_EQ(exclusive_claim.messages.front().entry_id,
+               exclusive.entry_id);
       store.register_process(process("process-e", "workspace-a", now));
       store.register_agent(agent("agent-e", "process-e", "session-b", now));
       CHECK_EQ(
@@ -232,77 +245,77 @@ int main() {
       store.register_process(process("process-order", "workspace-a", now));
       store.register_agent(
           agent("agent-order", "process-order", "session-order", now));
-      const auto ordered_a = store.send(SendRequest{
-          .message_id = "ordered-a",
+      const auto ordered_a = store.send(EnqueueMailboxEntryRequest{
+          .entry_id = "ordered-a",
           .sender_agent_id = "agent-a",
           .sender_session_id = "session-a",
           .target = MailboxTarget{.session_id = "session-order"},
           .workspace_id = "workspace-a",
-          .body = MailboxBody{.text = "a"},
+          .body = MailboxPayload{.text = "a"},
           .created_at_ms = now,
       });
-      const auto ordered_b = store.send(SendRequest{
-          .message_id = "ordered-b",
+      const auto ordered_b = store.send(EnqueueMailboxEntryRequest{
+          .entry_id = "ordered-b",
           .sender_agent_id = "agent-a",
           .sender_session_id = "session-a",
           .target = MailboxTarget{.session_id = "session-order"},
           .workspace_id = "workspace-a",
-          .body = MailboxBody{.text = "b"},
+          .body = MailboxPayload{.text = "b"},
           .created_at_ms = now,
       });
-      CHECK_EQ(ordered_a.message_id, std::string("ordered-a"));
+      CHECK_EQ(ordered_a.entry_id, std::string("ordered-a"));
       CHECK_EQ(
           store
               .inspect(InboxQuery{.session_id = "session-order", .now_ms = now})
               .front()
-              .message_id,
+              .entry_id,
           std::string("ordered-a"));
       // Recipient and kind predicates are applied in SQL before LIMIT: an
       // unrelated row must not starve the caller's exact, filtered inbox.
       store.register_process(process("process-other", "workspace-a", now));
       store.register_agent(
           agent("agent-other", "process-other", "session-order", now));
-      store.send(SendRequest{.message_id = "filtered-other",
+      store.send(EnqueueMailboxEntryRequest{.entry_id = "filtered-other",
                              .sender_agent_id = "agent-a",
                              .sender_session_id = "session-a",
                              .target = MailboxTarget{.agent_id = "agent-other"},
                              .workspace_id = "workspace-a",
-                             .kind = MailboxMessageKind::steer,
-                             .body = MailboxBody{.text = "other"},
+                             .kind = MailboxEntryKind::steer,
+                             .body = MailboxPayload{.text = "other"},
                              .created_at_ms = now});
-      store.send(SendRequest{.message_id = "filtered-note",
+      store.send(EnqueueMailboxEntryRequest{.entry_id = "filtered-note",
                              .sender_agent_id = "agent-a",
                              .sender_session_id = "session-a",
                              .target = MailboxTarget{.agent_id = "agent-order"},
                              .workspace_id = "workspace-a",
-                             .kind = MailboxMessageKind::note,
-                             .body = MailboxBody{.text = "note"},
+                             .kind = MailboxEntryKind::note,
+                             .body = MailboxPayload{.text = "note"},
                              .created_at_ms = now});
-      store.send(SendRequest{.message_id = "filtered-steer",
+      store.send(EnqueueMailboxEntryRequest{.entry_id = "filtered-steer",
                              .sender_agent_id = "agent-a",
                              .sender_session_id = "session-a",
                              .target = MailboxTarget{.agent_id = "agent-order"},
                              .workspace_id = "workspace-a",
-                             .kind = MailboxMessageKind::steer,
-                             .body = MailboxBody{.text = "steer"},
+                             .kind = MailboxEntryKind::steer,
+                             .body = MailboxPayload{.text = "steer"},
                              .created_at_ms = now});
       const auto filtered =
           store.inspect(InboxQuery{.session_id = "session-order",
                                    .agent_id = "agent-order",
                                    .agent_kind = "root",
-                                   .kinds = {MailboxMessageKind::steer},
+                                   .kinds = {MailboxEntryKind::steer},
                                    .limit = 1,
                                    .now_ms = now});
       CHECK_EQ(filtered.size(), std::size_t{1});
-      CHECK_EQ(filtered.front().message_id, std::string("filtered-steer"));
+      CHECK_EQ(filtered.front().entry_id, std::string("filtered-steer"));
       CHECK(error_code([&] {
-              store.send(SendRequest{
-                  .message_id = ordered_b.message_id,
+              store.send(EnqueueMailboxEntryRequest{
+                  .entry_id = ordered_b.entry_id,
                   .sender_agent_id = "agent-a",
                   .sender_session_id = "session-a",
                   .target = MailboxTarget{.agent_id = "agent-order"},
                   .workspace_id = "workspace-a",
-                  .body = MailboxBody{.text = "duplicate"},
+                  .body = MailboxPayload{.text = "duplicate"},
                   .created_at_ms = now});
             }) == MailboxErrorCode::invalid_message);
 
@@ -334,26 +347,26 @@ int main() {
             reopened.list_agents(
                 AgentQuery{.workspace_id = "workspace-b", .now_ms = now});
           }) == MailboxErrorCode::permission_denied);
-    const auto cross_workspace = global.send(SendRequest{
+    const auto cross_workspace = global.send(EnqueueMailboxEntryRequest{
         .sender_agent_id = "agent-a",
         .sender_session_id = "session-a",
         .target = MailboxTarget{.agent_id = "agent-b2"},
         .workspace_id = "workspace-b",
-        .body = MailboxBody{.text = "cross-workspace"},
+        .body = MailboxPayload{.text = "cross-workspace"},
         .created_at_ms = now,
     });
     CHECK_EQ(workspace_b
                  .inspect(InboxQuery{.session_id = "session-b2", .now_ms = now})
                  .front()
-                 .message_id,
-             cross_workspace.message_id);
+                 .entry_id,
+             cross_workspace.entry_id);
     CHECK(error_code([&] {
             reopened.send(
-                SendRequest{.sender_agent_id = "agent-a",
+                EnqueueMailboxEntryRequest{.sender_agent_id = "agent-a",
                             .sender_session_id = "session-a",
                             .target = MailboxTarget{.agent_id = "agent-b2"},
                             .workspace_id = "workspace-b",
-                            .body = MailboxBody{.text = "blocked"},
+                            .body = MailboxPayload{.text = "blocked"},
                             .created_at_ms = now});
           }) == MailboxErrorCode::permission_denied);
 
@@ -377,12 +390,12 @@ int main() {
     reopened.register_agent(
         agent("root-claim", "process-root-claim", "shared-session", now));
     const auto root_only = reopened.send(
-        SendRequest{.message_id = "root-only-claim",
+        EnqueueMailboxEntryRequest{.entry_id = "root-only-claim",
                     .sender_agent_id = "agent-a",
                     .sender_session_id = "session-a",
                     .target = MailboxTarget{.session_id = "shared-session"},
                     .workspace_id = "workspace-a",
-                    .body = MailboxBody{.text = "root only"},
+                    .body = MailboxPayload{.text = "root only"},
                     .created_at_ms = now});
     reopened.register_agent(agent("child-claim", "process-root-claim",
                                   "shared-session", now,
@@ -390,13 +403,13 @@ int main() {
     reopened.register_agent(agent("child-claim-2", "process-root-claim",
                                   "shared-session", now,
                                   std::string("root-claim")));
-    const auto session_with_children = reopened.send(SendRequest{
-        .message_id = "session-with-children",
+    const auto session_with_children = reopened.send(EnqueueMailboxEntryRequest{
+        .entry_id = "session-with-children",
         .sender_agent_id = "agent-a",
         .sender_session_id = "session-a",
         .target = MailboxTarget{.session_id = "shared-session"},
         .workspace_id = "workspace-a",
-        .body = MailboxBody{.text = "root attachment"},
+        .body = MailboxPayload{.text = "root attachment"},
         .created_at_ms = now,
     });
     CHECK(!session_with_children.recipient_agent_id.has_value());
@@ -416,9 +429,9 @@ int main() {
                                     .agent_id = "root-claim",
                                     .now_ms = now});
     CHECK_EQ(root_claim.messages.size(), std::size_t{2});
-    CHECK_EQ(root_claim.messages.front().message_id, root_only.message_id);
-    CHECK_EQ(root_claim.messages.back().message_id,
-             session_with_children.message_id);
+    CHECK_EQ(root_claim.messages.front().entry_id, root_only.entry_id);
+    CHECK_EQ(root_claim.messages.back().entry_id,
+             session_with_children.entry_id);
 
     const auto insecure_dir = root / "insecure";
     std::filesystem::create_directories(insecure_dir);

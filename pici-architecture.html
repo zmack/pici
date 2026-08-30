@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pici architecture field guide</title>
+  <style>
+    :root {
+      --paper: #f4f0e8;
+      --ink: #17221f;
+      --muted: #60706a;
+      --line: #c9d0c9;
+      --panel: rgba(255,255,255,.72);
+      --core: #125f57;
+      --core-soft: #d9eee8;
+      --edge: #a44d28;
+      --edge-soft: #f5dfd2;
+      --data: #355c8a;
+      --data-soft: #dce8f4;
+      --warn: #b47a16;
+      --warn-soft: #f5e8c7;
+      --risk: #a33b3b;
+      --risk-soft: #f4dada;
+      --ok: #3e7451;
+      --shadow: 0 18px 50px rgba(26,42,36,.10);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --serif: Iowan Old Style, Charter, Georgia, serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 2%, rgba(18,95,87,.11), transparent 28rem),
+        radial-gradient(circle at 93% 18%, rgba(164,77,40,.09), transparent 25rem),
+        var(--paper);
+      font: 16px/1.58 var(--sans);
+    }
+    a { color: var(--core); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    code, .mono { font-family: var(--mono); font-size: .9em; }
+    code { padding: .12rem .32rem; border-radius: 4px; background: rgba(18,95,87,.08); }
+    .shell { width: min(1420px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 72px 0 48px; }
+    .eyebrow { color: var(--edge); font: 700 .78rem/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+    h1, h2, h3 { font-family: var(--serif); letter-spacing: -.025em; }
+    h1 { max-width: 920px; margin: 14px 0 18px; font-size: clamp(3.1rem, 8vw, 7.2rem); line-height: .91; font-weight: 600; }
+    h1 em { color: var(--core); font-style: normal; }
+    .lede { max-width: 860px; color: #33443f; font: 1.22rem/1.6 var(--serif); }
+    .meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+    .chip { border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px; background: rgba(255,255,255,.48); color: var(--muted); font: .76rem var(--mono); }
+    nav {
+      position: sticky; top: 0; z-index: 20; overflow-x: auto;
+      border-block: 1px solid rgba(96,112,106,.25);
+      background: rgba(244,240,232,.92); backdrop-filter: blur(14px);
+    }
+    nav .shell { display: flex; gap: 24px; }
+    nav a { flex: 0 0 auto; padding: 14px 0 12px; color: var(--muted); text-decoration: none; font: 700 .75rem var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+    nav a:hover { color: var(--core); }
+    main { padding: 30px 0 90px; }
+    section { scroll-margin-top: 64px; padding: 48px 0; border-bottom: 1px solid rgba(96,112,106,.22); }
+    .section-head { display: grid; grid-template-columns: minmax(220px,.75fr) 2fr; gap: 30px; align-items: end; margin-bottom: 28px; }
+    h2 { margin: 0; font-size: clamp(2rem, 4vw, 3.5rem); line-height: 1; }
+    .section-head p { max-width: 790px; margin: 0; color: var(--muted); }
+    h3 { margin: 0 0 10px; font-size: 1.42rem; line-height: 1.15; }
+    p { margin: 0 0 1rem; }
+    .grid { display: grid; gap: 16px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0,1fr)); }
+    .card { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: var(--shadow); padding: 22px; }
+    .card p:last-child, .callout p:last-child { margin-bottom: 0; }
+    .kicker { display: block; margin-bottom: 9px; color: var(--edge); font: 700 .72rem var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .verdict { border-left: 5px solid var(--core); padding: 24px 28px; background: var(--core-soft); border-radius: 0 14px 14px 0; font: 1.12rem/1.55 var(--serif); }
+    .stats { display: grid; grid-template-columns: repeat(5,1fr); gap: 12px; margin-top: 20px; }
+    .stat { padding: 18px; border-top: 3px solid var(--core); background: rgba(255,255,255,.58); }
+    .stat b { display: block; font: 600 1.75rem var(--serif); }
+    .stat span { color: var(--muted); font: .73rem var(--mono); }
+
+    /* Architecture map */
+    .map-wrap { overflow-x: auto; padding: 10px 2px 22px; }
+    .architecture { min-width: 1060px; display: grid; grid-template-columns: 1.05fr 1.2fr 1.25fr 1.15fr; gap: 13px; align-items: stretch; }
+    .lane { display: grid; gap: 12px; align-content: start; }
+    .lane-title { padding-bottom: 7px; border-bottom: 2px solid; font: 800 .72rem var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+    .lane.edge .lane-title { color: var(--edge); }
+    .lane.core .lane-title { color: var(--core); }
+    .lane.data .lane-title { color: var(--data); }
+    .box { position: relative; min-height: 116px; border: 1px solid var(--line); border-radius: 10px; padding: 16px; background: rgba(255,255,255,.75); }
+    .box.edge { border-top: 4px solid var(--edge); }
+    .box.core { border-top: 4px solid var(--core); }
+    .box.data { border-top: 4px solid var(--data); }
+    .box h3 { font: 800 .94rem var(--mono); letter-spacing: -.02em; }
+    .box p { margin: 0; color: var(--muted); font-size: .85rem; }
+    .box .files { display: block; margin-top: 10px; color: var(--ink); font: .7rem/1.45 var(--mono); }
+    .arrow { display: grid; place-items: center; color: var(--core); font: 700 .75rem var(--mono); text-align: center; }
+    .cross-flow { min-width: 1060px; display: grid; grid-template-columns: repeat(8,1fr); gap: 4px; margin-top: 12px; }
+    .flow-step { position: relative; min-height: 93px; padding: 13px 11px; border-radius: 8px; background: var(--core-soft); font-size: .76rem; }
+    .flow-step:not(:last-child)::after { content: "→"; position: absolute; right: -10px; top: 34px; z-index: 2; color: var(--core); font-weight: 900; }
+    .flow-step b { display: block; margin-bottom: 5px; font-family: var(--mono); }
+    .flow-step:nth-child(4), .flow-step:nth-child(5) { background: var(--edge-soft); }
+    .flow-step:nth-child(7), .flow-step:nth-child(8) { background: var(--data-soft); }
+
+    table { width: 100%; border-collapse: collapse; background: rgba(255,255,255,.5); font-size: .9rem; }
+    th { position: sticky; top: 45px; z-index: 2; padding: 12px 14px; background: #e5e5dc; color: var(--muted); text-align: left; font: 700 .7rem var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    td { vertical-align: top; padding: 14px; border-top: 1px solid var(--line); }
+    td:first-child { font-family: var(--mono); font-weight: 700; }
+    tr:hover td { background: rgba(255,255,255,.55); }
+    .tag { display: inline-block; border-radius: 999px; padding: 3px 8px; font: 700 .65rem var(--mono); text-transform: uppercase; }
+    .tag.hot { color: var(--risk); background: var(--risk-soft); }
+    .tag.warm { color: #7b5312; background: var(--warn-soft); }
+    .tag.sound { color: var(--ok); background: #dfeee3; }
+    .risk-list { counter-reset: risk; display: grid; gap: 14px; }
+    .risk { position: relative; display: grid; grid-template-columns: 64px 1.2fr 2fr; gap: 18px; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+    .risk::before { counter-increment: risk; content: counter(risk, decimal-leading-zero); color: var(--risk); font: 700 1.7rem var(--mono); }
+    .risk h3 { font-family: var(--sans); font-size: 1.05rem; }
+    .risk p { margin: 0; color: var(--muted); font-size: .9rem; }
+    .signal { margin-top: 8px; color: var(--ink); font: .72rem/1.5 var(--mono); }
+    .heat { display: grid; grid-template-columns: 1.4fr .6fr .6fr .7fr 2fr; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    .heat.header { color: var(--muted); background: #e5e5dc; font: 700 .66rem var(--mono); text-transform: uppercase; }
+    .bar { height: 7px; overflow: hidden; border-radius: 99px; background: #dedfd8; }
+    .bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,var(--warn),var(--risk)); }
+    .roadmap { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }
+    .phase { min-height: 300px; border-top: 6px solid var(--core); padding: 19px; background: rgba(255,255,255,.62); }
+    .phase:nth-child(2) { border-color: #377b72; }
+    .phase:nth-child(3) { border-color: var(--warn); }
+    .phase:nth-child(4) { border-color: var(--edge); }
+    .phase ol, .phase ul { padding-left: 1.2rem; }
+    .phase li { margin-bottom: .7rem; }
+    details { border-top: 1px solid var(--line); padding: 13px 0; }
+    summary { cursor: pointer; font-weight: 750; }
+    details p { margin: 10px 0 0; color: var(--muted); }
+    .callout { padding: 20px; border: 1px solid #d4b66f; border-radius: 10px; background: var(--warn-soft); }
+    footer { padding: 38px 0 70px; color: var(--muted); font-size: .84rem; }
+    @media (max-width: 900px) {
+      .section-head, .grid.two, .grid.three { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: repeat(2,1fr); }
+      .risk { grid-template-columns: 48px 1fr; }
+      .risk > p { grid-column: 2; }
+      .roadmap { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 20px,1420px); }
+      header { padding-top: 46px; }
+      .stats, .roadmap { grid-template-columns: 1fr; }
+      .risk { grid-template-columns: 1fr; }
+      .risk > p { grid-column: auto; }
+      th { position: static; }
+    }
+    @media print {
+      nav { display: none; }
+      body { background: white; }
+      .card, .box, .risk { box-shadow: none; break-inside: avoid; }
+      section { break-before: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="shell">
+    <div class="eyebrow">Repository field guide · 29 August 2026</div>
+    <h1>How <em>Pici</em> fits together.</h1>
+    <p class="lede">A code-based map of the runtime boxes, the paths between them, and the places where growth is starting to hurt. Pici is best understood as a compact agent kernel surrounded by an increasingly capable product runtime: terminal UX, durable sessions, model adapters, Lua policy, and multi-agent coordination.</p>
+    <div class="meta">
+      <span class="chip">C++23</span><span class="chip">CMake</span><span class="chip">CLI + JSONL RPC + HTTP/SSE</span><span class="chip">SQLite mailbox</span><span class="chip">JSONL sessions</span><span class="chip">Lua add-ons</span>
+    </div>
+  </header>
+
+  <nav aria-label="Document sections"><div class="shell">
+    <a href="#summary">Summary</a><a href="#map">Big boxes</a><a href="#flow">Turn flow</a><a href="#modules">Modules</a><a href="#hotspots">Hotspots</a><a href="#bottlenecks">Bottlenecks</a><a href="#roadmap">Focus</a><a href="#method">Method</a>
+  </div></nav>
+
+  <main class="shell">
+    <section id="summary">
+      <div class="section-head"><h2>Executive read</h2><p>The architecture has a good event-driven center. Most pressure is now at the product-runtime seams around that center, where composition, concurrency, persistence, and presentation meet.</p></div>
+      <div class="verdict"><strong>The shortest useful model:</strong> front ends create an <code>AgentSession</code>; the session drives an <code>Agent</code>; the agent snapshots <code>AgentState</code> and runs <code>AgentLoop</code>; the loop streams through a provider, executes tools, and emits typed events; adapters consume those events for rendering, persistence, RPC/SSE, and coordination. Lua hooks can intercept context, tools, events, commands, and presentation along the way.</div>
+      <div class="stats">
+        <div class="stat"><b>31,169</b><span>core C++ lines · 94 files</span></div>
+        <div class="stat"><b>5,747</b><span>CLI lines · 20 files</span></div>
+        <div class="stat"><b>41,737</b><span>all src C++ lines</span></div>
+        <div class="stat"><b>22,886</b><span>test C++ lines · 39 files</span></div>
+        <div class="stat"><b>3</b><span>front doors: CLI, RPC, ACP</span></div>
+      </div>
+      <div class="grid three" style="margin-top:16px">
+        <article class="card"><span class="kicker">Strong seam</span><h3>Typed event stream</h3><p>Providers, the loop, renderers, persistence, RPC, and telemetry communicate through explicit message/event types. That gives Pici a clean place to observe behavior and add adapters.</p></article>
+        <article class="card"><span class="kicker">Primary architecture debt</span><h3>Composition lives in the CLI</h3><p><code>cmd_run()</code> in <code>src/main.cpp</code> owns setup, lifecycle, closures, REPL commands, UI, mailbox delivery, hooks, and task wiring. The reusable runtime exists only partially in <code>AgentSession</code>.</p></article>
+        <article class="card"><span class="kicker">Primary scaling debt</span><h3>Coarse serialization</h3><p>ACP serializes durable runs process-wide. Session and mailbox stores hold broad mutexes around filesystem or SQLite work. These are safe first implementations but cap independent concurrency.</p></article>
+      </div>
+    </section>
+
+    <section id="map">
+      <div class="section-head"><h2>The big boxes</h2><p>Read left to right. Entry adapters translate human or network input into the shared runtime. The runtime delegates model work and tool work, while storage and presentation observe or persist the resulting event stream.</p></div>
+      <div class="map-wrap" role="img" aria-label="Layered architecture map">
+        <div class="architecture">
+          <div class="lane edge">
+            <div class="lane-title">1 · Entry adapters</div>
+            <div class="box edge"><h3>Interactive CLI</h3><p>Arguments, config, readline/vim input, slash commands, renderer selection, faux control.</p><span class="files">src/main.cpp<br>src/cli/*</span></div>
+            <div class="box edge"><h3>JSONL RPC</h3><p>Machine-oriented prompt, task, state, compact, model, steer, and interrupt commands.</p><span class="files">src/cli/rpc_mode.*</span></div>
+            <div class="box edge"><h3>ACP HTTP/SSE</h3><p>Agent manifest, durable runs, streaming SSE, sessions, and task APIs.</p><span class="files">src/acp/*</span></div>
+          </div>
+          <div class="lane core">
+            <div class="lane-title">2 · Runtime & orchestration</div>
+            <div class="box core"><h3>AgentSession</h3><p>Durable session façade: activation, prompt draining, model/sandbox changes, compaction, message journaling.</p><span class="files">core/session/agent_session.*</span></div>
+            <div class="box core"><h3>Agent + AgentState</h3><p>Lifecycle, worker ownership, cancellation, steering/follow-ups, transcript/model/tool state.</p><span class="files">core/agent.*<br>core/agent_state.*</span></div>
+            <div class="box core"><h3>AgentLoop + EventStream</h3><p>Turn state machine: prepare context → stream LLM → execute tools → inject steering → repeat.</p><span class="files">core/agent_loop.*<br>core/stream.* · event_types.*</span></div>
+            <div class="box core"><h3>AgentTaskManager</h3><p>Subagent tree, context inheritance, limits, worker threads, task messaging, results, memory arenas.</p><span class="files">core/agent_task.*</span></div>
+          </div>
+          <div class="lane data">
+            <div class="lane-title">3 · Capabilities</div>
+            <div class="box data"><h3>Provider layer</h3><p>Model registry, message transforms, OpenAI-compatible Chat, Codex Responses, Muse, and faux clients.</p><span class="files">core/models.* · llm_client.*<br>core/providers/* · http/*</span></div>
+            <div class="box data"><h3>Tool layer</h3><p>Read/search/edit/write/bash/apply-patch, validation, process sandboxing, progress and cancellation.</p><span class="files">core/builtin_tools.*<br>apply_patch.* · sandbox.*</span></div>
+            <div class="box data"><h3>Lua + skills</h3><p>Model-callable tools and hooks for context, policy, commands, task APIs, formatting, status, and storage.</p><span class="files">core/lua_tool.* · skills.*<br>addons/*.lua</span></div>
+            <div class="box data"><h3>Auth & diagnostics</h3><p>Credential resolution/OAuth, stream tracing, OpenTelemetry, token/cost/memory accounting.</p><span class="files">core/auth/* · otel_init.*<br>stream_diagnostics.* · memory_stats.*</span></div>
+          </div>
+          <div class="lane edge">
+            <div class="lane-title">4 · State & observers</div>
+            <div class="box edge"><h3>Session journal</h3><p>Append-only JSONL with headers, messages, metadata, truncation, forks, and compaction replacement records.</p><span class="files">core/session/session_store.*<br>session_tree.*</span></div>
+            <div class="box edge"><h3>Mailbox</h3><p>SQLite discovery and delivery, leasing/acknowledgement, root/subagent identities, autonomous turns.</p><span class="files">core/mailbox/*</span></div>
+            <div class="box edge"><h3>Presentation</h3><p>Raw, diff-Markdown, viewport, and region renderers; terminal primitives; Markdown and syntax highlighting.</p><span class="files">stream_renderer.* · region_renderer.*<br>terminal.* · markdown.*</span></div>
+            <div class="box edge"><h3>Wire observers</h3><p>Event JSON, RPC replies, ACP synchronous output and SSE, faux-control protocol.</p><span class="files">event_json.* · cli/rpc_mode.*<br>acp/* · providers/faux_control.*</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="callout"><strong>Important boundary:</strong> <code>pi-core</code> currently includes orchestration, tools, Lua, persistence, mailbox, and terminal rendering. <code>pi-http</code> adds curl-backed providers/auth. The library boundary is therefore a build/link boundary, not a strict domain boundary.</div>
+    </section>
+
+    <section id="flow">
+      <div class="section-head"><h2>One turn, end to end</h2><p>This is the dominant data path. Tools can cause multiple model messages within one turn, and steering/mailbox messages can enter at safe boundaries before the loop stops.</p></div>
+      <div class="map-wrap">
+        <div class="cross-flow">
+          <div class="flow-step"><b>1 · Input</b>CLI/RPC/ACP produces user message envelopes plus source/presentation metadata.</div>
+          <div class="flow-step"><b>2 · Session</b><code>AgentSession::run_messages</code> starts a stream and later journals completed messages.</div>
+          <div class="flow-step"><b>3 · Snapshot</b><code>Agent</code> copies prompt, transcript, model, tools, identity, and loop callbacks.</div>
+          <div class="flow-step"><b>4 · Prepare</b>Lua/context hooks transform and budget messages; provider conversion follows.</div>
+          <div class="flow-step"><b>5 · Model</b><code>LLMClient</code> builds HTTP payload, parses SSE, and emits incremental assistant events.</div>
+          <div class="flow-step"><b>6 · Tools</b>Calls are validated, gated by hooks, then run sequentially or with <code>std::async</code>.</div>
+          <div class="flow-step"><b>7 · Events</b>Message/tool/turn events update state and fan out to renderer, RPC/SSE, Lua, tasks, and diagnostics.</div>
+          <div class="flow-step"><b>8 · Commit</b>Message-end records flush to JSONL; optional compaction uses epoch-checked durable commit.</div>
+        </div>
+      </div>
+      <div class="grid two">
+        <article class="card"><span class="kicker">Control flow</span><h3>Why the loop repeats</h3><p>An assistant response containing tool calls is not terminal. Tool results are appended to context, queued steering is injected, and another model request begins. The loop stops on a normal assistant answer, a configured stop hook, cancellation/error, or after follow-up work has drained.</p></article>
+        <article class="card"><span class="kicker">Threading model</span><h3>Where work runs</h3><p>Each agent run has a <code>jthread</code>. Provider streaming runs in that worker. Parallel tool calls use one <code>std::async</code> task per call. Subagents have their own runners. Mailbox maintenance and terminal title updates add background threads. UI-facing activity is queued back toward the presentation owner.</p></article>
+      </div>
+    </section>
+
+    <section id="modules">
+      <div class="section-head"><h2>Module directory</h2><p>The practical “what do I change?” guide. Ownership descriptions reflect current code, including places where responsibilities overlap.</p></div>
+      <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Area</th><th>Job</th><th>Talks to</th><th>Assessment</th></tr></thead>
+        <tbody>
+          <tr><td>main.cpp</td><td>Full CLI composition root and interactive coordinator; constructs almost every service and owns most commands.</td><td>All CLI/core subsystems</td><td><span class="tag hot">Hot</span> Highest coupling and largest source file.</td></tr>
+          <tr><td>cli/</td><td>Argument/config parsing, readline and vim editing, wrapping, selectors, RPC and deterministic faux-control modes.</td><td>AgentSession, renderers, models, tasks</td><td><span class="tag warm">Warm</span> Readline is a large terminal state machine.</td></tr>
+          <tr><td>AgentSession</td><td>Reusable durable-session façade around Agent: restore/create/fork/truncate, run, append events, model/sandbox persistence, compaction.</td><td>Agent, SessionStore, ModelRegistry</td><td><span class="tag sound">Sound seam</span> Best candidate to grow into shared runtime.</td></tr>
+          <tr><td>Agent</td><td>Public async API, per-run lifecycle, state updates, worker ownership, steering/follow-up queues, idle-only transitions.</td><td>AgentLoop, AgentState, Compaction</td><td><span class="tag warm">Warm</span> Lock ordering and copied snapshots deserve care.</td></tr>
+          <tr><td>AgentLoop</td><td>Core state machine for context prep, provider stream, tool calls, hooks, steering, follow-ups and terminal events.</td><td>LLMClient, tools, EventStream</td><td><span class="tag hot">Hot</span> Central behavioral complexity.</td></tr>
+          <tr><td>messages/events/stream</td><td>Canonical variants for model messages, content, tools, lifecycle events and thread-safe producer/consumer streaming.</td><td>Everything</td><td><span class="tag sound">Foundation</span> Stable contracts; changes have wide blast radius.</td></tr>
+          <tr><td>providers/ + http/</td><td>Request conversion, auth headers, retry/transport, SSE parsing and provider-specific response reconciliation.</td><td>LLMClient, models, auth</td><td><span class="tag hot">Hot</span> Protocol edge cases and duplicated parser logic.</td></tr>
+          <tr><td>models + auth/</td><td>Configured/built-in catalog, provider resolution, API keys, credential store, ChatGPT/Codex OAuth.</td><td>CLI/ACP, providers</td><td><span class="tag warm">Warm</span> Security-sensitive, moderate coupling.</td></tr>
+          <tr><td>builtin_tools</td><td>Filesystem/search/process tools, truncation/progress, workspace confinement and tool-set construction.</td><td>Sandbox, apply_patch, skills, terminal</td><td><span class="tag hot">Hot</span> 1.6k lines and a security boundary.</td></tr>
+          <tr><td>lua_tool + addons</td><td>Lua VM wrappers, tools, hook composition, commands, task/mailbox bindings, presentation and persistent add-on state.</td><td>AgentLoop, tools, tasks, UI</td><td><span class="tag hot">Hot</span> Broad extension surface in one 2.4k-line implementation.</td></tr>
+          <tr><td>skills</td><td>Discover, validate and expose SKILL.md packages; built-in skill tool and prompt catalog.</td><td>System prompt, tools, tasks</td><td><span class="tag sound">Bounded</span> Clear feature boundary.</td></tr>
+          <tr><td>session/</td><td>Append-only JSONL journal, replay, fork inheritance, compaction records, listing and tree display.</td><td>AgentSession, CLI, ACP</td><td><span class="tag warm">Warm</span> Simple and robust; linear scans limit scale.</td></tr>
+          <tr><td>agent_task</td><td>Subagent ownership, paths/IDs, context inheritance, resource limits, messaging, result lifecycle and memory arenas.</td><td>AgentSession, Lua, ACP, mailbox</td><td><span class="tag hot">Hot</span> Concurrency-heavy state machine.</td></tr>
+          <tr><td>mailbox/</td><td>Cross-process/session discovery and durable delivery over SQLite; claims, leases, acks and autonomous root turns.</td><td>AgentTaskManager, Lua, CLI</td><td><span class="tag hot">Hot</span> Store + coordinator total 2.9k lines and many locks.</td></tr>
+          <tr><td>rendering/terminal</td><td>Event-to-UI dispatch, Markdown/syntax rendering, scrollback/viewport/region composition and terminal control.</td><td>CLI, ACP render adapters, Lua formatters</td><td><span class="tag hot">Hot</span> Known token-by-token CPU paths.</td></tr>
+          <tr><td>acp/</td><td>HTTP routes, run types, SSE writer, synchronous/stream renderers, session/task endpoints.</td><td>AgentSession, SessionStore, tasks</td><td><span class="tag hot">Hot</span> Global durable-run serialization.</td></tr>
+          <tr><td>compaction</td><td>Budget estimation, remote compaction call, events and stale-snapshot/epoch protection.</td><td>Agent, AgentSession, provider</td><td><span class="tag sound">Good protocol</span> Missing provider-independent local fallback.</td></tr>
+          <tr><td>observability</td><td>OTel spans, raw stream diagnostics, usage/cost and jemalloc session-arena reporting.</td><td>Loop, HTTP, tasks, CLI</td><td><span class="tag sound">Useful</span> Present, but not yet a benchmark discipline.</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section id="hotspots">
+      <div class="section-head"><h2>Complexity hotspots</h2><p>Size alone is not guilt. The risky files combine size with branches, shared state, protocol parsing, terminal invariants, or broad dependency reach. Branch counts below are simple lexical signals, not formal cyclomatic complexity.</p></div>
+      <div class="heat header"><span>File</span><span>Lines</span><span>Branches*</span><span>Lock sites</span><span>Why it is hot</span></div>
+      <div class="heat"><b class="mono">src/main.cpp</b><span>2,832</span><span>412</span><span>20</span><span>Composition root plus REPL state machine; nearly every subsystem meets here.</span></div>
+      <div class="heat"><b class="mono">core/lua_tool.cpp</b><span>2,393</span><span>266</span><span>15</span><span>C API boundary, VM lifetime, hooks, tools, formatting, commands and task bindings.</span></div>
+      <div class="heat"><b class="mono">core/region_renderer.cpp</b><span>1,761</span><span>270</span><span>30</span><span>Concurrent mutable UI model, ANSI geometry, scrolling, repaint and semantic turn classification.</span></div>
+      <div class="heat"><b class="mono">cli/readline.cpp</b><span>1,740</span><span>293</span><span>0</span><span>Escape parsing, raw mode, Unicode geometry, paste, resize, wake FDs and editor modes.</span></div>
+      <div class="heat"><b class="mono">core/agent_task.cpp</b><span>1,545</span><span>269</span><span>39</span><span>Highest lock density among large files; nested task lifecycle and thread ownership.</span></div>
+      <div class="heat"><b class="mono">core/agent_loop.cpp</b><span>1,331</span><span>125</span><span>0</span><span>Core behavioral state machine and async tool fan-out; correctness hotspot more than lock hotspot.</span></div>
+      <div class="heat"><b class="mono">mailbox/coordinator.cpp</b><span>1,000</span><span>115</span><span>35</span><span>Delivery lifecycle, maintenance, root/subagent routing and lock-rich shared state.</span></div>
+      <div class="heat"><b class="mono">provider implementations</b><span>781–1,041</span><span>143–195</span><span>0</span><span>Streaming protocol state machines with provider-specific reconciliation and errors.</span></div>
+      <p style="margin-top:12px;color:var(--muted);font-size:.8rem">* Count of lexical control-flow tokens (<code>if</code>, <code>switch</code>, <code>case</code>, loops, and catches), gathered as a directional comparison only.</p>
+      <div class="grid two" style="margin-top:22px">
+        <article class="card"><span class="kicker">Coupling hotspot</span><h3><code>cmd_run()</code></h3><p>The source comments already acknowledge that renderer, session, mailbox, and REPL dispatch share one scope through closures. This makes a small CLI feature easy to add locally but hard to reuse in ACP or test without reproducing setup.</p></article>
+        <article class="card"><span class="kicker">Concurrency hotspot</span><h3>Tasks + mailbox</h3><p><code>AgentTaskManager</code> and <code>MailboxCoordinator</code> coordinate manager locks, per-task locks, runners, callbacks, leases, and shutdown. Their comments show careful lock-order work; that is also evidence that this subsystem needs explicit state-machine boundaries and stress testing.</p></article>
+      </div>
+    </section>
+
+    <section id="bottlenecks">
+      <div class="section-head"><h2>Likely bottlenecks</h2><p>Ranked by confidence and likely user impact. “Confirmed by code” means the scaling behavior is directly visible; it does not claim a production profile was run.</p></div>
+      <div class="risk-list">
+        <article class="risk"><div><h3>Streaming renderer work grows with transcript size</h3><span class="tag hot">CPU · confirmed</span></div><p>Viewport repaint renders the growing Markdown buffer and splits physical lines on each text delta; diff Markdown repeatedly scans rendered output for cursor rows. Existing plans E/F/G explicitly describe O(N²)-like cumulative work and discarded allocations. Region rendering is also state/geometry heavy, though its exact profile needs measurement.<span class="signal">Evidence: plan_E_split_lines_ring_buffer.md · plan_F_incremental_row_count_tracking.md · plan_G1–G4 · stream_renderer.cpp</span></p></article>
+        <article class="risk"><div><h3>ACP durable runs are globally serialized</h3><span class="tag hot">Throughput · confirmed</span></div><p>Every run takes the single process-wide <code>durable_run_mutex</code> before creating/restoring an <code>AgentSession</code>; the lock is retained by streaming closures. Independent sessions therefore cannot run concurrently even though the HTTP server has a thread pool.<span class="signal">Evidence: acp/handlers.cpp:40 and :580–587</span></p></article>
+        <article class="risk"><div><h3>Transcript copies and transformations are O(context) per turn</h3><span class="tag warm">Memory/CPU · structural</span></div><p><code>AgentState::messages()</code> returns a vector copy; <code>context_snapshot()</code> copies messages and tools; hooks and provider transforms may copy again. As sessions grow, every model round—including tool-induced rounds—pays more allocation and memory-bandwidth cost before network latency begins.<span class="signal">Evidence: agent_state.h snapshots · agent.cpp create_context_snapshot · providers/transform_messages.cpp</span></p></article>
+        <article class="risk"><div><h3>Session operations scan files under one mutex</h3><span class="tag warm">I/O · confirmed</span></div><p>Listing reads every session file to accumulate metadata; child detection scans the directory and headers; load recursively replays JSONL ancestry. These operations hold <code>SessionStore::mutex_</code>. Message completion also flushes each journal line synchronously. This is fine for dozens of sessions, less so for thousands or large histories.<span class="signal">Evidence: session_store.cpp list(), has_children(), load(), write_line_locked()</span></p></article>
+        <article class="risk"><div><h3>Mailbox concurrency funnels through one store connection</h3><span class="tag warm">Contention · structural</span></div><p><code>MailboxStore</code> owns one SQLite handle and guards public operations with one mutex. <code>MailboxCoordinator</code> adds its own frequently acquired mutex around delivery state. WAL helps cross-process behavior, but in-process calls still serialize and long transactions/queries can block unrelated mailbox actions.<span class="signal">Evidence: mailbox_store.h/.cpp · mailbox_coordinator.cpp lock sites</span></p></article>
+        <article class="risk"><div><h3>Parallel tools create an unbounded thread fan-out per response</h3><span class="tag warm">Threads · potential</span></div><p>Parallel mode launches one <code>std::async(std::launch::async)</code> per tool call. Normal model outputs keep this small, but there is no executor/backpressure boundary. Combined with subagent runners and multiple sessions, bursts can oversubscribe CPU and complicate completion-order presentation.<span class="signal">Evidence: agent_loop.cpp around parallel tool execution · plans/parallel-tool-call-live-ordering.md</span></p></article>
+        <article class="risk"><div><h3>One Lua hook instance serializes calls through its VM lock</h3><span class="tag warm">Extension latency · potential</span></div><p>Lua state cannot be entered concurrently, so hook/tool operations guard VM access. Slow policy or formatting hooks sit on request, tool, and rendering paths. Separate subagent hook instances reduce global contention, but any one session can still be delayed by synchronous add-on work.<span class="signal">Evidence: lua_tool.cpp mutex-guarded hook invocations</span></p></article>
+      </div>
+    </section>
+
+    <section id="roadmap">
+      <div class="section-head"><h2>Where to focus next</h2><p>The best order is to measure first, remove known user-facing cliffs second, then reshape ownership so later work does not multiply across CLI/RPC/ACP.</p></div>
+      <div class="roadmap">
+        <article class="phase"><span class="kicker">Now · establish truth</span><h3>Benchmarks & service-level signals</h3><ol><li>Add deterministic benchmarks for 10k/100k streamed tokens across each renderer.</li><li>Measure context snapshot/transform bytes and duration per model round.</li><li>Load-test ACP with independent session IDs and mailbox/task churn.</li><li>Expose queue, lock-wait, SQLite, render-frame and provider timing metrics through existing diagnostics/OTel.</li></ol></article>
+        <article class="phase"><span class="kicker">Next · remove cliffs</span><h3>Fix confirmed bottlenecks</h3><ol><li>Execute renderer plans E/F/G or simplify to region + raw as the removal plan proposes.</li><li>Replace ACP’s global mutex with keyed per-session execution ownership; allow unrelated sessions concurrently.</li><li>Add bounded tool execution rather than one new thread per call.</li><li>Move session listing metadata to an index/cache and shorten lock-held I/O.</li></ol></article>
+        <article class="phase"><span class="kicker">Then · reduce coupling</span><h3>Promote a shared runtime</h3><ol><li>Grow <code>AgentSession</code> into a <code>SessionRuntime</code> that owns model/auth/tools/hooks/tasks/mailbox policies.</li><li>Extract CLI command dispatch and UI ownership from <code>cmd_run()</code>.</li><li>Make CLI, JSONL RPC, and ACP thin adapters over the same construction path.</li><li>Split <code>pi-core</code> presentation and product services from the kernel when ownership is clear.</li></ol></article>
+        <article class="phase"><span class="kicker">Later · scale the model</span><h3>Context & coordination</h3><ol><li>Introduce shared/immutable transcript snapshots or copy-on-write history.</li><li>Add provider-independent local compaction/trimming fallback.</li><li>Give task/mailbox lifecycle explicit transition objects and adversarial concurrency tests.</li><li>Consolidate provider parser/request utilities without erasing genuine protocol differences.</li></ol></article>
+      </div>
+      <div class="grid two" style="margin-top:16px">
+        <article class="card"><span class="kicker">Highest ROI refactor</span><h3>Shared runtime construction</h3><p>This prevents behavioral drift across the three entry surfaces and creates one home for session lifecycle, hooks, tools, task limits, mailbox identity, auth, diagnostics, and persistence. Do it after adding characterization tests and measurements, because <code>cmd_run()</code> currently encodes many subtle terminal and mailbox invariants.</p></article>
+        <article class="card"><span class="kicker">Avoid premature work</span><h3>Do not optimize provider network latency in C++ first</h3><p>Model calls dominate wall time, but much of that is external. The controllable pain is pre-request copying, token-by-token rendering, coarse serialization, and synchronous persistence. Measure request construction and parser CPU, then optimize only if it is material.</p></article>
+      </div>
+    </section>
+
+    <section id="decisions">
+      <div class="section-head"><h2>Design notes worth preserving</h2><p>Several current choices are good foundations. Refactors should keep their guarantees explicit.</p></div>
+      <details open><summary>Typed messages and events are the architectural spine</summary><p><code>Message</code>, <code>AgentEvent</code>, and <code>EventStream</code> decouple provider streaming from renderers and wire adapters. Continue adding typed events at real commit points—such as the existing mailbox reply notice—rather than inferring truth from tool names or formatted text.</p></details>
+      <details><summary>Idle-only transitions protect cross-cutting state</summary><p>Model switches, session restores, and compaction commits are guarded against active streaming, pending tools, and queued steering/follow-ups. The compaction transcript epoch prevents a slow network replacement from overwriting newer messages. Preserve this transactional shape in a shared runtime.</p></details>
+      <details><summary>Append-only persistence favors recovery and debuggability</summary><p>JSONL messages, metadata, truncation, and compaction replacement records are easy to inspect and replay. An index can accelerate discovery without abandoning the journal as the source of truth.</p></details>
+      <details><summary>Lua is policy and customization; native code owns hard mechanisms</summary><p>The current split works best when C++ owns sandboxing, durable delivery, task lifecycle, and typed events while Lua chooses presentation and higher-level policy. Avoid forcing security-critical command parsing or concurrency ownership entirely into add-ons.</p></details>
+      <details><summary>Tests are a real asset</summary><p>The tree contains about 22.9k lines of C++ tests across 39 source files plus Lua add-on tests. Agent loop, readline, Lua, region renderer, compaction, terminal, providers, mailbox, tasks, RPC and ACP all have dedicated coverage. Use those suites as characterization protection during extraction.</p></details>
+    </section>
+
+    <section id="method">
+      <div class="section-head"><h2>Scope & method</h2><p>This is a static architecture assessment, not a runtime profile. Claims are deliberately labeled as confirmed code structure, documented hot path, or likely scaling risk.</p></div>
+      <div class="grid two">
+        <article class="card"><span class="kicker">Inspected</span><h3>Evidence base</h3><p>Build targets and dependencies; every source/module inventory; primary headers; prompt/turn/session flow; runtime assembly; ACP routes; provider transport; JSONL and SQLite persistence; concurrency markers; source size/branch/lock signals; tests; README and current design/performance plans.</p></article>
+        <article class="card"><span class="kicker">Not claimed</span><h3>Limits</h3><p>No production trace, heap profile, flame graph, network benchmark, or multi-process stress run was performed. A “likely bottleneck” means the code has a scaling shape worth measuring, not that it is currently the top wall-clock consumer in every workload.</p></article>
+      </div>
+      <div class="callout" style="margin-top:16px"><strong>Freshness note:</strong> the README’s original ~3.3k-line architecture sketch is now historical. The current source is roughly 41.7k C++ lines and includes durable compaction, configurable providers, skills, task trees, mailbox coordination, region rendering, OAuth, RPC, ACP, and memory/OTel instrumentation.</div>
+    </section>
+  </main>
+
+  <footer class="shell">Generated from the repository at <span class="mono">/home/zmack/prj/pici</span>. This document is self-contained: no external fonts, scripts, or diagram libraries are required.</footer>
+</body>
+</html>

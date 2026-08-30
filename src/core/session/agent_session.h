@@ -88,7 +88,7 @@ public:
   bool truncate_active_session(std::size_t through);
 
   RunResult run_prompt(std::string prompt, const EventCallback &callback = {});
-  RunResult run_messages(std::vector<AgentMessageEnvelope> messages,
+  RunResult run_messages(std::vector<AgentInput> messages,
                          const EventCallback &callback = {});
 
   struct CompactionRunResult {

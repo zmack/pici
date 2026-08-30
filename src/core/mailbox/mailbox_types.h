@@ -43,11 +43,11 @@ private:
   MailboxErrorCode code_;
 };
 
-enum class MailboxMessageKind { steer, note, request, reply };
+enum class MailboxEntryKind { steer, note, request, reply };
 
-std::string_view mailbox_message_kind_to_string(MailboxMessageKind kind);
-std::optional<MailboxMessageKind>
-mailbox_message_kind_from_string(std::string_view value);
+std::string_view mailbox_entry_kind_to_string(MailboxEntryKind kind);
+std::optional<MailboxEntryKind>
+mailbox_entry_kind_from_string(std::string_view value);
 
 struct MailboxStoreOptions {
   std::filesystem::path path;
@@ -121,41 +121,45 @@ struct MailboxTarget {
   std::optional<std::string> agent_id;
 };
 
-struct MailboxBody {
+struct MailboxPayload {
   std::string text;
   std::vector<std::pair<std::string, std::string>> metadata;
 };
 
-struct SendRequest {
-  std::optional<std::string> message_id;
+struct EnqueueMailboxEntryRequest {
+  // In-memory field name only; the SQLite column and Lua-facing JSON key
+  // stay "message_id"/"reply_to" -- see plans/session-runtime-migration.md
+  // Phase 4b. Translation happens at mailbox_store.cpp's SQL bind/read
+  // sites and mailbox_bindings.cpp's Lua JSON sites.
+  std::optional<std::string> entry_id;
   std::string sender_agent_id;
   std::string sender_session_id;
   MailboxTarget target;
   std::string workspace_id;
-  MailboxMessageKind kind{MailboxMessageKind::note};
-  MailboxBody body;
-  std::optional<std::string> reply_to_message_id;
+  MailboxEntryKind kind{MailboxEntryKind::note};
+  MailboxPayload body;
+  std::optional<std::string> reply_to_entry_id;
   TimestampMs created_at_ms{0};
   TimestampMs available_at_ms{0};
 };
 
-struct SendReceipt {
-  std::string message_id;
+struct MailboxEnqueueReceipt {
+  std::string entry_id;
   std::string recipient_session_id;
   std::optional<std::string> recipient_agent_id;
   TimestampMs created_at_ms{0};
 };
 
-struct MailboxMessage {
-  std::string message_id;
+struct MailboxEntry {
+  std::string entry_id;
   std::string sender_agent_id;
   std::string sender_session_id;
   std::string recipient_session_id;
   std::optional<std::string> recipient_agent_id;
   std::string workspace_id;
-  MailboxMessageKind kind{MailboxMessageKind::note};
-  MailboxBody body;
-  std::optional<std::string> reply_to_message_id;
+  MailboxEntryKind kind{MailboxEntryKind::note};
+  MailboxPayload body;
+  std::optional<std::string> reply_to_entry_id;
   TimestampMs created_at_ms{0};
   TimestampMs available_at_ms{0};
   std::optional<std::string> claim_agent_id;
@@ -174,8 +178,8 @@ struct InboxQuery {
   // Required with agent_id for caller-scoped inspection.  An empty value is
   // retained only for privileged store diagnostics.
   std::string agent_kind;
-  std::optional<std::string> message_id;
-  std::vector<MailboxMessageKind> kinds;
+  std::optional<std::string> entry_id;
+  std::vector<MailboxEntryKind> kinds;
   bool include_acknowledged{false};
   bool claimable_only{false};
   std::size_t limit{50};
@@ -186,18 +190,18 @@ struct ClaimRequest {
   std::string session_id;
   std::string agent_id;
   std::optional<std::string> workspace_id;
-  std::vector<MailboxMessageKind> kinds;
+  std::vector<MailboxEntryKind> kinds;
   std::size_t limit{50};
   TimestampMs now_ms{0};
   std::int64_t lease_ms{30'000};
 };
 
 struct ClaimResult {
-  std::vector<MailboxMessage> messages;
+  std::vector<MailboxEntry> messages;
 };
 
 struct AcknowledgeRequest {
-  std::string message_id;
+  std::string entry_id;
   std::string agent_id;
   std::string claim_token;
   std::optional<std::string> workspace_id;

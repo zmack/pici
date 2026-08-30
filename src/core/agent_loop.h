@@ -15,9 +15,9 @@
 #include "core/agent_state.h"
 #include "core/auth_types.h"
 #include "core/event_types.h"
+#include "core/input_provenance.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
-#include "core/request_presentation.h"
 #include "core/stream.h"
 
 #ifdef PI_CPP_OTEL_ENABLED
@@ -41,18 +41,23 @@ class LLMClient;
 // Returns true to continue, false to abort.
 using StreamCallback = std::function<void(const AgentEvent &)>;
 
-using MessageAcceptanceCallback = std::function<void()>;
+using InputAcceptanceCallback = std::function<void()>;
 
-enum class AgentMessageSource {
-  ordinary,
-  mailbox,
-};
-
-struct AgentMessageEnvelope {
+// Phase 7 of plans/session-runtime-migration.md folded away a separate
+// InputSource enum (ordinary/mailbox only, no follow_up) that used to live
+// here alongside `presentation` below: AgentInput carried both its own
+// narrower source signal AND a RequestPresentation with a richer, distinct
+// source of its own -- accept/steering routing in agent.cpp read the
+// former, presentation/rendering and event serialization read the latter,
+// so the same input's origin could (and in the JSONL RPC frontend, did)
+// disagree between the two. AgentInput now carries exactly one source of
+// truth: `presentation.source` (InputProvenance::Source, which already has
+// the full ordinary/mailbox/follow_up range). Route new accept/steering
+// logic through that field; do not reintroduce a second one.
+struct AgentInput {
   Message message;
-  MessageAcceptanceCallback on_accepted;
-  AgentMessageSource source{AgentMessageSource::ordinary};
-  RequestPresentation presentation;
+  InputAcceptanceCallback on_accepted;
+  InputProvenance presentation;
 };
 
 struct BeforeToolCallContext {
@@ -117,7 +122,7 @@ struct AgentLoopConfig {
 
   // Optional addon-owned context preparation. The callback may return a
   // request-local replacement message list; persistence remains a session
-  // concern owned by AgentSession.
+  // concern owned by SessionRuntime.
   std::function<std::optional<std::vector<Message>>(
       const AgentContext &, std::size_t estimated_tokens, std::stop_token)>
       prepare_context;
@@ -143,7 +148,7 @@ struct AgentLoopConfig {
 
   // Envelope-aware steering source. When present, this takes precedence over
   // the legacy message-only source.
-  std::function<std::vector<AgentMessageEnvelope>()> get_steering_envelopes;
+  std::function<std::vector<AgentInput>()> get_steering_envelopes;
 
   // Returns follow-up messages (injected after agent would stop)
   std::function<std::vector<Message>()> get_follow_up_messages;
@@ -183,9 +188,8 @@ run_agent_loop_continue(AgentContext &context, const AgentLoopConfig &config,
                         const std::stop_token &stop_tok = std::stop_token{});
 
 EventStream<AgentEvent, std::vector<Message>>
-run_agent_loop_envelopes(std::vector<AgentMessageEnvelope> prompts,
-                         AgentContext context, const AgentLoopConfig &config,
-                         StreamCallback emit,
+run_agent_loop_envelopes(std::vector<AgentInput> prompts, AgentContext context,
+                         const AgentLoopConfig &config, StreamCallback emit,
                          const std::stop_token &stop_tok = std::stop_token{});
 
 // Stream an assistant response from the LLM.
