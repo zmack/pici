@@ -822,6 +822,18 @@ if(PI_CPP_BUILD_TESTS)
     )
     add_test(NAME test-frontend-parity COMMAND test-frontend-parity)
 
+    # Characterization tests for cmd_run() (src/main.cpp): drives the real
+    # compiled pi-cli binary as a subprocess, since everything in main.cpp
+    # currently lives in one anonymous namespace with internal linkage and
+    # can't be linked into a test binary directly. See test_cmd_run.cpp's
+    # file comment.
+    add_executable(test-cmd_run test/test_cmd_run.cpp)
+    target_compile_definitions(test-cmd_run PRIVATE
+        PI_CLI_BINARY="$<TARGET_FILE:pi-cli>"
+    )
+    add_dependencies(test-cmd_run pi-cli)
+    add_test(NAME test-cmd_run COMMAND test-cmd_run)
+
     # Link every automated C++ test with gtest_main. test-markdown-display is
     # a manual demo and is deliberately excluded.
     set(PI_CPP_GTEST_TEST_TARGETS
@@ -835,7 +847,7 @@ if(PI_CPP_BUILD_TESTS)
         test-mailbox-bindings test-credential_store test-openai_codex_oauth
         test-openai_codex_responses test-sandbox test-system_prompt test-rpc_mode
         test-faux_control_mode test-readline test-wrap test-vim-mode test-acp
-        test-frontend-parity
+        test-frontend-parity test-cmd_run
     )
     foreach(test_target IN LISTS PI_CPP_GTEST_TEST_TARGETS)
         target_link_libraries(${test_target} PRIVATE GTest::gtest_main
