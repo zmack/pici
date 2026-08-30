@@ -13,9 +13,11 @@
 #include "core/memory_stats.h"
 #include "core/session/agent_session.h"
 
+#include <gtest/gtest.h>
+
 #include <algorithm>
-#include <cstddef>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -27,15 +29,6 @@
 using namespace pi::core;
 
 namespace {
-int failed = 0;
-#define CHECK(value)                                                           \
-  do {                                                                         \
-    if (!(value)) {                                                            \
-      ++failed;                                                                \
-      std::cerr << "FAIL: " << #value << " at " << __LINE__ << "\n";           \
-    }                                                                          \
-  } while (false)
-
 Message user_message(std::string text) {
   UserMessage message;
   message.content.emplace_back(TextContent{.text = std::move(text)});
@@ -50,22 +43,23 @@ Message tool_result_message(std::string text, std::string call_id) {
   return Message{std::move(message)};
 }
 
-void test_composition_split() {
+TEST(MemoryStats, CompositionSplit) {
   // A single user message with only text: everything lands in text_bytes.
   const auto report =
       composition_report_for_messages({user_message("hello world")});
-  CHECK(report.message_count == 1);
-  CHECK(report.transcript_bytes > 0);
-  CHECK(report.text_bytes + report.tool_use_bytes +
-            report.tool_result_bytes + report.other_bytes ==
-        report.transcript_bytes);
-  CHECK(report.text_bytes == report.transcript_bytes);
+  EXPECT_TRUE(report.message_count == 1);
+  EXPECT_TRUE(report.transcript_bytes > 0);
+  EXPECT_TRUE(report.text_bytes + report.tool_use_bytes +
+                  report.tool_result_bytes + report.other_bytes ==
+              report.transcript_bytes);
+  EXPECT_TRUE(report.text_bytes == report.transcript_bytes);
 
   // A tool result's text counts as tool_result bytes, not text bytes.
   const auto result_report = composition_report_for_messages(
       {tool_result_message(std::string(5000, 'x'), "call_1")});
-  CHECK(result_report.tool_result_bytes == result_report.transcript_bytes);
-  CHECK(result_report.text_bytes == 0);
+  EXPECT_TRUE(result_report.tool_result_bytes ==
+              result_report.transcript_bytes);
+  EXPECT_TRUE(result_report.text_bytes == 0);
 
   // Mixed transcripts keep the split additive.
   std::vector<Message> messages;
@@ -78,30 +72,29 @@ void test_composition_split() {
   call.id = "call_1";
   call.name = "read";
   call.arguments = nlohmann::json::object();
-  assistant.content.emplace_back(call);       // tool_use
+  assistant.content.emplace_back(call); // tool_use
   assistant.content.emplace_back(TextContent{.text = std::string(300, 'b')});
   messages.emplace_back(std::move(assistant));
-  messages.push_back(
-      tool_result_message(std::string(4000, 'c'), "call_1"));
+  messages.push_back(tool_result_message(std::string(4000, 'c'), "call_1"));
 
   const auto mixed = composition_report_for_messages(messages);
-  CHECK(mixed.message_count == 3);
-  CHECK(mixed.text_bytes + mixed.tool_use_bytes + mixed.tool_result_bytes +
-            mixed.other_bytes ==
-        mixed.transcript_bytes);
-  CHECK(mixed.text_bytes > 0);
-  CHECK(mixed.tool_use_bytes > 0);
-  CHECK(mixed.tool_result_bytes > mixed.text_bytes);
+  EXPECT_TRUE(mixed.message_count == 3);
+  EXPECT_TRUE(mixed.text_bytes + mixed.tool_use_bytes +
+                  mixed.tool_result_bytes + mixed.other_bytes ==
+              mixed.transcript_bytes);
+  EXPECT_TRUE(mixed.text_bytes > 0);
+  EXPECT_TRUE(mixed.tool_use_bytes > 0);
+  EXPECT_TRUE(mixed.tool_result_bytes > mixed.text_bytes);
 
   // Empty transcript: all zeros, no crash.
   const auto empty = composition_report_for_messages({});
-  CHECK(empty.message_count == 0);
-  CHECK(empty.transcript_bytes == 0);
+  EXPECT_TRUE(empty.message_count == 0);
+  EXPECT_TRUE(empty.transcript_bytes == 0);
 }
 
-void test_stub_safety() {
+TEST(MemoryStats, StubSafety) {
 #if !PI_MEMSTATS_HAVE_MALLCTL
-  CHECK(!memory_stats_available());
+  EXPECT_TRUE(!memory_stats_available());
 #else
   // Real build: availability depends on the runtime environment; both
   // outcomes are valid here, but nothing may crash either way.
@@ -113,52 +106,51 @@ void test_stub_safety() {
   // Every call must be a safe no-op / nullopt when unavailable.
   const auto arena = acquire_session_arena();
   if (!memory_stats_available()) {
-    CHECK(!arena.has_value());
-    CHECK(!current_arena().has_value());
-    CHECK(!read_arena_stats(SessionArena{0}).has_value());
+    EXPECT_TRUE(!arena.has_value());
+    EXPECT_TRUE(!current_arena().has_value());
+    EXPECT_TRUE(!read_arena_stats(SessionArena{0}).has_value());
     release_session_arena(arena); // must not crash on nullopt
     unbind_current_thread();
     bind_current_thread(SessionArena{7}); // unknown index: ignored
     const auto snapshot = read_process_snapshot();
-    CHECK(snapshot.rss_bytes > 0);
-    CHECK(!snapshot.allocator_allocated_bytes.has_value());
-    CHECK(!snapshot.allocator_resident_bytes.has_value());
+    EXPECT_TRUE(snapshot.rss_bytes > 0);
+    EXPECT_TRUE(!snapshot.allocator_allocated_bytes.has_value());
+    EXPECT_TRUE(!snapshot.allocator_resident_bytes.has_value());
 
     // inherit_arena is a passthrough: invoking it runs the callable.
     int ran = 0;
     inherit_arena([&] { ++ran; })();
-    CHECK(ran == 1);
+    EXPECT_TRUE(ran == 1);
   }
 }
 
 #if PI_MEMSTATS_HAVE_MALLCTL
-void test_arena_round_trip() {
+TEST(MemoryStats, ArenaRoundTrip) {
   if (!memory_stats_available()) {
-    std::cerr << "skip: arena round-trip needs LD_PRELOAD=libjemalloc.so.2\n";
-    return;
+    GTEST_SKIP() << "arena round-trip needs LD_PRELOAD=libjemalloc.so.2";
   }
 
   const auto arena = acquire_session_arena();
-  CHECK(arena.has_value());
+  EXPECT_TRUE(arena.has_value());
 
   // Reading stats for a fresh (empty) arena works.
   const auto fresh = read_arena_stats(*arena);
-  CHECK(fresh.has_value());
+  EXPECT_TRUE(fresh.has_value());
 
   // Binding this thread routes allocations into the session arena.
   bind_current_thread(*arena);
-  CHECK(current_arena().has_value());
-  CHECK(*current_arena() == *arena);
+  EXPECT_TRUE(current_arena().has_value());
+  EXPECT_TRUE(*current_arena() == *arena);
 
   const auto before = read_arena_stats(*arena);
   std::vector<std::byte *> keep;
   for (int i = 0; i < 16; ++i)
     keep.push_back(static_cast<std::byte *>(std::malloc(64 * 1024)));
   const auto after = read_arena_stats(*arena);
-  CHECK(before.has_value() && after.has_value());
+  EXPECT_TRUE(before.has_value() && after.has_value());
   // At least one of the ~1 MiB of allocations must be visible in the arena
   // (tcache batching can hide some transiently, hence the loose floor).
-  CHECK(after->allocated_bytes >= before->allocated_bytes + 512 * 1024);
+  EXPECT_TRUE(after->allocated_bytes >= before->allocated_bytes + 512 * 1024);
   for (auto *p : keep)
     std::free(p);
 
@@ -176,17 +168,17 @@ void test_arena_round_trip() {
   worker.join();
   // The spawned thread restored to "no explicit binding", not our arena —
   // restore semantics, not leak-across-threads.
-  CHECK(observed_on_thread.has_value());
-  CHECK(*observed_on_thread == *arena);
-  CHECK(!observed_after_restore.has_value());
+  EXPECT_TRUE(observed_on_thread.has_value());
+  EXPECT_TRUE(*observed_on_thread == *arena);
+  EXPECT_TRUE(!observed_after_restore.has_value());
 
   // Release recycles the index; acquiring again hands out an arena that
   // reads fine (stale tail allowed, plan §Risks 4).
   unbind_current_thread();
   release_session_arena(arena);
   const auto recycled = acquire_session_arena();
-  CHECK(recycled.has_value());
-  CHECK(read_arena_stats(*recycled).has_value());
+  EXPECT_TRUE(recycled.has_value());
+  EXPECT_TRUE(read_arena_stats(*recycled).has_value());
   release_session_arena(recycled);
 }
 #endif // PI_MEMSTATS_HAVE_MALLCTL
@@ -194,7 +186,7 @@ void test_arena_round_trip() {
 // Phase 3 wiring must be safe in EVERY build: bind_root_arena() and
 // heap_reports() are no-ops / return nothing useful without jemalloc, but
 // may never crash.
-void test_heap_reports_safety() {
+TEST(MemoryStats, HeapReportsSafety) {
   Model model;
   model.id = "memstats-model";
   model.api = "unused";
@@ -207,13 +199,13 @@ void test_heap_reports_safety() {
   manager.bind_root_arena(); // idempotent
   const auto heaps = manager.heap_reports();
   if (!memory_stats_available()) {
-    CHECK(heaps.empty());
+    EXPECT_TRUE(heaps.empty());
     return;
   }
   // With jemalloc active: exactly the root row, with readable stats.
-  CHECK(heaps.size() == 1);
-  CHECK(heaps.front().label == "/root");
-  CHECK(heaps.front().arena.has_value());
+  EXPECT_TRUE(heaps.size() == 1);
+  EXPECT_TRUE(heaps.front().label == "/root");
+  EXPECT_TRUE(heaps.front().arena.has_value());
 }
 
 #if PI_MEMSTATS_HAVE_MALLCTL
@@ -222,11 +214,9 @@ void test_heap_reports_safety() {
 // delta appears in THAT TASK'S ARENA — not the root's, not shared. This is
 // the test that catches the original design's flaw (binding only fixed
 // threads would have dumped nearly everything into shared).
-void test_child_task_arena_attribution() {
+TEST(MemoryStats, ChildTaskArenaAttribution) {
   if (!memory_stats_available()) {
-    std::cerr << "note: skipping arena-attribution test; jemalloc is not the "
-                 "active allocator in this run\n";
-    return;
+    GTEST_SKIP() << "arena-attribution needs jemalloc as the active allocator";
   }
 
   constexpr std::size_t kResponseBytes = 2u << 20; // 2 MiB of live text
@@ -267,10 +257,9 @@ void test_child_task_arena_attribution() {
   manager.bind_root_arena(); // same call main.cpp makes before the REPL loop
 
   const auto before = manager.heap_reports();
-  const auto root_before_it =
-      std::ranges::find(before, std::string{"/root"},
-                        &SessionHeapReport::label);
-  CHECK(root_before_it != before.end());
+  const auto root_before_it = std::ranges::find(before, std::string{"/root"},
+                                                &SessionHeapReport::label);
+  EXPECT_TRUE(root_before_it != before.end());
   const auto root_before =
       root_before_it->arena ? root_before_it->arena->allocated_bytes : 0;
 
@@ -288,50 +277,34 @@ void test_child_task_arena_attribution() {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(25));
   }
-  CHECK(done.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(done.status == AgentTaskStatusKind::completed);
 
   const auto after = manager.heap_reports();
-  const auto child_it = std::ranges::find(after, spawned.task_path,
-                                          &SessionHeapReport::label);
+  const auto child_it =
+      std::ranges::find(after, spawned.task_path, &SessionHeapReport::label);
   const auto root_after_it =
       std::ranges::find(after, std::string{"/root"}, &SessionHeapReport::label);
-  CHECK(child_it != after.end());
-  CHECK(root_after_it != after.end());
-  CHECK(child_it->arena.has_value());
+  EXPECT_TRUE(child_it != after.end());
+  EXPECT_TRUE(root_after_it != after.end());
+  EXPECT_TRUE(child_it->arena.has_value());
   const auto child_after = child_it->arena->allocated_bytes;
   const auto root_after = root_after_it->arena
                               ? root_after_it->arena->allocated_bytes
                               : root_before;
   // The child's arena absorbed the multi-MiB turn...
-  CHECK(child_after >= kResponseBytes / 2);
+  EXPECT_TRUE(child_after >= kResponseBytes / 2);
   // ...while the root stayed roughly flat (bookkeeping noise only).
-  CHECK(root_after - root_before < kResponseBytes / 4);
+  EXPECT_TRUE(root_after - root_before < kResponseBytes / 4);
 
   // Close joins the runner, purges, and recycles the arena: the task leaves
   // heap_reports and the release path is crash-free.
   static_cast<void>(manager.close(spawned.id));
   const auto post_close = manager.heap_reports();
-  CHECK(std::ranges::find(post_close, spawned.task_path,
-                          &SessionHeapReport::label) == post_close.end());
-  CHECK(std::ranges::find(post_close, std::string{"/root"},
-                          &SessionHeapReport::label) != post_close.end());
+  EXPECT_TRUE(std::ranges::find(post_close, spawned.task_path,
+                                &SessionHeapReport::label) == post_close.end());
+  EXPECT_TRUE(std::ranges::find(post_close, std::string{"/root"},
+                                &SessionHeapReport::label) != post_close.end());
 }
 #endif // PI_MEMSTATS_HAVE_MALLCTL
 
 } // namespace
-
-int main() {
-  test_composition_split();
-  test_stub_safety();
-  test_heap_reports_safety();
-#if PI_MEMSTATS_HAVE_MALLCTL
-  test_arena_round_trip();
-  test_child_task_arena_attribution();
-#endif
-  if (failed == 0) {
-    std::cout << "memory_stats tests passed\n";
-    return 0;
-  }
-  std::cout << failed << " memory_stats test(s) FAILED\n";
-  return 1;
-}

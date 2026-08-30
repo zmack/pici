@@ -1,287 +1,223 @@
-#include <functional>
-#include <iostream>
-#include <source_location>
 #include <string>
 #include <vector>
 
 #include "core/agent_state.h"
 #include "core/message_types.h"
+
 #include "core/providers/openai_completions.h"
+#include <gtest/gtest.h>
 
 using namespace pi::core;
 
-namespace tests {
-
-int passed{0};
-int failed{0};
-int total{0};
-int current_failed{0};
-
-struct TestResult {
-    std::string name;
-    bool ok;
-};
-
-std::vector<TestResult> results;
-
-bool CHECK_impl(bool cond, bool expected,
-                std::string_view expr,
-                std::source_location loc = std::source_location::current()) {
-    if (cond != expected) {
-        current_failed++;
-        std::cerr << "  FAIL " << loc.file_name() << ":" << loc.line()
-                  << " - " << expr << " (expected " << expected << ", got " << cond << ")\n";
-        return false;
-    }
-    return true;
-}
-
-#define CHECK(cond) \
-    (::tests::CHECK_impl(static_cast<bool>(cond), true, #cond, \
-                         std::source_location::current()))
-
-#define CHECK_EQ(a, b) \
-    (::tests::CHECK_impl((a) == (b), true, #a " == " #b, \
-                         std::source_location::current()))
-
-void register_test(std::string name, std::function<void()> fn) {
-    total++;
-    current_failed = 0;
-    fn();
-    if (current_failed == 0) {
-        passed++;
-    } else {
-        failed++;
-    }
-    results.push_back({name, current_failed == 0});
-}
-
-void print_summary() {
-    std::cout << "\n========================================\n";
-    std::cout << "  Tests: " << total << " total, "
-              << passed << " passed, "
-              << failed << " failed\n";
-    std::cout << "========================================\n";
-
-    if (failed > 0) {
-        std::cout << "\nFailed tests:\n";
-        for (const auto& r : results) {
-            if (!r.ok) {
-                std::cout << "  - " << r.name << "\n";
-            }
-        }
-    }
-}
-
-} // namespace tests
-
-static Model make_model(std::string id = "gpt-4o", std::string provider = "openai") {
-    Model m;
-    m.id = std::move(id);
-    m.provider = std::move(provider);
-    m.api = "openai-completions";
-    return m;
+static Model make_model(std::string id = "gpt-4o",
+                        std::string provider = "openai") {
+  Model m;
+  m.id = std::move(id);
+  m.provider = std::move(provider);
+  m.api = "openai-completions";
+  return m;
 }
 
 static AgentContext make_context() {
-    AgentContext ctx;
-    return ctx;
+  AgentContext ctx;
+  return ctx;
 }
 
-int main() {
-    tests::register_test("build_request_json: basic request structure", []() {
-        OpenAICompatibleClient client;
-        auto model = make_model("gpt-4o");
-        auto ctx = make_context();
-        StreamOptions opts;
+TEST(OpenAICompletions, BuildRequestBasic) {
 
-        auto json = client.build_request_json(model, ctx, opts);
+  OpenAICompatibleClient client;
+  auto model = make_model("gpt-4o");
+  auto ctx = make_context();
+  StreamOptions opts;
 
-        CHECK_EQ(json["model"].get<std::string>(), std::string("gpt-4o"));
-        CHECK_EQ(json["stream"].get<bool>(), true);
-        CHECK(json["messages"].is_array());
-    });
+  auto json = client.build_request_json(model, ctx, opts);
 
-    tests::register_test("build_request_json: includes system prompt", []() {
-        OpenAICompatibleClient client;
-        auto model = make_model();
-        AgentContext ctx;
-        ctx.system_prompt = "You are helpful";
-        StreamOptions opts;
+  EXPECT_EQ(json["model"].get<std::string>(), std::string("gpt-4o"));
+  EXPECT_EQ(json["stream"].get<bool>(), true);
+  EXPECT_TRUE(json["messages"].is_array());
+}
+TEST(OpenAICompletions, BuildRequestSystemPrompt) {
 
-        auto json = client.build_request_json(model, ctx, opts);
+  OpenAICompatibleClient client;
+  auto model = make_model();
+  AgentContext ctx;
+  ctx.system_prompt = "You are helpful";
+  StreamOptions opts;
 
-        CHECK(json["messages"].is_array());
-        CHECK(!json["messages"].empty());
-        CHECK_EQ(json["messages"][0]["role"].get<std::string>(), std::string("system"));
-        CHECK_EQ(json["messages"][0]["content"].get<std::string>(), std::string("You are helpful"));
-    });
+  auto json = client.build_request_json(model, ctx, opts);
 
-    tests::register_test("build_request_json: user message becomes role=user", []() {
-        OpenAICompatibleClient client;
-        auto model = make_model();
-        AgentContext ctx;
-        ctx.system_prompt = "sys";
-        UserMessage um;
-        um.content.push_back(TextContent{.text = "hello"});
-        ctx.messages.push_back(std::move(um));
-        StreamOptions opts;
+  EXPECT_TRUE(json["messages"].is_array());
+  EXPECT_TRUE(!json["messages"].empty());
+  EXPECT_EQ(json["messages"][0]["role"].get<std::string>(),
+            std::string("system"));
+  EXPECT_EQ(json["messages"][0]["content"].get<std::string>(),
+            std::string("You are helpful"));
+}
+TEST(OpenAICompletions, BuildRequestUserMessage) {
 
-        auto json = client.build_request_json(model, ctx, opts);
-        auto& msgs = json["messages"];
+  OpenAICompatibleClient client;
+  auto model = make_model();
+  AgentContext ctx;
+  ctx.system_prompt = "sys";
+  UserMessage um;
+  um.content.push_back(TextContent{.text = "hello"});
+  ctx.messages.push_back(std::move(um));
+  StreamOptions opts;
 
-        bool found_user = false;
-        for (const auto& m : msgs) {
-            if (m["role"] == "user") {
-                CHECK_EQ(m["content"].get<std::string>(), std::string("hello"));
-                found_user = true;
-            }
-        }
-        CHECK(found_user);
-    });
+  auto json = client.build_request_json(model, ctx, opts);
+  auto &msgs = json["messages"];
 
-    tests::register_test(
-        "build_request_json: runtime identity is valid user input", []() {
-          OpenAICompatibleClient client;
-          auto model = make_model();
-          AgentContext ctx;
-          ctx.system_prompt = "sys";
-          UserMessage identity;
-          identity.content.emplace_back(TextContent{
-              .text = "[pici runtime context; not user-authored]\n"
-                      "mailbox agent_id=agt_a; session_id=sess_a; kind=root;\n"
-                      "Use agents_self when you need the authoritative "
-                      "structured identity."});
-          ctx.messages.emplace_back(std::move(identity));
-          ctx.messages.emplace_back(
-              UserMessage{.content = {TextContent{.text = "hello"}}});
-          StreamOptions opts;
+  bool found_user = false;
+  for (const auto &m : msgs) {
+    if (m["role"] == "user") {
+      EXPECT_EQ(m["content"].get<std::string>(), std::string("hello"));
+      found_user = true;
+    }
+  }
+  EXPECT_TRUE(found_user);
+}
+TEST(OpenAICompletions, BuildRequestRuntimeIdentity) {
 
-          const auto json = client.build_request_json(model, ctx, opts);
-          CHECK_EQ(json["messages"].size(), std::size_t(3));
-          CHECK_EQ(json["messages"][1]["role"].get<std::string>(), "user");
-          CHECK(json["messages"][1]["content"].get<std::string>().starts_with(
-              "[pici runtime context; not user-authored]"));
-          CHECK_EQ(json["messages"][2]["content"].get<std::string>(), "hello");
-        });
+  OpenAICompatibleClient client;
+  auto model = make_model();
+  AgentContext ctx;
+  ctx.system_prompt = "sys";
+  UserMessage identity;
+  identity.content.emplace_back(TextContent{
+      .text = "[pici runtime context; not user-authored]\n"
+              "mailbox agent_id=agt_a; session_id=sess_a; kind=root;\n"
+              "Use agents_self when you need the authoritative "
+              "structured identity."});
+  ctx.messages.emplace_back(std::move(identity));
+  ctx.messages.emplace_back(
+      UserMessage{.content = {TextContent{.text = "hello"}}});
+  StreamOptions opts;
 
-    tests::register_test("build_request_json: temperature forwarded", []() {
-        OpenAICompatibleClient client;
-        auto model = make_model();
-        auto ctx = make_context();
-        StreamOptions opts;
-        opts.temperature = 0.5;
+  const auto json = client.build_request_json(model, ctx, opts);
+  EXPECT_EQ(json["messages"].size(), std::size_t(3));
+  EXPECT_EQ(json["messages"][1]["role"].get<std::string>(), "user");
+  EXPECT_TRUE(json["messages"][1]["content"].get<std::string>().starts_with(
+      "[pici runtime context; not user-authored]"));
+  EXPECT_EQ(json["messages"][2]["content"].get<std::string>(), "hello");
+}
+TEST(OpenAICompletions, BuildRequestTemperature) {
 
-        auto json = client.build_request_json(model, ctx, opts);
+  OpenAICompatibleClient client;
+  auto model = make_model();
+  auto ctx = make_context();
+  StreamOptions opts;
+  opts.temperature = 0.5;
 
-        CHECK(json.contains("temperature"));
-        CHECK_EQ(json["temperature"].get<double>(), 0.5);
-    });
+  auto json = client.build_request_json(model, ctx, opts);
 
-    tests::register_test("build_request_json: max_tokens forwarded with compat field", []() {
-        OpenAICompatibleClient client;
+  EXPECT_TRUE(json.contains("temperature"));
+  EXPECT_EQ(json["temperature"].get<double>(), 0.5);
+}
+TEST(OpenAICompletions, BuildRequestMaxTokens) {
 
-        {
-            auto model = make_model();
-            auto ctx = make_context();
-            StreamOptions opts;
-            opts.max_tokens = 1024;
+  OpenAICompatibleClient client;
 
-            auto json = client.build_request_json(model, ctx, opts);
-            CHECK(json.contains("max_completion_tokens"));
-            CHECK(!json.contains("max_tokens"));
-            CHECK_EQ(json["max_completion_tokens"].get<int>(), 1024);
-        }
+  {
+    auto model = make_model();
+    auto ctx = make_context();
+    StreamOptions opts;
+    opts.max_tokens = 1024;
 
-        {
-            Model model = make_model("some-model", "other");
-            model.base_url = "https://llm.chutes.ai/v1";
-            auto ctx = make_context();
-            StreamOptions opts;
-            opts.max_tokens = 512;
+    auto json = client.build_request_json(model, ctx, opts);
+    EXPECT_TRUE(json.contains("max_completion_tokens"));
+    EXPECT_TRUE(!json.contains("max_tokens"));
+    EXPECT_EQ(json["max_completion_tokens"].get<int>(), 1024);
+  }
 
-            auto json = client.build_request_json(model, ctx, opts);
-            CHECK(json.contains("max_tokens"));
-            CHECK(!json.contains("max_completion_tokens"));
-            CHECK_EQ(json["max_tokens"].get<int>(), 512);
-        }
-    });
+  {
+    Model model = make_model("some-model", "other");
+    model.base_url = "https://llm.chutes.ai/v1";
+    auto ctx = make_context();
+    StreamOptions opts;
+    opts.max_tokens = 512;
 
-    tests::register_test("build_request_json: local llama.cpp compatibility", []() {
-        OpenAICompatibleClient client;
-        auto model = make_model("Qwen3.6-35B-A3B-UD-IQ4_NL.gguf", "llamacpp");
-        model.base_url = "http://127.0.0.1:8080/v1";
-        auto ctx = make_context();
-        StreamOptions opts;
-        opts.max_tokens = 128;
+    auto json = client.build_request_json(model, ctx, opts);
+    EXPECT_TRUE(json.contains("max_tokens"));
+    EXPECT_TRUE(!json.contains("max_completion_tokens"));
+    EXPECT_EQ(json["max_tokens"].get<int>(), 512);
+  }
+}
+TEST(OpenAICompletions, BuildRequestLlamaCpp) {
 
-        auto json = client.build_request_json(model, ctx, opts);
+  OpenAICompatibleClient client;
+  auto model = make_model("Qwen3.6-35B-A3B-UD-IQ4_NL.gguf", "llamacpp");
+  model.base_url = "http://127.0.0.1:8080/v1";
+  auto ctx = make_context();
+  StreamOptions opts;
+  opts.max_tokens = 128;
 
-        CHECK_EQ(json["model"].get<std::string>(),
-                 std::string("Qwen3.6-35B-A3B-UD-IQ4_NL.gguf"));
-        CHECK(json.contains("max_tokens"));
-        CHECK(!json.contains("max_completion_tokens"));
-        CHECK(!json.contains("store"));
-        CHECK(!json.contains("stream_options"));
-        CHECK_EQ(json["stream"].get<bool>(), true);
-        CHECK(json.contains("chat_template_kwargs"));
-        CHECK_EQ(json["chat_template_kwargs"]["enable_thinking"].get<bool>(), false);
-    });
+  auto json = client.build_request_json(model, ctx, opts);
 
-    tests::register_test("build_request_json: fireworks compatibility streams", []() {
-        OpenAICompatibleClient client;
-        auto model = make_model("accounts/fireworks/models/glm-5p2", "fireworks");
-        model.base_url = "https://api.fireworks.ai/inference/v1";
-        auto ctx = make_context();
-        StreamOptions opts;
-        opts.max_tokens = 256;
+  EXPECT_EQ(json["model"].get<std::string>(),
+            std::string("Qwen3.6-35B-A3B-UD-IQ4_NL.gguf"));
+  EXPECT_TRUE(json.contains("max_tokens"));
+  EXPECT_TRUE(!json.contains("max_completion_tokens"));
+  EXPECT_TRUE(!json.contains("store"));
+  EXPECT_TRUE(!json.contains("stream_options"));
+  EXPECT_EQ(json["stream"].get<bool>(), true);
+  EXPECT_TRUE(json.contains("chat_template_kwargs"));
+  EXPECT_EQ(json["chat_template_kwargs"]["enable_thinking"].get<bool>(), false);
+}
+TEST(OpenAICompletions, BuildRequestFireworks) {
 
-        auto json = client.build_request_json(model, ctx, opts);
+  OpenAICompatibleClient client;
+  auto model = make_model("accounts/fireworks/models/glm-5p2", "fireworks");
+  model.base_url = "https://api.fireworks.ai/inference/v1";
+  auto ctx = make_context();
+  StreamOptions opts;
+  opts.max_tokens = 256;
 
-        CHECK_EQ(json["stream"].get<bool>(), true);
-        CHECK(json.contains("max_tokens"));
-        CHECK(!json.contains("max_completion_tokens"));
-        CHECK(json.contains("stream_options"));
-    });
+  auto json = client.build_request_json(model, ctx, opts);
 
-    tests::register_test("build_request_json: prompt_cache_key set for meta base_url", []() {
-        OpenAICompatibleClient client;
-        auto model = make_model("muse-spark-1.1", "meta-chat");
-        model.base_url = "https://api.meta.ai/v1";
-        auto ctx = make_context();
-        StreamOptions opts;
+  EXPECT_EQ(json["stream"].get<bool>(), true);
+  EXPECT_TRUE(json.contains("max_tokens"));
+  EXPECT_TRUE(!json.contains("max_completion_tokens"));
+  EXPECT_TRUE(json.contains("stream_options"));
+}
+TEST(OpenAICompletions, BuildRequestPromptCacheMeta) {
 
-        auto json = client.build_request_json(model, ctx, opts);
+  OpenAICompatibleClient client;
+  auto model = make_model("muse-spark-1.1", "meta-chat");
+  model.base_url = "https://api.meta.ai/v1";
+  auto ctx = make_context();
+  StreamOptions opts;
 
-        CHECK(json.contains("prompt_cache_key"));
-        CHECK_EQ(json["prompt_cache_key"].get<std::string>(), std::string("pici"));
-    });
+  auto json = client.build_request_json(model, ctx, opts);
 
-    tests::register_test("build_request_json: prompt_cache_key absent for other providers", []() {
-        OpenAICompatibleClient client;
-        auto model = make_model("gpt-4o", "openai");
-        auto ctx = make_context();
-        StreamOptions opts;
+  EXPECT_TRUE(json.contains("prompt_cache_key"));
+  EXPECT_EQ(json["prompt_cache_key"].get<std::string>(), std::string("pici"));
+}
+TEST(OpenAICompletions, BuildRequestPromptCacheOther) {
 
-        auto json = client.build_request_json(model, ctx, opts);
+  OpenAICompatibleClient client;
+  auto model = make_model("gpt-4o", "openai");
+  auto ctx = make_context();
+  StreamOptions opts;
 
-        CHECK(!json.contains("prompt_cache_key"));
-    });
+  auto json = client.build_request_json(model, ctx, opts);
 
-    tests::register_test("map_finish_reason: stop", []() {
-        CHECK_EQ(OpenAICompatibleClient::map_finish_reason("stop"), StopReason::stop);
-        CHECK_EQ(OpenAICompatibleClient::map_finish_reason("end"), StopReason::stop);
-    });
+  EXPECT_TRUE(!json.contains("prompt_cache_key"));
+}
+TEST(OpenAICompletions, MapFinishReasonStop) {
 
-    tests::register_test("map_finish_reason: tool_calls", []() {
-        CHECK_EQ(OpenAICompatibleClient::map_finish_reason("tool_calls"), StopReason::tool_use);
-        CHECK_EQ(OpenAICompatibleClient::map_finish_reason("function_call"), StopReason::tool_use);
-    });
+  EXPECT_EQ(OpenAICompatibleClient::map_finish_reason("stop"),
+            StopReason::stop);
+  EXPECT_EQ(OpenAICompatibleClient::map_finish_reason("end"), StopReason::stop);
+}
+TEST(OpenAICompletions, MapFinishReasonToolCalls) {
 
-    tests::register_test("map_finish_reason: unknown", []() {
-        CHECK_EQ(OpenAICompatibleClient::map_finish_reason("xyz"), StopReason::error);
-    });
+  EXPECT_EQ(OpenAICompatibleClient::map_finish_reason("tool_calls"),
+            StopReason::tool_use);
+  EXPECT_EQ(OpenAICompatibleClient::map_finish_reason("function_call"),
+            StopReason::tool_use);
+}
+TEST(OpenAICompletions, MapFinishReasonUnknown) {
 
-    tests::print_summary();
-    return tests::failed > 0 ? 1 : 0;
+  EXPECT_EQ(OpenAICompatibleClient::map_finish_reason("xyz"),
+            StopReason::error);
 }

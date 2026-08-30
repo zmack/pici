@@ -633,6 +633,19 @@ target_compile_definitions(pi-acp PRIVATE
 if(PI_CPP_BUILD_TESTS)
     enable_testing()
 
+    # Keep the test framework isolated from normal builds and pin it to a
+    # known release. The individual test binaries below intentionally remain
+    # separate CTest entries; this preserves their existing process isolation.
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG        v1.18.0
+        GIT_SHALLOW    TRUE
+        EXCLUDE_FROM_ALL
+    )
+    FetchContent_MakeAvailable(googletest)
+
     foreach(test_name IN ITEMS core agent_loop agent agent_tasks compaction stream tool_validation builtin_tools apply_patch lua_tool markdown terminal skills memory_stats)
         add_executable(test-${test_name}
             test/test_${test_name}.cpp
@@ -808,6 +821,25 @@ if(PI_CPP_BUILD_TESTS)
         PI_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     add_test(NAME test-frontend-parity COMMAND test-frontend-parity)
+
+    # Link every automated C++ test with gtest_main. test-markdown-display is
+    # a manual demo and is deliberately excluded.
+    set(PI_CPP_GTEST_TEST_TARGETS
+        test-core test-agent_loop test-agent test-agent_tasks test-compaction
+        test-stream test-tool_validation test-builtin_tools test-apply_patch
+        test-lua_tool test-markdown test-terminal test-skills test-memory_stats
+        test-subagent-activity test-subagent-panel test-region-renderer
+        test-faux_client test-faux_control test-auth_resolver
+        test-openai_completions test-muse_messages test-config
+        test-mailbox-runtime test-mailbox-store test-mailbox-coordinator
+        test-mailbox-bindings test-credential_store test-openai_codex_oauth
+        test-openai_codex_responses test-sandbox test-system_prompt test-rpc_mode
+        test-faux_control_mode test-readline test-wrap test-vim-mode test-acp
+        test-frontend-parity
+    )
+    foreach(test_target IN LISTS PI_CPP_GTEST_TEST_TARGETS)
+        target_link_libraries(${test_target} PRIVATE GTest::gtest_main)
+    endforeach()
 endif()
 
 add_library(pi-http

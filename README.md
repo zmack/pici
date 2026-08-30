@@ -306,6 +306,7 @@ enum class RendererErrorKind { llm, transport, tool, abort, unknown };
 - **libstdc++** with C++23 support (threads, stop_token, concepts, ranges)
 - **nlohmann/json** v3.11.3 (fetched automatically via FetchContent)
 - **pboettch/json-schema-validator** v2.3.0 (fetched automatically via FetchContent)
+- **GoogleTest** v1.18.0 (fetched automatically via FetchContent for C++ tests only)
 
 ## Building
 
@@ -318,6 +319,11 @@ make lint         # clang-tidy target
 make format       # clang-format target
 make test         # build + ctest
 ```
+
+Automated C++ suites use GoogleTest but retain one CTest entry per binary.
+Filter individual cases directly, for example `./build/test-core --gtest_filter=Suite.Case`.
+Lua addon tests continue through the native `test-addons` CTest entry, and
+`test-markdown-display` remains a manual demo.
 
 ```bash
 # Configure
@@ -778,7 +784,7 @@ Numbers are good attribution, not audited totals:
 4. **Async streaming** — `EventStream` supports blocking iterator, `for_each`, and `wait()`
 5. **Provider abstraction** — `LLMClient` interface allows swapping providers without touching the loop
 6. **C++23 features** — `std::stop_token`/`std::stop_source` for cancellation, concepts, `if constexpr`, `std::scoped_lock`, structured bindings
-7. **Self-contained tests** — custom test harness, no Catch2 or other test frameworks
+7. **Self-contained tests** — GoogleTest is fetched only for C++ tests; Lua addon tests retain their native runner
 
 ## Implementation Lessons
 

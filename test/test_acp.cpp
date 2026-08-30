@@ -15,29 +15,12 @@
 #include <string_view>
 #include <thread>
 
+#include <gtest/gtest.h>
+
 #include <httplib.h>
 
 using namespace pi;
 using namespace pi::acp;
-
-// ─── Minimal test harness ────────────────────────────────────────────────────
-
-namespace tests {
-int passed{0}, failed{0}, total{0};
-
-bool check(bool cond, std::string_view expr,
-           std::source_location loc = std::source_location::current()) {
-  ++total;
-  if (cond) { ++passed; std::cout << "  PASS " << expr << "\n"; return true; }
-  ++failed;
-  std::cout << "  FAIL " << loc.file_name() << ":" << loc.line()
-            << " — " << expr << "\n";
-  return false;
-}
-} // namespace tests
-
-#define CHECK(expr) tests::check(!!(expr), #expr)
-#define CHECK_EQ(a,b) tests::check((a)==(b), #a " == " #b)
 
 // ─── Server fixture ──────────────────────────────────────────────────────────
 
@@ -54,8 +37,10 @@ struct AcpFixture {
     core::FauxClient::Script script;
     script.events = {
         core::AssistantMessageEvent{core::AssistantMessageStartEvent{}},
-        core::AssistantMessageEvent{core::AssistantMessageTextDeltaEvent{0, "Hello from faux agent", {}}},
-        core::AssistantMessageEvent{core::AssistantMessageDoneEvent{core::StopReason::stop, final_msg}},
+        core::AssistantMessageEvent{core::AssistantMessageTextDeltaEvent{
+            0, "Hello from faux agent", {}}},
+        core::AssistantMessageEvent{
+            core::AssistantMessageDoneEvent{core::StopReason::stop, final_msg}},
     };
 
     core::LLMClientRegistry::instance().register_client("faux", [script] {
@@ -63,14 +48,18 @@ struct AcpFixture {
     });
 
     ServerConfig cfg;
-    cfg.agent_name        = "test-agent";
+    cfg.agent_name = "test-agent";
     cfg.agent_description = "ACP test agent";
-    cfg.threads           = 2;
+    cfg.threads = 2;
 
     // Faux model — no real LLM needed
     core::Model m;
-    m.id = "faux"; m.name = "faux"; m.api = "faux";
-    m.provider = "faux"; m.context_window = 4096; m.max_tokens = 512;
+    m.id = "faux";
+    m.name = "faux";
+    m.api = "faux";
+    m.provider = "faux";
+    m.context_window = 4096;
+    m.max_tokens = 512;
     cfg.agent_opts.model = m;
     core::ProviderConfig faux_provider;
     faux_provider.id = "faux";
@@ -101,15 +90,13 @@ struct AcpFixture {
         core::AssistantMessageEvent{core::AssistantMessageStartEvent{}},
         core::AssistantMessageEvent{core::AssistantMessageTextDeltaEvent{
             0, "Hello from slow faux agent", {}}},
-        core::AssistantMessageEvent{
-            core::AssistantMessageDoneEvent{core::StopReason::stop,
-                                            slow_final_msg}},
+        core::AssistantMessageEvent{core::AssistantMessageDoneEvent{
+            core::StopReason::stop, slow_final_msg}},
     };
     slow_script.delay_between = std::chrono::milliseconds(300);
     core::LLMClientRegistry::instance().register_client(
         "faux-slow", [slow_script] {
-          return std::make_shared<core::FauxClient>(
-              std::vector{slow_script});
+          return std::make_shared<core::FauxClient>(std::vector{slow_script});
         });
     core::ProviderConfig slow_provider;
     slow_provider.id = "faux-slow-provider";
@@ -126,7 +113,8 @@ struct AcpFixture {
             {"faux-b", alternate_provider},
             {"faux-slow-provider", slow_provider}});
     cfg.agent_opts.model_registry = cfg.model_registry;
-    cfg.agent_opts.get_api_key = [](std::string_view) -> std::optional<std::string> {
+    cfg.agent_opts.get_api_key =
+        [](std::string_view) -> std::optional<std::string> {
       return std::nullopt;
     };
     cfg.agent_opts.should_stop_after_turn = nullptr;
@@ -146,82 +134,85 @@ struct AcpFixture {
     server_thread.detach();
   }
 
-  httplib::Client client() {
-    return httplib::Client("127.0.0.1", port);
-  }
+  httplib::Client client() { return httplib::Client("127.0.0.1", port); }
 };
+
+// All ACP cases share one in-process server. Starting one server per case
+// would add substantial startup cost and would change the original suite's
+// process-level lifecycle.
+AcpFixture &shared_acp_fixture() {
+  static AcpFixture fixture;
+  return fixture;
+}
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 void test_health(AcpFixture &fx) {
   auto cli = fx.client();
   auto r = cli.Get("/health");
-  CHECK(r != nullptr);
-  CHECK(r->status == 200);
-  CHECK(r->body.find("ok") != std::string::npos);
+  EXPECT_TRUE(r != nullptr);
+  EXPECT_TRUE(r->status == 200);
+  EXPECT_TRUE(r->body.find("ok") != std::string::npos);
 }
 
 void test_agents_list(AcpFixture &fx) {
   auto cli = fx.client();
   auto r = cli.Get("/agents");
-  CHECK(r != nullptr);
-  CHECK(r->status == 200);
+  EXPECT_TRUE(r != nullptr);
+  EXPECT_TRUE(r->status == 200);
   auto j = nlohmann::json::parse(r->body);
-  CHECK(j.is_array());
-  CHECK(!j.empty());
-  CHECK(j[0]["name"] == "test-agent");
+  EXPECT_TRUE(j.is_array());
+  EXPECT_TRUE(!j.empty());
+  EXPECT_TRUE(j[0]["name"] == "test-agent");
 }
 
 void test_agent_manifest(AcpFixture &fx) {
   auto cli = fx.client();
   auto r = cli.Get("/agents/test-agent");
-  CHECK(r != nullptr);
-  CHECK(r->status == 200);
+  EXPECT_TRUE(r != nullptr);
+  EXPECT_TRUE(r->status == 200);
   auto j = nlohmann::json::parse(r->body);
-  CHECK(j["name"] == "test-agent");
-  CHECK(j.contains("description"));
-  CHECK(j.contains("metadata"));
-  CHECK(j["metadata"].contains("tools"));
+  EXPECT_TRUE(j["name"] == "test-agent");
+  EXPECT_TRUE(j.contains("description"));
+  EXPECT_TRUE(j.contains("metadata"));
+  EXPECT_TRUE(j["metadata"].contains("tools"));
 }
 
 void test_agent_not_found(AcpFixture &fx) {
   auto cli = fx.client();
   auto r = cli.Get("/agents/nonexistent");
-  CHECK(r != nullptr);
-  CHECK(r->status == 404);
+  EXPECT_TRUE(r != nullptr);
+  EXPECT_TRUE(r->status == 404);
 }
 
 void test_run_sync(AcpFixture &fx) {
   auto cli = fx.client();
   nlohmann::json body = {
-    {"agent_name", "test-agent"},
-    {"mode",       "sync"},
-    {"input", {{
-      {"role",  "user"},
-      {"parts", {{{"content_type","text/plain"},{"content","hello"}}}}
-    }}}
-  };
+      {"agent_name", "test-agent"},
+      {"mode", "sync"},
+      {"input",
+       {{{"role", "user"},
+         {"parts",
+          {{{"content_type", "text/plain"}, {"content", "hello"}}}}}}}};
   auto r = cli.Post("/runs", body.dump(), "application/json");
-  CHECK(r != nullptr);
-  CHECK(r->status == 200);
+  EXPECT_TRUE(r != nullptr);
+  EXPECT_TRUE(r->status == 200);
   auto j = nlohmann::json::parse(r->body);
-  CHECK(j.contains("run_id"));
-  CHECK(j.contains("status"));
+  EXPECT_TRUE(j.contains("run_id"));
+  EXPECT_TRUE(j.contains("status"));
   // Faux provider may return completed or failed depending on setup
   auto status = j["status"].get<std::string>();
-  CHECK(status == "completed" || status == "failed");
+  EXPECT_TRUE(status == "completed" || status == "failed");
 }
 
 void test_run_streaming(AcpFixture &fx) {
   auto cli = fx.client();
   nlohmann::json body = {
-    {"agent_name", "test-agent"},
-    {"mode",       "stream"},
-    {"input", {{
-      {"role",  "user"},
-      {"parts", {{{"content_type","text/plain"},{"content","hi"}}}}
-    }}}
-  };
+      {"agent_name", "test-agent"},
+      {"mode", "stream"},
+      {"input",
+       {{{"role", "user"},
+         {"parts", {{{"content_type", "text/plain"}, {"content", "hi"}}}}}}}};
 
   // httplib client buffers the full SSE body once the stream completes
   auto r = cli.Post("/runs", body.dump(), "application/json");
@@ -229,13 +220,15 @@ void test_run_streaming(AcpFixture &fx) {
     std::cerr << "[test_run_streaming] request failed: "
               << httplib::to_string(r.error()) << "\n";
   }
-  CHECK(r != nullptr);
-  if (!r) return;
+  EXPECT_TRUE(r != nullptr);
+  if (!r)
+    return;
   if (r->body.find("run.created") == std::string::npos)
-    std::cerr << "[test_run_streaming] body: " << r->body.substr(0, 200) << "\n";
-  CHECK(r->body.find("run.created") != std::string::npos);
-  CHECK(r->body.find("run.completed") != std::string::npos ||
-        r->body.find("run.failed")    != std::string::npos);
+    std::cerr << "[test_run_streaming] body: " << r->body.substr(0, 200)
+              << "\n";
+  EXPECT_TRUE(r->body.find("run.created") != std::string::npos);
+  EXPECT_TRUE(r->body.find("run.completed") != std::string::npos ||
+              r->body.find("run.failed") != std::string::npos);
 }
 
 void test_run_session(AcpFixture &fx) {
@@ -243,13 +236,14 @@ void test_run_session(AcpFixture &fx) {
   const std::string session_id = "test-session-42";
 
   auto make_body = [&](std::string text, bool alternate = false) {
-    nlohmann::json body = {
-      {"agent_name", "test-agent"}, {"mode", "sync"},
-      {"session_id", session_id},
-      {"input", {{{"role","user"},
-                  {"parts",{{{"content_type","text/plain"},
-                              {"content", std::move(text)}}}}}}}
-    };
+    nlohmann::json body = {{"agent_name", "test-agent"},
+                           {"mode", "sync"},
+                           {"session_id", session_id},
+                           {"input",
+                            {{{"role", "user"},
+                              {"parts",
+                               {{{"content_type", "text/plain"},
+                                 {"content", std::move(text)}}}}}}}};
     if (alternate) {
       body["provider"] = "faux-b";
       body["model"] = "other";
@@ -259,27 +253,27 @@ void test_run_session(AcpFixture &fx) {
 
   // First turn
   auto r1 = cli.Post("/runs", make_body("first message"), "application/json");
-  CHECK(r1 != nullptr);
-  CHECK(r1->status == 200);
+  EXPECT_TRUE(r1 != nullptr);
+  EXPECT_TRUE(r1->status == 200);
 
   // Second turn explicitly switches provider/model.
-  auto r2 = cli.Post("/runs", make_body("second message", true), "application/json");
-  CHECK(r2 != nullptr);
-  CHECK(r2->status == 200);
+  auto r2 =
+      cli.Post("/runs", make_body("second message", true), "application/json");
+  EXPECT_TRUE(r2 != nullptr);
+  EXPECT_TRUE(r2->status == 200);
   auto j2 = nlohmann::json::parse(r2->body);
-  CHECK(j2.value("session_id", "") == session_id);
-  CHECK(j2.value("provider", "") == "faux-b");
-  CHECK(j2.value("model", "") == "other");
+  EXPECT_TRUE(j2.value("session_id", "") == session_id);
+  EXPECT_TRUE(j2.value("provider", "") == "faux-b");
+  EXPECT_TRUE(j2.value("model", "") == "other");
 
   // Third turn without selection restores the journaled model.
   auto r3 = cli.Post("/runs", make_body("third message"), "application/json");
-  CHECK(r3 != nullptr);
-  CHECK(r3->status == 200);
+  EXPECT_TRUE(r3 != nullptr);
+  EXPECT_TRUE(r3->status == 200);
   auto j3 = nlohmann::json::parse(r3->body);
-  CHECK(j3.value("provider", "") == "faux-b");
-  CHECK(j3.value("model", "") == "other");
+  EXPECT_TRUE(j3.value("provider", "") == "faux-b");
+  EXPECT_TRUE(j3.value("model", "") == "other");
 }
-
 
 // plans/session-runtime-migration.md Phase 6, decision (a): successive
 // /runs calls against the same session_id reuse one SessionRuntime, looked
@@ -295,13 +289,14 @@ void test_run_session_isolation(AcpFixture &fx) {
 
   auto make_body = [](const std::string &session_id, std::string text,
                       bool select_alternate) {
-    nlohmann::json body = {
-        {"agent_name", "test-agent"},
-        {"mode", "sync"},
-        {"session_id", session_id},
-        {"input", {{{"role", "user"},
-                    {"parts", {{{"content_type", "text/plain"},
-                                {"content", std::move(text)}}}}}}}};
+    nlohmann::json body = {{"agent_name", "test-agent"},
+                           {"mode", "sync"},
+                           {"session_id", session_id},
+                           {"input",
+                            {{{"role", "user"},
+                              {"parts",
+                               {{{"content_type", "text/plain"},
+                                 {"content", std::move(text)}}}}}}}};
     if (select_alternate) {
       body["provider"] = "faux-b";
       body["model"] = "other";
@@ -311,36 +306,36 @@ void test_run_session_isolation(AcpFixture &fx) {
 
   // session_a explicitly selects the alternate model; session_b never does,
   // so it stays on the default "faux" model throughout.
-  auto a1 = cli.Post("/runs", make_body(session_a, "a1", true),
-                     "application/json");
-  CHECK(a1 != nullptr);
-  CHECK(a1->status == 200);
-  auto b1 = cli.Post("/runs", make_body(session_b, "b1", false),
-                     "application/json");
-  CHECK(b1 != nullptr);
-  CHECK(b1->status == 200);
+  auto a1 =
+      cli.Post("/runs", make_body(session_a, "a1", true), "application/json");
+  EXPECT_TRUE(a1 != nullptr);
+  EXPECT_TRUE(a1->status == 200);
+  auto b1 =
+      cli.Post("/runs", make_body(session_b, "b1", false), "application/json");
+  EXPECT_TRUE(b1 != nullptr);
+  EXPECT_TRUE(b1->status == 200);
 
   // Follow-up on each with no explicit selection must restore that
   // session's own journaled model -- if the registry ever mixed the two
   // SessionRuntimes up, session_b would incorrectly see "faux-b"/"other"
   // here.
-  auto a2 = cli.Post("/runs", make_body(session_a, "a2", false),
-                     "application/json");
-  CHECK(a2 != nullptr);
-  CHECK(a2->status == 200);
+  auto a2 =
+      cli.Post("/runs", make_body(session_a, "a2", false), "application/json");
+  EXPECT_TRUE(a2 != nullptr);
+  EXPECT_TRUE(a2->status == 200);
   auto ja2 = nlohmann::json::parse(a2->body);
-  CHECK(ja2.value("session_id", "") == session_a);
-  CHECK(ja2.value("provider", "") == "faux-b");
-  CHECK(ja2.value("model", "") == "other");
+  EXPECT_TRUE(ja2.value("session_id", "") == session_a);
+  EXPECT_TRUE(ja2.value("provider", "") == "faux-b");
+  EXPECT_TRUE(ja2.value("model", "") == "other");
 
-  auto b2 = cli.Post("/runs", make_body(session_b, "b2", false),
-                     "application/json");
-  CHECK(b2 != nullptr);
-  CHECK(b2->status == 200);
+  auto b2 =
+      cli.Post("/runs", make_body(session_b, "b2", false), "application/json");
+  EXPECT_TRUE(b2 != nullptr);
+  EXPECT_TRUE(b2->status == 200);
   auto jb2 = nlohmann::json::parse(b2->body);
-  CHECK(jb2.value("session_id", "") == session_b);
-  CHECK(jb2.value("provider", "") == "faux");
-  CHECK(jb2.value("model", "") == "faux");
+  EXPECT_TRUE(jb2.value("session_id", "") == session_b);
+  EXPECT_TRUE(jb2.value("provider", "") == "faux");
+  EXPECT_TRUE(jb2.value("model", "") == "faux");
 }
 
 // plans/session-runtime-migration.md Phase 7: removing durable_run_mutex
@@ -367,8 +362,8 @@ void test_run_concurrent_sessions_no_blocking(AcpFixture &fx) {
 
   std::optional<httplib::Result> slow_result;
   std::thread slow_thread([&] {
-    slow_result = slow_client.Post("/runs", slow_body.dump(),
-                                   "application/json");
+    slow_result =
+        slow_client.Post("/runs", slow_body.dump(), "application/json");
   });
 
   // Give the slow run a head start so it's genuinely in flight (past
@@ -391,23 +386,23 @@ void test_run_concurrent_sessions_no_blocking(AcpFixture &fx) {
 
   slow_thread.join();
 
-  CHECK(fast_result != nullptr);
+  EXPECT_TRUE(fast_result != nullptr);
   if (fast_result) {
-    CHECK(fast_result->status == 200);
+    EXPECT_TRUE(fast_result->status == 200);
     auto jf = nlohmann::json::parse(fast_result->body);
-    CHECK(jf.value("session_id", "") == "concurrent-fast");
-    CHECK(jf.value("status", "") == "completed");
+    EXPECT_TRUE(jf.value("session_id", "") == "concurrent-fast");
+    EXPECT_TRUE(jf.value("status", "") == "completed");
   }
   // The slow run's script alone takes ~900ms (three scripted events, 300ms
   // apart); the fast request must not have queued behind it.
-  CHECK(fast_elapsed < std::chrono::milliseconds(500));
+  EXPECT_TRUE(fast_elapsed < std::chrono::milliseconds(500));
 
-  CHECK(slow_result.has_value() && *slow_result != nullptr);
+  EXPECT_TRUE(slow_result.has_value() && *slow_result != nullptr);
   if (slow_result && *slow_result) {
-    CHECK((*slow_result)->status == 200);
+    EXPECT_TRUE((*slow_result)->status == 200);
     auto js = nlohmann::json::parse((*slow_result)->body);
-    CHECK(js.value("session_id", "") == "concurrent-slow");
-    CHECK(js.value("status", "") == "completed");
+    EXPECT_TRUE(js.value("session_id", "") == "concurrent-slow");
+    EXPECT_TRUE(js.value("status", "") == "completed");
   }
 }
 
@@ -434,8 +429,8 @@ void test_run_concurrent_same_session_conflict(AcpFixture &fx) {
 
   std::optional<httplib::Result> slow_result;
   std::thread slow_thread([&] {
-    slow_result = slow_client.Post("/runs", slow_body.dump(),
-                                   "application/json");
+    slow_result =
+        slow_client.Post("/runs", slow_body.dump(), "application/json");
   });
 
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -448,21 +443,21 @@ void test_run_concurrent_same_session_conflict(AcpFixture &fx) {
        {{{"role", "user"},
          {"parts",
           {{{"content_type", "text/plain"}, {"content", "conflict"}}}}}}}};
-  auto conflict_result = conflict_client.Post("/runs", conflict_body.dump(),
-                                              "application/json");
+  auto conflict_result =
+      conflict_client.Post("/runs", conflict_body.dump(), "application/json");
 
   slow_thread.join();
 
-  CHECK(conflict_result != nullptr);
+  EXPECT_TRUE(conflict_result != nullptr);
   if (conflict_result)
-    CHECK(conflict_result->status == 409);
+    EXPECT_TRUE(conflict_result->status == 409);
 
-  CHECK(slow_result.has_value() && *slow_result != nullptr);
+  EXPECT_TRUE(slow_result.has_value() && *slow_result != nullptr);
   if (slow_result && *slow_result) {
-    CHECK((*slow_result)->status == 200);
+    EXPECT_TRUE((*slow_result)->status == 200);
     auto js = nlohmann::json::parse((*slow_result)->body);
-    CHECK(js.value("session_id", "") == session_id);
-    CHECK(js.value("status", "") == "completed");
+    EXPECT_TRUE(js.value("session_id", "") == session_id);
+    EXPECT_TRUE(js.value("status", "") == "completed");
   }
 }
 
@@ -473,37 +468,37 @@ void test_agent_tasks(AcpFixture &fx) {
       {"prompt", "review the change"},
   };
   auto spawn = cli.Post("/tasks", body.dump(), "application/json");
-  CHECK(spawn != nullptr);
-  CHECK(spawn && spawn->status == 202);
+  EXPECT_TRUE(spawn != nullptr);
+  EXPECT_TRUE(spawn && spawn->status == 202);
   if (!spawn)
     return;
 
   auto task = nlohmann::json::parse(spawn->body);
   const auto task_id = task.value("id", std::string{});
-  CHECK(!task_id.empty());
-  CHECK(task.value("task_path", "") == "/root/review");
+  EXPECT_TRUE(!task_id.empty());
+  EXPECT_TRUE(task.value("task_path", "") == "/root/review");
 
   auto events = cli.Get("/tasks/events?timeout_ms=0");
-  CHECK(events != nullptr);
+  EXPECT_TRUE(events != nullptr);
   if (events) {
-    CHECK(events->status == 200);
+    EXPECT_TRUE(events->status == 200);
     const auto event_body = nlohmann::json::parse(events->body);
-    CHECK(event_body["events"].is_array());
+    EXPECT_TRUE(event_body["events"].is_array());
     bool saw_spawn = false;
     for (const auto &record : event_body["events"]) {
-      if (record.value("event", nlohmann::json::object())
-              .value("type", "") == "task.spawned" &&
+      if (record.value("event", nlohmann::json::object()).value("type", "") ==
+              "task.spawned" &&
           record["event"].value("task_id", "") == task_id)
         saw_spawn = true;
     }
-    CHECK(saw_spawn);
+    EXPECT_TRUE(saw_spawn);
   }
 
   auto wait_for_terminal = [&](std::uint64_t &generation) {
     nlohmann::json current;
     for (int attempt = 0; attempt < 20; ++attempt) {
       auto get = cli.Get("/tasks/" + task_id);
-      CHECK(get != nullptr);
+      EXPECT_TRUE(get != nullptr);
       if (!get)
         return current;
       current = nlohmann::json::parse(get->body);
@@ -513,15 +508,14 @@ void test_agent_tasks(AcpFixture &fx) {
           status == "interrupted")
         return current;
 
-      auto wait = cli.Post(
-          "/tasks/wait",
-          nlohmann::json{{"targets", {task_id}},
-                         {"after_generation", generation},
-                         {"timeout_ms", 1000}}
-              .dump(),
-          "application/json");
-      CHECK(wait != nullptr);
-      CHECK(wait && wait->status == 200);
+      auto wait = cli.Post("/tasks/wait",
+                           nlohmann::json{{"targets", {task_id}},
+                                          {"after_generation", generation},
+                                          {"timeout_ms", 1000}}
+                               .dump(),
+                           "application/json");
+      EXPECT_TRUE(wait != nullptr);
+      EXPECT_TRUE(wait && wait->status == 200);
       if (wait && wait->status == 200) {
         const auto changed = nlohmann::json::parse(wait->body)["changed"];
         if (changed.is_array() && !changed.empty())
@@ -534,67 +528,103 @@ void test_agent_tasks(AcpFixture &fx) {
   std::uint64_t generation = task.value("generation", 0ULL);
   auto completed = wait_for_terminal(generation);
   const auto first_status = completed.value("status", "");
-  CHECK(first_status == "completed" || first_status == "errored" ||
-        first_status == "interrupted");
-  CHECK(completed.contains("result"));
+  EXPECT_TRUE(first_status == "completed" || first_status == "errored" ||
+              first_status == "interrupted");
+  EXPECT_TRUE(completed.contains("result"));
 
-  auto follow = cli.Post(
-      "/tasks/" + task_id + "/follow-up",
-      nlohmann::json{{"message", "follow up"}}.dump(), "application/json");
-  CHECK(follow != nullptr);
-  CHECK(follow && follow->status == 202);
+  auto follow = cli.Post("/tasks/" + task_id + "/follow-up",
+                         nlohmann::json{{"message", "follow up"}}.dump(),
+                         "application/json");
+  EXPECT_TRUE(follow != nullptr);
+  EXPECT_TRUE(follow && follow->status == 202);
   auto followed = wait_for_terminal(generation);
-  CHECK(followed.value("status", "") == "completed" ||
-        followed.value("status", "") == "errored" ||
-        followed.value("status", "") == "interrupted");
+  EXPECT_TRUE(followed.value("status", "") == "completed" ||
+              followed.value("status", "") == "errored" ||
+              followed.value("status", "") == "interrupted");
 
   auto list = cli.Get("/tasks");
-  CHECK(list != nullptr);
-  CHECK(list && list->status == 200);
+  EXPECT_TRUE(list != nullptr);
+  EXPECT_TRUE(list && list->status == 200);
   if (list) {
     const auto values = nlohmann::json::parse(list->body);
-    CHECK(values.is_array());
+    EXPECT_TRUE(values.is_array());
     bool found = false;
     for (const auto &value : values)
       found = found || value.value("id", "") == task_id;
-    CHECK(found);
+    EXPECT_TRUE(found);
   }
 
-  auto close = cli.Post("/tasks/" + task_id + "/close", "{}", "application/json");
-  CHECK(close != nullptr);
-  CHECK(close && close->status == 200);
+  auto close =
+      cli.Post("/tasks/" + task_id + "/close", "{}", "application/json");
+  EXPECT_TRUE(close != nullptr);
+  EXPECT_TRUE(close && close->status == 200);
   auto gone = cli.Get("/tasks/" + task_id);
-  CHECK(gone != nullptr);
-  CHECK(gone && gone->status == 404);
+  EXPECT_TRUE(gone != nullptr);
+  EXPECT_TRUE(gone && gone->status == 404);
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
-
-int main() {
-  std::cout << "=== pi-cpp ACP server tests ===\n\n";
-
-  AcpFixture fx;
-  if (fx.port == 0) {
-    std::cerr << "Server failed to start\n";
-    return 1;
-  }
-
+TEST(Acp, Health) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
   test_health(fx);
-  test_agents_list(fx);
-  test_agent_manifest(fx);
-  test_agent_not_found(fx);
-  test_run_sync(fx);
-  test_run_streaming(fx);
-  test_run_session(fx);
-  test_run_session_isolation(fx);
-  test_run_concurrent_sessions_no_blocking(fx);
-  test_run_concurrent_same_session_conflict(fx);
-  test_agent_tasks(fx);
+}
 
-  std::cout << "\n========================================\n"
-            << "  Tests: " << tests::total  << " total, "
-            << tests::passed << " passed, "
-            << tests::failed << " failed\n"
-            << "========================================\n";
-  return tests::failed == 0 ? 0 : 1;
+TEST(Acp, AgentsList) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_agents_list(fx);
+}
+
+TEST(Acp, AgentManifest) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_agent_manifest(fx);
+}
+
+TEST(Acp, AgentNotFound) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_agent_not_found(fx);
+}
+
+TEST(Acp, RunSync) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_run_sync(fx);
+}
+
+TEST(Acp, RunStreaming) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_run_streaming(fx);
+}
+
+TEST(Acp, RunSession) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_run_session(fx);
+}
+
+TEST(Acp, RunSessionIsolation) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_run_session_isolation(fx);
+}
+
+TEST(Acp, RunConcurrentSessionsNoBlocking) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_run_concurrent_sessions_no_blocking(fx);
+}
+
+TEST(Acp, RunConcurrentSameSessionConflict) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_run_concurrent_same_session_conflict(fx);
+}
+
+TEST(Acp, AgentTasks) {
+  auto &fx = shared_acp_fixture();
+  ASSERT_GT(fx.port.load(), 0);
+  test_agent_tasks(fx);
 }

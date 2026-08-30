@@ -1,5 +1,7 @@
 #include "cli/mailbox_runtime.h"
 
+#include <gtest/gtest.h>
+
 #include "cli/config.h"
 #include "core/agent.h"
 #include "core/agent_state.h"
@@ -26,27 +28,6 @@
 
 #include <unistd.h>
 
-namespace tests {
-int passed{0};
-int failed{0};
-
-bool check(bool condition, std::string_view expression,
-           std::source_location location = std::source_location::current()) {
-  if (condition) {
-    ++passed;
-    return true;
-  }
-  ++failed;
-  std::cout << "FAIL " << location.file_name() << ":" << location.line()
-            << " — " << expression << "\n";
-  return false;
-}
-} // namespace tests
-
-#define CHECK(expression) tests::check((expression), #expression)
-#define CHECK_EQ(left, right)                                                  \
-  tests::check((left) == (right), #left " == " #right)
-
 namespace {
 
 using namespace pi;
@@ -63,8 +44,8 @@ public:
 
   std::shared_ptr<core::AssistantMessage>
   stream(const core::Model &model, const core::AgentContext &,
-        const core::StreamOptions &, core::AssistantEventCallback,
-        std::stop_token stop_tok) override {
+         const core::StreamOptions &, core::AssistantEventCallback,
+         std::stop_token stop_tok) override {
     entered_->store(true);
     while (!release_->load() && !stop_tok.stop_requested())
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -120,15 +101,15 @@ core::AgentTaskSnapshot wait_for_task_status(core::AgentTaskManager &manager,
 // than the Observer — so closed_at_ms alone would not distinguish correct
 // from incorrect teardown order. The intermediate "completed" status update
 // is Observer-exclusive, which is what this test checks.
-void test_teardown_order() {
+TEST(MailboxRuntime, TeardownOrder) {
   const auto suffix =
       std::chrono::steady_clock::now().time_since_epoch().count();
 
   auto make_coordinator = [&](std::string_view label) {
-    const auto root = std::filesystem::temp_directory_path() /
-                      ("pici-mailbox-runtime-teardown-" + std::string(label) +
-                       "-" + std::to_string(::getpid()) + "-" +
-                       std::to_string(suffix));
+    const auto root =
+        std::filesystem::temp_directory_path() /
+        ("pici-mailbox-runtime-teardown-" + std::string(label) + "-" +
+         std::to_string(::getpid()) + "-" + std::to_string(suffix));
     std::filesystem::create_directories(root);
     std::filesystem::permissions(root, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace);
@@ -177,36 +158,37 @@ void test_teardown_order() {
         mailbox_runtime.task_event_callback());
     mailbox_runtime.connect(root, tasks, [] {});
 
-    const auto child =
-        tasks->spawn({.task_name = "child-a", .prompt = "go"});
+    const auto child = tasks->spawn({.task_name = "child-a", .prompt = "go"});
     const auto entered_deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!entered->load() &&
-          std::chrono::steady_clock::now() < entered_deadline)
+           std::chrono::steady_clock::now() < entered_deadline)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    CHECK(entered->load());
+    EXPECT_TRUE(entered->load());
 
     release->store(true);
     const auto completed = wait_for_task_status(
         *tasks, child.id, core::AgentTaskStatusKind::completed);
-    CHECK(completed.status == core::AgentTaskStatusKind::completed);
+    EXPECT_TRUE(completed.status == core::AgentTaskStatusKind::completed);
 
     // Query the mailbox store before shutdown/close: the child's terminal
     // close would independently set status="closed" and mask what we're
     // testing, so this snapshot must happen while the task is merely
     // "completed" but still resident.
-    const auto children = coordinator->store().list_agents(core::AgentQuery{
-        .session_id = "session-a", .include_stale = true, .include_closed = true});
+    const auto children = coordinator->store().list_agents(
+        core::AgentQuery{.session_id = "session-a",
+                         .include_stale = true,
+                         .include_closed = true});
     const auto record = std::ranges::find_if(
         children, [&](const auto &agent) { return agent.task_id == child.id; });
-    CHECK(record != children.end());
+    EXPECT_TRUE(record != children.end());
     if (record != children.end())
       status_when_connected = record->status;
 
     tasks->shutdown();
     mailbox_runtime.shutdown();
   }
-  CHECK_EQ(status_when_connected, std::string("completed"));
+  EXPECT_EQ(status_when_connected, std::string("completed"));
 
   // Scenario B: wrong order — mailbox_runtime is torn down (its Observer
   // detached) *before* the child task transitions to "completed", the way
@@ -230,14 +212,13 @@ void test_teardown_order() {
         mailbox_runtime.task_event_callback());
     mailbox_runtime.connect(root, tasks, [] {});
 
-    const auto child =
-        tasks->spawn({.task_name = "child-b", .prompt = "go"});
+    const auto child = tasks->spawn({.task_name = "child-b", .prompt = "go"});
     const auto entered_deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!entered->load() &&
-          std::chrono::steady_clock::now() < entered_deadline)
+           std::chrono::steady_clock::now() < entered_deadline)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    CHECK(entered->load());
+    EXPECT_TRUE(entered->load());
 
     // Detach the observer (and stop the coordinator's root/maintenance
     // machinery) *before* releasing the blocked turn — the reordering bug
@@ -248,13 +229,15 @@ void test_teardown_order() {
     release->store(true);
     const auto completed = wait_for_task_status(
         *tasks, child.id, core::AgentTaskStatusKind::completed);
-    CHECK(completed.status == core::AgentTaskStatusKind::completed);
+    EXPECT_TRUE(completed.status == core::AgentTaskStatusKind::completed);
 
-    const auto children = coordinator->store().list_agents(core::AgentQuery{
-        .session_id = "session-b", .include_stale = true, .include_closed = true});
+    const auto children = coordinator->store().list_agents(
+        core::AgentQuery{.session_id = "session-b",
+                         .include_stale = true,
+                         .include_closed = true});
     const auto record = std::ranges::find_if(
         children, [&](const auto &agent) { return agent.task_id == child.id; });
-    CHECK(record != children.end());
+    EXPECT_TRUE(record != children.end());
     if (record != children.end())
       status_when_disconnected = record->status;
 
@@ -264,12 +247,12 @@ void test_teardown_order() {
   // state), but the mailbox record never heard about it: the wrong teardown
   // order silently drops durable observability, exactly the failure mode
   // the declared-order comment in cli/mailbox_runtime.h exists to prevent.
-  CHECK(status_when_disconnected != "completed");
+  EXPECT_TRUE(status_when_disconnected != "completed");
 }
 
 } // namespace
 
-int main() {
+TEST(MailboxRuntime, LaunchAndDisabledRuntime) {
   using namespace pi;
 
   const auto workspace =
@@ -292,31 +275,26 @@ int main() {
 
   const auto launch =
       cli::resolve_mailbox_launch_options(args, model, workspace);
-  CHECK_EQ(launch.resolved_path, std::filesystem::path("/cli/mailbox.sqlite3"));
-  CHECK_EQ(launch.coordinator.store.path, launch.resolved_path);
-  CHECK_EQ(launch.coordinator.store.workspace_path,
-           workspace.lexically_normal().string());
-  CHECK(launch.coordinator.store.scope == core::MailboxScope::global);
-  CHECK_EQ(launch.coordinator.store.claim_lease_ms, std::int64_t{4321});
-  CHECK_EQ(launch.coordinator.store.retention_days, std::int64_t{12});
-  CHECK_EQ(launch.coordinator.heartbeat_interval,
-           std::chrono::milliseconds(1234));
-  CHECK_EQ(launch.coordinator.stale_after, std::chrono::milliseconds(5678));
-  CHECK_EQ(launch.coordinator.poll_interval, std::chrono::milliseconds(90));
-  CHECK_EQ(launch.coordinator.provider, std::string("provider-a"));
-  CHECK_EQ(launch.coordinator.model_id, std::string("model-a"));
-  CHECK(!launch.coordinator.process_id.empty());
-  CHECK(!launch.coordinator.root_agent_id.empty());
-  CHECK(!launch.coordinator.store.workspace_id.empty());
+  EXPECT_EQ(launch.resolved_path,
+            std::filesystem::path("/cli/mailbox.sqlite3"));
+  EXPECT_EQ(launch.coordinator.store.path, launch.resolved_path);
+  EXPECT_EQ(launch.coordinator.store.workspace_path,
+            workspace.lexically_normal().string());
+  EXPECT_TRUE(launch.coordinator.store.scope == core::MailboxScope::global);
+  EXPECT_EQ(launch.coordinator.store.claim_lease_ms, std::int64_t{4321});
+  EXPECT_EQ(launch.coordinator.store.retention_days, std::int64_t{12});
+  EXPECT_EQ(launch.coordinator.heartbeat_interval,
+            std::chrono::milliseconds(1234));
+  EXPECT_EQ(launch.coordinator.stale_after, std::chrono::milliseconds(5678));
+  EXPECT_EQ(launch.coordinator.poll_interval, std::chrono::milliseconds(90));
+  EXPECT_EQ(launch.coordinator.provider, std::string("provider-a"));
+  EXPECT_EQ(launch.coordinator.model_id, std::string("model-a"));
+  EXPECT_TRUE(!launch.coordinator.process_id.empty());
+  EXPECT_TRUE(!launch.coordinator.root_agent_id.empty());
+  EXPECT_TRUE(!launch.coordinator.store.workspace_id.empty());
 
   core::MailboxRuntime disabled;
-  CHECK(!disabled.enabled());
-  CHECK(!disabled.task_event_callback());
-  CHECK(disabled.claim_idle_root_turn().empty());
-
-  test_teardown_order();
-
-  std::cout << "passed: " << tests::passed << ", failed: " << tests::failed
-            << "\n";
-  return tests::failed == 0 ? 0 : 1;
+  EXPECT_TRUE(!disabled.enabled());
+  EXPECT_TRUE(!disabled.task_event_callback());
+  EXPECT_TRUE(disabled.claim_idle_root_turn().empty());
 }

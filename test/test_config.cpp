@@ -1,5 +1,7 @@
 #include "cli/args.h"
+
 #include "cli/config.h"
+#include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -10,24 +12,6 @@
 #include <source_location>
 #include <string_view>
 #include <vector>
-
-namespace tests {
-int passed{0}, failed{0}, total{0};
-bool check(bool cond, std::string_view expr,
-           std::source_location loc = std::source_location::current()) {
-  ++total;
-  if (cond) {
-    ++passed;
-    return true;
-  }
-  ++failed;
-  std::cout << "  FAIL " << loc.file_name() << ":" << loc.line() << " — "
-            << expr << "\n";
-  return false;
-}
-} // namespace tests
-#define CHECK(e) tests::check(!!(e), #e)
-#define CHECK_EQ(a, b) tests::check((a) == (b), #a " == " #b)
 
 using namespace pi::cli;
 
@@ -52,17 +36,16 @@ static bool has_diagnostic(const Config &config, std::string_view needle) {
   });
 }
 
-int main() {
-  std::cout << "=== pi-cpp config tests ===\n\n";
+TEST(Config, ParsingAndMerging) {
 
   // default_config_path doesn't throw
-  CHECK(!default_config_path().empty());
+  EXPECT_TRUE(!default_config_path().empty());
 
   // Missing file returns empty Args (not an error)
   {
     auto cfg = load_config("/tmp/pici-nonexistent-config.toml");
-    CHECK(cfg.model.empty());
-    CHECK(cfg.provider.empty());
+    EXPECT_TRUE(cfg.model.empty());
+    EXPECT_TRUE(cfg.provider.empty());
   }
 
   // Full config round-trip
@@ -111,29 +94,29 @@ claim_lease_ms = 31000
 retention_days = 45
 )toml");
     auto cfg = load_config(p);
-    CHECK_EQ(cfg.model, std::string("gpt-4o"));
-    CHECK_EQ(cfg.provider, std::string("openai"));
-    CHECK_EQ(cfg.base_url, std::string("https://api.openai.com/v1"));
-    CHECK_EQ(cfg.system_prompt, std::string("You are helpful."));
-    CHECK(cfg.thinking == ThinkingLevel::medium);
-    CHECK_EQ(cfg.tools_dir, std::string("/tmp/tools"));
-    CHECK(!cfg.no_tools);
-    CHECK_EQ(cfg.tools.size(), std::size_t(2));
-    CHECK_EQ(cfg.hooks_files.size(), std::size_t(2));
-    CHECK_EQ(cfg.hooks_dir, std::string("/tmp/addons"));
-    CHECK_EQ(cfg.render, std::string("markdown"));
-    CHECK(cfg.verbose);
-    CHECK(cfg.no_context_files);
-    CHECK(!cfg.no_skills); // [skills] absent in this fixture
-    CHECK_EQ(cfg.sandbox_mode, std::string("disabled"));
-    CHECK_EQ(cfg.agent_write_tools, std::string("core"));
-    CHECK(cfg.mailbox_enabled);
-    CHECK_EQ(cfg.mailbox_path, std::string("~/custom-mailbox.sqlite3"));
+    EXPECT_EQ(cfg.model, std::string("gpt-4o"));
+    EXPECT_EQ(cfg.provider, std::string("openai"));
+    EXPECT_EQ(cfg.base_url, std::string("https://api.openai.com/v1"));
+    EXPECT_EQ(cfg.system_prompt, std::string("You are helpful."));
+    EXPECT_TRUE(cfg.thinking == ThinkingLevel::medium);
+    EXPECT_EQ(cfg.tools_dir, std::string("/tmp/tools"));
+    EXPECT_TRUE(!cfg.no_tools);
+    EXPECT_EQ(cfg.tools.size(), std::size_t(2));
+    EXPECT_EQ(cfg.hooks_files.size(), std::size_t(2));
+    EXPECT_EQ(cfg.hooks_dir, std::string("/tmp/addons"));
+    EXPECT_EQ(cfg.render, std::string("markdown"));
+    EXPECT_TRUE(cfg.verbose);
+    EXPECT_TRUE(cfg.no_context_files);
+    EXPECT_TRUE(!cfg.no_skills); // [skills] absent in this fixture
+    EXPECT_EQ(cfg.sandbox_mode, std::string("disabled"));
+    EXPECT_EQ(cfg.agent_write_tools, std::string("core"));
+    EXPECT_TRUE(cfg.mailbox_enabled);
+    EXPECT_EQ(cfg.mailbox_path, std::string("~/custom-mailbox.sqlite3"));
     auto document = load_config_document(p);
-    CHECK(document.mailbox.enabled);
-    CHECK_EQ(document.mailbox.scope, std::string("global"));
-    CHECK_EQ(document.mailbox.heartbeat_interval_ms, std::int64_t{3000});
-    CHECK_EQ(document.mailbox.retention_days, std::int64_t{45});
+    EXPECT_TRUE(document.mailbox.enabled);
+    EXPECT_EQ(document.mailbox.scope, std::string("global"));
+    EXPECT_EQ(document.mailbox.heartbeat_interval_ms, std::int64_t{3000});
+    EXPECT_EQ(document.mailbox.retention_days, std::int64_t{45});
   }
 
   // Provider and custom-model definitions remain separate from Args defaults.
@@ -173,29 +156,29 @@ max_tokens = 32768
 context_window = 200000
 )toml");
     auto config = load_config_document(p);
-    CHECK(!config.has_errors());
-    CHECK_EQ(config.defaults.model, std::string("gpt-4.1"));
-    CHECK_EQ(config.providers.size(), std::size_t(2));
+    EXPECT_TRUE(!config.has_errors());
+    EXPECT_EQ(config.defaults.model, std::string("gpt-4.1"));
+    EXPECT_EQ(config.providers.size(), std::size_t(2));
 
     const auto &local = config.providers.at("local");
-    CHECK_EQ(local.api.value(), std::string("openai-completions"));
-    CHECK_EQ(local.base_url.value(), std::string("http://127.0.0.1:8080/v1"));
-    CHECK_EQ(local.api_key.env_var.value(), std::string("PICI_LOCAL_KEY"));
-    CHECK_EQ(local.headers.at("X-Tenant"), std::string("engineering"));
-    CHECK_EQ(local.models.size(), std::size_t(2));
-    CHECK_EQ(local.models[0].input_capabilities->size(), std::size_t(2));
-    CHECK_EQ(local.models[0].input_capabilities->at(1), std::string("image"));
-    CHECK_EQ(local.models[0].headers.at("X-Model-Route"),
-             std::string("vision"));
-    CHECK_EQ(local.models[0].cost.output_per_mtok.value(), 1.25);
-    CHECK_EQ(local.models[1].id, std::string("accounts/company/models/coder"));
-    CHECK_EQ(local.model_overrides.at("accounts/company/models/coder")
-                 .max_tokens.value(),
-             std::uint64_t(32768));
-    CHECK_EQ(config.providers.at("openai")
-                 .model_overrides.at("gpt-4.1")
-                 .context_window.value(),
-             std::uint64_t(200000));
+    EXPECT_EQ(local.api.value(), std::string("openai-completions"));
+    EXPECT_EQ(local.base_url.value(), std::string("http://127.0.0.1:8080/v1"));
+    EXPECT_EQ(local.api_key.env_var.value(), std::string("PICI_LOCAL_KEY"));
+    EXPECT_EQ(local.headers.at("X-Tenant"), std::string("engineering"));
+    EXPECT_EQ(local.models.size(), std::size_t(2));
+    EXPECT_EQ(local.models[0].input_capabilities->size(), std::size_t(2));
+    EXPECT_EQ(local.models[0].input_capabilities->at(1), std::string("image"));
+    EXPECT_EQ(local.models[0].headers.at("X-Model-Route"),
+              std::string("vision"));
+    EXPECT_EQ(local.models[0].cost.output_per_mtok.value(), 1.25);
+    EXPECT_EQ(local.models[1].id, std::string("accounts/company/models/coder"));
+    EXPECT_EQ(local.model_overrides.at("accounts/company/models/coder")
+                  .max_tokens.value(),
+              std::uint64_t(32768));
+    EXPECT_EQ(config.providers.at("openai")
+                  .model_overrides.at("gpt-4.1")
+                  .context_window.value(),
+              std::uint64_t(200000));
   }
 
   // Recognized provider/model schema errors carry their TOML paths.
@@ -220,17 +203,18 @@ input_capabilities = ["text", "audio", "text"]
 id = "duplicate"
 )toml");
     auto config = load_config_document(p);
-    CHECK(config.has_errors());
-    CHECK(has_diagnostic(config, "providers.bad.auth"));
-    CHECK(has_diagnostic(config, "providers.bad.api_key"));
-    CHECK(has_diagnostic(config, "providers.bad.headers.Authorization"));
-    CHECK(has_diagnostic(config, "providers.bad.headers.X-Number"));
-    CHECK(has_diagnostic(config, "providers.bad.models[0].context_window"));
-    CHECK(has_diagnostic(config,
-                         "providers.bad.models[0].input_capabilities[1]"));
-    CHECK(has_diagnostic(
+    EXPECT_TRUE(config.has_errors());
+    EXPECT_TRUE(has_diagnostic(config, "providers.bad.auth"));
+    EXPECT_TRUE(has_diagnostic(config, "providers.bad.api_key"));
+    EXPECT_TRUE(has_diagnostic(config, "providers.bad.headers.Authorization"));
+    EXPECT_TRUE(has_diagnostic(config, "providers.bad.headers.X-Number"));
+    EXPECT_TRUE(
+        has_diagnostic(config, "providers.bad.models[0].context_window"));
+    EXPECT_TRUE(has_diagnostic(
+        config, "providers.bad.models[0].input_capabilities[1]"));
+    EXPECT_TRUE(has_diagnostic(
         config, "providers.bad.models[0].thinking_level_map.unsupported"));
-    CHECK(has_diagnostic(config, "duplicate model id"));
+    EXPECT_TRUE(has_diagnostic(config, "duplicate model id"));
   }
 
   // OAuth-only built-in providers cannot be given a plaintext or env key.
@@ -243,7 +227,7 @@ auth = "oauth"
 api_key_env = "PICI_CODEX_KEY"
 )toml");
     auto config = load_config_document(p);
-    CHECK(has_diagnostic(config, "providers.openai-codex"));
+    EXPECT_TRUE(has_diagnostic(config, "providers.openai-codex"));
   }
 
   // merge: CLI string wins over config
@@ -255,8 +239,8 @@ api_key_env = "PICI_CODEX_KEY"
     cli.model = "gpt-4o-mini";
     cli.provider = "";
     auto out = merge_args(conf, cli);
-    CHECK_EQ(out.model, std::string("gpt-4o-mini")); // CLI wins
-    CHECK_EQ(out.provider, std::string("openai"));   // config wins (CLI empty)
+    EXPECT_EQ(out.model, std::string("gpt-4o-mini")); // CLI wins
+    EXPECT_EQ(out.provider, std::string("openai"));   // config wins (CLI empty)
   }
 
   // sandbox mode merges like other scalar configuration values
@@ -266,7 +250,7 @@ api_key_env = "PICI_CODEX_KEY"
     Args cli;
     cli.sandbox_mode = "disabled";
     auto out = merge_args(conf, cli);
-    CHECK_EQ(out.sandbox_mode, std::string("disabled"));
+    EXPECT_EQ(out.sandbox_mode, std::string("disabled"));
   }
 
   // stream trace is a CLI-only diagnostic path
@@ -274,7 +258,7 @@ api_key_env = "PICI_CODEX_KEY"
     Args cli;
     cli.stream_trace = "/tmp/pici-stream.jsonl";
     auto out = merge_args({}, cli);
-    CHECK_EQ(out.stream_trace, std::string("/tmp/pici-stream.jsonl"));
+    EXPECT_EQ(out.stream_trace, std::string("/tmp/pici-stream.jsonl"));
   }
 
   // merge: booleans are OR'd
@@ -286,8 +270,8 @@ api_key_env = "PICI_CODEX_KEY"
     cli.no_tools = false;
     cli.verbose = true;
     auto out = merge_args(conf, cli);
-    CHECK(out.no_tools); // conf true OR cli false → true
-    CHECK(out.verbose);  // conf false OR cli true → true
+    EXPECT_TRUE(out.no_tools); // conf true OR cli false → true
+    EXPECT_TRUE(out.verbose);  // conf false OR cli true → true
   }
 
   // merge: hooks_files accumulate (config first then CLI)
@@ -297,9 +281,9 @@ api_key_env = "PICI_CODEX_KEY"
     Args cli;
     cli.hooks_files = {"/cli/hook.lua"};
     auto out = merge_args(conf, cli);
-    CHECK_EQ(out.hooks_files.size(), std::size_t(2));
-    CHECK_EQ(out.hooks_files[0], std::string("/conf/hook.lua"));
-    CHECK_EQ(out.hooks_files[1], std::string("/cli/hook.lua"));
+    EXPECT_EQ(out.hooks_files.size(), std::size_t(2));
+    EXPECT_EQ(out.hooks_files[0], std::string("/conf/hook.lua"));
+    EXPECT_EQ(out.hooks_files[1], std::string("/cli/hook.lua"));
   }
 
   // merge: CLI tools vector wins over config
@@ -309,8 +293,8 @@ api_key_env = "PICI_CODEX_KEY"
     Args cli;
     cli.tools = {"grep"};
     auto out = merge_args(conf, cli);
-    CHECK_EQ(out.tools.size(), std::size_t(1));
-    CHECK_EQ(out.tools[0], std::string("grep")); // CLI wins
+    EXPECT_EQ(out.tools.size(), std::size_t(1));
+    EXPECT_EQ(out.tools[0], std::string("grep")); // CLI wins
   }
 
   // Mailbox path precedence is CLI, then environment, then TOML.
@@ -327,9 +311,9 @@ path = "/toml/mailbox.sqlite3"
       argv.push_back(value.data());
     auto environment =
         load_and_merge(static_cast<int>(argv.size()), argv.data());
-    CHECK_EQ(environment.config_path, p.string());
-    CHECK_EQ(environment.mailbox_path, std::string("/env/mailbox.sqlite3"));
-    CHECK(environment.mailbox_enabled);
+    EXPECT_EQ(environment.config_path, p.string());
+    EXPECT_EQ(environment.mailbox_path, std::string("/env/mailbox.sqlite3"));
+    EXPECT_TRUE(environment.mailbox_enabled);
     values.push_back("--mailbox");
     values.push_back("/cli/mailbox.sqlite3");
     argv.clear();
@@ -337,14 +321,14 @@ path = "/toml/mailbox.sqlite3"
       argv.push_back(value.data());
     auto command_line =
         load_and_merge(static_cast<int>(argv.size()), argv.data());
-    CHECK_EQ(command_line.mailbox_path, std::string("/cli/mailbox.sqlite3"));
-    CHECK(command_line.mailbox_enabled);
+    EXPECT_EQ(command_line.mailbox_path, std::string("/cli/mailbox.sqlite3"));
+    EXPECT_TRUE(command_line.mailbox_enabled);
     values = {"pi", "--no-mailbox"};
     argv.clear();
     for (auto &value : values)
       argv.push_back(value.data());
     auto disabled = load_and_merge(static_cast<int>(argv.size()), argv.data());
-    CHECK(!disabled.mailbox_enabled);
+    EXPECT_TRUE(!disabled.mailbox_enabled);
     unsetenv("PICI_MAILBOX");
   }
 
@@ -357,62 +341,62 @@ path = "/toml/mailbox.sqlite3"
     } catch (const std::exception &) {
       threw = true;
     }
-    CHECK(threw);
+    EXPECT_TRUE(threw);
   }
 
   // faux-control selects a Unix socket without consuming unrelated arguments
   {
     auto args =
         parse({"pi", "--faux-control", "/tmp/faux.sock", "--render", "region"});
-    CHECK_EQ(args.faux_control_socket, std::string("/tmp/faux.sock"));
-    CHECK_EQ(args.render, std::string("region"));
-    CHECK(args.diagnostics.empty());
+    EXPECT_EQ(args.faux_control_socket, std::string("/tmp/faux.sock"));
+    EXPECT_EQ(args.render, std::string("region"));
+    EXPECT_TRUE(args.diagnostics.empty());
     std::vector<std::string> values{"pi", "--faux-control", "/tmp/merged.sock"};
     std::vector<char *> argv;
     for (auto &value : values)
       argv.push_back(value.data());
     auto merged = load_and_merge(static_cast<int>(argv.size()), argv.data());
-    CHECK_EQ(merged.faux_control_socket, std::string("/tmp/merged.sock"));
+    EXPECT_EQ(merged.faux_control_socket, std::string("/tmp/merged.sock"));
   }
 
   // auth commands have an explicit, CLI-only grammar
   {
     auto args = parse({"pi", "--config", "/tmp/config.toml", "auth", "login",
                        "openai-codex", "--device", "--verbose"});
-    CHECK(args.auth_action == AuthAction::login);
-    CHECK_EQ(args.auth_provider, std::string("openai-codex"));
-    CHECK(args.auth_device);
-    CHECK(args.verbose);
-    CHECK(args.diagnostics.empty());
+    EXPECT_TRUE(args.auth_action == AuthAction::login);
+    EXPECT_EQ(args.auth_provider, std::string("openai-codex"));
+    EXPECT_TRUE(args.auth_device);
+    EXPECT_TRUE(args.verbose);
+    EXPECT_TRUE(args.diagnostics.empty());
 
     auto invalid =
         parse({"pi", "auth", "login", "openai-codex", "--model", "gpt-5.5"});
-    CHECK(!invalid.diagnostics.empty());
-    CHECK(invalid.diagnostics.front().is_error);
+    EXPECT_TRUE(!invalid.diagnostics.empty());
+    EXPECT_TRUE(invalid.diagnostics.front().is_error);
   }
 
   // --compaction-threshold parses a valid fraction
   {
     auto args =
         parse({"pi", "--remote-compaction", "--compaction-threshold", "0.7"});
-    CHECK(args.remote_compaction_enabled);
-    CHECK(args.compaction_threshold_pct > 0.699);
-    CHECK(args.compaction_threshold_pct < 0.701);
-    CHECK(args.diagnostics.empty());
+    EXPECT_TRUE(args.remote_compaction_enabled);
+    EXPECT_TRUE(args.compaction_threshold_pct > 0.699);
+    EXPECT_TRUE(args.compaction_threshold_pct < 0.701);
+    EXPECT_TRUE(args.diagnostics.empty());
   }
 
   // --compaction-threshold rejects an out-of-range fraction
   {
     auto args = parse({"pi", "--compaction-threshold", "1.5"});
-    CHECK(!args.diagnostics.empty());
-    CHECK(args.diagnostics.front().is_error);
+    EXPECT_TRUE(!args.diagnostics.empty());
+    EXPECT_TRUE(args.diagnostics.front().is_error);
   }
 
   // --compaction-threshold rejects garbage
   {
     auto args = parse({"pi", "--compaction-threshold", "not-a-number"});
-    CHECK(!args.diagnostics.empty());
-    CHECK(args.diagnostics.front().is_error);
+    EXPECT_TRUE(!args.diagnostics.empty());
+    EXPECT_TRUE(args.diagnostics.front().is_error);
   }
 
   // [compaction] threshold_pct loads from TOML
@@ -423,9 +407,9 @@ remote_enabled = true
 threshold_pct = 0.65
 )toml");
     auto cfg = load_config(p);
-    CHECK(cfg.remote_compaction_enabled);
-    CHECK(cfg.compaction_threshold_pct > 0.649);
-    CHECK(cfg.compaction_threshold_pct < 0.651);
+    EXPECT_TRUE(cfg.remote_compaction_enabled);
+    EXPECT_TRUE(cfg.compaction_threshold_pct > 0.649);
+    EXPECT_TRUE(cfg.compaction_threshold_pct < 0.651);
   }
 
   // [skills] disabled loads from TOML and merges with the CLI flag
@@ -435,12 +419,12 @@ threshold_pct = 0.65
 disabled = true
 )toml");
     auto cfg = load_config(p);
-    CHECK(cfg.no_skills);
+    EXPECT_TRUE(cfg.no_skills);
 
     auto merged = merge_args(cfg, parse({"pi"}));
-    CHECK(merged.no_skills);
+    EXPECT_TRUE(merged.no_skills);
     auto cli_wins = merge_args(cfg, parse({"pi"}));
-    CHECK(cli_wins.no_skills);
+    EXPECT_TRUE(cli_wins.no_skills);
   }
 
   // an out-of-range TOML threshold_pct is ignored (falls back to the
@@ -451,7 +435,7 @@ disabled = true
 threshold_pct = 1.5
 )toml");
     auto cfg = load_config(p);
-    CHECK_EQ(cfg.compaction_threshold_pct, 0.0);
+    EXPECT_EQ(cfg.compaction_threshold_pct, 0.0);
   }
 
   // merge: CLI threshold wins over config
@@ -461,8 +445,8 @@ threshold_pct = 1.5
     Args cli;
     cli.compaction_threshold_pct = 0.9;
     auto out = merge_args(conf, cli);
-    CHECK(out.compaction_threshold_pct > 0.899);
-    CHECK(out.compaction_threshold_pct < 0.901);
+    EXPECT_TRUE(out.compaction_threshold_pct > 0.899);
+    EXPECT_TRUE(out.compaction_threshold_pct < 0.901);
   }
 
   // merge: config threshold survives when CLI leaves it unset
@@ -471,13 +455,7 @@ threshold_pct = 1.5
     conf.compaction_threshold_pct = 0.6;
     Args cli;
     auto out = merge_args(conf, cli);
-    CHECK(out.compaction_threshold_pct > 0.599);
-    CHECK(out.compaction_threshold_pct < 0.601);
+    EXPECT_TRUE(out.compaction_threshold_pct > 0.599);
+    EXPECT_TRUE(out.compaction_threshold_pct < 0.601);
   }
-
-  std::cout << "\n========================================\n"
-            << "  Tests: " << tests::total << " total, " << tests::passed
-            << " passed, " << tests::failed << " failed\n"
-            << "========================================\n";
-  return tests::failed == 0 ? 0 : 1;
 }

@@ -12,57 +12,9 @@
 #include <variant>
 
 #include "core/builtin_tools.h"
+#include <gtest/gtest.h>
 
 using namespace pi::core;
-
-namespace tests {
-
-int passed{0};
-int failed{0};
-int total{0};
-int current_failed{0};
-
-bool CHECK_impl(bool cond, bool expected, std::string_view expr,
-                std::source_location loc = std::source_location::current()) {
-  if (cond != expected) {
-    current_failed++;
-    std::cerr << "  FAIL " << loc.file_name() << ":" << loc.line() << " - "
-              << expr << " (expected " << expected << ", got " << cond
-              << ")\n";
-    return false;
-  }
-  return true;
-}
-
-#define CHECK(cond)                                                            \
-  (::tests::CHECK_impl(static_cast<bool>(cond), true, #cond,                  \
-                       std::source_location::current()))
-
-#define CHECK_EQ(a, b)                                                         \
-  (::tests::CHECK_impl((a) == (b), true, #a " == " #b,                        \
-                       std::source_location::current()))
-
-void register_test(std::string name, std::function<void()> fn) {
-  total++;
-  current_failed = 0;
-  fn();
-  if (current_failed == 0) {
-    passed++;
-    std::cout << "  PASS " << name << "\n";
-  } else {
-    failed++;
-    std::cout << "  FAIL " << name << "\n";
-  }
-}
-
-void print_summary() {
-  std::cout << "\n========================================\n";
-  std::cout << "  Tests: " << total << " total, " << passed << " passed, "
-            << failed << " failed\n";
-  std::cout << "========================================\n";
-}
-
-} // namespace tests
 
 static std::shared_ptr<const ToolDefinition>
 find_tool(const std::vector<std::shared_ptr<const ToolDefinition>> &tools,
@@ -79,490 +31,467 @@ static SandboxPolicyPtr disabled_sandbox() {
   return std::make_shared<SandboxPolicy>(SandboxMode::disabled);
 }
 
-void test_tool_factories() {
-  tests::register_test("Builtin tools: factory names", []() {
-    const auto tools =
-        create_all_tools(std::filesystem::temp_directory_path(),
-                         disabled_sandbox());
-    CHECK_EQ(tools.size(), std::size_t(8));
-    CHECK(find_tool(tools, "read"));
-    CHECK(find_tool(tools, "bash"));
-    CHECK(find_tool(tools, "edit"));
-    CHECK(find_tool(tools, "write"));
-    CHECK(find_tool(tools, "grep"));
-    CHECK(find_tool(tools, "find"));
-    CHECK(find_tool(tools, "ls"));
-  });
+TEST(BuiltinTools, Builtin_tools_factory_names) {
+  const auto tools = create_all_tools(std::filesystem::temp_directory_path(),
+                                      disabled_sandbox());
+  EXPECT_EQ(tools.size(), std::size_t(8));
+  EXPECT_TRUE(find_tool(tools, "read"));
+  EXPECT_TRUE(find_tool(tools, "bash"));
+  EXPECT_TRUE(find_tool(tools, "edit"));
+  EXPECT_TRUE(find_tool(tools, "write"));
+  EXPECT_TRUE(find_tool(tools, "grep"));
+  EXPECT_TRUE(find_tool(tools, "find"));
+  EXPECT_TRUE(find_tool(tools, "ls"));
 }
 
-void test_file_tools() {
-  tests::register_test("Builtin tools: read write edit", []() {
-    const auto root = std::filesystem::temp_directory_path() /
-                      "pici-builtin-tools-file-test";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root);
+TEST(BuiltinTools, Builtin_tools_read_write_edit) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-builtin-tools-file-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
 
-    auto write = find_tool(tools, "write");
-    auto read = find_tool(tools, "read");
-    auto edit = find_tool(tools, "edit");
+  auto write = find_tool(tools, "write");
+  auto read = find_tool(tools, "read");
+  auto edit = find_tool(tools, "edit");
 
-    auto write_result =
-        write->execute("1", R"({"path":"notes/a.txt","content":"hello\nworld"})");
-    CHECK(!write_result->is_error());
+  auto write_result =
+      write->execute("1", R"({"path":"notes/a.txt","content":"hello\nworld"})");
+  EXPECT_TRUE(!write_result->is_error());
 
-    auto read_result = read->execute("2", R"({"path":"notes/a.txt","limit":1})");
-    CHECK(!read_result->is_error());
-    CHECK(read_result->content().find("hello") != std::string::npos);
-    CHECK(read_result->content().find("Use offset=2") != std::string::npos);
+  auto read_result = read->execute("2", R"({"path":"notes/a.txt","limit":1})");
+  EXPECT_TRUE(!read_result->is_error());
+  EXPECT_TRUE(read_result->content().find("hello") != std::string::npos);
+  EXPECT_TRUE(read_result->content().find("Use offset=2") != std::string::npos);
 
-    auto edit_result = edit->execute(
-        "3",
-        R"({"path":"notes/a.txt","edits":[{"oldText":"world","newText":"there"}]})");
-    CHECK(!edit_result->is_error());
+  auto edit_result = edit->execute(
+      "3",
+      R"({"path":"notes/a.txt","edits":[{"oldText":"world","newText":"there"}]})");
+  EXPECT_TRUE(!edit_result->is_error());
 
-    auto final_result = read->execute("4", R"({"path":"notes/a.txt"})");
-    CHECK(final_result->content().find("there") != std::string::npos);
-    std::filesystem::remove_all(root);
-  });
+  auto final_result = read->execute("4", R"({"path":"notes/a.txt"})");
+  EXPECT_TRUE(final_result->content().find("there") != std::string::npos);
+  std::filesystem::remove_all(root);
+}
 
-  tests::register_test("Edit tool: fuzzy match trailing whitespace", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-edit-fuzzy-ws";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root);
-    auto write = find_tool(tools, "write");
-    auto edit  = find_tool(tools, "edit");
-    auto read  = find_tool(tools, "read");
+TEST(BuiltinTools, Edit_tool_fuzzy_match_trailing_whitespace) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-edit-fuzzy-ws";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto edit = find_tool(tools, "edit");
+  auto read = find_tool(tools, "read");
 
-    // File has trailing spaces on lines; model's oldText won't include them
-    write->execute("1", R"({"path":"f.txt","content":"line one   \nline two  \nline three"})");
-    auto r = edit->execute("2",
-        R"({"path":"f.txt","edits":[{"oldText":"line one\nline two","newText":"LINE ONE\nLINE TWO"}]})");
-    CHECK(!r->is_error());
-    auto content = read->execute("3", R"({"path":"f.txt"})");
-    CHECK(content->content().find("LINE ONE") != std::string::npos);
-    std::filesystem::remove_all(root);
-  });
+  // File has trailing spaces on lines; model's oldText won't include them
+  write->execute(
+      "1",
+      R"({"path":"f.txt","content":"line one   \nline two  \nline three"})");
+  auto r = edit->execute(
+      "2",
+      R"({"path":"f.txt","edits":[{"oldText":"line one\nline two","newText":"LINE ONE\nLINE TWO"}]})");
+  EXPECT_TRUE(!r->is_error());
+  auto content = read->execute("3", R"({"path":"f.txt"})");
+  EXPECT_TRUE(content->content().find("LINE ONE") != std::string::npos);
+  std::filesystem::remove_all(root);
+}
 
-  tests::register_test("Edit tool: fuzzy match smart quotes", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-edit-fuzzy-quotes";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root);
-    auto write = find_tool(tools, "write");
-    auto edit  = find_tool(tools, "edit");
-    auto read  = find_tool(tools, "read");
+TEST(BuiltinTools, Edit_tool_fuzzy_match_smart_quotes) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-edit-fuzzy-quotes";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto edit = find_tool(tools, "edit");
+  auto read = find_tool(tools, "read");
 
-    // File contains smart curly quotes; model sends straight ASCII quotes
-    write->execute("1", R"({"path":"q.txt","content":"say “hello” to me"})");
-    auto r = edit->execute("2",
-        R"({"path":"q.txt","edits":[{"oldText":"say \"hello\" to me","newText":"say \"world\" to me"}]})");
-    CHECK(!r->is_error());
-    auto content = read->execute("3", R"({"path":"q.txt"})");
-    CHECK(content->content().find("world") != std::string::npos);
-    std::filesystem::remove_all(root);
-  });
+  // File contains smart curly quotes; model sends straight ASCII quotes
+  write->execute("1", R"({"path":"q.txt","content":"say “hello” to me"})");
+  auto r = edit->execute(
+      "2",
+      R"({"path":"q.txt","edits":[{"oldText":"say \"hello\" to me","newText":"say \"world\" to me"}]})");
+  EXPECT_TRUE(!r->is_error());
+  auto content = read->execute("3", R"({"path":"q.txt"})");
+  EXPECT_TRUE(content->content().find("world") != std::string::npos);
+  std::filesystem::remove_all(root);
+}
 
-  tests::register_test("Edit tool: multiple edits applied to same base", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-edit-multi";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root);
-    auto write = find_tool(tools, "write");
-    auto edit  = find_tool(tools, "edit");
-    auto read  = find_tool(tools, "read");
+TEST(BuiltinTools, Edit_tool_multiple_edits_applied_to_same_base) {
+  const auto root = std::filesystem::temp_directory_path() / "pici-edit-multi";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto edit = find_tool(tools, "edit");
+  auto read = find_tool(tools, "read");
 
-    write->execute("1", R"({"path":"m.txt","content":"alpha\nbeta\ngamma"})");
-    auto r = edit->execute("2", R"({"path":"m.txt","edits":[
+  write->execute("1", R"({"path":"m.txt","content":"alpha\nbeta\ngamma"})");
+  auto r = edit->execute("2", R"({"path":"m.txt","edits":[
       {"oldText":"alpha","newText":"ALPHA"},
       {"oldText":"gamma","newText":"GAMMA"}
     ]})");
-    CHECK(!r->is_error());
-    auto content = read->execute("3", R"({"path":"m.txt"})");
-    CHECK(content->content().find("ALPHA") != std::string::npos);
-    CHECK(content->content().find("GAMMA") != std::string::npos);
-    CHECK(content->content().find("beta")  != std::string::npos);
-    std::filesystem::remove_all(root);
-  });
+  EXPECT_TRUE(!r->is_error());
+  auto content = read->execute("3", R"({"path":"m.txt"})");
+  EXPECT_TRUE(content->content().find("ALPHA") != std::string::npos);
+  EXPECT_TRUE(content->content().find("GAMMA") != std::string::npos);
+  EXPECT_TRUE(content->content().find("beta") != std::string::npos);
+  std::filesystem::remove_all(root);
+}
 
-  tests::register_test("Edit tool: accepts old_text/new_text snake_case alias", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-edit-snake-alias";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root);
-    auto write = find_tool(tools, "write");
-    auto edit  = find_tool(tools, "edit");
-    auto read  = find_tool(tools, "read");
+TEST(BuiltinTools, Edit_tool_accepts_old_text_new_text_snake_case_alias) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-edit-snake-alias";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto edit = find_tool(tools, "edit");
+  auto read = find_tool(tools, "read");
 
-    write->execute("1", R"({"path":"s.txt","content":"alpha\nbeta"})");
-    nlohmann::json raw = {
-        {"path", "s.txt"},
-        {"edits", nlohmann::json::array({nlohmann::json{
-                     {"old_text", "alpha"}, {"new_text", "ALPHA"}}})}};
-    auto prepared = edit->prepare_arguments(raw);
-    CHECK(prepared["edits"][0].contains("oldText"));
-    CHECK(!prepared["edits"][0].contains("old_text"));
-    auto r = edit->execute("2", prepared.dump());
-    CHECK(!r->is_error());
-    auto content = read->execute("3", R"({"path":"s.txt"})");
-    CHECK(content->content().find("ALPHA") != std::string::npos);
-    std::filesystem::remove_all(root);
-  });
+  write->execute("1", R"({"path":"s.txt","content":"alpha\nbeta"})");
+  nlohmann::json raw = {
+      {"path", "s.txt"},
+      {"edits", nlohmann::json::array({nlohmann::json{
+                    {"old_text", "alpha"}, {"new_text", "ALPHA"}}})}};
+  auto prepared = edit->prepare_arguments(raw);
+  EXPECT_TRUE(prepared["edits"][0].contains("oldText"));
+  EXPECT_TRUE(!prepared["edits"][0].contains("old_text"));
+  auto r = edit->execute("2", prepared.dump());
+  EXPECT_TRUE(!r->is_error());
+  auto content = read->execute("3", R"({"path":"s.txt"})");
+  EXPECT_TRUE(content->content().find("ALPHA") != std::string::npos);
+  std::filesystem::remove_all(root);
+}
 
-  tests::register_test("Edit tool: miss on stale oldText hints the nearby line", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-edit-near-miss";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root);
-    auto write = find_tool(tools, "write");
-    auto edit  = find_tool(tools, "edit");
+TEST(BuiltinTools, Edit_tool_miss_on_stale_oldText_hints_the_nearby_line) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-edit-near-miss";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto edit = find_tool(tools, "edit");
 
-    write->execute(
-        "1",
-        R"({"path":"n.txt","content":"one\ntwo\nthree hundred forty\nfour\n"})");
-    // The line grew an extra word since the model last read the file; it
-    // still asks to replace the old, now-stale line verbatim.
-    auto r = edit->execute(
-        "2",
-        R"({"path":"n.txt","edits":[{"oldText":"three hundred\n","newText":"THREE HUNDRED\n"}]})");
-    CHECK(r->is_error());
-    CHECK(r->content().find("Closest match is near line 3") !=
-          std::string::npos);
-    CHECK(r->content().find("three hundred forty") != std::string::npos);
-    std::filesystem::remove_all(root);
-  });
+  write->execute(
+      "1",
+      R"({"path":"n.txt","content":"one\ntwo\nthree hundred forty\nfour\n"})");
+  // The line grew an extra word since the model last read the file; it
+  // still asks to replace the old, now-stale line verbatim.
+  auto r = edit->execute(
+      "2",
+      R"({"path":"n.txt","edits":[{"oldText":"three hundred\n","newText":"THREE HUNDRED\n"}]})");
+  EXPECT_TRUE(r->is_error());
+  EXPECT_TRUE(r->content().find("Closest match is near line 3") !=
+              std::string::npos);
+  EXPECT_TRUE(r->content().find("three hundred forty") != std::string::npos);
+  std::filesystem::remove_all(root);
+}
 
-  tests::register_test("Edit tool: overlap detection", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-edit-overlap";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root);
-    auto write = find_tool(tools, "write");
-    auto edit  = find_tool(tools, "edit");
+TEST(BuiltinTools, Edit_tool_overlap_detection) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-edit-overlap";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto edit = find_tool(tools, "edit");
 
-    write->execute("1", R"({"path":"o.txt","content":"abcdef"})");
-    auto r = edit->execute("2", R"({"path":"o.txt","edits":[
+  write->execute("1", R"({"path":"o.txt","content":"abcdef"})");
+  auto r = edit->execute("2", R"({"path":"o.txt","edits":[
       {"oldText":"abcd","newText":"X"},
       {"oldText":"cdef","newText":"Y"}
     ]})");
-    CHECK(r->is_error());
-    std::filesystem::remove_all(root);
-  });
+  EXPECT_TRUE(r->is_error());
+  std::filesystem::remove_all(root);
 }
 
-void test_truncation_detail() {
-  tests::register_test("Truncation detail: line limit message", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-trunc-test";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root);
-    auto write = find_tool(tools, "write");
-    auto read  = find_tool(tools, "read");
+TEST(BuiltinTools, Truncation_detail_line_limit_message) {
+  const auto root = std::filesystem::temp_directory_path() / "pici-trunc-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto read = find_tool(tools, "read");
 
-    // Write 2500 lines (exceeds default 2000-line limit)
-    std::string content;
-    for (int i = 1; i <= 2500; ++i)
-      content += "line " + std::to_string(i) + "\n";
-    write->execute("1", R"({"path":"big.txt","content":)" +
-                         nlohmann::json(content).dump() + "}");
+  // Write 2500 lines (exceeds default 2000-line limit)
+  std::string content;
+  for (int i = 1; i <= 2500; ++i)
+    content += "line " + std::to_string(i) + "\n";
+  write->execute("1", R"({"path":"big.txt","content":)" +
+                          nlohmann::json(content).dump() + "}");
 
-    auto r = read->execute("2", R"({"path":"big.txt"})");
-    CHECK(!r->is_error());
-    // Read tool shows "N more lines... Use offset=X" for its own line limit
-    CHECK(r->content().find("more lines in file") != std::string::npos);
-    CHECK(r->content().find("offset=") != std::string::npos);
-    // And truncate_head adds detail when byte limit is hit on the assembled output
-    // (this file is small enough to not hit byte limit, so just verify line limit works)
-    CHECK(r->content().find("line 2500") == std::string::npos); // line 2500 not shown
-    std::filesystem::remove_all(root);
-  });
+  auto r = read->execute("2", R"({"path":"big.txt"})");
+  EXPECT_TRUE(!r->is_error());
+  // Read tool shows "N more lines... Use offset=X" for its own line limit
+  EXPECT_TRUE(r->content().find("more lines in file") != std::string::npos);
+  EXPECT_TRUE(r->content().find("offset=") != std::string::npos);
+  // And truncate_head adds detail when byte limit is hit on the assembled
+  // output (this file is small enough to not hit byte limit, so just verify
+  // line limit works)
+  EXPECT_TRUE(r->content().find("line 2500") ==
+              std::string::npos); // line 2500 not shown
+  std::filesystem::remove_all(root);
 }
 
-void test_gitignore() {
-  tests::register_test("GitIgnore: find respects .gitignore", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-gitignore-test";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root / "src");
-    std::filesystem::create_directories(root / "dist");
-    std::filesystem::create_directories(root / "node_modules" / "pkg");
-    std::ofstream(root / "src" / "main.cpp") << "int main() {}";
-    std::ofstream(root / "dist" / "out.js") << "output";
-    std::ofstream(root / "node_modules" / "pkg" / "index.js") << "pkg";
-    std::ofstream(root / ".gitignore") << "dist/\nnode_modules/\n";
+TEST(BuiltinTools, GitIgnore_find_respects_gitignore) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-gitignore-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root / "src");
+  std::filesystem::create_directories(root / "dist");
+  std::filesystem::create_directories(root / "node_modules" / "pkg");
+  std::ofstream(root / "src" / "main.cpp") << "";
+  std::ofstream(root / "dist" / "out.js") << "output";
+  std::ofstream(root / "node_modules" / "pkg" / "index.js") << "pkg";
+  std::ofstream(root / ".gitignore") << "dist/\nnode_modules/\n";
 
-    const auto tools = create_all_tools(root);
-    auto find = find_tool(tools, "find");
-    auto r = find->execute("1", R"({"pattern":"*.cpp","path":"."})");
-    CHECK(!r->is_error());
-    CHECK(r->content().find("main.cpp") != std::string::npos);
+  const auto tools = create_all_tools(root);
+  auto find = find_tool(tools, "find");
+  auto r = find->execute("1", R"({"pattern":"*.cpp","path":"."})");
+  EXPECT_TRUE(!r->is_error());
+  EXPECT_TRUE(r->content().find("main.cpp") != std::string::npos);
 
-    // dist and node_modules should be skipped
-    auto r2 = find->execute("2", R"({"pattern":"*.js","path":"."})");
-    CHECK(r2->content().find("out.js") == std::string::npos);
-    CHECK(r2->content().find("index.js") == std::string::npos);
+  // dist and node_modules should be skipped
+  auto r2 = find->execute("2", R"({"pattern":"*.js","path":"."})");
+  EXPECT_TRUE(r2->content().find("out.js") == std::string::npos);
+  EXPECT_TRUE(r2->content().find("index.js") == std::string::npos);
 
-    std::filesystem::remove_all(root);
-  });
-
-  tests::register_test("GitIgnore: grep respects .gitignore", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-gitignore-grep";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root / "src");
-    std::filesystem::create_directories(root / "vendor");
-    std::ofstream(root / "src" / "main.cpp") << "needle";
-    std::ofstream(root / "vendor" / "lib.cpp") << "needle";
-    std::ofstream(root / ".gitignore") << "vendor/\n";
-
-    const auto tools = create_all_tools(root);
-    auto grep = find_tool(tools, "grep");
-    auto r = grep->execute("1", R"({"pattern":"needle"})");
-    CHECK(r->content().find("src/main.cpp") != std::string::npos);
-    CHECK(r->content().find("vendor") == std::string::npos);
-    std::filesystem::remove_all(root);
-  });
+  std::filesystem::remove_all(root);
 }
 
-void test_image_read() {
-  tests::register_test("Read tool: image returns ImageContent block", []() {
-    const auto root = std::filesystem::temp_directory_path() / "pici-image-test";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
+TEST(BuiltinTools, GitIgnore_grep_respects_gitignore) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-gitignore-grep";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root / "src");
+  std::filesystem::create_directories(root / "vendor");
+  std::ofstream(root / "src" / "main.cpp") << "needle";
+  std::ofstream(root / "vendor" / "lib.cpp") << "needle";
+  std::ofstream(root / ".gitignore") << "vendor/\n";
 
-    // Write a tiny valid PNG (1x1 white pixel)
-    static const unsigned char kPng[] = {
-        0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,
-        0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,
-        0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,
-        0x08,0x02,0x00,0x00,0x00,0x90,0x77,0x53,
-        0xde,0x00,0x00,0x00,0x0c,0x49,0x44,0x41,
-        0x54,0x08,0xd7,0x63,0xf8,0xff,0xff,0x3f,
-        0x00,0x05,0xfe,0x02,0xfe,0xdc,0xcc,0x59,
-        0xe7,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,
-        0x44,0xae,0x42,0x60,0x82};
-    std::ofstream f(root / "img.png", std::ios::binary);
-    f.write(reinterpret_cast<const char*>(kPng), sizeof(kPng));
-    f.close();
-
-    const auto tools = create_all_tools(root);
-    auto read = find_tool(tools, "read");
-    auto r = read->execute("1", R"({"path":"img.png"})");
-    CHECK(!r->is_error());
-    // Should mention image in text content
-    CHECK(r->content().find("image/png") != std::string::npos);
-    // Should have two content blocks: text + image
-    auto blocks = r->content_blocks();
-    CHECK_EQ(blocks.size(), std::size_t(2));
-    CHECK(std::holds_alternative<TextContent>(blocks[0]));
-    CHECK(std::holds_alternative<ImageContent>(blocks[1]));
-    const auto &img = std::get<ImageContent>(blocks[1]);
-    CHECK(img.mime_type == "image/png");
-    CHECK(!img.data.empty());
-
-    std::filesystem::remove_all(root);
-  });
+  const auto tools = create_all_tools(root);
+  auto grep = find_tool(tools, "grep");
+  auto r = grep->execute("1", R"({"pattern":"needle"})");
+  EXPECT_TRUE(r->content().find("src/main.cpp") != std::string::npos);
+  EXPECT_TRUE(r->content().find("vendor") == std::string::npos);
+  std::filesystem::remove_all(root);
 }
 
-void test_discovery_tools() {
-  tests::register_test("Builtin tools: ls find grep", []() {
-    const auto root = std::filesystem::temp_directory_path() /
-                      "pici-builtin-tools-discovery-test";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root / "src");
-    std::ofstream(root / "src" / "main.cpp") << "int main() { return 0; }\n";
-    std::ofstream(root / "README.md") << "needle\n";
+TEST(BuiltinTools, Read_tool_image_returns_ImageContent_block) {
+  const auto root = std::filesystem::temp_directory_path() / "pici-image-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
 
-    const auto tools = create_all_tools(root);
-    auto ls = find_tool(tools, "ls");
-    auto find = find_tool(tools, "find");
-    auto grep = find_tool(tools, "grep");
+  // Write a tiny valid PNG (1x1 white pixel)
+  static const unsigned char kPng[] = {
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00,
+      0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8, 0xff, 0xff, 0x3f,
+      0x00, 0x05, 0xfe, 0x02, 0xfe, 0xdc, 0xcc, 0x59, 0xe7, 0x00, 0x00, 0x00,
+      0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
+  std::ofstream f(root / "img.png", std::ios::binary);
+  f.write(reinterpret_cast<const char *>(kPng), sizeof(kPng));
+  f.close();
 
-    auto ls_result = ls->execute("1", R"({"path":"."})");
-    CHECK(ls_result->content().find("src/") != std::string::npos);
+  const auto tools = create_all_tools(root);
+  auto read = find_tool(tools, "read");
+  auto r = read->execute("1", R"({"path":"img.png"})");
+  EXPECT_TRUE(!r->is_error());
+  // Should mention image in text content
+  EXPECT_TRUE(r->content().find("image/png") != std::string::npos);
+  // Should have two content blocks: text + image
+  auto blocks = r->content_blocks();
+  EXPECT_EQ(blocks.size(), std::size_t(2));
+  EXPECT_TRUE(std::holds_alternative<TextContent>(blocks[0]));
+  EXPECT_TRUE(std::holds_alternative<ImageContent>(blocks[1]));
+  const auto &img = std::get<ImageContent>(blocks[1]);
+  EXPECT_TRUE(img.mime_type == "image/png");
+  EXPECT_TRUE(!img.data.empty());
 
-    auto find_result = find->execute("2", R"({"pattern":"**/*.cpp"})");
-    CHECK(find_result->content().find("src/main.cpp") != std::string::npos);
-
-    auto readme_result = find->execute("3", R"({"pattern":"**/README*"})");
-    CHECK(readme_result->content().find("README.md") != std::string::npos);
-
-    auto grep_result = grep->execute("3", R"({"pattern":"needle"})");
-    CHECK(grep_result->content().find("README.md:1: needle") !=
-          std::string::npos);
-    std::filesystem::remove_all(root);
-  });
-
-  tests::register_test("Grep tool: unbalanced paren gives actionable error", []() {
-    const auto root = std::filesystem::temp_directory_path() /
-                      "pici-builtin-tools-grep-regex-error";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    std::ofstream(root / "a.cpp") << "void run_turn() {}\n";
-    const auto tools = create_all_tools(root);
-    auto grep = find_tool(tools, "grep");
-
-    // A bare function-call-shaped pattern is invalid regex (unbalanced
-    // '('); the tool should say so and point at literal:true rather than
-    // leaking the raw std::regex_error message.
-    auto bad = grep->execute("1", R"({"pattern":"run_turn("})");
-    CHECK(bad->is_error());
-    CHECK(bad->content().find("literal: true") != std::string::npos);
-
-    auto literal = grep->execute("2", R"({"pattern":"run_turn(","literal":true})");
-    CHECK(!literal->is_error());
-    CHECK(literal->content().find("a.cpp:1:") != std::string::npos);
-    std::filesystem::remove_all(root);
-  });
+  std::filesystem::remove_all(root);
 }
 
-void test_bash_tool() {
-  tests::register_test("Builtin tools: bash", []() {
-    const auto root =
-        std::filesystem::temp_directory_path() / "pici-builtin-tools-bash-test";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root);
-    const auto tools = create_all_tools(root, disabled_sandbox());
-    auto bash = find_tool(tools, "bash");
-    auto result = bash->execute("1", R"({"command":"printf ok"})");
-    CHECK(!result->is_error());
-    CHECK_EQ(result->content(), "ok");
-    std::filesystem::remove_all(root);
-  });
+TEST(BuiltinTools, Builtin_tools_ls_find_grep) {
+  const auto root = std::filesystem::temp_directory_path() /
+                    "pici-builtin-tools-discovery-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root / "src");
+  std::ofstream(root / "src" / "main.cpp") << "\n";
+  std::ofstream(root / "README.md") << "needle\n";
 
-  tests::register_test("Bash tool: timeout kills command", []() {
-    const auto tools = create_all_tools(std::filesystem::temp_directory_path(), disabled_sandbox());
-    auto bash = find_tool(tools, "bash");
-    auto start = std::chrono::steady_clock::now();
-    auto result = bash->execute("1", R"({"command":"sleep 60","timeout":1})");
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now() - start).count();
-    CHECK(result->is_error());
-    CHECK(result->content().find("timed out") != std::string::npos);
-    CHECK(elapsed < 5); // must not wait 60s
-  });
+  const auto tools = create_all_tools(root);
+  auto ls = find_tool(tools, "ls");
+  auto find = find_tool(tools, "find");
+  auto grep = find_tool(tools, "grep");
 
-  tests::register_test("Bash tool: stop_token aborts command", []() {
-    const auto tools = create_all_tools(std::filesystem::temp_directory_path(), disabled_sandbox());
-    auto bash = find_tool(tools, "bash");
+  auto ls_result = ls->execute("1", R"({"path":"."})");
+  EXPECT_TRUE(ls_result->content().find("src/") != std::string::npos);
 
-    std::stop_source src;
-    std::thread killer([&src]() {
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
-      src.request_stop();
-    });
+  auto find_result = find->execute("2", R"({"pattern":"**/*.cpp"})");
+  EXPECT_TRUE(find_result->content().find("src/main.cpp") != std::string::npos);
 
-    auto start = std::chrono::steady_clock::now();
-    auto result = bash->execute("1", R"({"command":"sleep 60"})", src.get_token(), {});
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now() - start).count();
-    killer.join();
+  auto readme_result = find->execute("3", R"({"pattern":"**/README*"})");
+  EXPECT_TRUE(readme_result->content().find("README.md") != std::string::npos);
 
-    CHECK(result->is_error());
-    CHECK(result->content().find("aborted") != std::string::npos);
-    CHECK(elapsed < 5);
-  });
-
-  tests::register_test("Bash tool: exit code propagated", []() {
-    const auto tools = create_all_tools(std::filesystem::temp_directory_path(), disabled_sandbox());
-    auto bash = find_tool(tools, "bash");
-    auto result = bash->execute("1", R"({"command":"exit 42"})");
-    CHECK(result->is_error());
-    CHECK(result->content().find("42") != std::string::npos);
-  });
+  auto grep_result = grep->execute("3", R"({"pattern":"needle"})");
+  EXPECT_TRUE(grep_result->content().find("README.md:1: needle") !=
+              std::string::npos);
+  std::filesystem::remove_all(root);
 }
 
-void test_skill_tool() {
-  tests::register_test("Skill tool: registered only with non-empty catalog",
-                       []() {
-                         auto empty =
-                             std::make_shared<SkillCatalog>();
-                         CHECK(!find_tool(create_all_tools(
-                                               std::filesystem::temp_directory_path(),
-                                               {}, empty),
-                                           "skill"));
+TEST(BuiltinTools, Grep_tool_unbalanced_paren_gives_actionable_error) {
+  const auto root = std::filesystem::temp_directory_path() /
+                    "pici-builtin-tools-grep-regex-error";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  std::ofstream(root / "a.cpp") << "void run_turn() {}\n";
+  const auto tools = create_all_tools(root);
+  auto grep = find_tool(tools, "grep");
 
-                         auto catalog = std::make_shared<SkillCatalog>();
-                         catalog->skills.push_back(
-                             {"demo", "A demo skill.", "/tmp/demo/SKILL.md",
-                              "/tmp/demo", "project"});
-                         CHECK(find_tool(create_all_tools(
-                                             std::filesystem::temp_directory_path(),
-                                             {}, catalog),
-                                         "skill"));
-                         CHECK(find_tool(create_read_only_tools(
-                                             std::filesystem::temp_directory_path(),
-                                             catalog),
-                                         "skill"));
-                       });
+  // A bare function-call-shaped pattern is invalid regex (unbalanced
+  // '('); the tool should say so and point at literal:true rather than
+  // leaking the raw std::regex_error message.
+  auto bad = grep->execute("1", R"({"pattern":"run_turn("})");
+  EXPECT_TRUE(bad->is_error());
+  EXPECT_TRUE(bad->content().find("literal: true") != std::string::npos);
 
-  tests::register_test("Skill tool: loads body from disk", []() {
-    const auto root = std::filesystem::temp_directory_path() /
-                      "pici-builtin-tools-skill-test";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root / "skills" / "demo");
-    const auto skill_file = root / "skills" / "demo" / "SKILL.md";
-    {
-      std::ofstream out(skill_file);
-      out << "---\nname: demo\ndescription: A demo skill.\n---\n"
-          << "Step one.\nStep two.\n";
-    }
-
-    auto catalog = std::make_shared<SkillCatalog>();
-    catalog->skills.push_back({"demo", "A demo skill.", skill_file.string(),
-                               skill_file.parent_path(), "project"});
-    const auto tools = create_read_only_tools(root, catalog);
-    const auto skill_tool = find_tool(tools, "skill");
-    CHECK(skill_tool != nullptr);
-
-    const auto result = skill_tool->execute("1", R"({"name":"demo"})", {}, {});
-    CHECK(!result->is_error());
-    CHECK(result->content().find("Loaded skill 'demo'") !=
-          std::string::npos);
-    CHECK(result->content().find("Step two.") != std::string::npos);
-  });
-
-  tests::register_test("Skill tool: unknown name suggests closest", []() {
-    auto catalog = std::make_shared<SkillCatalog>();
-    catalog->skills.push_back(
-        {"release-checklist", "d", "/x/SKILL.md", "/x", "project"});
-    const auto tools =
-        create_read_only_tools(std::filesystem::temp_directory_path(), catalog);
-    const auto result =
-        find_tool(tools, "skill")
-            ->execute("1", R"({"name":"release-checklst"})", {}, {});
-    CHECK(result->is_error());
-    CHECK(result->content().find("release-checklist") != std::string::npos);
-  });
+  auto literal =
+      grep->execute("2", R"({"pattern":"run_turn(","literal":true})");
+  EXPECT_TRUE(!literal->is_error());
+  EXPECT_TRUE(literal->content().find("a.cpp:1:") != std::string::npos);
+  std::filesystem::remove_all(root);
 }
 
-void test_fuzzy_find() {
-  tests::register_test("Find tool: fuzzy mode ranks and tokenizes", []() {
-    const auto root = std::filesystem::temp_directory_path() /
-                      "pici-builtin-tools-fuzzy-find";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root / "src");
-    std::ofstream(root / "src" / "build_tools.cpp").put('\n');
-    std::ofstream(root / "src" / "other.txt").put('\n');
-    const auto tool = find_tool(create_all_tools(root), "find");
-    const auto result = tool->execute(
-        "1", R"({"pattern":"buildtools cpp","mode":"fuzzy"})", {}, {});
-    CHECK(!result->is_error());
-    CHECK(result->content().find("src/build_tools.cpp") == 0);
-    std::filesystem::remove_all(root);
-  });
+TEST(BuiltinTools, Builtin_tools_bash) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-builtin-tools-bash-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root, disabled_sandbox());
+  auto bash = find_tool(tools, "bash");
+  auto result = bash->execute("1", R"({"command":"printf ok"})");
+  EXPECT_TRUE(!result->is_error());
+  EXPECT_EQ(result->content(), "ok");
+  std::filesystem::remove_all(root);
 }
 
-int main() {
-  test_tool_factories();
-  test_file_tools();
-  test_truncation_detail();
-  test_gitignore();
-  test_image_read();
-  test_discovery_tools();
-  test_fuzzy_find();
-  test_bash_tool();
-  test_skill_tool();
+TEST(BuiltinTools, Bash_tool_timeout_kills_command) {
+  const auto tools = create_all_tools(std::filesystem::temp_directory_path(),
+                                      disabled_sandbox());
+  auto bash = find_tool(tools, "bash");
+  auto start = std::chrono::steady_clock::now();
+  auto result = bash->execute("1", R"({"command":"sleep 60","timeout":1})");
+  auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                     std::chrono::steady_clock::now() - start)
+                     .count();
+  EXPECT_TRUE(result->is_error());
+  EXPECT_TRUE(result->content().find("timed out") != std::string::npos);
+  EXPECT_TRUE(elapsed < 5); // must not wait 60s
+}
 
-  tests::print_summary();
-  return tests::failed == 0 ? 0 : 1;
+TEST(BuiltinTools, Bash_tool_stop_token_aborts_command) {
+  const auto tools = create_all_tools(std::filesystem::temp_directory_path(),
+                                      disabled_sandbox());
+  auto bash = find_tool(tools, "bash");
+
+  std::stop_source src;
+  std::thread killer([&src]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    src.request_stop();
+  });
+
+  auto start = std::chrono::steady_clock::now();
+  auto result =
+      bash->execute("1", R"({"command":"sleep 60"})", src.get_token(), {});
+  auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                     std::chrono::steady_clock::now() - start)
+                     .count();
+  killer.join();
+
+  EXPECT_TRUE(result->is_error());
+  EXPECT_TRUE(result->content().find("aborted") != std::string::npos);
+  EXPECT_TRUE(elapsed < 5);
+}
+
+TEST(BuiltinTools, Bash_tool_exit_code_propagated) {
+  const auto tools = create_all_tools(std::filesystem::temp_directory_path(),
+                                      disabled_sandbox());
+  auto bash = find_tool(tools, "bash");
+  auto result = bash->execute("1", R"({"command":"exit 42"})");
+  EXPECT_TRUE(result->is_error());
+  EXPECT_TRUE(result->content().find("42") != std::string::npos);
+}
+
+TEST(BuiltinTools, Skill_tool_registered_only_with_non_empty_catalog) {
+  auto empty = std::make_shared<SkillCatalog>();
+  EXPECT_TRUE(!find_tool(
+      create_all_tools(std::filesystem::temp_directory_path(), {}, empty),
+      "skill"));
+
+  auto catalog = std::make_shared<SkillCatalog>();
+  catalog->skills.push_back(
+      {"demo", "A demo skill.", "/tmp/demo/SKILL.md", "/tmp/demo", "project"});
+  EXPECT_TRUE(find_tool(
+      create_all_tools(std::filesystem::temp_directory_path(), {}, catalog),
+      "skill"));
+  EXPECT_TRUE(find_tool(
+      create_read_only_tools(std::filesystem::temp_directory_path(), catalog),
+      "skill"));
+}
+
+TEST(BuiltinTools, Skill_tool_loads_body_from_disk) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-builtin-tools-skill-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root / "skills" / "demo");
+  const auto skill_file = root / "skills" / "demo" / "SKILL.md";
+  {
+    std::ofstream out(skill_file);
+    out << "---\nname: demo\ndescription: A demo skill.\n---\n"
+        << "Step one.\nStep two.\n";
+  }
+
+  auto catalog = std::make_shared<SkillCatalog>();
+  catalog->skills.push_back({"demo", "A demo skill.", skill_file.string(),
+                             skill_file.parent_path(), "project"});
+  const auto tools = create_read_only_tools(root, catalog);
+  const auto skill_tool = find_tool(tools, "skill");
+  EXPECT_TRUE(skill_tool != nullptr);
+
+  const auto result = skill_tool->execute("1", R"({"name":"demo"})", {}, {});
+  EXPECT_TRUE(!result->is_error());
+  EXPECT_TRUE(result->content().find("Loaded skill 'demo'") !=
+              std::string::npos);
+  EXPECT_TRUE(result->content().find("Step two.") != std::string::npos);
+}
+
+TEST(BuiltinTools, Skill_tool_unknown_name_suggests_closest) {
+  auto catalog = std::make_shared<SkillCatalog>();
+  catalog->skills.push_back(
+      {"release-checklist", "d", "/x/SKILL.md", "/x", "project"});
+  const auto tools =
+      create_read_only_tools(std::filesystem::temp_directory_path(), catalog);
+  const auto result =
+      find_tool(tools, "skill")
+          ->execute("1", R"({"name":"release-checklst"})", {}, {});
+  EXPECT_TRUE(result->is_error());
+  EXPECT_TRUE(result->content().find("release-checklist") != std::string::npos);
+}
+
+TEST(BuiltinTools, Find_tool_fuzzy_mode_ranks_and_tokenizes) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-builtin-tools-fuzzy-find";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root / "src");
+  std::ofstream(root / "src" / "build_tools.cpp").put('\n');
+  std::ofstream(root / "src" / "other.txt").put('\n');
+  const auto tool = find_tool(create_all_tools(root), "find");
+  const auto result = tool->execute(
+      "1", R"({"pattern":"buildtools cpp","mode":"fuzzy"})", {}, {});
+  EXPECT_TRUE(!result->is_error());
+  EXPECT_TRUE(result->content().find("src/build_tools.cpp") == 0);
+  std::filesystem::remove_all(root);
 }

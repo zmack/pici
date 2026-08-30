@@ -1,10 +1,11 @@
 #include "core/apply_patch.h"
 
-#include <cassert>
+#include <gtest/gtest.h>
+
 #include <filesystem>
 #include <fstream>
 
-int main() {
+TEST(ApplyPatch, AppliesUpdate) {
   const auto dir =
       std::filesystem::temp_directory_path() / "pici-apply-patch-test";
   std::filesystem::remove_all(dir);
@@ -16,12 +17,18 @@ int main() {
         "*** Begin Patch" + std::string(1, '\n') +
         "*** Update File: file.txt\n@@\n-one\n+ONE\n*** End Patch\n";
     const auto patch = pi::core::parse_patch(input, true, error);
-    assert(patch);
+    ASSERT_TRUE(patch);
     pi::core::apply_patch(dir, *patch);
   }
   std::ifstream in(dir / "file.txt");
   const std::string content{std::istreambuf_iterator<char>(in), {}};
-  assert(content == "ONE\ntwo\n");
+  EXPECT_EQ(content, "ONE\ntwo\n");
+  std::filesystem::remove_all(dir);
+}
+
+TEST(ApplyPatch, PreservesLeadingContext) {
+  const auto dir =
+      std::filesystem::temp_directory_path() / "pici-apply-patch-test";
   std::filesystem::remove_all(dir);
 
   // A chunk with a leading pure-context line (" foo", no +/-) must parse
@@ -41,11 +48,11 @@ int main() {
                               " three\n"
                               "*** End Patch\n";
     const auto patch = pi::core::parse_patch(input, true, error);
-    assert(patch);
+    ASSERT_TRUE(patch);
     pi::core::apply_patch(dir, *patch);
   }
   std::ifstream in2(dir / "file.txt");
   const std::string content2{std::istreambuf_iterator<char>(in2), {}};
-  assert(content2 == "one\nTWO\nthree\n");
+  EXPECT_EQ(content2, "one\nTWO\nthree\n");
   std::filesystem::remove_all(dir);
 }

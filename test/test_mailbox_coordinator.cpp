@@ -1,7 +1,9 @@
 #include "core/agent_task.h"
 #include "core/mailbox/mailbox_coordinator.h"
+
 #include "core/providers/faux.h"
 #include "core/session/agent_session.h"
+#include <gtest/gtest.h>
 
 #include <algorithm>
 #include <chrono>
@@ -15,27 +17,6 @@
 #include <vector>
 
 #include <unistd.h>
-
-namespace tests {
-int passed{0};
-int failed{0};
-
-bool check(bool condition, std::string_view expression,
-           std::source_location location = std::source_location::current()) {
-  if (condition) {
-    ++passed;
-    return true;
-  }
-  ++failed;
-  std::cout << "FAIL " << location.file_name() << ":" << location.line()
-            << " — " << expression << "\n";
-  return false;
-}
-} // namespace tests
-
-#define CHECK(expression) tests::check((expression), #expression)
-#define CHECK_EQ(left, right)                                                  \
-  tests::check((left) == (right), #left " == " #right)
 
 using namespace pi::core;
 
@@ -59,7 +40,7 @@ MailboxErrorCode error_code(auto &&call) {
 // (retention-window expiry / MailboxCoordinator's cleanup_interval); that
 // remains an open Phase 1 gap — see plans/session-runtime-migration.md
 // Phase 1 item 3.
-int main() {
+TEST(MailboxCoordinator, LifecycleAndRouting) {
   const auto suffix =
       std::chrono::steady_clock::now().time_since_epoch().count();
   const auto root = std::filesystem::temp_directory_path() /
@@ -94,26 +75,28 @@ int main() {
         [&](const AgentTaskEvent &) { observed = true; },
     });
     callbacks(AgentTaskClosedEvent{.id = "ignored"});
-    CHECK(observed);
+    EXPECT_TRUE(observed);
 
     MailboxCoordinator coordinator(options());
-    CHECK(std::filesystem::exists(root / "mailbox.sqlite3"));
+    EXPECT_TRUE(std::filesystem::exists(root / "mailbox.sqlite3"));
     const auto root_a = coordinator.activate_root("session-a", "first");
-    CHECK(coordinator.status().root_active);
-    CHECK_EQ(coordinator.status().session_id.value(), std::string("session-a"));
+    EXPECT_TRUE(coordinator.status().root_active);
+    EXPECT_EQ(coordinator.status().session_id.value(),
+              std::string("session-a"));
     coordinator.set_session_name("renamed");
-    CHECK_EQ(coordinator.status().session_name.value(), std::string("renamed"));
-    CHECK_EQ(coordinator.self(root_a).session_name.value(),
-             std::string("renamed"));
-    CHECK_EQ(coordinator.self(root_a).agent_id, root_a.agent_id);
-    CHECK_EQ(coordinator.self(root_a).session_id, root_a.session_id);
-    CHECK_EQ(coordinator.self(root_a).lease_expires_at_ms,
-             now + std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::hours(2))
-                       .count());
+    EXPECT_EQ(coordinator.status().session_name.value(),
+              std::string("renamed"));
+    EXPECT_EQ(coordinator.self(root_a).session_name.value(),
+              std::string("renamed"));
+    EXPECT_EQ(coordinator.self(root_a).agent_id, root_a.agent_id);
+    EXPECT_EQ(coordinator.self(root_a).session_id, root_a.session_id);
+    EXPECT_EQ(coordinator.self(root_a).lease_expires_at_ms,
+              now + std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::hours(2))
+                        .count());
     coordinator.set_root_running(true);
     coordinator.set_model("test", "model-b");
-    CHECK(coordinator.status().root_running);
+    EXPECT_TRUE(coordinator.status().root_running);
 
     coordinator.register_subagent("agent_1", "/root/child", "root");
     coordinator.observe_task_event(AgentTaskStatusChangedEvent{
@@ -122,41 +105,43 @@ int main() {
         .current = AgentTaskStatusKind::completed});
     auto children = coordinator.store().list_agents(AgentQuery{
         .session_id = "session-a", .include_closed = true, .now_ms = now});
-    CHECK_EQ(children.size(), std::size_t{2});
-    CHECK(std::ranges::any_of(children, [](const auto &child) {
+    EXPECT_EQ(children.size(), std::size_t{2});
+    EXPECT_TRUE(std::ranges::any_of(children, [](const auto &child) {
       return child.task_id == "agent_1" && child.status == "completed";
     }));
     const auto first_child = std::ranges::find_if(
         children, [](const auto &child) { return child.task_id == "agent_1"; });
-    CHECK(first_child != children.end());
+    EXPECT_TRUE(first_child != children.end());
     const auto first_endpoint = first_child->agent_id;
     coordinator.register_subagent("agent_2", "/root/child/nested", "agent_1");
     coordinator.register_subagent("agent_3", "/root/child/nested/deeper",
                                   "agent_2");
     coordinator.observe_task_event(AgentTaskClosedEvent{.id = "agent_1"});
-    CHECK(coordinator.store()
-              .list_agents(AgentQuery{.agent_id = first_endpoint,
-                                      .include_closed = true,
-                                      .now_ms = now})
-              .front()
-              .closed_at_ms.has_value());
+    EXPECT_TRUE(coordinator.store()
+                    .list_agents(AgentQuery{.agent_id = first_endpoint,
+                                            .include_closed = true,
+                                            .now_ms = now})
+                    .front()
+                    .closed_at_ms.has_value());
 
     const auto root_b = coordinator.activate_root("session-b", "second");
-    CHECK_EQ(coordinator.status().session_id.value(), std::string("session-b"));
-    CHECK_EQ(coordinator.store()
-                 .list_agents(AgentQuery{.include_closed = true, .now_ms = now})
-                 .size(),
-             std::size_t{5});
+    EXPECT_EQ(coordinator.status().session_id.value(),
+              std::string("session-b"));
+    EXPECT_EQ(
+        coordinator.store()
+            .list_agents(AgentQuery{.include_closed = true, .now_ms = now})
+            .size(),
+        std::size_t{5});
     const auto old_agents = coordinator.store().list_agents(AgentQuery{
         .session_id = "session-a", .include_closed = true, .now_ms = now});
-    CHECK_EQ(old_agents.size(), std::size_t{4});
-    CHECK(std::ranges::all_of(old_agents, [](const auto &agent) {
+    EXPECT_EQ(old_agents.size(), std::size_t{4});
+    EXPECT_TRUE(std::ranges::all_of(old_agents, [](const auto &agent) {
       return agent.closed_at_ms.has_value();
     }));
     const auto current_agents = coordinator.store().list_agents(AgentQuery{
         .session_id = "session-b", .include_closed = true, .now_ms = now});
-    CHECK_EQ(current_agents.size(), std::size_t{1});
-    CHECK(!current_agents.front().closed_at_ms.has_value());
+    EXPECT_EQ(current_agents.size(), std::size_t{1});
+    EXPECT_TRUE(!current_agents.front().closed_at_ms.has_value());
 
     std::vector<AgentInput> delivered;
     std::vector<AgentInput> root_queue;
@@ -173,165 +158,167 @@ int main() {
     };
     delivery->drop_root_queued = [&root_queue] { root_queue.clear(); };
     coordinator.attach_delivery(delivery);
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "steer-1",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.session_id = "session-b"},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::steer,
-                    .body = MailboxPayload{.text = "inspect this"},
-                    .created_at_ms = now});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "steer-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::steer,
+        .body = MailboxPayload{.text = "inspect this"},
+        .created_at_ms = now});
     coordinator.pump_inbox();
-    CHECK(delivered.empty());
+    EXPECT_TRUE(delivered.empty());
     coordinator.set_root_running(true);
     coordinator.pump_inbox();
-    CHECK_EQ(delivered.size(), std::size_t{1});
-    CHECK(std::holds_alternative<UserMessage>(delivered.front().message));
-    CHECK(std::get<TextContent>(
-              std::get<UserMessage>(delivered.front().message).content.front())
-              .text == "[pici mailbox message]\n"
-                       "message_id=steer-1\n"
-                       "kind=steer\n"
-                       "sender_session_id=sender-session\n"
-                       "sender_agent_id=sender-agent\n"
-                       "recipient_session_id=session-b\n"
-                       "recipient_agent_id=(session root)\n"
-                       "\ninspect this");
-    CHECK(delivered.front().presentation.source == InputProvenance::Source::mailbox);
-    CHECK_EQ(delivered.front().presentation.message_id.value(), "steer-1");
-    CHECK_EQ(delivered.front().presentation.message_kind.value(), "steer");
-    CHECK_EQ(delivered.front().presentation.sender_agent_id.value(),
-             "sender-agent");
-    CHECK_EQ(delivered.front().presentation.sender_session_id.value(),
-             "sender-session");
+    EXPECT_EQ(delivered.size(), std::size_t{1});
+    EXPECT_TRUE(std::holds_alternative<UserMessage>(delivered.front().message));
+    EXPECT_TRUE(
+        std::get<TextContent>(
+            std::get<UserMessage>(delivered.front().message).content.front())
+            .text == "[pici mailbox message]\n"
+                     "message_id=steer-1\n"
+                     "kind=steer\n"
+                     "sender_session_id=sender-session\n"
+                     "sender_agent_id=sender-agent\n"
+                     "recipient_session_id=session-b\n"
+                     "recipient_agent_id=(session root)\n"
+                     "\ninspect this");
+    EXPECT_TRUE(delivered.front().presentation.source ==
+                InputProvenance::Source::mailbox);
+    EXPECT_EQ(delivered.front().presentation.message_id.value(), "steer-1");
+    EXPECT_EQ(delivered.front().presentation.message_kind.value(), "steer");
+    EXPECT_EQ(delivered.front().presentation.sender_agent_id.value(),
+              "sender-agent");
+    EXPECT_EQ(delivered.front().presentation.sender_session_id.value(),
+              "sender-session");
     delivered.front().on_accepted();
     root_queue.clear();
-    CHECK(coordinator.store()
-              .inspect(InboxQuery{.session_id = "session-b",
-                                  .workspace_id = "workspace",
-                                  .now_ms = now})
-              .empty());
+    EXPECT_TRUE(coordinator.store()
+                    .inspect(InboxQuery{.session_id = "session-b",
+                                        .workspace_id = "workspace",
+                                        .now_ms = now})
+                    .empty());
 
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "note-1",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.session_id = "session-b"},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::note,
-                    .body = MailboxPayload{.text = "do not steer"},
-                    .created_at_ms = now});
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "reply-1",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.session_id = "session-b"},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::reply,
-                    .body = MailboxPayload{.text = "do not steer"},
-                    .created_at_ms = now});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "note-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::note,
+        .body = MailboxPayload{.text = "do not steer"},
+        .created_at_ms = now});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "reply-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::reply,
+        .body = MailboxPayload{.text = "do not steer"},
+        .created_at_ms = now});
     coordinator.pump_inbox();
-    CHECK_EQ(delivered.size(), std::size_t{1});
-    CHECK_EQ(coordinator.store()
-                 .inspect(InboxQuery{.session_id = "session-b",
-                                     .workspace_id = "workspace",
-                                     .now_ms = now})
-                 .size(),
-             std::size_t{2});
+    EXPECT_EQ(delivered.size(), std::size_t{1});
+    EXPECT_EQ(coordinator.store()
+                  .inspect(InboxQuery{.session_id = "session-b",
+                                      .workspace_id = "workspace",
+                                      .now_ms = now})
+                  .size(),
+              std::size_t{2});
     for (const auto entry_id : {"steer-1", "note-1", "reply-1"}) {
-      CHECK(error_code([&] {
-              static_cast<void>(coordinator.reply(
-                  root_b, entry_id, MailboxPayload{.text = "invalid"}));
-            }) == MailboxErrorCode::invalid_message);
+      EXPECT_TRUE(error_code([&] {
+                    static_cast<void>(coordinator.reply(
+                        root_b, entry_id, MailboxPayload{.text = "invalid"}));
+                  }) == MailboxErrorCode::invalid_message);
     }
 
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "steer-2",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.session_id = "session-b"},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::steer,
-                    .body = MailboxPayload{.text = "retry me"},
-                    .created_at_ms = now});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "steer-2",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::steer,
+        .body = MailboxPayload{.text = "retry me"},
+        .created_at_ms = now});
     accept_delivery = false;
     coordinator.pump_inbox();
-    CHECK_EQ(delivered.size(), std::size_t{1});
+    EXPECT_EQ(delivered.size(), std::size_t{1});
     now += 101;
     accept_delivery = true;
     coordinator.pump_inbox();
-    CHECK_EQ(delivered.size(), std::size_t{2});
+    EXPECT_EQ(delivered.size(), std::size_t{2});
     delivered.back().on_accepted();
 
     std::vector<AgentInput> subagent_delivered;
     delivery->subagent = [&](std::string, std::string task_id,
                              std::vector<AgentInput> messages) {
-      CHECK_EQ(task_id, std::string("agent_4"));
+      EXPECT_EQ(task_id, std::string("agent_4"));
       for (auto &message : messages)
         subagent_delivered.push_back(std::move(message));
       return true;
     };
     coordinator.set_root_running(false);
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "root-only-session",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.session_id = "session-b"},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::steer,
-                    .body = MailboxPayload{.text = "root only"},
-                    .created_at_ms = now});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "root-only-session",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::steer,
+        .body = MailboxPayload{.text = "root only"},
+        .created_at_ms = now});
     const auto child4 =
         coordinator.register_subagent("agent_4", "/root/child-4", "root");
     coordinator.observe_task_event(AgentTaskStatusChangedEvent{
         .id = "agent_4",
         .previous = AgentTaskStatusKind::pending_init,
         .current = AgentTaskStatusKind::completed});
-    CHECK(coordinator
-              .inspect(child4, InboxQuery{.entry_id = "root-only-session",
-                                          .limit = 1})
-              .empty());
+    EXPECT_TRUE(coordinator
+                    .inspect(child4, InboxQuery{.entry_id = "root-only-session",
+                                                .limit = 1})
+                    .empty());
     bool child_reply_rejected = false;
     try {
-      static_cast<void>(coordinator.reply(child4, "root-only-session",
-                                          MailboxPayload{.text = "wrong child"}));
+      static_cast<void>(coordinator.reply(
+          child4, "root-only-session", MailboxPayload{.text = "wrong child"}));
     } catch (const MailboxError &error) {
       child_reply_rejected = error.code() == MailboxErrorCode::not_found;
     }
-    CHECK(child_reply_rejected);
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "exact-child-note",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.agent_id = child4.agent_id},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::note,
-                    .body = MailboxPayload{.text = "child only"},
-                    .created_at_ms = now});
-    CHECK(coordinator
-              .inspect(root_b,
-                       InboxQuery{.entry_id = "exact-child-note", .limit = 1})
-              .empty());
+    EXPECT_TRUE(child_reply_rejected);
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "exact-child-note",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.agent_id = child4.agent_id},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::note,
+        .body = MailboxPayload{.text = "child only"},
+        .created_at_ms = now});
+    EXPECT_TRUE(coordinator
+                    .inspect(root_b, InboxQuery{.entry_id = "exact-child-note",
+                                                .limit = 1})
+                    .empty());
     const auto child5 =
         coordinator.register_subagent("agent_5", "/root/child-5", "root");
-    CHECK(coordinator
-              .inspect(child5,
-                       InboxQuery{.entry_id = "exact-child-note", .limit = 1})
-              .empty());
-    CHECK_EQ(coordinator
-                 .inspect(child4, InboxQuery{.entry_id = "exact-child-note",
-                                             .limit = 1})
-                 .size(),
-             std::size_t{1});
+    EXPECT_TRUE(coordinator
+                    .inspect(child5, InboxQuery{.entry_id = "exact-child-note",
+                                                .limit = 1})
+                    .empty());
+    EXPECT_EQ(coordinator
+                  .inspect(child4, InboxQuery{.entry_id = "exact-child-note",
+                                              .limit = 1})
+                  .size(),
+              std::size_t{1});
     bool root_reply_rejected = false;
     try {
-      static_cast<void>(coordinator.reply(root_b, "exact-child-note",
-                                          MailboxPayload{.text = "wrong root"}));
+      static_cast<void>(coordinator.reply(
+          root_b, "exact-child-note", MailboxPayload{.text = "wrong root"}));
     } catch (const MailboxError &error) {
       root_reply_rejected = error.code() == MailboxErrorCode::not_found;
     }
-    CHECK(root_reply_rejected);
+    EXPECT_TRUE(root_reply_rejected);
     bool sibling_reply_rejected = false;
     try {
       static_cast<void>(coordinator.reply(
@@ -339,12 +326,12 @@ int main() {
     } catch (const MailboxError &error) {
       sibling_reply_rejected = error.code() == MailboxErrorCode::not_found;
     }
-    CHECK(sibling_reply_rejected);
+    EXPECT_TRUE(sibling_reply_rejected);
     coordinator.pump_inbox();
-    CHECK(subagent_delivered.empty());
+    EXPECT_TRUE(subagent_delivered.empty());
     coordinator.set_root_running(true);
     coordinator.pump_inbox();
-    CHECK_EQ(delivered.size(), std::size_t{3});
+    EXPECT_EQ(delivered.size(), std::size_t{3});
     delivered.back().on_accepted();
     const auto child_agents =
         coordinator.store().list_agents(AgentQuery{.session_id = "session-b",
@@ -355,27 +342,27 @@ int main() {
         std::ranges::find_if(child_agents, [](const auto &agent) {
           return agent.task_id == "agent_4";
         });
-    CHECK(endpoint != child_agents.end());
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "sub-steer-1",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.agent_id = endpoint->agent_id},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::steer,
-                    .body = MailboxPayload{.text = "reactivate child"},
-                    .created_at_ms = now});
+    EXPECT_TRUE(endpoint != child_agents.end());
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "sub-steer-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.agent_id = endpoint->agent_id},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::steer,
+        .body = MailboxPayload{.text = "reactivate child"},
+        .created_at_ms = now});
     coordinator.pump_inbox();
-    CHECK_EQ(subagent_delivered.size(), std::size_t{1});
+    EXPECT_EQ(subagent_delivered.size(), std::size_t{1});
     subagent_delivered.front().on_accepted();
-    CHECK(coordinator.store()
-              .inspect(InboxQuery{.session_id = "session-b",
-                                  .workspace_id = "workspace",
-                                  .agent_id = endpoint->agent_id,
-                                  .agent_kind = "subagent",
-                                  .entry_id = "sub-steer-1",
-                                  .now_ms = now})
-              .empty());
+    EXPECT_TRUE(coordinator.store()
+                    .inspect(InboxQuery{.session_id = "session-b",
+                                        .workspace_id = "workspace",
+                                        .agent_id = endpoint->agent_id,
+                                        .agent_kind = "subagent",
+                                        .entry_id = "sub-steer-1",
+                                        .now_ms = now})
+                    .empty());
 
     coordinator.observe_task_event(
         AgentTaskStatusChangedEvent{.id = "agent_2",
@@ -388,13 +375,13 @@ int main() {
         std::ranges::find_if(old_agents_after, [](const auto &agent) {
           return agent.task_id == "agent_2";
         });
-    CHECK(second_child != old_agents_after.end());
-    CHECK(coordinator.store()
-              .list_agents(AgentQuery{.agent_id = second_child->agent_id,
-                                      .include_closed = true,
-                                      .now_ms = now})
-              .front()
-              .status == "closed");
+    EXPECT_TRUE(second_child != old_agents_after.end());
+    EXPECT_TRUE(coordinator.store()
+                    .list_agents(AgentQuery{.agent_id = second_child->agent_id,
+                                            .include_closed = true,
+                                            .now_ms = now})
+                    .front()
+                    .status == "closed");
 
     Model task_model;
     task_model.id = "task-model";
@@ -428,13 +415,13 @@ int main() {
         std::ranges::find_if(shutdown_agents, [&](const auto &agent) {
           return agent.task_id == task.id;
         });
-    CHECK(shutdown_endpoint != shutdown_agents.end());
+    EXPECT_TRUE(shutdown_endpoint != shutdown_agents.end());
     const auto shutdown_agent = coordinator.store().list_agents(
         AgentQuery{.agent_id = shutdown_endpoint->agent_id,
                    .include_closed = true,
                    .now_ms = now});
-    CHECK_EQ(shutdown_agent.size(), std::size_t{1});
-    CHECK(shutdown_agent.front().closed_at_ms.has_value());
+    EXPECT_EQ(shutdown_agent.size(), std::size_t{1});
+    EXPECT_TRUE(shutdown_agent.front().closed_at_ms.has_value());
 
     auto second_options = options();
     second_options.process_id = "process-2";
@@ -452,15 +439,14 @@ int main() {
     for (const auto &agent : same_agents)
       if (agent.task_id == "agent_same")
         same_endpoints.push_back(agent.agent_id);
-    CHECK_EQ(same_endpoints.size(), std::size_t{2});
-    CHECK(same_endpoints[0] != same_endpoints[1]);
+    EXPECT_EQ(same_endpoints.size(), std::size_t{2});
+    EXPECT_TRUE(same_endpoints[0] != same_endpoints[1]);
     second_coordinator.stop();
 
     coordinator.set_root_running(false);
     std::size_t root_wakes = 0;
     delivery->root_wake = [&root_wakes] { ++root_wakes; };
-    for (const auto kind :
-         {MailboxEntryKind::note, MailboxEntryKind::reply}) {
+    for (const auto kind : {MailboxEntryKind::note, MailboxEntryKind::reply}) {
       coordinator.store().send(EnqueueMailboxEntryRequest{
           .entry_id =
               kind == MailboxEntryKind::note ? "idle-note" : "idle-reply",
@@ -473,18 +459,18 @@ int main() {
           .created_at_ms = now});
     }
     coordinator.maintenance_tick();
-    CHECK(!coordinator.idle_root_work_pending());
-    CHECK_EQ(root_wakes, std::size_t{0});
+    EXPECT_TRUE(!coordinator.idle_root_work_pending());
+    EXPECT_EQ(root_wakes, std::size_t{0});
     const auto probe_root = coordinator.self(root_b).agent_id;
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "a-leased",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.session_id = "session-b"},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::request,
-                    .body = MailboxPayload{.text = "leased first"},
-                    .created_at_ms = now});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "a-leased",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::request,
+        .body = MailboxPayload{.text = "leased first"},
+        .created_at_ms = now});
     const auto leased = coordinator.store().claim(
         ClaimRequest{.session_id = "session-b",
                      .agent_id = probe_root,
@@ -493,19 +479,19 @@ int main() {
                      .limit = 1,
                      .now_ms = now,
                      .lease_ms = 100});
-    CHECK_EQ(leased.messages.size(), std::size_t{1});
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "b-claimable",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.session_id = "session-b"},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::request,
-                    .body = MailboxPayload{.text = "claimable later"},
-                    .created_at_ms = now});
-    CHECK(coordinator.idle_root_work_pending());
+    EXPECT_EQ(leased.messages.size(), std::size_t{1});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "b-claimable",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::request,
+        .body = MailboxPayload{.text = "claimable later"},
+        .created_at_ms = now});
+    EXPECT_TRUE(coordinator.idle_root_work_pending());
     const auto claimable_probe = coordinator.claim_idle_root_turn(1);
-    CHECK_EQ(claimable_probe.size(), std::size_t{1});
+    EXPECT_EQ(claimable_probe.size(), std::size_t{1});
     claimable_probe.front().on_accepted();
     coordinator.set_root_running(false);
     coordinator.store().acknowledge(
@@ -514,30 +500,30 @@ int main() {
                            .claim_token = *leased.messages.front().claim_token,
                            .workspace_id = "workspace",
                            .now_ms = now});
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "idle-request-1",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.session_id = "session-b"},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::request,
-                    .body = MailboxPayload{.text = "answer this while idle"},
-                    .created_at_ms = now});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "idle-request-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.session_id = "session-b"},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::request,
+        .body = MailboxPayload{.text = "answer this while idle"},
+        .created_at_ms = now});
     for (std::size_t index = 0; index < 16; ++index) {
       const auto entry_id = "idle-steer-" + std::to_string(index);
-      coordinator.store().send(
-          EnqueueMailboxEntryRequest{.entry_id = entry_id,
-                      .sender_agent_id = "sender-agent",
-                      .sender_session_id = "sender-session",
-                      .target = MailboxTarget{.session_id = "session-b"},
-                      .workspace_id = "workspace",
-                      .kind = MailboxEntryKind::steer,
-                      .body = MailboxPayload{.text = entry_id},
-                      .created_at_ms = now});
+      coordinator.store().send(EnqueueMailboxEntryRequest{
+          .entry_id = entry_id,
+          .sender_agent_id = "sender-agent",
+          .sender_session_id = "sender-session",
+          .target = MailboxTarget{.session_id = "session-b"},
+          .workspace_id = "workspace",
+          .kind = MailboxEntryKind::steer,
+          .body = MailboxPayload{.text = entry_id},
+          .created_at_ms = now});
     }
-    CHECK(coordinator.idle_root_work_pending());
+    EXPECT_TRUE(coordinator.idle_root_work_pending());
     coordinator.maintenance_tick();
-    CHECK(root_wakes > 0);
+    EXPECT_TRUE(root_wakes > 0);
     // delivered_at_ms commits at delivery (claim -> AgentInput conversion
     // inside claim_idle_root_turn()), not at the raw store-level claim()
     // check above: "b-claimable"/"idle-request-1" was already claimed once
@@ -545,57 +531,59 @@ int main() {
     // back unset here, and only becomes set once claim_idle_root_turn()
     // below actually converts it.
     {
-      const auto before_delivery = coordinator.store().inspect(
-          InboxQuery{.session_id = "session-b",
-                     .workspace_id = "workspace",
-                     .entry_id = "idle-request-1",
-                     .include_acknowledged = true,
-                     .now_ms = now});
-      CHECK_EQ(before_delivery.size(), std::size_t{1});
-      CHECK(!before_delivery.front().delivered_at_ms.has_value());
+      const auto before_delivery =
+          coordinator.store().inspect(InboxQuery{.session_id = "session-b",
+                                                 .workspace_id = "workspace",
+                                                 .entry_id = "idle-request-1",
+                                                 .include_acknowledged = true,
+                                                 .now_ms = now});
+      EXPECT_EQ(before_delivery.size(), std::size_t{1});
+      EXPECT_TRUE(!before_delivery.front().delivered_at_ms.has_value());
     }
     const auto idle_messages = coordinator.claim_idle_root_turn();
-    CHECK_EQ(idle_messages.size(), std::size_t{16});
+    EXPECT_EQ(idle_messages.size(), std::size_t{16});
     {
-      const auto after_delivery = coordinator.store().inspect(
-          InboxQuery{.session_id = "session-b",
-                     .workspace_id = "workspace",
-                     .entry_id = "idle-request-1",
-                     .include_acknowledged = true,
-                     .now_ms = now});
-      CHECK_EQ(after_delivery.size(), std::size_t{1});
-      CHECK(after_delivery.front().delivered_at_ms.has_value());
+      const auto after_delivery =
+          coordinator.store().inspect(InboxQuery{.session_id = "session-b",
+                                                 .workspace_id = "workspace",
+                                                 .entry_id = "idle-request-1",
+                                                 .include_acknowledged = true,
+                                                 .now_ms = now});
+      EXPECT_EQ(after_delivery.size(), std::size_t{1});
+      EXPECT_TRUE(after_delivery.front().delivered_at_ms.has_value());
     }
-    CHECK(coordinator.status().root_running);
-    CHECK(std::get<TextContent>(
-              std::get<UserMessage>(idle_messages.front().message)
-                  .content.front())
-              .text.find(
-                  "Reply with agents_reply(message_id=\"idle-request-1\")") !=
-          std::string::npos);
-    CHECK(coordinator.claim_idle_root_turn().empty());
+    EXPECT_TRUE(coordinator.status().root_running);
+    EXPECT_TRUE(
+        std::get<TextContent>(
+            std::get<UserMessage>(idle_messages.front().message)
+                .content.front())
+            .text.find(
+                "Reply with agents_reply(message_id=\"idle-request-1\")") !=
+        std::string::npos);
+    EXPECT_TRUE(coordinator.claim_idle_root_turn().empty());
     for (const auto &message : idle_messages)
       message.on_accepted();
-    CHECK(idle_messages.front().presentation.source == InputProvenance::Source::mailbox);
-    CHECK(idle_messages.front().presentation.message_id.has_value());
-    CHECK(idle_messages.front().presentation.message_kind.has_value());
+    EXPECT_TRUE(idle_messages.front().presentation.source ==
+                InputProvenance::Source::mailbox);
+    EXPECT_TRUE(idle_messages.front().presentation.message_id.has_value());
+    EXPECT_TRUE(idle_messages.front().presentation.message_kind.has_value());
     coordinator.set_root_running(false);
-    CHECK(coordinator.idle_root_work_pending());
+    EXPECT_TRUE(coordinator.idle_root_work_pending());
     const auto remaining_idle_messages = coordinator.claim_idle_root_turn();
-    CHECK_EQ(remaining_idle_messages.size(), std::size_t{1});
+    EXPECT_EQ(remaining_idle_messages.size(), std::size_t{1});
     remaining_idle_messages.front().on_accepted();
     coordinator.set_root_running(false);
-    CHECK(!coordinator.idle_root_work_pending());
-    CHECK(coordinator.claim_idle_root_turn().empty());
+    EXPECT_TRUE(!coordinator.idle_root_work_pending());
+    EXPECT_TRUE(coordinator.claim_idle_root_turn().empty());
     MailboxAutonomousTurnBudget budget;
     for (std::size_t index = 0;
          index < MailboxAutonomousTurnBudget::max_consecutive_turns; ++index) {
-      CHECK(budget.can_run());
+      EXPECT_TRUE(budget.can_run());
       budget.record();
     }
-    CHECK(budget.exhausted());
+    EXPECT_TRUE(budget.exhausted());
     budget.reset();
-    CHECK(budget.can_run());
+    EXPECT_TRUE(budget.can_run());
     coordinator.store().send(EnqueueMailboxEntryRequest{
         .entry_id = "idle-redelivery",
         .sender_agent_id = "sender-agent",
@@ -606,62 +594,64 @@ int main() {
         .body = MailboxPayload{.text = "retry after acceptance failure"},
         .created_at_ms = now});
     const auto unaccepted = coordinator.claim_idle_root_turn();
-    CHECK_EQ(unaccepted.size(), std::size_t{1});
+    EXPECT_EQ(unaccepted.size(), std::size_t{1});
     coordinator.set_root_running(false);
-    CHECK(!coordinator.idle_root_work_pending());
+    EXPECT_TRUE(!coordinator.idle_root_work_pending());
     now += 101;
-    CHECK(coordinator.idle_root_work_pending());
+    EXPECT_TRUE(coordinator.idle_root_work_pending());
     const auto redelivery = coordinator.claim_idle_root_turn();
-    CHECK_EQ(redelivery.size(), std::size_t{1});
+    EXPECT_EQ(redelivery.size(), std::size_t{1});
     redelivery.front().on_accepted();
     coordinator.set_root_running(false);
-    CHECK(coordinator.store()
-              .inspect(InboxQuery{.session_id = "session-b",
-                                  .workspace_id = "workspace",
-                                  .agent_id = coordinator.self(root_b).agent_id,
-                                  .agent_kind = "root",
-                                  .entry_id = "idle-request-1",
-                                  .now_ms = now})
-              .empty());
+    EXPECT_TRUE(
+        coordinator.store()
+            .inspect(InboxQuery{.session_id = "session-b",
+                                .workspace_id = "workspace",
+                                .agent_id = coordinator.self(root_b).agent_id,
+                                .agent_kind = "root",
+                                .entry_id = "idle-request-1",
+                                .now_ms = now})
+            .empty());
 
     coordinator.set_root_running(true);
     coordinator.maintenance_tick();
     const auto delivered_after_tick = delivered.size();
     const auto root_endpoint = coordinator.self(root_b).agent_id;
     now += 1;
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "cadence-1",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.agent_id = root_endpoint},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::steer,
-                    .body = MailboxPayload{.text = "cadence"},
-                    .created_at_ms = now});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "cadence-1",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.agent_id = root_endpoint},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::steer,
+        .body = MailboxPayload{.text = "cadence"},
+        .created_at_ms = now});
     coordinator.maintenance_tick();
-    CHECK_EQ(delivered.size(), delivered_after_tick);
+    EXPECT_EQ(delivered.size(), delivered_after_tick);
     now += 249;
     coordinator.maintenance_tick();
-    CHECK(delivered.size() > delivered_after_tick);
-    CHECK(!root_queue.empty());
+    EXPECT_TRUE(delivered.size() > delivered_after_tick);
+    EXPECT_TRUE(!root_queue.empty());
     coordinator.set_root_running(false);
-    CHECK(root_queue.empty());
+    EXPECT_TRUE(root_queue.empty());
     now += 101;
     coordinator.set_root_running(true);
     coordinator.pump_inbox();
-    CHECK(std::get<TextContent>(
-              std::get<UserMessage>(delivered.back().message).content.front())
-              .text.find("cadence-1") != std::string::npos);
+    EXPECT_TRUE(
+        std::get<TextContent>(
+            std::get<UserMessage>(delivered.back().message).content.front())
+            .text.find("cadence-1") != std::string::npos);
     delivered.back().on_accepted();
-    coordinator.store().send(
-        EnqueueMailboxEntryRequest{.entry_id = "stop-race",
-                    .sender_agent_id = "sender-agent",
-                    .sender_session_id = "sender-session",
-                    .target = MailboxTarget{.agent_id = root_endpoint},
-                    .workspace_id = "workspace",
-                    .kind = MailboxEntryKind::steer,
-                    .body = MailboxPayload{.text = "stop"},
-                    .created_at_ms = now});
+    coordinator.store().send(EnqueueMailboxEntryRequest{
+        .entry_id = "stop-race",
+        .sender_agent_id = "sender-agent",
+        .sender_session_id = "sender-session",
+        .target = MailboxTarget{.agent_id = root_endpoint},
+        .workspace_id = "workspace",
+        .kind = MailboxEntryKind::steer,
+        .body = MailboxPayload{.text = "stop"},
+        .created_at_ms = now});
     coordinator.pump_inbox();
     auto stop_race = delivered.back();
     std::thread acceptance([&stop_race] { stop_race.on_accepted(); });
@@ -675,19 +665,15 @@ int main() {
     } catch (const MailboxError &error) {
       stale_rejected = error.code() == MailboxErrorCode::permission_denied;
     }
-    CHECK(stale_rejected);
+    EXPECT_TRUE(stale_rejected);
     coordinator.stop();
     acceptance.join();
     coordinator.stop();
-    CHECK(!coordinator.status().root_active);
+    EXPECT_TRUE(!coordinator.status().root_active);
   } catch (const std::exception &error) {
-    std::cout << "unexpected exception: " << error.what() << "\n";
-    ++tests::failed;
+    FAIL() << "unexpected exception: " << error.what();
   }
 
   std::error_code error;
   std::filesystem::remove_all(root, error);
-  std::cout << "Tests: " << tests::passed << " passed, " << tests::failed
-            << " failed\n";
-  return tests::failed == 0 ? 0 : 1;
 }

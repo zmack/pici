@@ -1,5 +1,7 @@
 #include "core/mailbox/mailbox_store.h"
 
+#include <gtest/gtest.h>
+
 #include <sqlite3.h>
 
 #include <chrono>
@@ -11,27 +13,6 @@
 #include <string_view>
 
 #include <unistd.h>
-
-namespace tests {
-int passed{0};
-int failed{0};
-
-bool check(bool condition, std::string_view expression,
-           std::source_location location = std::source_location::current()) {
-  if (condition) {
-    ++passed;
-    return true;
-  }
-  ++failed;
-  std::cout << "FAIL " << location.file_name() << ":" << location.line()
-            << " — " << expression << "\n";
-  return false;
-}
-} // namespace tests
-
-#define CHECK(expression) tests::check((expression), #expression)
-#define CHECK_EQ(left, right)                                                  \
-  tests::check((left) == (right), #left " == " #right)
 
 using namespace pi::core;
 
@@ -73,7 +54,7 @@ MailboxErrorCode error_code(auto &&call) {
 
 } // namespace
 
-int main() {
+TEST(MailboxStore, PersistenceClaimsAndCleanup) {
   const auto suffix =
       std::chrono::steady_clock::now().time_since_epoch().count();
   const auto root = std::filesystem::temp_directory_path() /
@@ -100,9 +81,9 @@ int main() {
   try {
     {
       MailboxStore store(options("workspace-a"));
-      CHECK_EQ(store.status(StatusRequest{.workspace_id = "workspace-a"})
-                   .schema_version,
-               1);
+      EXPECT_EQ(store.status(StatusRequest{.workspace_id = "workspace-a"})
+                    .schema_version,
+                1);
 
       store.register_process(process("process-a", "workspace-a", now));
       store.register_agent(agent("agent-a", "process-a", "session-a", now));
@@ -111,9 +92,9 @@ int main() {
 
       const auto initial_wait = store.wait_for_change(
           WaitRequest{.workspace_id = "workspace-a", .timeout_ms = 0});
-      CHECK(initial_wait.generation > 0);
-      CHECK(initial_wait.presence_changed);
-      CHECK(!initial_wait.messages_changed);
+      EXPECT_TRUE(initial_wait.generation > 0);
+      EXPECT_TRUE(initial_wait.presence_changed);
+      EXPECT_TRUE(!initial_wait.messages_changed);
 
       const auto exact = store.send(EnqueueMailboxEntryRequest{
           .entry_id = "exact-message",
@@ -124,43 +105,43 @@ int main() {
           .body = MailboxPayload{.text = "hello"},
           .created_at_ms = now,
       });
-      CHECK_EQ(exact.recipient_agent_id.value(), std::string("agent-b"));
+      EXPECT_EQ(exact.recipient_agent_id.value(), std::string("agent-b"));
       const auto message_wait = store.wait_for_change(
           WaitRequest{.workspace_id = "workspace-a",
                       .after_generation = initial_wait.generation,
                       .timeout_ms = 0});
-      CHECK(message_wait.messages_changed);
-      CHECK(!message_wait.presence_changed);
+      EXPECT_TRUE(message_wait.messages_changed);
+      EXPECT_TRUE(!message_wait.presence_changed);
 
       auto inspected =
           store.inspect(InboxQuery{.session_id = "session-b", .now_ms = now});
-      CHECK_EQ(inspected.size(), std::size_t{1});
-      CHECK_EQ(inspected.front().body.text, std::string("hello"));
+      EXPECT_EQ(inspected.size(), std::size_t{1});
+      EXPECT_EQ(inspected.front().body.text, std::string("hello"));
       const auto claimed = store.claim(ClaimRequest{
           .session_id = "session-b", .agent_id = "agent-b", .now_ms = now});
-      CHECK_EQ(claimed.messages.size(), std::size_t{1});
-      CHECK(claimed.messages.front().claim_token.has_value());
+      EXPECT_EQ(claimed.messages.size(), std::size_t{1});
+      EXPECT_TRUE(claimed.messages.front().claim_token.has_value());
       // claim() alone is not delivery (docs/architecture-lexicon.md:
       // "Delivery converts a claimed actionable entry into agent input") --
       // the raw agents_claim Lua path calls claim() without ever building
       // agent input, so delivered_at_ms must stay unset until a caller
       // (MailboxCoordinator's two delivery sites) explicitly calls
       // mark_delivered().
-      CHECK(!claimed.messages.front().delivered_at_ms.has_value());
+      EXPECT_TRUE(!claimed.messages.front().delivered_at_ms.has_value());
       store.mark_delivered(exact.entry_id, "workspace-a", now);
-      const auto after_mark_delivered = store.inspect(
-          InboxQuery{.session_id = "session-b", .now_ms = now});
-      CHECK_EQ(after_mark_delivered.size(), std::size_t{1});
-      CHECK(after_mark_delivered.front().delivered_at_ms.has_value());
-      CHECK_EQ(*after_mark_delivered.front().delivered_at_ms, now);
+      const auto after_mark_delivered =
+          store.inspect(InboxQuery{.session_id = "session-b", .now_ms = now});
+      EXPECT_EQ(after_mark_delivered.size(), std::size_t{1});
+      EXPECT_TRUE(after_mark_delivered.front().delivered_at_ms.has_value());
+      EXPECT_EQ(*after_mark_delivered.front().delivered_at_ms, now);
       const auto token = *claimed.messages.front().claim_token;
-      CHECK(error_code([&] {
-              store.acknowledge(
-                  AcknowledgeRequest{.entry_id = exact.entry_id,
-                                     .agent_id = "wrong-agent",
-                                     .claim_token = token,
-                                     .now_ms = now});
-            }) == MailboxErrorCode::invalid_claim);
+      EXPECT_TRUE(error_code([&] {
+                    store.acknowledge(
+                        AcknowledgeRequest{.entry_id = exact.entry_id,
+                                           .agent_id = "wrong-agent",
+                                           .claim_token = token,
+                                           .now_ms = now});
+                  }) == MailboxErrorCode::invalid_claim);
       store.acknowledge(AcknowledgeRequest{.entry_id = exact.entry_id,
                                            .agent_id = "agent-b",
                                            .claim_token = token,
@@ -169,8 +150,9 @@ int main() {
                                            .agent_id = "agent-b",
                                            .claim_token = token,
                                            .now_ms = now});
-      CHECK(store.inspect(InboxQuery{.session_id = "session-b", .now_ms = now})
-                .empty());
+      EXPECT_TRUE(
+          store.inspect(InboxQuery{.session_id = "session-b", .now_ms = now})
+              .empty());
 
       const auto session = store.send(EnqueueMailboxEntryRequest{
           .sender_agent_id = "agent-a",
@@ -180,28 +162,28 @@ int main() {
           .body = MailboxPayload{.text = "durable"},
           .created_at_ms = now,
       });
-      CHECK(!session.recipient_agent_id.has_value());
+      EXPECT_TRUE(!session.recipient_agent_id.has_value());
       store.register_process(process("process-c", "workspace-a", now));
       store.register_agent(agent("agent-c", "process-c", "session-b", now));
-      CHECK(error_code([&] {
-              store.send(EnqueueMailboxEntryRequest{
-                  .sender_agent_id = "agent-a",
-                  .sender_session_id = "session-a",
-                  .target = MailboxTarget{.session_id = "session-b"},
-                  .workspace_id = "workspace-a",
-                  .body = MailboxPayload{.text = "ambiguous"},
-                  .created_at_ms = now});
-            }) == MailboxErrorCode::ambiguous_target);
+      EXPECT_TRUE(error_code([&] {
+                    store.send(EnqueueMailboxEntryRequest{
+                        .sender_agent_id = "agent-a",
+                        .sender_session_id = "session-a",
+                        .target = MailboxTarget{.session_id = "session-b"},
+                        .workspace_id = "workspace-a",
+                        .body = MailboxPayload{.text = "ambiguous"},
+                        .created_at_ms = now});
+                  }) == MailboxErrorCode::ambiguous_target);
       store.close_process("process-b", now);
       store.close_process("process-c", now);
       store.register_process(process("process-d", "workspace-a", now));
       store.register_agent(agent("agent-d", "process-d", "session-b", now));
-      CHECK_EQ(store
-                   .claim(ClaimRequest{.session_id = "session-b",
-                                       .agent_id = "agent-d",
-                                       .now_ms = now})
-                   .messages.size(),
-               std::size_t{1});
+      EXPECT_EQ(store
+                    .claim(ClaimRequest{.session_id = "session-b",
+                                        .agent_id = "agent-d",
+                                        .now_ms = now})
+                    .messages.size(),
+                std::size_t{1});
 
       const auto exclusive = store.send(EnqueueMailboxEntryRequest{
           .sender_agent_id = "agent-a",
@@ -213,34 +195,33 @@ int main() {
       });
       const auto exclusive_claim = store.claim(ClaimRequest{
           .session_id = "session-b", .agent_id = "agent-d", .now_ms = now});
-      CHECK_EQ(exclusive_claim.messages.size(), std::size_t{1});
-      CHECK_EQ(exclusive_claim.messages.front().entry_id,
-               exclusive.entry_id);
+      EXPECT_EQ(exclusive_claim.messages.size(), std::size_t{1});
+      EXPECT_EQ(exclusive_claim.messages.front().entry_id, exclusive.entry_id);
       store.register_process(process("process-e", "workspace-a", now));
       store.register_agent(agent("agent-e", "process-e", "session-b", now));
-      CHECK_EQ(
+      EXPECT_EQ(
           store
               .list_agents(AgentQuery{.session_id = "session-b", .now_ms = now})
               .size(),
           std::size_t{2});
-      CHECK(store
-                .claim(ClaimRequest{.session_id = "session-b",
-                                    .agent_id = "agent-e",
-                                    .now_ms = now})
-                .messages.empty());
+      EXPECT_TRUE(store
+                      .claim(ClaimRequest{.session_id = "session-b",
+                                          .agent_id = "agent-e",
+                                          .now_ms = now})
+                      .messages.empty());
       now += 31'000;
-      CHECK_EQ(
+      EXPECT_EQ(
           store.inspect(InboxQuery{.session_id = "session-b", .now_ms = now})
               .size(),
           std::size_t{2});
-      CHECK_EQ(store
-                   .claim(ClaimRequest{.session_id = "session-b",
-                                       .agent_id = "agent-e",
-                                       .limit = 1,
-                                       .now_ms = now,
-                                       .lease_ms = 30'000})
-                   .messages.size(),
-               std::size_t{1});
+      EXPECT_EQ(store
+                    .claim(ClaimRequest{.session_id = "session-b",
+                                        .agent_id = "agent-e",
+                                        .limit = 1,
+                                        .now_ms = now,
+                                        .lease_ms = 30'000})
+                    .messages.size(),
+                std::size_t{1});
 
       store.register_process(process("process-order", "workspace-a", now));
       store.register_agent(
@@ -263,8 +244,8 @@ int main() {
           .body = MailboxPayload{.text = "b"},
           .created_at_ms = now,
       });
-      CHECK_EQ(ordered_a.entry_id, std::string("ordered-a"));
-      CHECK_EQ(
+      EXPECT_EQ(ordered_a.entry_id, std::string("ordered-a"));
+      EXPECT_EQ(
           store
               .inspect(InboxQuery{.session_id = "session-order", .now_ms = now})
               .front()
@@ -275,30 +256,33 @@ int main() {
       store.register_process(process("process-other", "workspace-a", now));
       store.register_agent(
           agent("agent-other", "process-other", "session-order", now));
-      store.send(EnqueueMailboxEntryRequest{.entry_id = "filtered-other",
-                             .sender_agent_id = "agent-a",
-                             .sender_session_id = "session-a",
-                             .target = MailboxTarget{.agent_id = "agent-other"},
-                             .workspace_id = "workspace-a",
-                             .kind = MailboxEntryKind::steer,
-                             .body = MailboxPayload{.text = "other"},
-                             .created_at_ms = now});
-      store.send(EnqueueMailboxEntryRequest{.entry_id = "filtered-note",
-                             .sender_agent_id = "agent-a",
-                             .sender_session_id = "session-a",
-                             .target = MailboxTarget{.agent_id = "agent-order"},
-                             .workspace_id = "workspace-a",
-                             .kind = MailboxEntryKind::note,
-                             .body = MailboxPayload{.text = "note"},
-                             .created_at_ms = now});
-      store.send(EnqueueMailboxEntryRequest{.entry_id = "filtered-steer",
-                             .sender_agent_id = "agent-a",
-                             .sender_session_id = "session-a",
-                             .target = MailboxTarget{.agent_id = "agent-order"},
-                             .workspace_id = "workspace-a",
-                             .kind = MailboxEntryKind::steer,
-                             .body = MailboxPayload{.text = "steer"},
-                             .created_at_ms = now});
+      store.send(EnqueueMailboxEntryRequest{
+          .entry_id = "filtered-other",
+          .sender_agent_id = "agent-a",
+          .sender_session_id = "session-a",
+          .target = MailboxTarget{.agent_id = "agent-other"},
+          .workspace_id = "workspace-a",
+          .kind = MailboxEntryKind::steer,
+          .body = MailboxPayload{.text = "other"},
+          .created_at_ms = now});
+      store.send(EnqueueMailboxEntryRequest{
+          .entry_id = "filtered-note",
+          .sender_agent_id = "agent-a",
+          .sender_session_id = "session-a",
+          .target = MailboxTarget{.agent_id = "agent-order"},
+          .workspace_id = "workspace-a",
+          .kind = MailboxEntryKind::note,
+          .body = MailboxPayload{.text = "note"},
+          .created_at_ms = now});
+      store.send(EnqueueMailboxEntryRequest{
+          .entry_id = "filtered-steer",
+          .sender_agent_id = "agent-a",
+          .sender_session_id = "session-a",
+          .target = MailboxTarget{.agent_id = "agent-order"},
+          .workspace_id = "workspace-a",
+          .kind = MailboxEntryKind::steer,
+          .body = MailboxPayload{.text = "steer"},
+          .created_at_ms = now});
       const auto filtered =
           store.inspect(InboxQuery{.session_id = "session-order",
                                    .agent_id = "agent-order",
@@ -306,47 +290,49 @@ int main() {
                                    .kinds = {MailboxEntryKind::steer},
                                    .limit = 1,
                                    .now_ms = now});
-      CHECK_EQ(filtered.size(), std::size_t{1});
-      CHECK_EQ(filtered.front().entry_id, std::string("filtered-steer"));
-      CHECK(error_code([&] {
-              store.send(EnqueueMailboxEntryRequest{
-                  .entry_id = ordered_b.entry_id,
-                  .sender_agent_id = "agent-a",
-                  .sender_session_id = "session-a",
-                  .target = MailboxTarget{.agent_id = "agent-order"},
-                  .workspace_id = "workspace-a",
-                  .body = MailboxPayload{.text = "duplicate"},
-                  .created_at_ms = now});
-            }) == MailboxErrorCode::invalid_message);
+      EXPECT_EQ(filtered.size(), std::size_t{1});
+      EXPECT_EQ(filtered.front().entry_id, std::string("filtered-steer"));
+      EXPECT_TRUE(error_code([&] {
+                    store.send(EnqueueMailboxEntryRequest{
+                        .entry_id = ordered_b.entry_id,
+                        .sender_agent_id = "agent-a",
+                        .sender_session_id = "session-a",
+                        .target = MailboxTarget{.agent_id = "agent-order"},
+                        .workspace_id = "workspace-a",
+                        .body = MailboxPayload{.text = "duplicate"},
+                        .created_at_ms = now});
+                  }) == MailboxErrorCode::invalid_message);
 
       const auto generation =
           store.status(StatusRequest{.workspace_id = "workspace-a"})
               .latest_generation;
       std::stop_source stop;
       stop.request_stop();
-      CHECK(store
-                .wait_for_change(WaitRequest{.workspace_id = "workspace-a",
-                                             .after_generation = generation,
-                                             .timeout_ms = 60'000},
-                                 stop.get_token())
-                .timed_out);
+      EXPECT_TRUE(
+          store
+              .wait_for_change(WaitRequest{.workspace_id = "workspace-a",
+                                           .after_generation = generation,
+                                           .timeout_ms = 60'000},
+                               stop.get_token())
+              .timed_out);
     }
 
     MailboxStore reopened(options("workspace-a"));
-    CHECK(reopened
-              .inspect(InboxQuery{.session_id = "session-order", .now_ms = now})
-              .size() >= 2);
+    EXPECT_TRUE(
+        reopened
+            .inspect(InboxQuery{.session_id = "session-order", .now_ms = now})
+            .size() >= 2);
 
     MailboxStore global(options("workspace-a", MailboxScope::global));
     global.register_process(process("process-b2", "workspace-b", now));
     global.register_agent(agent("agent-b2", "process-b2", "session-b2", now));
     MailboxStore workspace_b(options("workspace-b"));
-    CHECK_EQ(workspace_b.list_agents(AgentQuery{.now_ms = now}).size(),
-             std::size_t{1});
-    CHECK(error_code([&] {
-            reopened.list_agents(
-                AgentQuery{.workspace_id = "workspace-b", .now_ms = now});
-          }) == MailboxErrorCode::permission_denied);
+    EXPECT_EQ(workspace_b.list_agents(AgentQuery{.now_ms = now}).size(),
+              std::size_t{1});
+    EXPECT_TRUE(error_code([&] {
+                  reopened.list_agents(
+                      AgentQuery{.workspace_id = "workspace-b", .now_ms = now});
+                }) == MailboxErrorCode::permission_denied);
     const auto cross_workspace = global.send(EnqueueMailboxEntryRequest{
         .sender_agent_id = "agent-a",
         .sender_session_id = "session-a",
@@ -355,20 +341,21 @@ int main() {
         .body = MailboxPayload{.text = "cross-workspace"},
         .created_at_ms = now,
     });
-    CHECK_EQ(workspace_b
-                 .inspect(InboxQuery{.session_id = "session-b2", .now_ms = now})
-                 .front()
-                 .entry_id,
-             cross_workspace.entry_id);
-    CHECK(error_code([&] {
-            reopened.send(
-                EnqueueMailboxEntryRequest{.sender_agent_id = "agent-a",
-                            .sender_session_id = "session-a",
-                            .target = MailboxTarget{.agent_id = "agent-b2"},
-                            .workspace_id = "workspace-b",
-                            .body = MailboxPayload{.text = "blocked"},
-                            .created_at_ms = now});
-          }) == MailboxErrorCode::permission_denied);
+    EXPECT_EQ(
+        workspace_b
+            .inspect(InboxQuery{.session_id = "session-b2", .now_ms = now})
+            .front()
+            .entry_id,
+        cross_workspace.entry_id);
+    EXPECT_TRUE(error_code([&] {
+                  reopened.send(EnqueueMailboxEntryRequest{
+                      .sender_agent_id = "agent-a",
+                      .sender_session_id = "session-a",
+                      .target = MailboxTarget{.agent_id = "agent-b2"},
+                      .workspace_id = "workspace-b",
+                      .body = MailboxPayload{.text = "blocked"},
+                      .created_at_ms = now});
+                }) == MailboxErrorCode::permission_denied);
 
     const auto cleanup_process = process("process-cleanup", "workspace-a", now);
     reopened.register_process(cleanup_process);
@@ -382,21 +369,21 @@ int main() {
         reopened.cleanup(CleanupRequest{.now_ms = now,
                                         .acknowledged_retention_ms = 0,
                                         .stale_retention_ms = 0});
-    CHECK(cleanup.agents_removed >= 2);
-    CHECK(cleanup.processes_removed >= 1);
+    EXPECT_TRUE(cleanup.agents_removed >= 2);
+    EXPECT_TRUE(cleanup.processes_removed >= 1);
 
     reopened.register_process(
         process("process-root-claim", "workspace-a", now));
     reopened.register_agent(
         agent("root-claim", "process-root-claim", "shared-session", now));
-    const auto root_only = reopened.send(
-        EnqueueMailboxEntryRequest{.entry_id = "root-only-claim",
-                    .sender_agent_id = "agent-a",
-                    .sender_session_id = "session-a",
-                    .target = MailboxTarget{.session_id = "shared-session"},
-                    .workspace_id = "workspace-a",
-                    .body = MailboxPayload{.text = "root only"},
-                    .created_at_ms = now});
+    const auto root_only = reopened.send(EnqueueMailboxEntryRequest{
+        .entry_id = "root-only-claim",
+        .sender_agent_id = "agent-a",
+        .sender_session_id = "session-a",
+        .target = MailboxTarget{.session_id = "shared-session"},
+        .workspace_id = "workspace-a",
+        .body = MailboxPayload{.text = "root only"},
+        .created_at_ms = now});
     reopened.register_agent(agent("child-claim", "process-root-claim",
                                   "shared-session", now,
                                   std::string("root-claim")));
@@ -412,26 +399,26 @@ int main() {
         .body = MailboxPayload{.text = "root attachment"},
         .created_at_ms = now,
     });
-    CHECK(!session_with_children.recipient_agent_id.has_value());
-    CHECK(reopened
-              .claim(ClaimRequest{.session_id = "shared-session",
-                                  .agent_id = "child-claim",
-                                  .now_ms = now})
-              .messages.empty());
-    CHECK(reopened
-              .inspect(InboxQuery{.session_id = "shared-session",
-                                  .agent_id = "child-claim-2",
-                                  .agent_kind = "subagent",
-                                  .now_ms = now})
-              .empty());
+    EXPECT_TRUE(!session_with_children.recipient_agent_id.has_value());
+    EXPECT_TRUE(reopened
+                    .claim(ClaimRequest{.session_id = "shared-session",
+                                        .agent_id = "child-claim",
+                                        .now_ms = now})
+                    .messages.empty());
+    EXPECT_TRUE(reopened
+                    .inspect(InboxQuery{.session_id = "shared-session",
+                                        .agent_id = "child-claim-2",
+                                        .agent_kind = "subagent",
+                                        .now_ms = now})
+                    .empty());
     const auto root_claim =
         reopened.claim(ClaimRequest{.session_id = "shared-session",
                                     .agent_id = "root-claim",
                                     .now_ms = now});
-    CHECK_EQ(root_claim.messages.size(), std::size_t{2});
-    CHECK_EQ(root_claim.messages.front().entry_id, root_only.entry_id);
-    CHECK_EQ(root_claim.messages.back().entry_id,
-             session_with_children.entry_id);
+    EXPECT_EQ(root_claim.messages.size(), std::size_t{2});
+    EXPECT_EQ(root_claim.messages.front().entry_id, root_only.entry_id);
+    EXPECT_EQ(root_claim.messages.back().entry_id,
+              session_with_children.entry_id);
 
     const auto insecure_dir = root / "insecure";
     std::filesystem::create_directories(insecure_dir);
@@ -439,19 +426,19 @@ int main() {
                                  std::filesystem::perms::owner_all |
                                      std::filesystem::perms::group_read,
                                  std::filesystem::perm_options::replace);
-    CHECK(error_code([&] {
-            MailboxStore insecure(MailboxStoreOptions{
-                .path = insecure_dir / "mailbox.sqlite3",
-                .workspace_id = "workspace-a",
-                .workspace_path = "/tmp/workspace",
-                .clock = [&] { return now; },
-                .id_generator = [&] { return "insecure"; }});
-          }) == MailboxErrorCode::permission_denied);
+    EXPECT_TRUE(error_code([&] {
+                  MailboxStore insecure(MailboxStoreOptions{
+                      .path = insecure_dir / "mailbox.sqlite3",
+                      .workspace_id = "workspace-a",
+                      .workspace_path = "/tmp/workspace",
+                      .clock = [&] { return now; },
+                      .id_generator = [&] { return "insecure"; }});
+                }) == MailboxErrorCode::permission_denied);
 
     const auto symlink_target = root / "symlink-target.sqlite3";
     sqlite3 *symlink_database = nullptr;
-    CHECK_EQ(sqlite3_open(symlink_target.c_str(), &symlink_database),
-             SQLITE_OK);
+    EXPECT_EQ(sqlite3_open(symlink_target.c_str(), &symlink_database),
+              SQLITE_OK);
     sqlite3_close(symlink_database);
     std::filesystem::permissions(symlink_target,
                                  std::filesystem::perms::owner_read |
@@ -459,25 +446,25 @@ int main() {
                                  std::filesystem::perm_options::replace);
     const auto symlink_path = root / "symlink.sqlite3";
     std::filesystem::create_symlink(symlink_target, symlink_path);
-    CHECK(error_code([&] {
-            MailboxStore symlink(
-                MailboxStoreOptions{.path = symlink_path,
-                                    .workspace_id = "workspace-a",
-                                    .workspace_path = "/tmp/workspace",
-                                    .clock = [&] { return now; },
-                                    .id_generator = [&] { return "symlink"; }});
-          }) == MailboxErrorCode::permission_denied);
+    EXPECT_TRUE(error_code([&] {
+                  MailboxStore symlink(MailboxStoreOptions{
+                      .path = symlink_path,
+                      .workspace_id = "workspace-a",
+                      .workspace_path = "/tmp/workspace",
+                      .clock = [&] { return now; },
+                      .id_generator = [&] { return "symlink"; }});
+                }) == MailboxErrorCode::permission_denied);
 
     const auto nonregular_path = root / "nonregular.sqlite3";
     std::filesystem::create_directory(nonregular_path);
-    CHECK(error_code([&] {
-            MailboxStore nonregular(MailboxStoreOptions{
-                .path = nonregular_path,
-                .workspace_id = "workspace-a",
-                .workspace_path = "/tmp/workspace",
-                .clock = [&] { return now; },
-                .id_generator = [&] { return "nonregular"; }});
-          }) == MailboxErrorCode::permission_denied);
+    EXPECT_TRUE(error_code([&] {
+                  MailboxStore nonregular(MailboxStoreOptions{
+                      .path = nonregular_path,
+                      .workspace_id = "workspace-a",
+                      .workspace_path = "/tmp/workspace",
+                      .clock = [&] { return now; },
+                      .id_generator = [&] { return "nonregular"; }});
+                }) == MailboxErrorCode::permission_denied);
 
     const auto corrupt_path = root / "corrupt.sqlite3";
     {
@@ -488,21 +475,21 @@ int main() {
                                  std::filesystem::perms::owner_read |
                                      std::filesystem::perms::owner_write,
                                  std::filesystem::perm_options::replace);
-    CHECK(error_code([&] {
-            MailboxStore corrupt_store(
-                MailboxStoreOptions{.path = corrupt_path,
-                                    .workspace_id = "workspace-a",
-                                    .workspace_path = "/tmp/workspace",
-                                    .clock = [&] { return now; },
-                                    .id_generator = [&] { return "corrupt"; }});
-          }) == MailboxErrorCode::corrupt);
+    EXPECT_TRUE(error_code([&] {
+                  MailboxStore corrupt_store(MailboxStoreOptions{
+                      .path = corrupt_path,
+                      .workspace_id = "workspace-a",
+                      .workspace_path = "/tmp/workspace",
+                      .clock = [&] { return now; },
+                      .id_generator = [&] { return "corrupt"; }});
+                }) == MailboxErrorCode::corrupt);
 
     const auto newer_path = root / "newer.sqlite3";
     sqlite3 *database = nullptr;
-    CHECK_EQ(sqlite3_open(newer_path.c_str(), &database), SQLITE_OK);
-    CHECK_EQ(sqlite3_exec(database, "PRAGMA user_version=99", nullptr, nullptr,
-                          nullptr),
-             SQLITE_OK);
+    EXPECT_EQ(sqlite3_open(newer_path.c_str(), &database), SQLITE_OK);
+    EXPECT_EQ(sqlite3_exec(database, "PRAGMA user_version=99", nullptr, nullptr,
+                           nullptr),
+              SQLITE_OK);
     sqlite3_close(database);
     std::filesystem::permissions(newer_path,
                                  std::filesystem::perms::owner_read |
@@ -515,16 +502,12 @@ int main() {
         .clock = [&] { return now; },
         .id_generator = [&] { return "newer-" + std::to_string(++next_id); },
     };
-    CHECK(error_code([&] { MailboxStore newer(newer_options); }) ==
-          MailboxErrorCode::incompatible_schema);
+    EXPECT_TRUE(error_code([&] { MailboxStore newer(newer_options); }) ==
+                MailboxErrorCode::incompatible_schema);
   } catch (const std::exception &error) {
-    std::cout << "unexpected exception: " << error.what() << "\n";
-    ++tests::failed;
+    FAIL() << "unexpected exception: " << error.what();
   }
 
   std::error_code error;
   std::filesystem::remove_all(root, error);
-  std::cout << "Tests: " << tests::passed << " passed, " << tests::failed
-            << " failed\n";
-  return tests::failed == 0 ? 0 : 1;
 }

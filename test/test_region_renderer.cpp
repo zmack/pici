@@ -1,7 +1,9 @@
 #include "core/message_types.h"
+
 #include "core/region_renderer.h"
 #include "core/stream_renderer.h"
 #include "core/terminal.h"
+#include <gtest/gtest.h>
 
 #include <algorithm>
 #include <chrono>
@@ -17,16 +19,11 @@
 
 namespace {
 
-int failed = 0;
-
 void expect(bool condition, std::string_view message) {
-  if (!condition) {
-    ++failed;
-    std::cerr << "FAIL: " << message << '\n';
-  }
+  EXPECT_TRUE(condition) << message;
 }
 
-void test_ordered_transcript_blocks() {
+TEST(RegionRenderer, test_ordered_transcript_blocks) {
   pi::core::RegionState state;
   state.blocks = {pi::core::RegionTextBlock{"first"},
                   pi::core::RegionTextBlock{"second"}};
@@ -37,7 +34,7 @@ void test_ordered_transcript_blocks() {
   expect(frame.lines[0].ends_with("\033[0m"), "rows close SGR state");
 }
 
-void test_tail_anchor_and_scroll() {
+TEST(RegionRenderer, test_tail_anchor_and_scroll) {
   pi::core::RegionState state;
   state.blocks = {
       pi::core::RegionTextBlock{"one"}, pi::core::RegionTextBlock{"two"},
@@ -53,7 +50,7 @@ void test_tail_anchor_and_scroll() {
          "scroll offset moves toward transcript head");
 }
 
-void test_thinking_is_inserted_at_the_current_turn_boundary() {
+TEST(RegionRenderer, test_thinking_is_inserted_at_the_current_turn_boundary) {
   pi::core::RegionState state;
   state.blocks = {pi::core::RegionTextBlock{"previous answer"},
                   pi::core::RegionTextBlock{"current answer"}};
@@ -75,7 +72,7 @@ void test_thinking_is_inserted_at_the_current_turn_boundary() {
   expect(reasoning < current, "current answer follows its thinking block");
 }
 
-void test_sgr_reopens_after_wrap() {
+TEST(RegionRenderer, test_sgr_reopens_after_wrap) {
   pi::core::RegionState state;
   state.blocks = {pi::core::RegionTextBlock{"\033[31mabcdef\033[0m"}};
   const auto frame = pi::core::build_region_frame(state, 3, 4);
@@ -97,7 +94,7 @@ void test_sgr_reopens_after_wrap() {
          "reset-plus-color reopens color on continuation");
 }
 
-void test_word_wrap_breaks_on_spaces() {
+TEST(RegionRenderer, test_word_wrap_breaks_on_spaces) {
   pi::core::RegionState state;
   state.blocks = {pi::core::RegionTextBlock{"alpha beta gamma delta"}};
   // Each word is 5, 4, 5, 5 columns wide; at width 9 a character-boundary
@@ -122,7 +119,7 @@ void test_word_wrap_breaks_on_spaces() {
          "word-wrap breaks drop whitespace rather than carrying it forward");
 }
 
-void test_word_wrap_overlong_token_hard_wraps() {
+TEST(RegionRenderer, test_word_wrap_overlong_token_hard_wraps) {
   pi::core::RegionState state;
   // A single unbroken token wider than the whole row has no word boundary
   // to backtrack to, so it must still fall back to hard character-boundary
@@ -138,7 +135,7 @@ void test_word_wrap_overlong_token_hard_wraps() {
   expect(frame.lines[3] == "p\033[0m", "final partial chunk");
 }
 
-void test_word_wrap_sgr_reopens_after_word_boundary_break() {
+TEST(RegionRenderer, test_word_wrap_sgr_reopens_after_word_boundary_break) {
   pi::core::RegionState state;
   // "red " fits within width 5 and "w" still fits on that row, but "wo"
   // would overflow -- so the row breaks between "red" and "word" at the
@@ -155,7 +152,7 @@ void test_word_wrap_sgr_reopens_after_word_boundary_break() {
   expect(frame.lines[1].ends_with("\033[0m"), "wrapped row closes color");
 }
 
-void test_diff_only_changes_rows() {
+TEST(RegionRenderer, test_diff_only_changes_rows) {
   const std::vector<std::string> old_rows = {"one", "two", "three"};
   const std::vector<std::string> new_rows = {"one", "changed", "three"};
   const auto diff = pi::core::diff_region_rows(old_rows, new_rows);
@@ -167,7 +164,7 @@ void test_diff_only_changes_rows() {
          "diff skips unchanged last row");
 }
 
-void test_diff_scrolls_tail_without_repainting_every_row() {
+TEST(RegionRenderer, test_diff_scrolls_tail_without_repainting_every_row) {
   const std::vector<std::string> old_rows = {"one", "two", "three"};
   const std::vector<std::string> new_rows = {"two", "three", "four"};
   const auto diff = pi::core::diff_region_rows(old_rows, new_rows);
@@ -186,7 +183,7 @@ void test_diff_scrolls_tail_without_repainting_every_row() {
          "history scrolling paints only the new top row");
 }
 
-void test_degenerate_sizing() {
+TEST(RegionRenderer, test_degenerate_sizing) {
   pi::core::RegionState state;
   state.blocks = {pi::core::RegionTextBlock{"text"}};
   expect(pi::core::build_region_frame(state, 80, 0).lines.empty(),
@@ -206,7 +203,7 @@ pi::core::RegionBlock tool_block(std::string call_id, std::string name,
   return tool;
 }
 
-void test_tool_regions_preserve_call_order() {
+TEST(RegionRenderer, test_tool_regions_preserve_call_order) {
   pi::core::RegionState state;
   state.blocks.emplace_back(pi::core::RegionTextBlock{"before"});
   state.blocks.emplace_back(tool_block("call-a", "first", "a-result"));
@@ -225,7 +222,7 @@ void test_tool_regions_preserve_call_order() {
          "text after tools remains after tool regions");
 }
 
-void test_tool_updates_are_isolated() {
+TEST(RegionRenderer, test_tool_updates_are_isolated) {
   pi::core::RegionState state;
   state.blocks.emplace_back(tool_block("call-a", "first", "first-output"));
   state.blocks.emplace_back(tool_block("call-b", "second", "old-output"));
@@ -240,7 +237,7 @@ void test_tool_updates_are_isolated() {
          "updated tool output is rendered in place");
 }
 
-void test_interleaved_text_rounds() {
+TEST(RegionRenderer, test_interleaved_text_rounds) {
   pi::core::RegionState state;
   state.blocks.emplace_back(pi::core::RegionTextBlock{"round one"});
   state.blocks.emplace_back(tool_block("call", "tool", "result"));
@@ -252,7 +249,7 @@ void test_interleaved_text_rounds() {
          "second text round follows tool");
 }
 
-void test_tool_body_cap_and_expansion_cap() {
+TEST(RegionRenderer, test_tool_body_cap_and_expansion_cap) {
   pi::core::RegionState state;
   state.blocks.emplace_back(
       tool_block("call", "tool", "one\ntwo\nthree\nfour\nfive\nsix"));
@@ -273,7 +270,7 @@ void test_tool_body_cap_and_expansion_cap() {
          "newest tool remains expanded");
 }
 
-void test_custom_tool_output_is_rendered() {
+TEST(RegionRenderer, test_custom_tool_output_is_rendered) {
   pi::core::RegionState state;
   pi::core::RegionToolBlock tool;
   tool.call_id = "call";
@@ -288,7 +285,7 @@ void test_custom_tool_output_is_rendered() {
          "custom formatted tool body is preserved");
 }
 
-void test_formatter_regions_cap_and_reset() {
+TEST(RegionRenderer, test_formatter_regions_cap_and_reset) {
   pi::core::RegionState state;
   pi::core::RegionToolBlock running;
   running.call_id = "running";
@@ -323,7 +320,7 @@ void test_formatter_regions_cap_and_reset() {
          "completed formatter omits rows beyond the cap");
 }
 
-void test_formatter_sanitization_contract() {
+TEST(RegionRenderer, test_formatter_sanitization_contract) {
   const auto output = pi::core::sanitize_tool_output(
       "\033[31mred\033[2J\033[H\033]0;title\007plain\033[0m");
   expect(output.find("red") != std::string::npos,
@@ -337,7 +334,7 @@ void test_formatter_sanitization_contract() {
          "sanitizer removes cursor and OSC controls");
 }
 
-void test_tiny_layout_keeps_tool_body_collapsed() {
+TEST(RegionRenderer, test_tiny_layout_keeps_tool_body_collapsed) {
   pi::core::RegionState state;
   state.blocks.emplace_back(tool_block("call", "tool", "body"));
   state.blocks.emplace_back(pi::core::RegionTextBlock{"later text"});
@@ -361,7 +358,7 @@ private:
   std::string content_;
 };
 
-void test_tool_callbacks_route_into_regions() {
+TEST(RegionRenderer, test_tool_callbacks_route_into_regions) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates callback capture fd");
@@ -414,7 +411,7 @@ void test_tool_callbacks_route_into_regions() {
              output.find("[beta]") < output.find("after"),
          "callback-created regions preserve transcript order");
 }
-void test_tool_call_streaming_finalizes_into_single_block() {
+TEST(RegionRenderer, test_tool_call_streaming_finalizes_into_single_block) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates streaming capture fd");
@@ -448,7 +445,7 @@ void test_tool_call_streaming_finalizes_into_single_block() {
                               std::string_view needle) {
     std::size_t occurrences = 0;
     for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
-        pos = haystack.find(needle, pos + needle.size()))
+         pos = haystack.find(needle, pos + needle.size()))
       ++occurrences;
     return occurrences;
   };
@@ -460,7 +457,7 @@ void test_tool_call_streaming_finalizes_into_single_block() {
          "completion still attaches to the streamed-in block");
 }
 
-void test_tool_call_streaming_interleaved_calls_stay_isolated() {
+TEST(RegionRenderer, test_tool_call_streaming_interleaved_calls_stay_isolated) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates interleaved streaming capture fd");
@@ -483,8 +480,7 @@ void test_tool_call_streaming_interleaved_calls_stay_isolated() {
     renderer->on_tool_start("call-2", "grep", "{\"pattern\":\"foo\"}");
     renderer->on_tool_end("call-1", "read", TestToolResult{"file contents"},
                           false);
-    renderer->on_tool_end("call-2", "grep", TestToolResult{"3 matches"},
-                          false);
+    renderer->on_tool_end("call-2", "grep", TestToolResult{"3 matches"}, false);
     renderer->on_turn_end();
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
   }
@@ -508,7 +504,7 @@ void test_tool_call_streaming_interleaved_calls_stay_isolated() {
          "interleaved calls preserve their content_index arrival order");
 }
 
-void test_mailbox_reply_callback_path() {
+TEST(RegionRenderer, test_mailbox_reply_callback_path) {
   int fds[2]{};
   if (::pipe(fds) != 0) {
     expect(false, "pipe creates mailbox callback capture fd");
@@ -518,27 +514,27 @@ void test_mailbox_reply_callback_path() {
     auto renderer = pi::core::make_region_renderer(fds[1]);
     renderer->on_turn_start();
     pi::core::dispatch_event(
-        pi::core::ToolPresentationEvent{
-            "call-1", pi::core::MailboxReplyQueuedNotice{
-                          .request_message_id = "request-1",
-                          .recipient_session_id = "session-b",
-                          .recipient_agent_id = "agent-b",
-                          .reply_text = "first queued"}},
+        pi::core::ToolPresentationEvent{"call-1",
+                                        pi::core::MailboxReplyQueuedNotice{
+                                            .request_message_id = "request-1",
+                                            .recipient_session_id = "session-b",
+                                            .recipient_agent_id = "agent-b",
+                                            .reply_text = "first queued"}},
         *renderer);
     pi::core::dispatch_event(
-        pi::core::ToolPresentationEvent{
-            "call-2", pi::core::MailboxReplyQueuedNotice{
-                          .request_message_id = "request-2",
-                          .recipient_session_id = "session-c",
-                          .reply_text = "second queued"}},
+        pi::core::ToolPresentationEvent{"call-2",
+                                        pi::core::MailboxReplyQueuedNotice{
+                                            .request_message_id = "request-2",
+                                            .recipient_session_id = "session-c",
+                                            .reply_text = "second queued"}},
         *renderer);
     renderer->on_turn_end();
     pi::core::dispatch_event(
-        pi::core::ToolPresentationEvent{
-            "late", pi::core::MailboxReplyQueuedNotice{
-                        .request_message_id = "late",
-                        .recipient_session_id = "late",
-                        .reply_text = "must be dropped"}},
+        pi::core::ToolPresentationEvent{"late",
+                                        pi::core::MailboxReplyQueuedNotice{
+                                            .request_message_id = "late",
+                                            .recipient_session_id = "late",
+                                            .reply_text = "must be dropped"}},
         *renderer);
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
   }
@@ -558,14 +554,14 @@ void test_mailbox_reply_callback_path() {
          "callback without active turn is dropped");
 }
 
-void test_mailbox_reply_receipt_is_persistent_and_safe() {
+TEST(RegionRenderer, test_mailbox_reply_receipt_is_persistent_and_safe) {
   pi::core::RegionState state;
   pi::core::RegionTurn turn;
-  turn.blocks.emplace_back(pi::core::RegionReplyBlock{
-      .request_message_id = "request-1",
-      .call_id = "reply-call",
-      .recipient_label = "agent-b",
-      .raw_text = "queued reply text"});
+  turn.blocks.emplace_back(
+      pi::core::RegionReplyBlock{.request_message_id = "request-1",
+                                 .call_id = "reply-call",
+                                 .recipient_label = "agent-b",
+                                 .raw_text = "queued reply text"});
   state.turns.push_back(std::move(turn));
   const auto frame = pi::core::build_region_frame(state, 40, 10);
   expect(frame.lines.size() >= 2, "reply receipt paints persistent rows");
@@ -577,7 +573,7 @@ void test_mailbox_reply_receipt_is_persistent_and_safe() {
     expect(row.ends_with("\033[0m"), "reply rows close SGR");
 }
 
-void test_mailbox_reply_alongside_parallel_unrelated_tools() {
+TEST(RegionRenderer, test_mailbox_reply_alongside_parallel_unrelated_tools) {
   pi::core::RegionState state;
   pi::core::RegionTurn turn;
   pi::core::RegionToolBlock preceding;
@@ -586,11 +582,11 @@ void test_mailbox_reply_alongside_parallel_unrelated_tools() {
   preceding.args_json = "{}";
   preceding.raw_output = "a-result";
   turn.blocks.emplace_back(std::move(preceding));
-  turn.blocks.emplace_back(pi::core::RegionReplyBlock{
-      .request_message_id = "request-1",
-      .call_id = "call-b",
-      .recipient_label = "agent-b",
-      .raw_text = "queued reply text"});
+  turn.blocks.emplace_back(
+      pi::core::RegionReplyBlock{.request_message_id = "request-1",
+                                 .call_id = "call-b",
+                                 .recipient_label = "agent-b",
+                                 .raw_text = "queued reply text"});
   pi::core::RegionToolBlock following;
   following.call_id = "call-c";
   following.tool_name = "unrelated-c";
@@ -599,26 +595,33 @@ void test_mailbox_reply_alongside_parallel_unrelated_tools() {
   turn.blocks.emplace_back(std::move(following));
   state.turns.push_back(std::move(turn));
   const auto frame = pi::core::build_region_frame(state, 80, 20);
-  const auto first_tool = std::ranges::find_if(
-      frame.lines, [](const auto &line) { return line.find("[unrelated-a]") != std::string::npos; });
-  const auto reply = std::ranges::find_if(
-      frame.lines, [](const auto &line) { return line.find("REPLY -> agent-b queued") != std::string::npos; });
-  const auto second_tool = std::ranges::find_if(
-      frame.lines, [](const auto &line) { return line.find("[unrelated-c]") != std::string::npos; });
+  const auto first_tool =
+      std::ranges::find_if(frame.lines, [](const auto &line) {
+        return line.find("[unrelated-a]") != std::string::npos;
+      });
+  const auto reply = std::ranges::find_if(frame.lines, [](const auto &line) {
+    return line.find("REPLY -> agent-b queued") != std::string::npos;
+  });
+  const auto second_tool =
+      std::ranges::find_if(frame.lines, [](const auto &line) {
+        return line.find("[unrelated-c]") != std::string::npos;
+      });
   expect(first_tool != frame.lines.end() && reply != frame.lines.end() &&
              second_tool != frame.lines.end(),
          "reply and unrelated tools all render");
   expect(first_tool < reply && reply < second_tool,
          "reply block preserves call order between unrelated parallel tools");
-  const auto a_result = std::ranges::find_if(
-      frame.lines, [](const auto &line) { return line.find("a-result") != std::string::npos; });
-  const auto c_result = std::ranges::find_if(
-      frame.lines, [](const auto &line) { return line.find("c-result") != std::string::npos; });
+  const auto a_result = std::ranges::find_if(frame.lines, [](const auto &line) {
+    return line.find("a-result") != std::string::npos;
+  });
+  const auto c_result = std::ranges::find_if(frame.lines, [](const auto &line) {
+    return line.find("c-result") != std::string::npos;
+  });
   expect(a_result != frame.lines.end() && c_result != frame.lines.end(),
          "unrelated tool output is untouched by the reply block");
 }
 
-void test_region_factory_lifecycle() {
+TEST(RegionRenderer, test_region_factory_lifecycle) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates lifecycle capture fd");
@@ -675,7 +678,7 @@ void test_region_factory_lifecycle() {
 // without the transcript's scroll region resizing dynamically underneath
 // it. Confirms the transcript's DECSTBM range, the status row, and the
 // transcript content itself all agree on where that reservation starts.
-void test_composer_rows_reserved_in_region_mode() {
+TEST(RegionRenderer, test_composer_rows_reserved_in_region_mode) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates composer-reservation capture fd");
@@ -715,7 +718,7 @@ void test_composer_rows_reserved_in_region_mode() {
          "rows");
 }
 
-void test_subagent_pane_is_reserved_in_region_mode() {
+TEST(RegionRenderer, test_subagent_pane_is_reserved_in_region_mode) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates subagent-pane capture fd");
@@ -727,11 +730,10 @@ void test_subagent_pane_is_reserved_in_region_mode() {
            "region renderer advertises subagent pane support");
     renderer->on_turn_start();
     renderer->on_text_delta("root-transcript-content");
-    renderer->set_subagent_pane({
-        {.id = "child-1",
-         .name = "research",
-         .status = "running",
-         .last_activity = "tool started"}});
+    renderer->set_subagent_pane({{.id = "child-1",
+                                  .name = "research",
+                                  .status = "running",
+                                  .last_activity = "tool started"}});
     // Region rendering is coalesced on a background paint thread while a
     // turn is active; give that frame a chance to reach the capture pipe.
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
@@ -767,7 +769,7 @@ void test_subagent_pane_is_reserved_in_region_mode() {
 // '\n' to a single space (softbreak) -- silently destroying a box-drawn
 // table's line structure. Regression test for the fence-wrapping fix in
 // RegionRenderer::on_command_output().
-void test_command_output_table_survives_region_rendering() {
+TEST(RegionRenderer, test_command_output_table_survives_region_rendering) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates command-output capture fd");
@@ -800,17 +802,19 @@ void test_command_output_table_survives_region_rendering() {
   // presence, so a regression back to one squished line still fails.
   std::size_t border_rows = 0;
   std::size_t pos = 0;
-  while ((pos = output.find("+------+-----------+", pos)) != std::string::npos) {
+  while ((pos = output.find("+------+-----------+", pos)) !=
+         std::string::npos) {
     ++border_rows;
     pos += 1;
   }
-  expect(border_rows >= 3,
-         "table borders appear as separate painted rows, not squished into one");
+  expect(
+      border_rows >= 3,
+      "table borders appear as separate painted rows, not squished into one");
   expect(output.find("| root | 1.2 MB    |") != std::string::npos,
          "a data row survives intact with its internal spacing");
 }
 
-void test_command_output_table_survives_viewport_rendering() {
+TEST(RegionRenderer, test_command_output_table_survives_viewport_rendering) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates command-output capture fd");
@@ -837,7 +841,8 @@ void test_command_output_table_survives_viewport_rendering() {
 
   std::size_t border_rows = 0;
   std::size_t pos = 0;
-  while ((pos = output.find("+------+-----------+", pos)) != std::string::npos) {
+  while ((pos = output.find("+------+-----------+", pos)) !=
+         std::string::npos) {
     ++border_rows;
     pos += 1;
   }
@@ -855,7 +860,7 @@ void test_command_output_table_survives_viewport_rendering() {
 // next readline() prompt draws one row lower instead of reusing it,
 // compounding into a drifting stack of stale composers with every
 // subsequent command.
-void test_prepare_for_prompt_reanchors_composer() {
+TEST(RegionRenderer, test_prepare_for_prompt_reanchors_composer) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates prepare-for-prompt capture fd");
@@ -906,7 +911,7 @@ void test_prepare_for_prompt_reanchors_composer() {
 // do that wipe/re-anchor; on_turn_end() alone must leave the reserved rows
 // untouched so the composer's last-known-good contents keep showing through
 // every intermediate round.
-void test_intermediate_turn_end_does_not_blank_composer() {
+TEST(RegionRenderer, test_intermediate_turn_end_does_not_blank_composer) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates multi-round capture fd");
@@ -947,8 +952,8 @@ void test_intermediate_turn_end_does_not_blank_composer() {
   // round runs -- anything beyond that would mean on_turn_end() (round 1)
   // re-anchored on its own, which is the bug this test guards against.
   std::size_t occurrences = 0;
-  for (std::size_t pos = output.find(reanchor_sequence); pos != std::string::npos;
-       pos = output.find(reanchor_sequence, pos + 1))
+  for (std::size_t pos = output.find(reanchor_sequence);
+       pos != std::string::npos; pos = output.find(reanchor_sequence, pos + 1))
     ++occurrences;
   expect(occurrences == 1,
          "on_turn_end() must not wipe/re-anchor the composer when another "
@@ -961,7 +966,7 @@ void test_intermediate_turn_end_does_not_blank_composer() {
 // can hand back a clean screen. An ordinary dirty-driven repaint of
 // unchanged content diffs against the cache and writes nothing; this must
 // unconditionally discard the cache and repaint every row regardless.
-void test_force_full_repaint_reissues_every_row() {
+TEST(RegionRenderer, test_force_full_repaint_reissues_every_row) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates force-repaint capture fd");
@@ -996,7 +1001,7 @@ void test_force_full_repaint_reissues_every_row() {
          "cache would otherwise consider unchanged");
 }
 
-void test_idle_paint_saves_cursor_and_scrolls() {
+TEST(RegionRenderer, test_idle_paint_saves_cursor_and_scrolls) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates idle paint capture fd");
@@ -1039,7 +1044,7 @@ void test_idle_paint_saves_cursor_and_scrolls() {
          "idle errors are painted in the compositor");
 }
 
-void test_custom_status_line_outranks_builtin_status_text() {
+TEST(RegionRenderer, test_custom_status_line_outranks_builtin_status_text) {
   // An addon-provided status line (e.g. costline) must outrank the built-in
   // "tokens: N  done" text that on_turn_end() leaves in status_text --
   // otherwise the addon line is buried for the whole idle period between
@@ -1076,7 +1081,7 @@ void test_custom_status_line_outranks_builtin_status_text() {
          "built-in token tally must not bury the custom status line");
 }
 
-void test_explicit_turn_request_sections() {
+TEST(RegionRenderer, test_explicit_turn_request_sections) {
   pi::core::RegionState state;
   pi::core::RegionTurn ordinary;
   ordinary.requests.push_back(pi::core::RegionRequestBlock{
@@ -1086,9 +1091,9 @@ void test_explicit_turn_request_sections() {
   state.turns.push_back(std::move(ordinary));
 
   pi::core::RegionTurn mailbox;
-  pi::core::InputProvenance metadata{.source =
-                                             pi::core::InputProvenance::Source::mailbox,
-                                         .sender_task_path = "/root/luna"};
+  pi::core::InputProvenance metadata{
+      .source = pi::core::InputProvenance::Source::mailbox,
+      .sender_task_path = "/root/luna"};
   mailbox.requests.push_back(
       pi::core::RegionRequestBlock{.metadata = metadata,
                                    .raw_text = "mailbox prompt\nwrapped text",
@@ -1147,7 +1152,7 @@ void test_explicit_turn_request_sections() {
   expect(top.max_scroll_rows > 0, "explicit turns have a scroll boundary");
 }
 
-void test_request_audit_behaviors() {
+TEST(RegionRenderer, test_request_audit_behaviors) {
   pi::core::RegionState empty;
   empty.turns.push_back(pi::core::RegionTurn{
       .requests = {pi::core::RegionRequestBlock{}}, .blocks = {}});
@@ -1163,9 +1168,9 @@ void test_request_audit_behaviors() {
       pi::core::RegionRequestBlock{.metadata = {}, .raw_text = "ordinary"});
   mixed.requests.push_back(pi::core::RegionRequestBlock{
       .metadata =
-          pi::core::InputProvenance{.source =
-                                            pi::core::InputProvenance::Source::mailbox,
-                                        .sender_task_path = "/root/task"},
+          pi::core::InputProvenance{
+              .source = pi::core::InputProvenance::Source::mailbox,
+              .sender_task_path = "/root/task"},
       .raw_text = "mailbox"});
   const auto mixed_frame = pi::core::build_region_frame(
       pi::core::RegionState{.turns = {std::move(mixed)}}, 40, 20);
@@ -1303,7 +1308,7 @@ void test_request_audit_behaviors() {
          "sanitized request removes cursor, clear-screen, and OSC controls");
 }
 
-void test_assistant_section_classification() {
+TEST(RegionRenderer, test_assistant_section_classification) {
   auto count_heading = [](const pi::core::RegionFrame &frame,
                           std::string_view heading) {
     std::size_t count = 0;
@@ -1404,7 +1409,7 @@ void test_assistant_section_classification() {
   }
 }
 
-void test_callback_classification_lifecycle() {
+TEST(RegionRenderer, test_callback_classification_lifecycle) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates callback classification capture fd");
@@ -1470,7 +1475,7 @@ void test_callback_classification_lifecycle() {
          "callback lifecycle preserves provisional, work, and answer order");
 }
 
-void test_error_survives_fast_turn_end() {
+TEST(RegionRenderer, test_error_survives_fast_turn_end) {
   int fds[2]{};
   const bool pipe_ok = ::pipe(fds) == 0;
   expect(pipe_ok, "pipe creates fast error capture fd");
@@ -1503,7 +1508,7 @@ void test_error_survives_fast_turn_end() {
          "usage is visible in the status bar");
 }
 
-void test_turn_based_scroll_reaches_older_turns() {
+TEST(RegionRenderer, test_turn_based_scroll_reaches_older_turns) {
   // Reproduces the reported "scrolling doesn't work with the region
   // renderer" complaint via the real event path (on_turn_start /
   // on_text_delta / on_turn_end) instead of hand-built RegionState, since
@@ -1544,50 +1549,3 @@ void test_turn_based_scroll_reaches_older_turns() {
 }
 
 } // namespace
-
-int main() {
-  test_ordered_transcript_blocks();
-  test_tail_anchor_and_scroll();
-  test_thinking_is_inserted_at_the_current_turn_boundary();
-  test_sgr_reopens_after_wrap();
-  test_word_wrap_breaks_on_spaces();
-  test_word_wrap_overlong_token_hard_wraps();
-  test_word_wrap_sgr_reopens_after_word_boundary_break();
-  test_diff_only_changes_rows();
-  test_diff_scrolls_tail_without_repainting_every_row();
-  test_degenerate_sizing();
-  test_tool_regions_preserve_call_order();
-  test_tool_updates_are_isolated();
-  test_interleaved_text_rounds();
-  test_tool_body_cap_and_expansion_cap();
-  test_custom_tool_output_is_rendered();
-  test_formatter_regions_cap_and_reset();
-  test_formatter_sanitization_contract();
-  test_tiny_layout_keeps_tool_body_collapsed();
-  test_tool_callbacks_route_into_regions();
-  test_tool_call_streaming_finalizes_into_single_block();
-  test_tool_call_streaming_interleaved_calls_stay_isolated();
-  test_region_factory_lifecycle();
-  test_composer_rows_reserved_in_region_mode();
-  test_subagent_pane_is_reserved_in_region_mode();
-  test_command_output_table_survives_region_rendering();
-  test_command_output_table_survives_viewport_rendering();
-  test_prepare_for_prompt_reanchors_composer();
-  test_intermediate_turn_end_does_not_blank_composer();
-  test_force_full_repaint_reissues_every_row();
-  test_mailbox_reply_receipt_is_persistent_and_safe();
-  test_mailbox_reply_alongside_parallel_unrelated_tools();
-  test_mailbox_reply_callback_path();
-  test_idle_paint_saves_cursor_and_scrolls();
-  test_custom_status_line_outranks_builtin_status_text();
-  test_turn_based_scroll_reaches_older_turns();
-  test_explicit_turn_request_sections();
-  test_request_audit_behaviors();
-  test_assistant_section_classification();
-  test_callback_classification_lifecycle();
-  test_error_survives_fast_turn_end();
-  if (failed != 0)
-    return 1;
-  std::cout << "region renderer tests passed\n";
-  return 0;
-}

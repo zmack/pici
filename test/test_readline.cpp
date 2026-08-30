@@ -1,5 +1,7 @@
 #include "cli/readline.h"
 
+#include <gtest/gtest.h>
+
 #include "core/stream_renderer.h"
 #include "core/terminal.h"
 
@@ -20,6 +22,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #ifdef __APPLE__
@@ -30,39 +33,40 @@
 
 using namespace pi::cli;
 
-namespace tests {
+namespace {
 
-int passed{0};
-int failed{0};
-int total{0};
-int current_failed{0};
-
-bool check(bool condition, std::string_view expression,
-           std::source_location location = std::source_location::current()) {
-  if (condition)
-    return true;
-  ++current_failed;
-  std::cerr << "  FAIL " << location.file_name() << ":" << location.line()
-            << " - " << expression << "\n";
-  return false;
+template <typename F> void run_case(std::string_view, F &&test) {
+  std::forward<F>(test)();
 }
 
-#define CHECK(expression) tests::check((expression), #expression)
-#define CHECK_EQ(left, right)                                                  \
-  tests::check((left) == (right), #left " == " #right)
+class ReadlineEnvironment : public ::testing::Test {
+protected:
+  static void SetUpTestSuite() {
+    if (const char *value = ::getenv("PICI_DISABLE_KITTY_KEYBOARD"))
+      previous_kitty_ = value;
+    if (const char *value = ::getenv("COLORTERM"))
+      previous_colorterm_ = value;
+    ::setenv("PICI_DISABLE_KITTY_KEYBOARD", "1", 1);
+    ::unsetenv("COLORTERM");
+  }
 
-void run(std::string name, const std::function<void()> &test) {
-  ++total;
-  current_failed = 0;
-  test();
-  if (current_failed == 0)
-    ++passed;
-  else
-    ++failed;
-  std::cout << (current_failed == 0 ? "  PASS " : "  FAIL ") << name << "\n";
-}
+  static void TearDownTestSuite() {
+    if (previous_kitty_)
+      ::setenv("PICI_DISABLE_KITTY_KEYBOARD", previous_kitty_->c_str(), 1);
+    else
+      ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
+    if (previous_colorterm_)
+      ::setenv("COLORTERM", previous_colorterm_->c_str(), 1);
+    else
+      ::unsetenv("COLORTERM");
+  }
 
-} // namespace tests
+private:
+  static inline std::optional<std::string> previous_kitty_;
+  static inline std::optional<std::string> previous_colorterm_;
+};
+
+} // namespace
 
 std::string read_until(int fd, std::string output, std::string_view marker) {
   const auto deadline =
@@ -141,19 +145,19 @@ int wait_for_child(pid_t child) {
   return -1;
 }
 
-void test_wake_channel() {
-  tests::run("ReadlineWake: nonblocking CLOEXEC coalescing", [] {
+TEST_F(ReadlineEnvironment, test_wake_channel) {
+  run_case("ReadlineWake: nonblocking CLOEXEC coalescing", [] {
     ReadlineWake wake;
     const auto descriptor_flags = ::fcntl(wake.read_fd(), F_GETFD);
     const auto status_flags = ::fcntl(wake.read_fd(), F_GETFL);
-    CHECK((descriptor_flags & FD_CLOEXEC) != 0);
-    CHECK((status_flags & O_NONBLOCK) != 0);
-    CHECK(wake.notify());
-    CHECK(wake.notify());
-    CHECK(wake.notify());
+    EXPECT_TRUE((descriptor_flags & FD_CLOEXEC) != 0);
+    EXPECT_TRUE((status_flags & O_NONBLOCK) != 0);
+    EXPECT_TRUE(wake.notify());
+    EXPECT_TRUE(wake.notify());
+    EXPECT_TRUE(wake.notify());
     wake.drain();
     pollfd descriptor{.fd = wake.read_fd(), .events = POLLIN};
-    CHECK_EQ(::poll(&descriptor, 1, 0), 0);
+    EXPECT_EQ(::poll(&descriptor, 1, 0), 0);
   });
 }
 
@@ -161,10 +165,10 @@ void test_non_tty_result(std::string input, ReadlineExit expected,
                          std::string expected_text) {
   int input_pipe[2] = {-1, -1};
   int output_pipe[2] = {-1, -1};
-  CHECK_EQ(::pipe(input_pipe), 0);
-  CHECK_EQ(::pipe(output_pipe), 0);
+  EXPECT_EQ(::pipe(input_pipe), 0);
+  EXPECT_EQ(::pipe(output_pipe), 0);
   const auto child = ::fork();
-  CHECK(child >= 0);
+  EXPECT_TRUE(child >= 0);
   if (child == 0) {
     ::dup2(input_pipe[0], STDIN_FILENO);
     ::dup2(output_pipe[1], STDOUT_FILENO);
@@ -181,30 +185,30 @@ void test_non_tty_result(std::string input, ReadlineExit expected,
   ::close(input_pipe[0]);
   ::close(output_pipe[1]);
   if (!input.empty())
-    CHECK_EQ(::write(input_pipe[1], input.data(), input.size()),
-             static_cast<ssize_t>(input.size()));
+    EXPECT_EQ(::write(input_pipe[1], input.data(), input.size()),
+              static_cast<ssize_t>(input.size()));
   ::close(input_pipe[1]);
   auto output = read_until(output_pipe[0], {}, "RESULT:");
   ::close(output_pipe[0]);
-  CHECK(output.find("RESULT:" + std::to_string(static_cast<int>(expected))) !=
-        std::string::npos);
-  CHECK(output.find(":" + expected_text + "\n") != std::string::npos);
-  CHECK_EQ(wait_for_child(child), 0);
+  EXPECT_TRUE(output.find("RESULT:" + std::to_string(static_cast<int>(
+                                          expected))) != std::string::npos);
+  EXPECT_TRUE(output.find(":" + expected_text + "\n") != std::string::npos);
+  EXPECT_EQ(wait_for_child(child), 0);
 }
 
-void test_non_tty_paths() {
-  tests::run("readline: non-TTY submit and EOF", [] {
+TEST_F(ReadlineEnvironment, test_non_tty_paths) {
+  run_case("readline: non-TTY submit and EOF", [] {
     test_non_tty_result("scripted\n", ReadlineExit::submitted, "scripted");
     test_non_tty_result("", ReadlineExit::eof, "");
   });
 }
 
-void test_tty_wake_and_reentry() {
-  tests::run("readline: wake preserves middle cursor and re-entry", [] {
+TEST_F(ReadlineEnvironment, test_tty_wake_and_reentry) {
+  run_case("readline: wake preserves middle cursor and re-entry", [] {
     ReadlineWake wake;
     int master = -1;
     const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-    CHECK(child >= 0);
+    EXPECT_TRUE(child >= 0);
     if (child == 0) {
       dprintf(STDOUT_FILENO, "READY\n");
       const auto first = readline("> ", {}, {}, {}, "héllo", 3, wake.read_fd());
@@ -220,45 +224,45 @@ void test_tty_wake_and_reentry() {
     }
 
     auto output = read_until(master, {}, "READY");
-    CHECK(output.find("READY") != std::string::npos);
+    EXPECT_TRUE(output.find("READY") != std::string::npos);
     output = read_until(master, std::move(output), "héllo");
-    CHECK_EQ(::write(master, "\033[D", 3), 3);
+    EXPECT_EQ(::write(master, "\033[D", 3), 3);
     output = read_new_output(master, std::move(output));
-    CHECK_EQ(::write(master, "\033[C", 3), 3);
+    EXPECT_EQ(::write(master, "\033[C", 3), 3);
     output = read_new_output(master, std::move(output));
-    CHECK(wake.notify());
-    CHECK(wake.notify());
-    CHECK(wake.notify());
+    EXPECT_TRUE(wake.notify());
+    EXPECT_TRUE(wake.notify());
+    EXPECT_TRUE(wake.notify());
     output = read_until(master, std::move(output), "RESULT:");
     const auto expected_result =
         "RESULT:" +
         std::to_string(static_cast<int>(ReadlineExit::mailbox_wake)) +
         ":3:héllo";
-    CHECK(output.find(expected_result) != std::string::npos);
+    EXPECT_TRUE(output.find(expected_result) != std::string::npos);
     output = read_until(master, std::move(output), "SECOND_READY");
-    CHECK(output.find("SECOND_READY") != std::string::npos);
+    EXPECT_TRUE(output.find("SECOND_READY") != std::string::npos);
 
     output = read_new_output(master, std::move(output));
-    CHECK_EQ(::write(master, "X", 1), 1);
+    EXPECT_EQ(::write(master, "X", 1), 1);
     output = read_new_output(master, std::move(output));
-    CHECK(wake.notify());
-    CHECK_EQ(::write(master, "\r", 1), 1);
+    EXPECT_TRUE(wake.notify());
+    EXPECT_EQ(::write(master, "\r", 1), 1);
     output = read_until(master, std::move(output), "RESULT2:");
     const auto expected_second =
         "RESULT2:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":4:héXllo";
-    CHECK(output.find(expected_second) != std::string::npos);
-    CHECK_EQ(wait_for_child(child), 0);
+    EXPECT_TRUE(output.find(expected_second) != std::string::npos);
+    EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   });
 }
 
-void test_escape_wake() {
-  tests::run("readline: isolated escape remains wakeable", [] {
+TEST_F(ReadlineEnvironment, test_escape_wake) {
+  run_case("readline: isolated escape remains wakeable", [] {
     ReadlineWake wake;
     int master = -1;
     const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-    CHECK(child >= 0);
+    EXPECT_TRUE(child >= 0);
     if (child == 0) {
       dprintf(STDOUT_FILENO, "READY\n");
       const auto result =
@@ -271,25 +275,25 @@ void test_escape_wake() {
 
     auto output = read_until(master, {}, "READY");
     output = read_until(master, std::move(output), "draft");
-    CHECK_EQ(::write(master, "\033", 1), 1);
-    CHECK(wake.notify());
+    EXPECT_EQ(::write(master, "\033", 1), 1);
+    EXPECT_TRUE(wake.notify());
     output = read_until(master, std::move(output), "RESULT:");
     const auto expected =
         "RESULT:" +
         std::to_string(static_cast<int>(ReadlineExit::mailbox_wake)) +
         ":2:draft";
-    CHECK(output.find(expected) != std::string::npos);
-    CHECK_EQ(wait_for_child(child), 0);
+    EXPECT_TRUE(output.find(expected) != std::string::npos);
+    EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   });
 }
 
-void test_eof_wake_race() {
-  tests::run("readline: EOF wins a wake boundary", [] {
+TEST_F(ReadlineEnvironment, test_eof_wake_race) {
+  run_case("readline: EOF wins a wake boundary", [] {
     ReadlineWake wake;
     int master = -1;
     const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-    CHECK(child >= 0);
+    EXPECT_TRUE(child >= 0);
     if (child == 0) {
       dprintf(STDOUT_FILENO, "READY\n");
       const auto result =
@@ -302,14 +306,14 @@ void test_eof_wake_race() {
 
     auto output = read_until(master, {}, "READY");
     output = read_until(master, std::move(output), "draft");
-    CHECK(wake.notify());
-    CHECK_EQ(::write(master, "\004", 1), 1);
+    EXPECT_TRUE(wake.notify());
+    EXPECT_EQ(::write(master, "\004", 1), 1);
     output = read_until(master, std::move(output), "RESULT:");
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::eof)) +
         ":2:draft";
-    CHECK(output.find(expected) != std::string::npos);
-    CHECK_EQ(wait_for_child(child), 0);
+    EXPECT_TRUE(output.find(expected) != std::string::npos);
+    EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   });
 }
@@ -325,11 +329,11 @@ std::size_t count_occurrences(std::string_view haystack,
   return count;
 }
 
-void test_mouse_wheel_scroll() {
-  tests::run("readline: SGR mouse wheel drives scroll actions", [] {
+TEST_F(ReadlineEnvironment, test_mouse_wheel_scroll) {
+  run_case("readline: SGR mouse wheel drives scroll actions", [] {
     int master = -1;
     const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-    CHECK(child >= 0);
+    EXPECT_TRUE(child >= 0);
     if (child == 0) {
       dprintf(STDOUT_FILENO, "READY\n");
       ControlFn control_fn = [](ControlAction action) {
@@ -346,19 +350,19 @@ void test_mouse_wheel_scroll() {
 
     // Wheel-up (Cb=64, no modifiers): three scroll_line_up actions per
     // notch, none of the down action.
-    CHECK_EQ(::write(master, "\033[<64;10;5M", 11), 11);
+    EXPECT_EQ(::write(master, "\033[<64;10;5M", 11), 11);
     output = read_new_output(master, std::move(output));
 
     // Wheel-down (Cb=65): three scroll_line_down actions.
-    CHECK_EQ(::write(master, "\033[<65;10;5M", 11), 11);
+    EXPECT_EQ(::write(master, "\033[<65;10;5M", 11), 11);
     output = read_new_output(master, std::move(output));
 
     // A plain left-click (Cb=0, no wheel bit) is not a scroll gesture and
     // must not drive any control action.
-    CHECK_EQ(::write(master, "\033[<0;10;5M", 10), 10);
+    EXPECT_EQ(::write(master, "\033[<0;10;5M", 10), 10);
     output = read_new_output(master, std::move(output));
 
-    CHECK_EQ(::write(master, "\r", 1), 1);
+    EXPECT_EQ(::write(master, "\r", 1), 1);
     output = read_until(master, std::move(output), "RESULT:");
 
     const auto up_marker =
@@ -367,10 +371,10 @@ void test_mouse_wheel_scroll() {
     const auto down_marker =
         "ACTION:" +
         std::to_string(static_cast<int>(ControlAction::scroll_line_down));
-    CHECK_EQ(count_occurrences(output, up_marker), 3U);
-    CHECK_EQ(count_occurrences(output, down_marker), 3U);
+    EXPECT_EQ(count_occurrences(output, up_marker), 3U);
+    EXPECT_EQ(count_occurrences(output, down_marker), 3U);
 
-    CHECK_EQ(wait_for_child(child), 0);
+    EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   });
 }
@@ -398,48 +402,47 @@ bool has_out_of_range_cursor_forward(std::string_view output, int columns) {
   return false;
 }
 
-void test_wrap_boundary_cursor_placement() {
+TEST_F(ReadlineEnvironment, test_wrap_boundary_cursor_placement) {
   constexpr int kColumns = 10;
 
-  tests::run("readline: cursor stays in range when text exactly fills a row",
-             [] {
-               struct winsize ws {};
-               ws.ws_row = 24;
-               ws.ws_col = kColumns;
-               int master = -1;
-               const auto child = forkpty(&master, nullptr, nullptr, &ws);
-               CHECK(child >= 0);
-               if (child == 0) {
-                 dprintf(STDOUT_FILENO, "READY\n");
-                 // Ten digits exactly fill a 10-column row with the cursor left
-                 // at the end of the text — the end-of-text tail-capture case.
-                 const auto result = readline("", {}, {}, {}, "0123456789", 10);
-                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                         static_cast<int>(result.reason), result.cursor,
-                         result.text.c_str());
-                 _exit(0);
-               }
+  run_case("readline: cursor stays in range when text exactly fills a row", [] {
+    struct winsize ws {};
+    ws.ws_row = 24;
+    ws.ws_col = kColumns;
+    int master = -1;
+    const auto child = forkpty(&master, nullptr, nullptr, &ws);
+    EXPECT_TRUE(child >= 0);
+    if (child == 0) {
+      dprintf(STDOUT_FILENO, "READY\n");
+      // Ten digits exactly fill a 10-column row with the cursor left
+      // at the end of the text — the end-of-text tail-capture case.
+      const auto result = readline("", {}, {}, {}, "0123456789", 10);
+      dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+              static_cast<int>(result.reason), result.cursor,
+              result.text.c_str());
+      _exit(0);
+    }
 
-               auto output = read_until(master, {}, "READY");
-               output = read_until(master, std::move(output), "0123456789");
-               CHECK(!has_out_of_range_cursor_forward(output, kColumns));
-               CHECK(output.find("\033[7m") != std::string::npos);
+    auto output = read_until(master, {}, "READY");
+    output = read_until(master, std::move(output), "0123456789");
+    EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
+    EXPECT_TRUE(output.find("\033[7m") != std::string::npos);
 
-               CHECK_EQ(::write(master, "\r", 1), 1);
-               output = read_until(master, std::move(output), "RESULT:");
-               CHECK(!has_out_of_range_cursor_forward(output, kColumns));
-               CHECK_EQ(wait_for_child(child), 0);
-               ::close(master);
-             });
+    EXPECT_EQ(::write(master, "\r", 1), 1);
+    output = read_until(master, std::move(output), "RESULT:");
+    EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
+    EXPECT_EQ(wait_for_child(child), 0);
+    ::close(master);
+  });
 
-  tests::run(
+  run_case(
       "readline: cursor stays in range mid-text at a soft wrap boundary", [] {
         struct winsize ws {};
         ws.ws_row = 24;
         ws.ws_col = kColumns;
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, &ws);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           // 15 characters wrap once (row 1: "0123456789", row 2: "ABCDE").
@@ -455,164 +458,162 @@ void test_wrap_boundary_cursor_placement() {
         // Walk the cursor back to offset 10 — the boundary between the two
         // wrapped rows, i.e. sitting right at the soft wrap.
         for (int i = 0; i < 5; ++i) {
-          CHECK_EQ(::write(master, "\033[D", 3), 3);
+          EXPECT_EQ(::write(master, "\033[D", 3), 3);
           output = read_new_output(master, std::move(output));
         }
-        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+        EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
-        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_alt_enter_inserts_newline() {
-  tests::run("readline: Alt+Enter inserts a newline, plain Enter still submits",
-             [] {
-               int master = -1;
-               const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-               CHECK(child >= 0);
-               if (child == 0) {
-                 dprintf(STDOUT_FILENO, "READY\n");
-                 const auto result = readline("> ", {}, {}, {}, "", 0);
-                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                         static_cast<int>(result.reason), result.cursor,
-                         result.text.c_str());
-                 _exit(0);
-               }
+TEST_F(ReadlineEnvironment, test_alt_enter_inserts_newline) {
+  run_case("readline: Alt+Enter inserts a newline, plain Enter still submits",
+           [] {
+             int master = -1;
+             const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result = readline("> ", {}, {}, {}, "", 0);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-               auto output = read_until(master, {}, "READY");
-               CHECK_EQ(::write(master, "ab", 2), 2);
-               output = read_new_output(master, std::move(output));
-               // ESC immediately followed by \r — the legacy Alt+Enter
-               // encoding.
-               CHECK_EQ(::write(master, "\033\r", 2), 2);
-               output = read_new_output(master, std::move(output));
-               CHECK_EQ(::write(master, "cd", 2), 2);
-               output = read_new_output(master, std::move(output));
-               // Plain Enter still submits — it must not have been
-               // reinterpreted.
-               CHECK_EQ(::write(master, "\r", 1), 1);
-               output = read_until(master, std::move(output), "RESULT:");
-               // The child's dprintf writes result.text (containing the real \n
-               // Alt+Enter inserted) back through the pty's own *output*
-               // processing, which still has ONLCR enabled (RawMode only
-               // touches input flags) — so the embedded \n is observed here as
-               // \r\n. The 5-byte cursor count below confirms the buffer itself
-               // holds a single \n, not two bytes.
-               const auto expected =
-                   "RESULT:" +
-                   std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-                   ":5:ab\r\ncd";
-               CHECK(output.find(expected) != std::string::npos);
-               CHECK_EQ(wait_for_child(child), 0);
-               ::close(master);
-             });
+             auto output = read_until(master, {}, "READY");
+             EXPECT_EQ(::write(master, "ab", 2), 2);
+             output = read_new_output(master, std::move(output));
+             // ESC immediately followed by \r — the legacy Alt+Enter
+             // encoding.
+             EXPECT_EQ(::write(master, "\033\r", 2), 2);
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "cd", 2), 2);
+             output = read_new_output(master, std::move(output));
+             // Plain Enter still submits — it must not have been
+             // reinterpreted.
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             // The child's dprintf writes result.text (containing the real \n
+             // Alt+Enter inserted) back through the pty's own *output*
+             // processing, which still has ONLCR enabled (RawMode only
+             // touches input flags) — so the embedded \n is observed here as
+             // \r\n. The 5-byte cursor count below confirms the buffer itself
+             // holds a single \n, not two bytes.
+             const auto expected =
+                 "RESULT:" +
+                 std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                 ":5:ab\r\ncd";
+             EXPECT_TRUE(output.find(expected) != std::string::npos);
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
-void test_bare_lf_inserts_newline() {
-  tests::run(
-      "readline: bare LF (Ctrl+J) inserts a newline, same as Alt+Enter -- "
-      "many terminals translate Shift+Enter into a raw LF independent of "
-      "the Kitty keyboard protocol or tmux's extended-keys forwarding",
-      [] {
-        int master = -1;
-        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
-        if (child == 0) {
-          dprintf(STDOUT_FILENO, "READY\n");
-          const auto result = readline("> ", {}, {}, {}, "", 0);
-          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                  static_cast<int>(result.reason), result.cursor,
-                  result.text.c_str());
-          _exit(0);
-        }
+TEST_F(ReadlineEnvironment, test_bare_lf_inserts_newline) {
+  run_case("readline: bare LF (Ctrl+J) inserts a newline, same as Alt+Enter -- "
+           "many terminals translate Shift+Enter into a raw LF independent of "
+           "the Kitty keyboard protocol or tmux's extended-keys forwarding",
+           [] {
+             int master = -1;
+             const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result = readline("> ", {}, {}, {}, "", 0);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-        auto output = read_until(master, {}, "READY");
-        CHECK_EQ(::write(master, "ab", 2), 2);
-        output = read_new_output(master, std::move(output));
-        // Bare '\n' (Ctrl+J) -- must insert, not submit.
-        CHECK_EQ(::write(master, "\n", 1), 1);
-        output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "cd", 2), 2);
-        output = read_new_output(master, std::move(output));
-        // Plain Enter ('\r') still submits.
-        CHECK_EQ(::write(master, "\r", 1), 1);
-        output = read_until(master, std::move(output), "RESULT:");
-        const auto expected =
-            "RESULT:" +
-            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-            ":5:ab\r\ncd";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
-        ::close(master);
-      });
+             auto output = read_until(master, {}, "READY");
+             EXPECT_EQ(::write(master, "ab", 2), 2);
+             output = read_new_output(master, std::move(output));
+             // Bare '\n' (Ctrl+J) -- must insert, not submit.
+             EXPECT_EQ(::write(master, "\n", 1), 1);
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "cd", 2), 2);
+             output = read_new_output(master, std::move(output));
+             // Plain Enter ('\r') still submits.
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             const auto expected =
+                 "RESULT:" +
+                 std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                 ":5:ab\r\ncd";
+             EXPECT_TRUE(output.find(expected) != std::string::npos);
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
-void test_multiline_navigation_and_backspace() {
-  tests::run(
-      "readline: Left/Right cross an embedded newline and Backspace joins "
-      "lines",
-      [] {
-        int master = -1;
-        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
-        if (child == 0) {
-          dprintf(STDOUT_FILENO, "READY\n");
-          const auto result = readline("> ", {}, {}, {}, "", 0);
-          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                  static_cast<int>(result.reason), result.cursor,
-                  result.text.c_str());
-          _exit(0);
-        }
+TEST_F(ReadlineEnvironment, test_multiline_navigation_and_backspace) {
+  run_case("readline: Left/Right cross an embedded newline and Backspace joins "
+           "lines",
+           [] {
+             int master = -1;
+             const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result = readline("> ", {}, {}, {}, "", 0);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-        auto output = read_until(master, {}, "READY");
-        // Build "ab\ncd" via Alt+Enter; cursor ends at offset 5 (the end).
-        CHECK_EQ(::write(master, "ab", 2), 2);
-        output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\033\r", 2), 2);
-        output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "cd", 2), 2);
-        output = read_new_output(master, std::move(output));
+             auto output = read_until(master, {}, "READY");
+             // Build "ab\ncd" via Alt+Enter; cursor ends at offset 5 (the end).
+             EXPECT_EQ(::write(master, "ab", 2), 2);
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "\033\r", 2), 2);
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "cd", 2), 2);
+             output = read_new_output(master, std::move(output));
 
-        // Left x3: 5->4->3->2. The third step crosses the embedded \n
-        // backward (from right after it to right before it), landing right
-        // after "ab".
-        for (int i = 0; i < 3; ++i) {
-          CHECK_EQ(::write(master, "\033[D", 3), 3);
-          output = read_new_output(master, std::move(output));
-        }
-        // Right x1: 2->3, crossing the same \n forward again, landing right
-        // after it (right before "cd").
-        CHECK_EQ(::write(master, "\033[C", 3), 3);
-        output = read_new_output(master, std::move(output));
-        // Backspace at offset 3 erases the \n itself (offset 2), rejoining
-        // "ab" and "cd" into "abcd" with the cursor left at offset 2.
-        CHECK_EQ(::write(master, "\x7f", 1), 1);
-        output = read_new_output(master, std::move(output));
+             // Left x3: 5->4->3->2. The third step crosses the embedded \n
+             // backward (from right after it to right before it), landing right
+             // after "ab".
+             for (int i = 0; i < 3; ++i) {
+               EXPECT_EQ(::write(master, "\033[D", 3), 3);
+               output = read_new_output(master, std::move(output));
+             }
+             // Right x1: 2->3, crossing the same \n forward again, landing
+             // right after it (right before "cd").
+             EXPECT_EQ(::write(master, "\033[C", 3), 3);
+             output = read_new_output(master, std::move(output));
+             // Backspace at offset 3 erases the \n itself (offset 2), rejoining
+             // "ab" and "cd" into "abcd" with the cursor left at offset 2.
+             EXPECT_EQ(::write(master, "\x7f", 1), 1);
+             output = read_new_output(master, std::move(output));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
-        output = read_until(master, std::move(output), "RESULT:");
-        const auto expected =
-            "RESULT:" +
-            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-            ":2:abcd";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
-        ::close(master);
-      });
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             const auto expected =
+                 "RESULT:" +
+                 std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                 ":2:abcd";
+             EXPECT_TRUE(output.find(expected) != std::string::npos);
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
-void test_bracketed_paste_is_inert_block_insert() {
-  tests::run(
+TEST_F(ReadlineEnvironment, test_bracketed_paste_is_inert_block_insert) {
+  run_case(
       "readline: bracketed paste lands intact and never submits, even with "
       "a trailing newline",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           const auto result = readline("> ", {}, {}, {}, "", 0);
@@ -626,12 +627,12 @@ void test_bracketed_paste_is_inert_block_insert() {
         // A paste with an embedded newline AND a trailing newline: neither
         // must submit, and both must land in the buffer as literal bytes.
         const std::string paste = "\033[200~line1\nline2\n\033[201~";
-        CHECK_EQ(::write(master, paste.data(), paste.size()),
-                 static_cast<ssize_t>(paste.size()));
+        EXPECT_EQ(::write(master, paste.data(), paste.size()),
+                  static_cast<ssize_t>(paste.size()));
         output = read_new_output(master, std::move(output));
-        CHECK(output.find("RESULT:") == std::string::npos);
+        EXPECT_TRUE(output.find("RESULT:") == std::string::npos);
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         // See the Alt+Enter test above: the pty's own output processing
         // (ONLCR) renders the buffer's real embedded \n bytes as \r\n here.
@@ -641,16 +642,16 @@ void test_bracketed_paste_is_inert_block_insert() {
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) +
             ":12:line1\r\nline2\r\n";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_embedded_newline_cursor_placement() {
+TEST_F(ReadlineEnvironment, test_embedded_newline_cursor_placement) {
   constexpr int kColumns = 10;
 
-  tests::run(
+  run_case(
       "readline: cursor right before an embedded newline lands on the next "
       "row, not the previous one",
       [] {
@@ -661,7 +662,7 @@ void test_embedded_newline_cursor_placement() {
         // "0123456789" exactly fills the first row; cursor sits right at
         // the embedded \n that follows it (offset 10).
         const auto child = forkpty(&master, nullptr, nullptr, &ws);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           const auto result = readline("", {}, {}, {}, "0123456789\nABCDE", 10);
@@ -673,7 +674,7 @@ void test_embedded_newline_cursor_placement() {
 
         auto output = read_until(master, {}, "READY");
         output = read_until(master, std::move(output), "ABCDE");
-        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+        EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
         // The final fill-and-toggle sequence must reach the reverse-video
         // toggle via a bare "\r" — no vertical move at all, since the
         // cursor's normalized row (start of the second row) matches where
@@ -685,199 +686,200 @@ void test_embedded_newline_cursor_placement() {
         // "\033[K" fill and this "\r\033[7m", so the two are no longer
         // byte-adjacent -- check for "\r\033[7m" and the *absence* of the
         // erroneous vertical move instead of exact adjacency to the fill.
-        CHECK(output.find("\r\033[7m") != std::string::npos);
-        CHECK(output.find("\033[1A\r\033[7m") == std::string::npos);
-        CHECK(output.find("\033[1B\r\033[7m") == std::string::npos);
+        EXPECT_TRUE(output.find("\r\033[7m") != std::string::npos);
+        EXPECT_TRUE(output.find("\033[1A\r\033[7m") == std::string::npos);
+        EXPECT_TRUE(output.find("\033[1B\r\033[7m") == std::string::npos);
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 
-  tests::run(
-      "readline: cursor right after an embedded newline lands on the new "
-      "row's start",
-      [] {
-        struct winsize ws {};
-        ws.ws_row = 24;
-        ws.ws_col = kColumns;
-        int master = -1;
-        // Cursor sits at offset 11 — right at 'A', the start of the second
-        // row.
-        const auto child = forkpty(&master, nullptr, nullptr, &ws);
-        CHECK(child >= 0);
-        if (child == 0) {
-          dprintf(STDOUT_FILENO, "READY\n");
-          const auto result = readline("", {}, {}, {}, "0123456789\nABCDE", 11);
-          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                  static_cast<int>(result.reason), result.cursor,
-                  result.text.c_str());
-          _exit(0);
-        }
+  run_case("readline: cursor right after an embedded newline lands on the new "
+           "row's start",
+           [] {
+             struct winsize ws {};
+             ws.ws_row = 24;
+             ws.ws_col = kColumns;
+             int master = -1;
+             // Cursor sits at offset 11 — right at 'A', the start of the second
+             // row.
+             const auto child = forkpty(&master, nullptr, nullptr, &ws);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result =
+                   readline("", {}, {}, {}, "0123456789\nABCDE", 11);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-        auto output = read_until(master, {}, "READY");
-        output = read_until(master, std::move(output), "ABCDE");
-        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
-        // See the comment on the identical check just above -- M6's footer
-        // row now sits between the composer's fill and the toggle.
-        CHECK(output.find("\r\033[7m") != std::string::npos);
-        CHECK(output.find("\033[1A\r\033[7m") == std::string::npos);
-        CHECK(output.find("\033[1B\r\033[7m") == std::string::npos);
+             auto output = read_until(master, {}, "READY");
+             output = read_until(master, std::move(output), "ABCDE");
+             EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
+             // See the comment on the identical check just above -- M6's footer
+             // row now sits between the composer's fill and the toggle.
+             EXPECT_TRUE(output.find("\r\033[7m") != std::string::npos);
+             EXPECT_TRUE(output.find("\033[1A\r\033[7m") == std::string::npos);
+             EXPECT_TRUE(output.find("\033[1B\r\033[7m") == std::string::npos);
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
-        output = read_until(master, std::move(output), "RESULT:");
-        CHECK_EQ(wait_for_child(child), 0);
-        ::close(master);
-      });
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
-void test_composer_height_cap() {
-  tests::run("readline: composer height cap bounds rendered row bookkeeping "
-             "regardless of draft length",
-             [] {
-               struct winsize ws {};
-               ws.ws_row = 40;
-               ws.ws_col = 80;
-               int master = -1;
-               std::string draft;
-               constexpr int kLines = 20;
-               for (int i = 0; i < kLines; ++i) {
-                 if (i > 0)
-                   draft += '\n';
-                 draft += "line" + std::to_string(i);
-               }
-               const auto child = forkpty(&master, nullptr, nullptr, &ws);
-               CHECK(child >= 0);
-               if (child == 0) {
-                 dprintf(STDOUT_FILENO, "READY\n");
-                 const auto result =
-                     readline("> ", {}, {}, {}, draft, draft.size());
-                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                         static_cast<int>(result.reason), result.cursor,
-                         result.text.c_str());
-                 _exit(0);
-               }
+TEST_F(ReadlineEnvironment, test_composer_height_cap) {
+  run_case("readline: composer height cap bounds rendered row bookkeeping "
+           "regardless of draft length",
+           [] {
+             struct winsize ws {};
+             ws.ws_row = 40;
+             ws.ws_col = 80;
+             int master = -1;
+             std::string draft;
+             constexpr int kLines = 20;
+             for (int i = 0; i < kLines; ++i) {
+               if (i > 0)
+                 draft += '\n';
+               draft += "line" + std::to_string(i);
+             }
+             const auto child = forkpty(&master, nullptr, nullptr, &ws);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result =
+                   readline("> ", {}, {}, {}, draft, draft.size());
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-               auto output = read_until(master, {}, "READY");
-               // Wait for the first redraw to complete in full (its trailing
-               // "\033[?7h", not just the content partway through).
-               output = read_until(master, std::move(output),
-                                   "line" + std::to_string(kLines - 1));
-               output = read_until(master, std::move(output), "\033[?7h");
-               const auto before_size = output.size();
+             auto output = read_until(master, {}, "READY");
+             // Wait for the first redraw to complete in full (its trailing
+             // "\033[?7h", not just the content partway through).
+             output = read_until(master, std::move(output),
+                                 "line" + std::to_string(kLines - 1));
+             output = read_until(master, std::move(output), "\033[?7h");
+             const auto before_size = output.size();
 
-               // One more keystroke triggers a second redraw, whose
-               // clear_previous() erases exactly rendered_rows_ rows (one
-               // "\033[2K" per row) before repainting — direct evidence of what
-               // InputRenderer's own row-count bookkeeping was set to by the
-               // draft's (uncapped, 20-row) first render.
-               CHECK_EQ(::write(master, "X", 1), 1);
-               output = read_until_from(master, std::move(output), before_size,
-                                        "\033[?7h");
-               const auto second_redraw = output.substr(before_size);
-               CHECK_EQ(count_occurrences(second_redraw, "\033[2K"),
-                        pi::core::kMaxComposerRows);
+             // One more keystroke triggers a second redraw, whose
+             // clear_previous() erases exactly rendered_rows_ rows (one
+             // "\033[2K" per row) before repainting — direct evidence of what
+             // InputRenderer's own row-count bookkeeping was set to by the
+             // draft's (uncapped, 20-row) first render.
+             EXPECT_EQ(::write(master, "X", 1), 1);
+             output = read_until_from(master, std::move(output), before_size,
+                                      "\033[?7h");
+             const auto second_redraw = output.substr(before_size);
+             EXPECT_EQ(count_occurrences(second_redraw, "\033[2K"),
+                       pi::core::kMaxComposerRows);
 
-               CHECK_EQ(::write(master, "\r", 1), 1);
-               output = read_until(master, std::move(output), "RESULT:");
-               CHECK_EQ(wait_for_child(child), 0);
-               ::close(master);
-             });
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
-void test_word_wrap_boundary() {
+TEST_F(ReadlineEnvironment, test_word_wrap_boundary) {
   constexpr int kColumns = 10;
 
-  tests::run(
-      "readline: typing a long sentence wraps at word boundaries, not "
-      "mid-word",
-      [] {
-        struct winsize ws {};
-        ws.ws_row = 24;
-        ws.ws_col = kColumns;
-        int master = -1;
-        // "hello world foo" at 10 columns: "hello" (5) fits row one; the
-        // next word "world" doesn't fit alongside it (5+1+5=11 > 10) but
-        // does fit a fresh row on its own, so the break falls at the space
-        // between them (dropped, not carried over) rather than mid-word.
-        // "world foo" (9 columns) then fits together on the second row.
-        const auto child = forkpty(&master, nullptr, nullptr, &ws);
-        CHECK(child >= 0);
-        if (child == 0) {
-          dprintf(STDOUT_FILENO, "READY\n");
-          const auto result = readline("", {}, {}, {}, "hello world foo", 15);
-          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                  static_cast<int>(result.reason), result.cursor,
-                  result.text.c_str());
-          _exit(0);
-        }
+  run_case("readline: typing a long sentence wraps at word boundaries, not "
+           "mid-word",
+           [] {
+             struct winsize ws {};
+             ws.ws_row = 24;
+             ws.ws_col = kColumns;
+             int master = -1;
+             // "hello world foo" at 10 columns: "hello" (5) fits row one; the
+             // next word "world" doesn't fit alongside it (5+1+5=11 > 10) but
+             // does fit a fresh row on its own, so the break falls at the space
+             // between them (dropped, not carried over) rather than mid-word.
+             // "world foo" (9 columns) then fits together on the second row.
+             const auto child = forkpty(&master, nullptr, nullptr, &ws);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result =
+                   readline("", {}, {}, {}, "hello world foo", 15);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-        auto output = read_until(master, {}, "READY");
-        output = read_until(master, std::move(output), "foo");
+             auto output = read_until(master, {}, "READY");
+             output = read_until(master, std::move(output), "foo");
 
-        // The renderer emits "\033[K\r\n" for a row transition; ONLCR is
-        // still enabled on the pty's output side (RawMode only touches
-        // input flags, same as the embedded-\n tests above), so the raw
-        // '\n' byte lands here as an *additional* "\r\n" on top of the
-        // '\r' already written, observed as "\033[K\r\r\n".
-        CHECK(output.find("hello\033[K\r\r\nworld foo") != std::string::npos);
-        // Neither word is ever split across the row-clear/wrap sequence --
-        // if it were, "hell" or "worl" would appear immediately followed
-        // by it.
-        CHECK(output.find("hell\033[K\r\r\no") == std::string::npos);
-        CHECK(output.find("worl\033[K\r\r\nd") == std::string::npos);
-        CHECK(!has_out_of_range_cursor_forward(output, kColumns));
+             // The renderer emits "\033[K\r\n" for a row transition; ONLCR is
+             // still enabled on the pty's output side (RawMode only touches
+             // input flags, same as the embedded-\n tests above), so the raw
+             // '\n' byte lands here as an *additional* "\r\n" on top of the
+             // '\r' already written, observed as "\033[K\r\r\n".
+             EXPECT_TRUE(output.find("hello\033[K\r\r\nworld foo") !=
+                         std::string::npos);
+             // Neither word is ever split across the row-clear/wrap sequence --
+             // if it were, "hell" or "worl" would appear immediately followed
+             // by it.
+             EXPECT_TRUE(output.find("hell\033[K\r\r\no") == std::string::npos);
+             EXPECT_TRUE(output.find("worl\033[K\r\r\nd") == std::string::npos);
+             EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
-        output = read_until(master, std::move(output), "RESULT:");
-        const auto expected =
-            "RESULT:" +
-            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-            ":15:hello world foo";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
-        ::close(master);
-      });
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             const auto expected =
+                 "RESULT:" +
+                 std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                 ":15:hello world foo";
+             EXPECT_TRUE(output.find(expected) != std::string::npos);
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 
-  tests::run("readline: a single overlong token (longer than the row) still "
-             "hard-wraps without overflowing",
-             [] {
-               struct winsize ws {};
-               ws.ws_row = 24;
-               ws.ws_col = kColumns;
-               int master = -1;
-               const std::string token(40, 'x'); // no whitespace anywhere in it
-               const auto child = forkpty(&master, nullptr, nullptr, &ws);
-               CHECK(child >= 0);
-               if (child == 0) {
-                 dprintf(STDOUT_FILENO, "READY\n");
-                 const auto result =
-                     readline("", {}, {}, {}, token, token.size());
-                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                         static_cast<int>(result.reason), result.cursor,
-                         result.text.c_str());
-                 _exit(0);
-               }
+  run_case("readline: a single overlong token (longer than the row) still "
+           "hard-wraps without overflowing",
+           [] {
+             struct winsize ws {};
+             ws.ws_row = 24;
+             ws.ws_col = kColumns;
+             int master = -1;
+             const std::string token(40, 'x'); // no whitespace anywhere in it
+             const auto child = forkpty(&master, nullptr, nullptr, &ws);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result =
+                   readline("", {}, {}, {}, token, token.size());
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-               auto output = read_until(master, {}, "READY");
-               output =
-                   read_until(master, std::move(output), std::string(4, 'x'));
-               // Wait for the redraw to finish so all four wrapped rows (40
-               // chars / 10 columns) have actually been emitted.
-               output = read_until(master, std::move(output), "\033[?7h");
-               CHECK(!has_out_of_range_cursor_forward(output, kColumns));
-               // The row-clear/wrap marker (see the ONLCR note above for the
-               // doubled \r) must appear (repeatedly) inside the unbroken token
-               // -- confirming the hard-wrap fallback engaged instead of
-               // overflowing a single row with all 40 characters.
-               CHECK(count_occurrences(output, "\033[K\r\r\n") >= 3U);
+             auto output = read_until(master, {}, "READY");
+             output =
+                 read_until(master, std::move(output), std::string(4, 'x'));
+             // Wait for the redraw to finish so all four wrapped rows (40
+             // chars / 10 columns) have actually been emitted.
+             output = read_until(master, std::move(output), "\033[?7h");
+             EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
+             // The row-clear/wrap marker (see the ONLCR note above for the
+             // doubled \r) must appear (repeatedly) inside the unbroken token
+             // -- confirming the hard-wrap fallback engaged instead of
+             // overflowing a single row with all 40 characters.
+             EXPECT_TRUE(count_occurrences(output, "\033[K\r\r\n") >= 3U);
 
-               CHECK_EQ(::write(master, "\r", 1), 1);
-               output = read_until(master, std::move(output), "RESULT:");
-               CHECK_EQ(wait_for_child(child), 0);
-               ::close(master);
-             });
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
 // Runs a readline() session (with the given initial draft/cursor) inside a
@@ -890,10 +892,10 @@ void run_editing_case(std::string name, std::string_view initial_draft,
                       ReadlineExit expected_reason,
                       const std::string &expected_text,
                       std::size_t expected_cursor) {
-  tests::run(std::move(name), [=] {
+  run_case(std::move(name), [=] {
     int master = -1;
     const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-    CHECK(child >= 0);
+    EXPECT_TRUE(child >= 0);
     if (child == 0) {
       dprintf(STDOUT_FILENO, "READY\n");
       const auto result =
@@ -906,11 +908,11 @@ void run_editing_case(std::string name, std::string_view initial_draft,
 
     auto output = read_until(master, {}, "READY");
     if (!input.empty()) {
-      CHECK_EQ(::write(master, input.data(), input.size()),
-               static_cast<ssize_t>(input.size()));
+      EXPECT_EQ(::write(master, input.data(), input.size()),
+                static_cast<ssize_t>(input.size()));
       output = read_new_output(master, std::move(output));
     }
-    CHECK_EQ(::write(master, "\r", 1), 1);
+    EXPECT_EQ(::write(master, "\r", 1), 1);
     output = read_until(master, std::move(output), "RESULT:");
     // The trailing "\r\n" (the dprintf format's own '\n' after "%s", doubled
     // by ONLCR same as everywhere else in this file) anchors the end of the
@@ -920,13 +922,13 @@ void run_editing_case(std::string name, std::string_view initial_draft,
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(expected_reason)) + ":" +
         std::to_string(expected_cursor) + ":" + expected_text + "\r\n";
-    CHECK(output.find(expected) != std::string::npos);
-    CHECK_EQ(wait_for_child(child), 0);
+    EXPECT_TRUE(output.find(expected) != std::string::npos);
+    EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   });
 }
 
-void test_up_down_logical_line_navigation() {
+TEST_F(ReadlineEnvironment, test_up_down_logical_line_navigation) {
   // Buffer: "ab\nc\ndefg" -- line0 "ab" (len 2), line1 "c" (len 1), line2
   // "defg" (len 4). Byte offsets: a0 b1 \n2 c3 \n4 d5 e6 f7 g8 (size 9).
   constexpr std::string_view kBuf = "ab\nc\ndefg";
@@ -954,7 +956,7 @@ void test_up_down_logical_line_navigation() {
                    "ab\r\nc\r\ndefg", 5);
 }
 
-void test_home_end_and_ctrl_a_e() {
+TEST_F(ReadlineEnvironment, test_home_end_and_ctrl_a_e) {
   // "hello\nworld": hello=0-4, \n=5, world: w6 o7 r8 l9 d10 (size 11).
   constexpr std::string_view kBuf = "hello\nworld";
 
@@ -980,14 +982,14 @@ void test_home_end_and_ctrl_a_e() {
       "\x05", ReadlineExit::submitted, "hello\r\nworld", 11);
 }
 
-void test_ctrl_arrows_scroll_transcript_not_buffer() {
-  tests::run(
+TEST_F(ReadlineEnvironment, test_ctrl_arrows_scroll_transcript_not_buffer) {
+  run_case(
       "readline: Ctrl+Up/Down and Ctrl+Home/End fire transcript scroll "
       "actions and leave the buffer/cursor untouched",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           ControlFn control_fn = [](ControlAction action) {
@@ -1003,16 +1005,16 @@ void test_ctrl_arrows_scroll_transcript_not_buffer() {
         auto output = read_until(master, {}, "READY");
         // Ctrl+Up, Ctrl+Down, Ctrl+Home, Ctrl+End -- one of each, in the
         // xterm-compatible CSI "1;5<letter>" modifier encoding.
-        CHECK_EQ(::write(master, "\033[1;5A", 6), 6);
+        EXPECT_EQ(::write(master, "\033[1;5A", 6), 6);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\033[1;5B", 6), 6);
+        EXPECT_EQ(::write(master, "\033[1;5B", 6), 6);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\033[1;5H", 6), 6);
+        EXPECT_EQ(::write(master, "\033[1;5H", 6), 6);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\033[1;5F", 6), 6);
+        EXPECT_EQ(::write(master, "\033[1;5F", 6), 6);
         output = read_new_output(master, std::move(output));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
 
         const auto up =
@@ -1027,10 +1029,10 @@ void test_ctrl_arrows_scroll_transcript_not_buffer() {
         const auto bottom =
             "ACTION:" +
             std::to_string(static_cast<int>(ControlAction::scroll_bottom));
-        CHECK_EQ(count_occurrences(output, up), 1U);
-        CHECK_EQ(count_occurrences(output, down), 1U);
-        CHECK_EQ(count_occurrences(output, top), 1U);
-        CHECK_EQ(count_occurrences(output, bottom), 1U);
+        EXPECT_EQ(count_occurrences(output, up), 1U);
+        EXPECT_EQ(count_occurrences(output, down), 1U);
+        EXPECT_EQ(count_occurrences(output, top), 1U);
+        EXPECT_EQ(count_occurrences(output, bottom), 1U);
 
         // The buffer and cursor must be exactly as they started -- these
         // keys drove the transcript, not the composer.
@@ -1038,13 +1040,13 @@ void test_ctrl_arrows_scroll_transcript_not_buffer() {
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) +
             ":2:ab\r\ncd";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_word_motion() {
+TEST_F(ReadlineEnvironment, test_word_motion) {
   // "foo bar baz", single-word runs separated by single spaces.
   // f0 o1 o2 sp3 b4 a5 r6 sp7 b8 a9 z10 (size 11).
   constexpr std::string_view kBuf = "foo bar baz";
@@ -1088,7 +1090,7 @@ void test_word_motion() {
                    11);
 }
 
-void test_ctrl_w_deletes_word_and_leading_whitespace() {
+TEST_F(ReadlineEnvironment, test_ctrl_w_deletes_word_and_leading_whitespace) {
   // "foo bar   baz": cursor placed right before "baz", after "bar" and its
   // three trailing spaces -- Ctrl+W must delete "bar   " (the word *and*
   // the whitespace run immediately before the cursor), not just "bar".
@@ -1098,7 +1100,7 @@ void test_ctrl_w_deletes_word_and_leading_whitespace() {
       "foo bar   baz", 10, "\x17", ReadlineExit::submitted, "foo baz", 4);
 }
 
-void test_ctrl_u_and_ctrl_k_kill_to_line_boundaries() {
+TEST_F(ReadlineEnvironment, test_ctrl_u_and_ctrl_k_kill_to_line_boundaries) {
   // "hello\nworld": world starts at offset 6; cursor at 9 sits right after
   // "wor". Ctrl+U kills back to the line start ("wor"), leaving "ld".
   run_editing_case("readline: Ctrl+U kills from the cursor to the current "
@@ -1112,14 +1114,14 @@ void test_ctrl_u_and_ctrl_k_kill_to_line_boundaries() {
       "hello\nworld", 8, "\x0b", ReadlineExit::submitted, "hello\r\nwo", 8);
 }
 
-void test_ctrl_y_yanks_last_kill_only() {
-  tests::run(
+TEST_F(ReadlineEnvironment, test_ctrl_y_yanks_last_kill_only) {
+  run_case(
       "readline: Ctrl+Y yanks only the most recent kill -- the single-slot "
       "buffer overwrites, it does not accumulate",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           const auto result = readline("> ", {}, {}, {}, "AAAA BBBB", 4);
@@ -1133,26 +1135,26 @@ void test_ctrl_y_yanks_last_kill_only() {
         output = read_until(master, std::move(output), "AAAA BBBB");
         // Ctrl+W at offset 4 kills "AAAA" (kill buffer: "AAAA"), leaving
         // " BBBB" with the cursor at 0.
-        CHECK_EQ(::write(master, "\x17", 1), 1);
+        EXPECT_EQ(::write(master, "\x17", 1), 1);
         output = read_new_output(master, std::move(output));
         // Ctrl+K at offset 0 kills the rest of the line, " BBBB" -- this
         // overwrites the kill buffer (now " BBBB", not "AAAA"), leaving an
         // empty buffer.
-        CHECK_EQ(::write(master, "\x0b", 1), 1);
+        EXPECT_EQ(::write(master, "\x0b", 1), 1);
         output = read_new_output(master, std::move(output));
         // Ctrl+Y yanks the kill buffer back. If the first kill had not
         // been overwritten, this would insert "AAAA" instead.
-        CHECK_EQ(::write(master, "\x19", 1), 1);
+        EXPECT_EQ(::write(master, "\x19", 1), 1);
         output = read_new_output(master, std::move(output));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         const auto expected =
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) +
             ":5: BBBB";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
@@ -1188,70 +1190,72 @@ constexpr std::string_view kKittyProbeQuery = "\033[?u\033[c";
 // implemented the probe at all yet).
 void await_kitty_probe_query(int master, std::string &output) {
   output = read_until(master, std::move(output), kKittyProbeQuery);
-  CHECK(output.find(kKittyProbeQuery) != std::string::npos);
+  EXPECT_TRUE(output.find(kKittyProbeQuery) != std::string::npos);
 }
 
-void test_kitty_probe_unsupported_replays_alt_enter_and_plain_submit() {
-  tests::run(
-      "readline: Kitty probe with only a DA1 reply concludes unsupported "
-      "and behaves exactly like M1-M3 (Alt+Enter newline, plain Enter "
-      "submits, no hang)",
-      [] {
-        int master = -1;
-        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
-        if (child == 0) {
-          ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
-          dprintf(STDOUT_FILENO, "READY\n");
-          const auto result = readline("> ", {}, {}, {}, "", 0);
-          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                  static_cast<int>(result.reason), result.cursor,
-                  result.text.c_str());
-          _exit(0);
-        }
+TEST_F(ReadlineEnvironment,
+       test_kitty_probe_unsupported_replays_alt_enter_and_plain_submit) {
+  run_case("readline: Kitty probe with only a DA1 reply concludes unsupported "
+           "and behaves exactly like M1-M3 (Alt+Enter newline, plain Enter "
+           "submits, no hang)",
+           [] {
+             int master = -1;
+             const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result = readline("> ", {}, {}, {}, "", 0);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-        auto output = read_until(master, {}, "READY");
-        await_kitty_probe_query(master, output);
-        // Answer only the DA1 sentinel -- a plausible xterm-style DA1
-        // reply -- never the Kitty flags query itself.
-        static constexpr std::string_view kDa1Reply = "\033[?62;1;2;6c";
-        CHECK_EQ(::write(master, kDa1Reply.data(), kDa1Reply.size()),
-                 static_cast<ssize_t>(kDa1Reply.size()));
-        output = read_new_output(master, std::move(output));
+             auto output = read_until(master, {}, "READY");
+             await_kitty_probe_query(master, output);
+             // Answer only the DA1 sentinel -- a plausible xterm-style DA1
+             // reply -- never the Kitty flags query itself.
+             static constexpr std::string_view kDa1Reply = "\033[?62;1;2;6c";
+             EXPECT_EQ(::write(master, kDa1Reply.data(), kDa1Reply.size()),
+                       static_cast<ssize_t>(kDa1Reply.size()));
+             output = read_new_output(master, std::move(output));
 
-        CHECK_EQ(::write(master, "ab", 2), 2);
-        output = read_new_output(master, std::move(output));
-        // ESC immediately followed by \r -- the legacy Alt+Enter encoding,
-        // still the only newline binding when the protocol isn't supported.
-        CHECK_EQ(::write(master, "\033\r", 2), 2);
-        output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "cd", 2), 2);
-        output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\r", 1), 1);
-        output = read_until(master, std::move(output), "RESULT:");
+             EXPECT_EQ(::write(master, "ab", 2), 2);
+             output = read_new_output(master, std::move(output));
+             // ESC immediately followed by \r -- the legacy Alt+Enter encoding,
+             // still the only newline binding when the protocol isn't
+             // supported.
+             EXPECT_EQ(::write(master, "\033\r", 2), 2);
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "cd", 2), 2);
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
 
-        const auto expected =
-            "RESULT:" +
-            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-            ":5:ab\r\ncd";
-        CHECK(output.find(expected) != std::string::npos);
-        // Unsupported means the "disambiguate escape codes" flag is never
-        // pushed.
-        CHECK(output.find("\033[>1u") == std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
-        ::close(master);
-      });
+             const auto expected =
+                 "RESULT:" +
+                 std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                 ":5:ab\r\ncd";
+             EXPECT_TRUE(output.find(expected) != std::string::npos);
+             // Unsupported means the "disambiguate escape codes" flag is never
+             // pushed.
+             EXPECT_TRUE(output.find("\033[>1u") == std::string::npos);
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
-void test_kitty_probe_supported_shift_enter_inserts_newline() {
-  tests::run(
+TEST_F(ReadlineEnvironment,
+       test_kitty_probe_supported_shift_enter_inserts_newline) {
+  run_case(
       "readline: Kitty probe with a flags reply before DA1 concludes "
       "supported -- Shift+Enter inserts a newline, CSI-encoded plain Enter "
       "still submits",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
           dprintf(STDOUT_FILENO, "READY\n");
@@ -1268,97 +1272,98 @@ void test_kitty_probe_supported_shift_enter_inserts_newline() {
         // escape codes") followed by the DA1 sentinel, in that order --
         // this is what makes the probe conclude "supported".
         static constexpr std::string_view kSupportedReply = "\033[?1u\033[?62c";
-        CHECK_EQ(
+        EXPECT_EQ(
             ::write(master, kSupportedReply.data(), kSupportedReply.size()),
             static_cast<ssize_t>(kSupportedReply.size()));
         output = read_new_output(master, std::move(output));
         // Supported means the flag actually gets pushed on raw-mode entry.
-        CHECK(output.find("\033[>1u") != std::string::npos);
+        EXPECT_TRUE(output.find("\033[>1u") != std::string::npos);
 
-        CHECK_EQ(::write(master, "ab", 2), 2);
+        EXPECT_EQ(::write(master, "ab", 2), 2);
         output = read_new_output(master, std::move(output));
         // Shift+Enter: codepoint 13, modifier field 2 (Shift, 1-biased).
         static constexpr std::string_view kShiftEnter = "\033[13;2u";
-        CHECK_EQ(::write(master, kShiftEnter.data(), kShiftEnter.size()),
-                 static_cast<ssize_t>(kShiftEnter.size()));
+        EXPECT_EQ(::write(master, kShiftEnter.data(), kShiftEnter.size()),
+                  static_cast<ssize_t>(kShiftEnter.size()));
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "cd", 2), 2);
+        EXPECT_EQ(::write(master, "cd", 2), 2);
         output = read_new_output(master, std::move(output));
         // Plain Enter via the CSI-u encoding (no modifier section) --
         // exercises the same submit path a bare '\r' would, but through the
         // new decode.
         static constexpr std::string_view kPlainEnter = "\033[13u";
-        CHECK_EQ(::write(master, kPlainEnter.data(), kPlainEnter.size()),
-                 static_cast<ssize_t>(kPlainEnter.size()));
+        EXPECT_EQ(::write(master, kPlainEnter.data(), kPlainEnter.size()),
+                  static_cast<ssize_t>(kPlainEnter.size()));
         output = read_until(master, std::move(output), "RESULT:");
 
         const auto expected =
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) +
             ":5:ab\r\ncd";
-        CHECK(output.find(expected) != std::string::npos);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
         // The flag is popped again on the way out (raw.leave(), called from
         // finish()).
-        CHECK(output.find("\033[<u") != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find("\033[<u") != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_kitty_probe_typeahead_survives_probe_window() {
-  tests::run("readline: type-ahead read during the Kitty probe's window is "
-             "replayed, not dropped",
-             [] {
-               int master = -1;
-               const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-               CHECK(child >= 0);
-               if (child == 0) {
-                 ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
-                 dprintf(STDOUT_FILENO, "READY\n");
-                 const auto result = readline("> ", {}, {}, {}, "", 0);
-                 dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                         static_cast<int>(result.reason), result.cursor,
-                         result.text.c_str());
-                 _exit(0);
-               }
+TEST_F(ReadlineEnvironment, test_kitty_probe_typeahead_survives_probe_window) {
+  run_case("readline: type-ahead read during the Kitty probe's window is "
+           "replayed, not dropped",
+           [] {
+             int master = -1;
+             const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result = readline("> ", {}, {}, {}, "", 0);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-               auto output = read_until(master, {}, "READY");
-               await_kitty_probe_query(master, output);
-               // A fast typist's keystrokes, arriving while the probe is still
-               // reading, before either reply is sent.
-               CHECK_EQ(::write(master, "hi", 2), 2);
-               // Now let the probe conclude (unsupported is enough to prove
-               // replay -- the DA1 reply on its own already exercises the "give
-               // up waiting" path).
-               static constexpr std::string_view kDa1Reply = "\033[?62c";
-               CHECK_EQ(::write(master, kDa1Reply.data(), kDa1Reply.size()),
-                        static_cast<ssize_t>(kDa1Reply.size()));
-               output = read_new_output(master, std::move(output));
+             auto output = read_until(master, {}, "READY");
+             await_kitty_probe_query(master, output);
+             // A fast typist's keystrokes, arriving while the probe is still
+             // reading, before either reply is sent.
+             EXPECT_EQ(::write(master, "hi", 2), 2);
+             // Now let the probe conclude (unsupported is enough to prove
+             // replay -- the DA1 reply on its own already exercises the "give
+             // up waiting" path).
+             static constexpr std::string_view kDa1Reply = "\033[?62c";
+             EXPECT_EQ(::write(master, kDa1Reply.data(), kDa1Reply.size()),
+                       static_cast<ssize_t>(kDa1Reply.size()));
+             output = read_new_output(master, std::move(output));
 
-               CHECK_EQ(::write(master, "cd", 2), 2);
-               output = read_new_output(master, std::move(output));
-               CHECK_EQ(::write(master, "\r", 1), 1);
-               output = read_until(master, std::move(output), "RESULT:");
+             EXPECT_EQ(::write(master, "cd", 2), 2);
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
 
-               const auto expected =
-                   "RESULT:" +
-                   std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-                   ":4:hicd";
-               CHECK(output.find(expected) != std::string::npos);
-               CHECK_EQ(wait_for_child(child), 0);
-               ::close(master);
-             });
+             const auto expected =
+                 "RESULT:" +
+                 std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                 ":4:hicd";
+             EXPECT_TRUE(output.find(expected) != std::string::npos);
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
-void test_kitty_disable_env_var_skips_probe_and_forces_fallback() {
-  tests::run(
+TEST_F(ReadlineEnvironment,
+       test_kitty_disable_env_var_skips_probe_and_forces_fallback) {
+  run_case(
       "readline: PICI_DISABLE_KITTY_KEYBOARD forces the Alt+Enter fallback "
       "and skips the probe outright, even though nothing here proves the "
       "probe would otherwise have concluded supported",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           // Explicit for this test's own documentation, even though
           // main() already sets this process-wide by default.
@@ -1372,37 +1377,37 @@ void test_kitty_disable_env_var_skips_probe_and_forces_fallback() {
         }
 
         auto output = read_until(master, {}, "READY");
-        CHECK_EQ(::write(master, "ab", 2), 2);
+        EXPECT_EQ(::write(master, "ab", 2), 2);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\033\r", 2), 2);
+        EXPECT_EQ(::write(master, "\033\r", 2), 2);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "cd", 2), 2);
+        EXPECT_EQ(::write(master, "cd", 2), 2);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
 
         const auto expected =
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) +
             ":5:ab\r\ncd";
-        CHECK(output.find(expected) != std::string::npos);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
         // The override skips the probe outright -- no query is ever sent --
         // and the flag is never pushed either.
-        CHECK(output.find(kKittyProbeQuery) == std::string::npos);
-        CHECK(output.find("\033[>1u") == std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find(kKittyProbeQuery) == std::string::npos);
+        EXPECT_TRUE(output.find("\033[>1u") == std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_kitty_supported_existing_bindings_unaffected() {
-  tests::run(
+TEST_F(ReadlineEnvironment, test_kitty_supported_existing_bindings_unaffected) {
+  run_case(
       "readline: arrow keys, Ctrl+Left/Right, mouse wheel, and bracketed "
       "paste all still work identically once the Kitty flag is active",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           ::unsetenv("PICI_DISABLE_KITTY_KEYBOARD");
           dprintf(STDOUT_FILENO, "READY\n");
@@ -1419,50 +1424,50 @@ void test_kitty_supported_existing_bindings_unaffected() {
         auto output = read_until(master, {}, "READY");
         await_kitty_probe_query(master, output);
         static constexpr std::string_view kSupportedReply = "\033[?1u\033[?62c";
-        CHECK_EQ(
+        EXPECT_EQ(
             ::write(master, kSupportedReply.data(), kSupportedReply.size()),
             static_cast<ssize_t>(kSupportedReply.size()));
         output = read_new_output(master, std::move(output));
-        CHECK(output.find("\033[>1u") != std::string::npos);
+        EXPECT_TRUE(output.find("\033[>1u") != std::string::npos);
 
-        CHECK_EQ(::write(master, "ab", 2), 2);
+        EXPECT_EQ(::write(master, "ab", 2), 2);
         output = read_new_output(master, std::move(output));
         // Plain Left, then Ctrl+Left: still character-left then word-left,
         // exactly as when the flag is inactive -- "ab" is cursor 1 then 0.
-        CHECK_EQ(::write(master, "\033[D", 3), 3);
+        EXPECT_EQ(::write(master, "\033[D", 3), 3);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\033[1;5D", 6), 6);
+        EXPECT_EQ(::write(master, "\033[1;5D", 6), 6);
         output = read_new_output(master, std::move(output));
         // Plain Right, then Ctrl+Right: back to cursor 1 then 2.
-        CHECK_EQ(::write(master, "\033[C", 3), 3);
+        EXPECT_EQ(::write(master, "\033[C", 3), 3);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\033[1;5C", 6), 6);
+        EXPECT_EQ(::write(master, "\033[1;5C", 6), 6);
         output = read_new_output(master, std::move(output));
         // SGR mouse wheel-up: three scroll_line_up actions, no buffer
         // change.
-        CHECK_EQ(::write(master, "\033[<64;10;5M", 11), 11);
+        EXPECT_EQ(::write(master, "\033[<64;10;5M", 11), 11);
         output = read_new_output(master, std::move(output));
         // Bracketed paste: still an inert block insert.
         static constexpr std::string_view kPaste = "\033[200~XY\033[201~";
-        CHECK_EQ(::write(master, kPaste.data(), kPaste.size()),
-                 static_cast<ssize_t>(kPaste.size()));
+        EXPECT_EQ(::write(master, kPaste.data(), kPaste.size()),
+                  static_cast<ssize_t>(kPaste.size()));
         output = read_new_output(master, std::move(output));
 
         static constexpr std::string_view kPlainEnter = "\033[13u";
-        CHECK_EQ(::write(master, kPlainEnter.data(), kPlainEnter.size()),
-                 static_cast<ssize_t>(kPlainEnter.size()));
+        EXPECT_EQ(::write(master, kPlainEnter.data(), kPlainEnter.size()),
+                  static_cast<ssize_t>(kPlainEnter.size()));
         output = read_until(master, std::move(output), "RESULT:");
 
         const auto expected =
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) +
             ":4:abXY";
-        CHECK(output.find(expected) != std::string::npos);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
         const auto up_marker =
             "ACTION:" +
             std::to_string(static_cast<int>(ControlAction::scroll_line_up));
-        CHECK_EQ(count_occurrences(output, up_marker), 3U);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_EQ(count_occurrences(output, up_marker), 3U);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
@@ -1477,14 +1482,15 @@ void test_kitty_supported_existing_bindings_unaffected() {
 // 0 $, d/c, dd/cc, including the e-vs-w distinction) is covered directly
 // against VimEngine, no pty needed, in test_vim_mode.cpp.
 
-void test_vim_mode_escape_enters_normal_and_h_moves_without_inserting() {
-  tests::run(
+TEST_F(ReadlineEnvironment,
+       test_vim_mode_escape_enters_normal_and_h_moves_without_inserting) {
+  run_case(
       "vim mode: Escape enters Normal mode -- h moves the cursor instead of "
       "inserting the letter 'h'; i returns to Insert",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           const auto result =
@@ -1496,10 +1502,10 @@ void test_vim_mode_escape_enters_normal_and_h_moves_without_inserting() {
         }
 
         auto output = read_until(master, {}, "READY");
-        CHECK_EQ(::write(master, "ab", 2), 2);
+        EXPECT_EQ(::write(master, "ab", 2), 2);
         output = read_new_output(master, std::move(output));
         // Bare Escape: enters Normal mode, no visible change.
-        CHECK_EQ(::write(master, "\x1b", 1), 1);
+        EXPECT_EQ(::write(master, "\x1b", 1), 1);
         // read_escape_sequence's own short poll window (25ms) has to expire
         // before this is recognized as a *bare* Escape rather than the
         // start of some other sequence -- give it a moment before sending
@@ -1508,35 +1514,35 @@ void test_vim_mode_escape_enters_normal_and_h_moves_without_inserting() {
         // 'h': a vim motion, not a literal character -- if this were
         // mistakenly inserted as text instead of intercepted, the
         // submitted buffer below would read "abh" instead of "aXb".
-        CHECK_EQ(::write(master, "h", 1), 1);
+        EXPECT_EQ(::write(master, "h", 1), 1);
         output = read_new_output(master, std::move(output));
         // 'i': insert before cursor (now at offset 1, between "a" and
         // "b") -- returns to Insert mode without moving the cursor.
-        CHECK_EQ(::write(master, "i", 1), 1);
+        EXPECT_EQ(::write(master, "i", 1), 1);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "X", 1), 1);
+        EXPECT_EQ(::write(master, "X", 1), 1);
         output = read_new_output(master, std::move(output));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         const auto expected =
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) +
             ":2:aXb";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_vim_mode_dd_deletes_whole_line_end_to_end() {
-  tests::run(
+TEST_F(ReadlineEnvironment, test_vim_mode_dd_deletes_whole_line_end_to_end) {
+  run_case(
       "vim mode: dd deletes the whole current line against a real terminal, "
       "and plain Enter still submits from Normal mode",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           // Cursor starts at offset 6, the start of "line2".
@@ -1549,9 +1555,9 @@ void test_vim_mode_dd_deletes_whole_line_end_to_end() {
         }
 
         auto output = read_until(master, {}, "line3");
-        CHECK_EQ(::write(master, "\x1b", 1), 1);
+        EXPECT_EQ(::write(master, "\x1b", 1), 1);
         poll(nullptr, 0, 60);
-        CHECK_EQ(::write(master, "dd", 2), 2);
+        EXPECT_EQ(::write(master, "dd", 2), 2);
         output = read_new_output(master, std::move(output));
 
         // Plain Enter submits even while still in Normal mode -- a
@@ -1559,30 +1565,30 @@ void test_vim_mode_dd_deletes_whole_line_end_to_end() {
         // and this test file's header comment): submit/EOF stay live in
         // every mode so the user is never trapped needing to press 'i'
         // first just to send a message.
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         const auto expected =
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) +
             ":6:line1\r\nline3";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_vim_mode_c_operator_enters_insert_mode() {
-  tests::run(
+TEST_F(ReadlineEnvironment, test_vim_mode_c_operator_enters_insert_mode) {
+  run_case(
       "vim mode: c<motion> deletes the span and drops straight into Insert "
       "mode -- no separate 'i' needed before typing",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
-          const auto result =
-              readline("> ", {}, {}, {}, "hello world", 11, -1, false, {}, true);
+          const auto result = readline("> ", {}, {}, {}, "hello world", 11, -1,
+                                       false, {}, true);
           dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
                   static_cast<int>(result.reason), result.cursor,
                   result.text.c_str());
@@ -1590,36 +1596,36 @@ void test_vim_mode_c_operator_enters_insert_mode() {
         }
 
         auto output = read_until(master, {}, "world");
-        CHECK_EQ(::write(master, "\x1b", 1), 1);
+        EXPECT_EQ(::write(master, "\x1b", 1), 1);
         poll(nullptr, 0, 60);
-        CHECK_EQ(::write(master, "0", 1), 1); // line start
+        EXPECT_EQ(::write(master, "0", 1), 1); // line start
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "cw", 2), 2); // change "hello " -> insert
+        EXPECT_EQ(::write(master, "cw", 2), 2); // change "hello " -> insert
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "X", 1), 1); // now in Insert mode
+        EXPECT_EQ(::write(master, "X", 1), 1); // now in Insert mode
         output = read_new_output(master, std::move(output));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         const auto expected =
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) +
             ":1:Xworld";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_vim_mode_uncovered_key_is_safe_noop() {
-  tests::run(
+TEST_F(ReadlineEnvironment, test_vim_mode_uncovered_key_is_safe_noop) {
+  run_case(
       "vim mode: an uncovered Normal-mode key ('x', not implemented in this "
       "milestone's scope) neither edits the buffer nor gets inserted as "
       "text",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           const auto result =
@@ -1631,104 +1637,103 @@ void test_vim_mode_uncovered_key_is_safe_noop() {
         }
 
         auto output = read_until(master, {}, "READY");
-        CHECK_EQ(::write(master, "hi", 2), 2);
+        EXPECT_EQ(::write(master, "hi", 2), 2);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\x1b", 1), 1);
+        EXPECT_EQ(::write(master, "\x1b", 1), 1);
         poll(nullptr, 0, 60);
-        CHECK_EQ(::write(master, "x", 1), 1);
+        EXPECT_EQ(::write(master, "x", 1), 1);
         output = read_new_output(master, std::move(output));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         // If 'x' had fallen through to plain-insert instead of being
         // swallowed as an uncovered Normal-mode key, this would read
         // "hix" instead.
         const auto expected =
             "RESULT:" +
-            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-            ":2:hi";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) + ":2:hi";
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_vim_mode_arrow_keys_unaffected_in_normal_mode() {
-  tests::run(
-      "vim mode: escape-sequence bindings (plain Left/Right) keep working "
-      "identically in Normal mode -- only single-byte keys are vim's to "
-      "intercept",
-      [] {
-        int master = -1;
-        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
-        if (child == 0) {
-          dprintf(STDOUT_FILENO, "READY\n");
-          const auto result =
-              readline("> ", {}, {}, {}, "ab", 2, -1, false, {}, true);
-          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                  static_cast<int>(result.reason), result.cursor,
-                  result.text.c_str());
-          _exit(0);
-        }
+TEST_F(ReadlineEnvironment,
+       test_vim_mode_arrow_keys_unaffected_in_normal_mode) {
+  run_case("vim mode: escape-sequence bindings (plain Left/Right) keep working "
+           "identically in Normal mode -- only single-byte keys are vim's to "
+           "intercept",
+           [] {
+             int master = -1;
+             const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result =
+                   readline("> ", {}, {}, {}, "ab", 2, -1, false, {}, true);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-        auto output = read_until(master, {}, "READY");
-        CHECK_EQ(::write(master, "\x1b", 1), 1);
-        poll(nullptr, 0, 60);
-        // Plain Left (CSI "[D"), the ordinary arrow-key escape sequence --
-        // not a vim single-byte key -- still moves the cursor exactly as
-        // it would without vim mode.
-        CHECK_EQ(::write(master, "\033[D", 3), 3);
-        output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "i", 1), 1); // back to Insert at offset 1
-        output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "X", 1), 1);
-        output = read_new_output(master, std::move(output));
+             auto output = read_until(master, {}, "READY");
+             EXPECT_EQ(::write(master, "\x1b", 1), 1);
+             poll(nullptr, 0, 60);
+             // Plain Left (CSI "[D"), the ordinary arrow-key escape sequence --
+             // not a vim single-byte key -- still moves the cursor exactly as
+             // it would without vim mode.
+             EXPECT_EQ(::write(master, "\033[D", 3), 3);
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "i", 1),
+                       1); // back to Insert at offset 1
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "X", 1), 1);
+             output = read_new_output(master, std::move(output));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
-        output = read_until(master, std::move(output), "RESULT:");
-        const auto expected =
-            "RESULT:" +
-            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-            ":2:aXb";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
-        ::close(master);
-      });
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             const auto expected =
+                 "RESULT:" +
+                 std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                 ":2:aXb";
+             EXPECT_TRUE(output.find(expected) != std::string::npos);
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
-void test_vim_mode_false_leaves_hjkl_as_literal_text() {
-  tests::run(
-      "vim mode: with vim_mode=false (the default), h/j/k/l are inserted "
-      "as literal characters -- M0-M4 behavior is completely unaffected",
-      [] {
-        int master = -1;
-        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
-        if (child == 0) {
-          dprintf(STDOUT_FILENO, "READY\n");
-          const auto result =
-              readline("> ", {}, {}, {}, "", 0, -1, false, {}, false);
-          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                  static_cast<int>(result.reason), result.cursor,
-                  result.text.c_str());
-          _exit(0);
-        }
+TEST_F(ReadlineEnvironment, test_vim_mode_false_leaves_hjkl_as_literal_text) {
+  run_case("vim mode: with vim_mode=false (the default), h/j/k/l are inserted "
+           "as literal characters -- M0-M4 behavior is completely unaffected",
+           [] {
+             int master = -1;
+             const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result =
+                   readline("> ", {}, {}, {}, "", 0, -1, false, {}, false);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-        auto output = read_until(master, {}, "READY");
-        CHECK_EQ(::write(master, "hjkl", 4), 4);
-        output = read_new_output(master, std::move(output));
+             auto output = read_until(master, {}, "READY");
+             EXPECT_EQ(::write(master, "hjkl", 4), 4);
+             output = read_new_output(master, std::move(output));
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
-        output = read_until(master, std::move(output), "RESULT:");
-        const auto expected =
-            "RESULT:" +
-            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-            ":4:hjkl";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
-        ::close(master);
-      });
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             const auto expected =
+                 "RESULT:" +
+                 std::to_string(static_cast<int>(ReadlineExit::submitted)) +
+                 ":4:hjkl";
+             EXPECT_TRUE(output.find(expected) != std::string::npos);
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
 // --- M6: visual polish --------------------------------------------------
@@ -1741,8 +1746,8 @@ void test_vim_mode_false_leaves_hjkl_as_literal_text() {
 // so the OSC 11 background-tint probe never fires here -- these are about
 // the footer row, not the tint.
 
-void test_footer_hint_shown_and_bookkept() {
-  tests::run(
+TEST_F(ReadlineEnvironment, test_footer_hint_shown_and_bookkept) {
+  run_case(
       "readline: footer hint row is drawn below the composer and folded "
       "into rendered_rows_ -- a later redraw's clear_previous() erases "
       "exactly one row for the composer and one for the footer",
@@ -1752,7 +1757,7 @@ void test_footer_hint_shown_and_bookkept() {
         ws.ws_col = 80;
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, &ws);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           const auto result = readline("> ", {}, {}, {}, "", 0);
@@ -1766,37 +1771,38 @@ void test_footer_hint_shown_and_bookkept() {
         // Wait for the first redraw to finish in full (its trailing
         // "\033[?7h", not just the content partway through).
         output = read_until(master, std::move(output), "\033[?7h");
-        CHECK(output.find("Alt+Enter: newline") != std::string::npos);
+        EXPECT_TRUE(output.find("Alt+Enter: newline") != std::string::npos);
         // rendered_rows_ was 0 before this first paint, so clear_previous()
         // was a no-op -- no erase yet.
-        CHECK_EQ(count_occurrences(output, "\033[2K"), 0U);
+        EXPECT_EQ(count_occurrences(output, "\033[2K"), 0U);
         const auto before_size = output.size();
 
         // A keystroke triggers a second redraw: clear_previous() now has to
         // erase both the composer's own row and the footer's row from the
         // first paint -- exactly 2 rows, one "\033[2K" each, if the footer
         // was correctly folded into rendered_rows_.
-        CHECK_EQ(::write(master, "a", 1), 1);
-        output = read_until_from(master, std::move(output), before_size,
-                                 "\033[?7h");
+        EXPECT_EQ(::write(master, "a", 1), 1);
+        output =
+            read_until_from(master, std::move(output), before_size, "\033[?7h");
         const auto second_redraw = output.substr(before_size);
-        CHECK_EQ(count_occurrences(second_redraw, "\033[2K"), 2U);
-        CHECK(second_redraw.find("Alt+Enter: newline") != std::string::npos);
+        EXPECT_EQ(count_occurrences(second_redraw, "\033[2K"), 2U);
+        EXPECT_TRUE(second_redraw.find("Alt+Enter: newline") !=
+                    std::string::npos);
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         const auto expected =
             "RESULT:" +
-            std::to_string(static_cast<int>(ReadlineExit::submitted)) +
-            ":1:a";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+            std::to_string(static_cast<int>(ReadlineExit::submitted)) + ":1:a";
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
 
-void test_footer_hint_hidden_when_composer_at_height_cap() {
-  tests::run(
+TEST_F(ReadlineEnvironment,
+       test_footer_hint_hidden_when_composer_at_height_cap) {
+  run_case(
       "readline: footer hint row is omitted once the composer is already "
       "using its full core::kMaxComposerRows budget, so it never grows the "
       "box past the cap or past region_renderer.cpp's fixed reservation",
@@ -1810,11 +1816,10 @@ void test_footer_hint_hidden_when_composer_at_height_cap() {
         // spare row for the footer.
         const std::string draft = "l0\nl1\nl2\nl3\nl4\nl5";
         const auto child = forkpty(&master, nullptr, nullptr, &ws);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
-          const auto result =
-              readline("> ", {}, {}, {}, draft, draft.size());
+          const auto result = readline("> ", {}, {}, {}, draft, draft.size());
           dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
                   static_cast<int>(result.reason), result.cursor,
                   result.text.c_str());
@@ -1823,15 +1828,15 @@ void test_footer_hint_hidden_when_composer_at_height_cap() {
 
         auto output = read_until(master, {}, "READY");
         output = read_until(master, std::move(output), "\033[?7h");
-        CHECK(output.find("l5") != std::string::npos);
-        CHECK(output.find("Alt+Enter: newline") == std::string::npos);
+        EXPECT_TRUE(output.find("l5") != std::string::npos);
+        EXPECT_TRUE(output.find("Alt+Enter: newline") == std::string::npos);
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
-        CHECK(output.find("RESULT:" + std::to_string(static_cast<int>(
-                                          ReadlineExit::submitted))) !=
-              std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find("RESULT:" + std::to_string(static_cast<int>(
+                                                ReadlineExit::submitted))) !=
+                    std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
@@ -2143,8 +2148,9 @@ private:
   int scroll_bottom_{-1};
 };
 
-void test_footer_scroll_at_terminal_bottom_does_not_desync_cursor() {
-  tests::run(
+TEST_F(ReadlineEnvironment,
+       test_footer_scroll_at_terminal_bottom_does_not_desync_cursor) {
+  run_case(
       "readline: when the composer's own last row lands on the terminal's "
       "physical last row, painting the footer hint below it must not "
       "desync the edit cursor or leave stale content behind once the "
@@ -2173,7 +2179,7 @@ void test_footer_scroll_at_terminal_bottom_does_not_desync_cursor() {
         const std::string prompt = std::string(19, '\n') + "> ";
         const std::string draft(228, 'x');
         const auto child = forkpty(&master, nullptr, nullptr, &ws);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           const auto result = readline(prompt, {}, {}, "", draft, draft.size());
@@ -2186,7 +2192,7 @@ void test_footer_scroll_at_terminal_bottom_does_not_desync_cursor() {
         auto output = read_until(master, {}, "READY");
         // Wait for the first redraw to finish in full.
         output = read_until(master, std::move(output), "\033[?7h");
-        CHECK(output.find("Alt+Enter: newline") != std::string::npos);
+        EXPECT_TRUE(output.find("Alt+Enter: newline") != std::string::npos);
 
         MiniTerminal term(80, 24);
         term.feed(output);
@@ -2195,14 +2201,15 @@ void test_footer_scroll_at_terminal_bottom_does_not_desync_cursor() {
         // footer's own row, regardless of whether painting the footer
         // scrolled the screen out from under an absolute DECSC/DECRC
         // restore.
-        CHECK(term.cursor_row() >= 0 && term.cursor_row() < term.height());
+        EXPECT_TRUE(term.cursor_row() >= 0 &&
+                    term.cursor_row() < term.height());
         const auto &cursor_row_text = term.row(term.cursor_row());
-        CHECK(cursor_row_text.find('x') != std::string::npos);
-        CHECK(cursor_row_text.find("Alt+Enter") == std::string::npos);
+        EXPECT_TRUE(cursor_row_text.find('x') != std::string::npos);
+        EXPECT_TRUE(cursor_row_text.find("Alt+Enter") == std::string::npos);
         // Exactly one copy of the footer text is visible on screen after
         // the first paint.
-        CHECK_EQ(count_occurrences(term.screen_text(), "Alt+Enter: newline"),
-                 1U);
+        EXPECT_EQ(count_occurrences(term.screen_text(), "Alt+Enter: newline"),
+                  1U);
 
         // Now shrink the composer abruptly: Ctrl+U kills from the start of
         // the current logical line to the cursor -- with no embedded '\n'
@@ -2210,7 +2217,7 @@ void test_footer_scroll_at_terminal_bottom_does_not_desync_cursor() {
         // the composer from 3 content rows to 0 in a single redraw. This
         // is the "row count contracts" step from the bug report.
         const auto before_shrink = output.size();
-        CHECK_EQ(::write(master, "\x15", 1), 1);
+        EXPECT_EQ(::write(master, "\x15", 1), 1);
         output = read_until_from(master, std::move(output), before_shrink,
                                  "\033[?7h");
 
@@ -2224,19 +2231,20 @@ void test_footer_scroll_at_terminal_bottom_does_not_desync_cursor() {
         // paint would land somewhere stale, leaving more than one visible
         // copy of the footer text on screen -- the reported "doubled"
         // symptom. There must still be exactly one.
-        CHECK_EQ(count_occurrences(term.screen_text(), "Alt+Enter: newline"),
-                 1U);
-        CHECK(term.cursor_row() >= 0 && term.cursor_row() < term.height());
-        CHECK(term.row(term.cursor_row()).find("Alt+Enter") ==
-              std::string::npos);
+        EXPECT_EQ(count_occurrences(term.screen_text(), "Alt+Enter: newline"),
+                  1U);
+        EXPECT_TRUE(term.cursor_row() >= 0 &&
+                    term.cursor_row() < term.height());
+        EXPECT_TRUE(term.row(term.cursor_row()).find("Alt+Enter") ==
+                    std::string::npos);
 
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
         const auto expected =
             "RESULT:" +
             std::to_string(static_cast<int>(ReadlineExit::submitted)) + ":0:";
-        CHECK(output.find(expected) != std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_TRUE(output.find(expected) != std::string::npos);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
@@ -2252,53 +2260,54 @@ constexpr std::string_view kOsc11ProbeQuery = "\033]11;?\007\033[c";
 
 void await_osc11_probe_query(int master, std::string &output) {
   output = read_until(master, std::move(output), kOsc11ProbeQuery);
-  CHECK(output.find(kOsc11ProbeQuery) != std::string::npos);
+  EXPECT_TRUE(output.find(kOsc11ProbeQuery) != std::string::npos);
 }
 
-void test_osc11_probe_skipped_without_truecolor_colorterm() {
-  tests::run(
-      "readline: without COLORTERM=truecolor/24bit, the OSC 11 background "
-      "query is never sent at all and the fixed \\033[100m tint is used",
-      [] {
-        int master = -1;
-        const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
-        if (child == 0) {
-          ::unsetenv("COLORTERM");
-          dprintf(STDOUT_FILENO, "READY\n");
-          const auto result = readline("> ", {}, {}, {}, "", 0);
-          dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
-                  static_cast<int>(result.reason), result.cursor,
-                  result.text.c_str());
-          _exit(0);
-        }
+TEST_F(ReadlineEnvironment,
+       test_osc11_probe_skipped_without_truecolor_colorterm) {
+  run_case("readline: without COLORTERM=truecolor/24bit, the OSC 11 background "
+           "query is never sent at all and the fixed \\033[100m tint is used",
+           [] {
+             int master = -1;
+             const auto child = forkpty(&master, nullptr, nullptr, nullptr);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               ::unsetenv("COLORTERM");
+               dprintf(STDOUT_FILENO, "READY\n");
+               const auto result = readline("> ", {}, {}, {}, "", 0);
+               dprintf(STDOUT_FILENO, "\nRESULT:%d:%zu:%s\n",
+                       static_cast<int>(result.reason), result.cursor,
+                       result.text.c_str());
+               _exit(0);
+             }
 
-        auto output = read_until(master, {}, "READY");
-        output = read_until(master, std::move(output), "\033[?7h");
-        CHECK(output.find("\033[100m") != std::string::npos);
-        CHECK(output.find("\033]11;?") == std::string::npos);
+             auto output = read_until(master, {}, "READY");
+             output = read_until(master, std::move(output), "\033[?7h");
+             EXPECT_TRUE(output.find("\033[100m") != std::string::npos);
+             EXPECT_TRUE(output.find("\033]11;?") == std::string::npos);
 
-        CHECK_EQ(::write(master, "x", 1), 1);
-        output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\r", 1), 1);
-        output = read_until(master, std::move(output), "RESULT:");
-        CHECK(output.find("RESULT:" + std::to_string(static_cast<int>(
-                                          ReadlineExit::submitted))) !=
-              std::string::npos);
-        CHECK_EQ(wait_for_child(child), 0);
-        ::close(master);
-      });
+             EXPECT_EQ(::write(master, "x", 1), 1);
+             output = read_new_output(master, std::move(output));
+             EXPECT_EQ(::write(master, "\r", 1), 1);
+             output = read_until(master, std::move(output), "RESULT:");
+             EXPECT_TRUE(
+                 output.find("RESULT:" + std::to_string(static_cast<int>(
+                                             ReadlineExit::submitted))) !=
+                 std::string::npos);
+             EXPECT_EQ(wait_for_child(child), 0);
+             ::close(master);
+           });
 }
 
-void test_osc11_probe_supported_blends_truecolor_tint() {
-  tests::run(
+TEST_F(ReadlineEnvironment, test_osc11_probe_supported_blends_truecolor_tint) {
+  run_case(
       "readline: COLORTERM=truecolor plus a scripted OSC 11 reply arriving "
       "before DA1 makes the composer's tint a blended truecolor "
       "\\033[48;2;r;g;bm sequence instead of the fixed fallback",
       [] {
         int master = -1;
         const auto child = forkpty(&master, nullptr, nullptr, nullptr);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           ::setenv("COLORTERM", "truecolor", 1);
           dprintf(STDOUT_FILENO, "READY\n");
@@ -2317,22 +2326,22 @@ void test_osc11_probe_supported_blends_truecolor_tint() {
         // the DA1 sentinel immediately after.
         static constexpr std::string_view kBackgroundReply =
             "\033]11;rgb:1e1e/1e1e/2222\033\\\033[?62c";
-        CHECK_EQ(::write(master, kBackgroundReply.data(),
-                         kBackgroundReply.size()),
-                 static_cast<ssize_t>(kBackgroundReply.size()));
+        EXPECT_EQ(
+            ::write(master, kBackgroundReply.data(), kBackgroundReply.size()),
+            static_cast<ssize_t>(kBackgroundReply.size()));
         output = read_until(master, std::move(output), "\033[?7h");
 
         // Dark background, so each channel is nudged 12% toward white:
         // 30 + (255-30)*0.12 = 57 (r, g); 34 + (255-34)*0.12 = 60.52,
         // rounds to 61 (b).
-        CHECK(output.find("\033[48;2;57;57;61m") != std::string::npos);
-        CHECK(output.find("\033[100m") == std::string::npos);
+        EXPECT_TRUE(output.find("\033[48;2;57;57;61m") != std::string::npos);
+        EXPECT_TRUE(output.find("\033[100m") == std::string::npos);
 
-        CHECK_EQ(::write(master, "x", 1), 1);
+        EXPECT_EQ(::write(master, "x", 1), 1);
         output = read_new_output(master, std::move(output));
-        CHECK_EQ(::write(master, "\r", 1), 1);
+        EXPECT_EQ(::write(master, "\r", 1), 1);
         output = read_until(master, std::move(output), "RESULT:");
-        CHECK_EQ(wait_for_child(child), 0);
+        EXPECT_EQ(wait_for_child(child), 0);
         ::close(master);
       });
 }
@@ -2374,8 +2383,9 @@ void test_osc11_probe_supported_blends_truecolor_tint() {
 // is gone before the next InputRenderer ever paints into it -- closing the
 // gap regardless of what wrote there, not just this one specific main.cpp
 // bug.
-void test_region_turn_boundary_survives_untracked_cursor_drift() {
-  tests::run(
+TEST_F(ReadlineEnvironment,
+       test_region_turn_boundary_survives_untracked_cursor_drift) {
+  run_case(
       "region renderer + readline: an untracked write that shifts the "
       "composer's on-screen position between turns (main.cpp's initial-CLI-"
       "argument-message path bypasses both renderers with a bare std::cout "
@@ -2395,7 +2405,7 @@ void test_region_turn_boundary_survives_untracked_cursor_drift() {
         // screen geometry this test depends on.
         std::cout.flush();
         const auto child = forkpty(&master, nullptr, nullptr, &ws);
-        CHECK(child >= 0);
+        EXPECT_TRUE(child >= 0);
         if (child == 0) {
           dprintf(STDOUT_FILENO, "READY\n");
           auto renderer = pi::core::make_region_renderer(STDOUT_FILENO);
@@ -2442,7 +2452,7 @@ void test_region_turn_boundary_survives_untracked_cursor_drift() {
           const auto from = output.size();
           output = read_until_from(master, std::move(output), from, "\033[?7h");
           if (occurrence == 0) // first prompt just finished painting once
-            CHECK_EQ(::write(master, "\r", 1), 1); // submit it
+            EXPECT_EQ(::write(master, "\r", 1), 1); // submit it
         }
 
         ::kill(child, SIGKILL);
@@ -2455,8 +2465,8 @@ void test_region_turn_boundary_survives_untracked_cursor_drift() {
         // Exactly one copy of the footer text must be visible -- before the
         // fix, the first (drift-shifted) prompt's orphaned footer survived
         // one row below the second prompt's correctly-positioned one.
-        CHECK_EQ(count_occurrences(term.screen_text(), "Alt+Enter: newline"),
-                 1U);
+        EXPECT_EQ(count_occurrences(term.screen_text(), "Alt+Enter: newline"),
+                  1U);
       });
 }
 
@@ -2495,211 +2505,156 @@ void test_region_turn_boundary_survives_untracked_cursor_drift() {
 // rest of that turn, so a resize's row-count change genuinely cannot reach
 // render_frame() until on_turn_end() resets it back to 0 ("use the live
 // height").
-void test_composer_survives_mid_turn_resize() {
-  tests::run(
-      "region renderer: a terminal resize observed while a turn is active "
-      "(paint_loop's own resize polling, not readline()'s on_resize "
-      "callback -- see RegionRenderer::on_resize()'s own comment that it "
-      "must only run between turns) must not let the transcript/status "
-      "repaint reclaim rows the composer's prompt and footer are still "
-      "painted on -- regression test for 'the input line disappears when "
-      "the agent generates output'",
-      [] {
-        struct winsize ws {};
-        ws.ws_row = 24;
-        ws.ws_col = 80;
-        int master = -1;
-        std::cout.flush();
-        const auto child = forkpty(&master, nullptr, nullptr, &ws);
-        CHECK(child >= 0);
-        if (child == 0) {
-          dprintf(STDOUT_FILENO, "READY\n");
-          auto renderer = pi::core::make_region_renderer(STDOUT_FILENO);
-          const std::string prompt = "\n> ";
-          // A non-empty initial draft submits on a bare "\r" with no typing
-          // needed (an empty buffer's Enter is a no-op) -- same trick
-          // test_footer_scroll_at_terminal_bottom... above uses.
-          (void)readline(prompt, {}, {}, {}, "hi", 2, -1,
-                         /*clear_on_submit=*/true);
-          renderer->on_turn_start();
-          // 24 chunks * 25ms ~= 600ms of simulated token-by-token
-          // streaming -- long enough for the parent to resize reliably
-          // partway through, with plenty of turn left afterward for more
-          // frames to paint post-resize (the bug needs the composer to
-          // still be gone right up to on_turn_end(), not just for one
-          // transient frame).
-          for (int i = 0; i < 24; ++i) {
-            renderer->on_text_delta("chunk ");
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-          }
-          renderer->on_turn_end();
-          // Deliberately hang -- the parent kills this child once it has
-          // captured everything it needs; letting readline()'s next call
-          // run (it would block on stdin forever anyway with no more
-          // scripted input) adds nothing and risks a stray extra repaint
-          // contaminating the capture, same rationale as the drift test
-          // above.
-          for (;;)
-            ::pause();
-        }
+TEST_F(ReadlineEnvironment, test_composer_survives_mid_turn_resize) {
+  run_case("region renderer: a terminal resize observed while a turn is active "
+           "(paint_loop's own resize polling, not readline()'s on_resize "
+           "callback -- see RegionRenderer::on_resize()'s own comment that it "
+           "must only run between turns) must not let the transcript/status "
+           "repaint reclaim rows the composer's prompt and footer are still "
+           "painted on -- regression test for 'the input line disappears when "
+           "the agent generates output'",
+           [] {
+             struct winsize ws {};
+             ws.ws_row = 24;
+             ws.ws_col = 80;
+             int master = -1;
+             std::cout.flush();
+             const auto child = forkpty(&master, nullptr, nullptr, &ws);
+             EXPECT_TRUE(child >= 0);
+             if (child == 0) {
+               dprintf(STDOUT_FILENO, "READY\n");
+               auto renderer = pi::core::make_region_renderer(STDOUT_FILENO);
+               const std::string prompt = "\n> ";
+               // A non-empty initial draft submits on a bare "\r" with no
+               // typing needed (an empty buffer's Enter is a no-op) -- same
+               // trick test_footer_scroll_at_terminal_bottom... above uses.
+               (void)readline(prompt, {}, {}, {}, "hi", 2, -1,
+                              /*clear_on_submit=*/true);
+               renderer->on_turn_start();
+               // 24 chunks * 25ms ~= 600ms of simulated token-by-token
+               // streaming -- long enough for the parent to resize reliably
+               // partway through, with plenty of turn left afterward for more
+               // frames to paint post-resize (the bug needs the composer to
+               // still be gone right up to on_turn_end(), not just for one
+               // transient frame).
+               for (int i = 0; i < 24; ++i) {
+                 renderer->on_text_delta("chunk ");
+                 std::this_thread::sleep_for(std::chrono::milliseconds(25));
+               }
+               renderer->on_turn_end();
+               // Deliberately hang -- the parent kills this child once it has
+               // captured everything it needs; letting readline()'s next call
+               // run (it would block on stdin forever anyway with no more
+               // scripted input) adds nothing and risks a stray extra repaint
+               // contaminating the capture, same rationale as the drift test
+               // above.
+               for (;;)
+                 ::pause();
+             }
 
-        auto output = read_until(master, {}, "READY");
-        output = read_until(master, std::move(output), "\033[?7h");
-        CHECK_EQ(::write(master, "\r", 1), 1); // submit "hi"
-        // The clear_on_submit redraw: the composer's static "empty box +
-        // footer" that's left on screen, untouched, for the rest of the
-        // turn. Captures the size before the move -- passing std::move
-        // (output) and output.size() as sibling arguments would read the
-        // size in unspecified order relative to the move.
-        const auto before_submit = output.size();
-        output = read_until_from(master, std::move(output), before_submit,
-                                 "\033[?7h");
+             auto output = read_until(master, {}, "READY");
+             output = read_until(master, std::move(output), "\033[?7h");
+             EXPECT_EQ(::write(master, "\r", 1), 1); // submit "hi"
+             // The clear_on_submit redraw: the composer's static "empty box +
+             // footer" that's left on screen, untouched, for the rest of the
+             // turn. Captures the size before the move -- passing std::move
+             // (output) and output.size() as sibling arguments would read the
+             // size in unspecified order relative to the move.
+             const auto before_submit = output.size();
+             output = read_until_from(master, std::move(output), before_submit,
+                                      "\033[?7h");
 
-        constexpr int kComposerRows =
-            static_cast<int>(pi::core::kMaxComposerRows);
-        constexpr int kOldContentRows = 24 - 1 - kComposerRows; // == 17
-        MiniTerminal before(80, 24);
-        before.feed(output);
-        // Composer's own first row (content_rows rows, then the status row,
-        // then the composer starts) holds the prompt; the footer sits one
-        // row below it -- see region_renderer.cpp's row-layout comments.
-        CHECK(before.row(kOldContentRows + 1).find("> ") != std::string::npos);
-        CHECK(before.row(kOldContentRows + 2).find("Alt+Enter") !=
-              std::string::npos);
+             constexpr int kComposerRows =
+                 static_cast<int>(pi::core::kMaxComposerRows);
+             constexpr int kOldContentRows = 24 - 1 - kComposerRows; // == 17
+             MiniTerminal before(80, 24);
+             before.feed(output);
+             // Composer's own first row (content_rows rows, then the status
+             // row, then the composer starts) holds the prompt; the footer sits
+             // one row below it -- see region_renderer.cpp's row-layout
+             // comments.
+             EXPECT_TRUE(before.row(kOldContentRows + 1).find("> ") !=
+                         std::string::npos);
+             EXPECT_TRUE(before.row(kOldContentRows + 2).find("Alt+Enter") !=
+                         std::string::npos);
 
-        // Let a couple of streaming frames land, then resize mid-turn --
-        // the exact condition under test.
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
-        struct winsize grown {};
-        grown.ws_row = 30;
-        grown.ws_col = 80;
-        // ioctl declarations vary by platform -- same rationale as
-        // readline.cpp's terminal_columns().
-        // NOLINTNEXTLINE(misc-include-cleaner)
-        CHECK_EQ(::ioctl(master, TIOCSWINSZ, &grown), 0);
-        ::kill(child, SIGWINCH);
+             // Let a couple of streaming frames land, then resize mid-turn --
+             // the exact condition under test.
+             std::this_thread::sleep_for(std::chrono::milliseconds(150));
+             struct winsize grown {};
+             grown.ws_row = 30;
+             grown.ws_col = 80;
+             // ioctl declarations vary by platform -- same rationale as
+             // readline.cpp's terminal_columns().
+             // NOLINTNEXTLINE(misc-include-cleaner)
+             EXPECT_EQ(::ioctl(master, TIOCSWINSZ, &grown), 0);
+             ::kill(child, SIGWINCH);
 
-        // Let streaming continue well past the resize -- 200ms is ~8 more
-        // on_text_delta() chunks at 25ms each, comfortably inside the 600ms
-        // (24 chunks) the child's loop runs for, so the turn is still
-        // active. This is the exact window the bug needs: not just the one
-        // frame immediately after the resize, but the composer staying gone
-        // for a real, sustained stretch of continued generation -- matching
-        // the user's report ("disappears when the agent generates output"),
-        // and distinguishing it from a resize that's noticed but only
-        // transiently mishandled. Drains everything the pty produces over
-        // that whole window (unlike read_new_output, which returns after
-        // the *first* non-empty read -- too early to capture a 200ms
-        // backlog) via the same poll+read loop read_until uses internally,
-        // just bounded by wall-clock time instead of a marker.
-        {
-          const auto deadline =
-              std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
-          while (std::chrono::steady_clock::now() < deadline) {
-            pollfd descriptor{.fd = master, .events = POLLIN};
-            if (::poll(&descriptor, 1, 25) <= 0)
-              continue;
-            char buffer[256];
-            const auto count = ::read(master, buffer, sizeof(buffer));
-            if (count > 0)
-              output.append(buffer, static_cast<std::size_t>(count));
-          }
-        }
+             // Let streaming continue well past the resize -- 200ms is ~8 more
+             // on_text_delta() chunks at 25ms each, comfortably inside the
+             // 600ms (24 chunks) the child's loop runs for, so the turn is
+             // still active. This is the exact window the bug needs: not just
+             // the one frame immediately after the resize, but the composer
+             // staying gone for a real, sustained stretch of continued
+             // generation -- matching the user's report ("disappears when the
+             // agent generates output"), and distinguishing it from a resize
+             // that's noticed but only transiently mishandled. Drains
+             // everything the pty produces over that whole window (unlike
+             // read_new_output, which returns after the *first* non-empty read
+             // -- too early to capture a 200ms backlog) via the same poll+read
+             // loop read_until uses internally, just bounded by wall-clock time
+             // instead of a marker.
+             {
+               const auto deadline = std::chrono::steady_clock::now() +
+                                     std::chrono::milliseconds(200);
+               while (std::chrono::steady_clock::now() < deadline) {
+                 pollfd descriptor{.fd = master, .events = POLLIN};
+                 if (::poll(&descriptor, 1, 25) <= 0)
+                   continue;
+                 char buffer[256];
+                 const auto count = ::read(master, buffer, sizeof(buffer));
+                 if (count > 0)
+                   output.append(buffer, static_cast<std::size_t>(count));
+               }
+             }
 
-        // Confirm this snapshot really is still mid-turn, not a race where
-        // the turn happened to finish before the sleep above elapsed --
-        // "tokens: 0  done" only ever appears once, written by
-        // on_turn_end(), never before.
-        CHECK(output.find("tokens: 0  done") == std::string::npos);
+             // Confirm this snapshot really is still mid-turn, not a race where
+             // the turn happened to finish before the sleep above elapsed --
+             // "tokens: 0  done" only ever appears once, written by
+             // on_turn_end(), never before.
+             EXPECT_TRUE(output.find("tokens: 0  done") == std::string::npos);
 
-        // Replay everything captured so far on an 80x30 canvas -- a strict
-        // superset of the pre-resize 80x24 screen, so this changes nothing
-        // about the composer's original rows unless render_frame() itself
-        // started addressing rows outside its old content_rows range, which
-        // is exactly what's under test. The composer's prompt and footer
-        // must still be sitting at their original rows (kOldContentRows + 1
-        // and + 2), untouched, well after the resize and with the turn
-        // still actively streaming.
-        MiniTerminal mid(80, 30);
-        mid.feed(output);
-        CHECK(mid.row(kOldContentRows + 1).find("> ") != std::string::npos);
-        CHECK(mid.row(kOldContentRows + 2).find("Alt+Enter") !=
-              std::string::npos);
+             // Replay everything captured so far on an 80x30 canvas -- a strict
+             // superset of the pre-resize 80x24 screen, so this changes nothing
+             // about the composer's original rows unless render_frame() itself
+             // started addressing rows outside its old content_rows range,
+             // which is exactly what's under test. The composer's prompt and
+             // footer must still be sitting at their original rows
+             // (kOldContentRows + 1 and + 2), untouched, well after the resize
+             // and with the turn still actively streaming.
+             MiniTerminal mid(80, 30);
+             mid.feed(output);
+             EXPECT_TRUE(mid.row(kOldContentRows + 1).find("> ") !=
+                         std::string::npos);
+             EXPECT_TRUE(mid.row(kOldContentRows + 2).find("Alt+Enter") !=
+                         std::string::npos);
 
-        // Let the turn actually finish and confirm recovery: the next
-        // resync (triggered by on_turn_end() resetting turn_layout_height
-        // back to 0) picks up the terminal's now-current 30-row size, so the
-        // DECSTBM sequence for its content_rows (23 == 30 - 1 -
-        // kMaxComposerRows) must appear by the time the turn ends -- proving
-        // the resize was deferred, not silently dropped altogether.
-        output = read_until(master, std::move(output), "tokens: 0  done");
-        CHECK(output.find("tokens: 0  done") != std::string::npos);
-        const std::string grown_scroll_region =
-            "\033[1;" + std::to_string(30 - 1 - kComposerRows) + "r";
-        CHECK(output.find(grown_scroll_region) != std::string::npos);
+             // Let the turn actually finish and confirm recovery: the next
+             // resync (triggered by on_turn_end() resetting turn_layout_height
+             // back to 0) picks up the terminal's now-current 30-row size, so
+             // the DECSTBM sequence for its content_rows (23 == 30 - 1 -
+             // kMaxComposerRows) must appear by the time the turn ends --
+             // proving the resize was deferred, not silently dropped
+             // altogether.
+             output = read_until(master, std::move(output), "tokens: 0  done");
+             EXPECT_TRUE(output.find("tokens: 0  done") != std::string::npos);
+             const std::string grown_scroll_region =
+                 "\033[1;" + std::to_string(30 - 1 - kComposerRows) + "r";
+             EXPECT_TRUE(output.find(grown_scroll_region) != std::string::npos);
 
-        ::kill(child, SIGKILL);
-        int status = 0;
-        ::waitpid(child, &status, 0);
-        ::close(master);
-      });
-}
-
-int main() {
-  // Every test above the "M4: Kitty keyboard protocol probe" section is
-  // exercising M1-M3 behavior, not the probe itself -- disable it
-  // process-wide (inherited by every forkpty() child below) so those tests
-  // stay exactly as fast and deterministic as before M4, skipping the
-  // probe's query/DA1 round trip entirely. The Kitty-probe-specific tests
-  // undo this in their own forked child.
-  ::setenv("PICI_DISABLE_KITTY_KEYBOARD", "1", 1);
-  // Same rationale for the M6 OSC 11 background-tint probe (see
-  // compute_input_area_background() in readline.cpp): every test other
-  // than the OSC-11-probe-specific ones below should behave exactly as if
-  // COLORTERM were never set to a truecolor value, regardless of what the
-  // ambient environment this test binary runs in happens to have.
-  ::unsetenv("COLORTERM");
-
-  test_wake_channel();
-  test_non_tty_paths();
-  test_tty_wake_and_reentry();
-  test_escape_wake();
-  test_eof_wake_race();
-  test_mouse_wheel_scroll();
-  test_wrap_boundary_cursor_placement();
-  test_alt_enter_inserts_newline();
-  test_bare_lf_inserts_newline();
-  test_multiline_navigation_and_backspace();
-  test_bracketed_paste_is_inert_block_insert();
-  test_embedded_newline_cursor_placement();
-  test_composer_height_cap();
-  test_word_wrap_boundary();
-  test_up_down_logical_line_navigation();
-  test_home_end_and_ctrl_a_e();
-  test_ctrl_arrows_scroll_transcript_not_buffer();
-  test_word_motion();
-  test_ctrl_w_deletes_word_and_leading_whitespace();
-  test_ctrl_u_and_ctrl_k_kill_to_line_boundaries();
-  test_ctrl_y_yanks_last_kill_only();
-  test_kitty_probe_unsupported_replays_alt_enter_and_plain_submit();
-  test_kitty_probe_supported_shift_enter_inserts_newline();
-  test_kitty_probe_typeahead_survives_probe_window();
-  test_kitty_disable_env_var_skips_probe_and_forces_fallback();
-  test_kitty_supported_existing_bindings_unaffected();
-  test_vim_mode_escape_enters_normal_and_h_moves_without_inserting();
-  test_vim_mode_dd_deletes_whole_line_end_to_end();
-  test_vim_mode_c_operator_enters_insert_mode();
-  test_vim_mode_uncovered_key_is_safe_noop();
-  test_vim_mode_arrow_keys_unaffected_in_normal_mode();
-  test_vim_mode_false_leaves_hjkl_as_literal_text();
-  test_footer_hint_shown_and_bookkept();
-  test_footer_hint_hidden_when_composer_at_height_cap();
-  test_footer_scroll_at_terminal_bottom_does_not_desync_cursor();
-  test_osc11_probe_skipped_without_truecolor_colorterm();
-  test_osc11_probe_supported_blends_truecolor_tint();
-  test_region_turn_boundary_survives_untracked_cursor_drift();
-  test_composer_survives_mid_turn_resize();
-  std::cout << "\nTests: " << tests::total << " total, " << tests::passed
-            << " passed, " << tests::failed << " failed\n";
-  return tests::failed == 0 ? 0 : 1;
+             ::kill(child, SIGKILL);
+             int status = 0;
+             ::waitpid(child, &status, 0);
+             ::close(master);
+           });
 }

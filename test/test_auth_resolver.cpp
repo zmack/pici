@@ -1,5 +1,7 @@
 #include "core/auth/auth_resolver.h"
+
 #include "core/models.h"
+#include <gtest/gtest.h>
 
 #include <cstdlib>
 #include <iostream>
@@ -9,7 +11,8 @@
 
 using namespace pi;
 
-int main() {
+TEST(AuthResolver, ProviderScopedCredentialsAndHeaders) {
+  const char *previous_auth_key = ::getenv("PICI_AUTH_TEST_A");
   ::setenv("PICI_AUTH_TEST_A", "provider-a-key", 1);
 
   core::ProviderConfig provider_a;
@@ -27,35 +30,37 @@ int main() {
 
   auto registry = std::make_shared<const core::ModelRegistry>(
       std::map<std::string, core::ProviderConfig>{{"provider-a", provider_a},
-                                                   {"provider-b", provider_b}});
+                                                  {"provider-b", provider_b}});
   auth::AuthResolver resolver(registry);
   const auto a = resolver.resolve("provider-a");
-  if (!a || !a->bearer_token || *a->bearer_token != "provider-a-key")
-    return 1;
-  if (resolver.availability("provider-a") !=
-      auth::AuthAvailability::configured)
-    return 1;
-  if (resolver.availability("provider-b") != auth::AuthAvailability::missing)
-    return 1;
+  ASSERT_TRUE(a);
+  ASSERT_TRUE(a->bearer_token);
+  EXPECT_EQ(*a->bearer_token, "provider-a-key");
+  EXPECT_EQ(resolver.availability("provider-a"),
+            auth::AuthAvailability::configured);
+  EXPECT_EQ(resolver.availability("provider-b"),
+            auth::AuthAvailability::missing);
 
   resolver.set_runtime_api_key("provider-a", "runtime-a");
   const auto runtime = resolver.resolve("provider-a");
-  if (!runtime || !runtime->bearer_token || *runtime->bearer_token != "runtime-a")
-    return 1;
+  ASSERT_TRUE(runtime);
+  ASSERT_TRUE(runtime->bearer_token);
+  EXPECT_EQ(*runtime->bearer_token, "runtime-a");
   try {
     (void)resolver.resolve("provider-b");
-    return 1;
+    FAIL() << "missing provider credential did not throw";
   } catch (const auth::AuthError &) {
   }
 
   std::map<std::string, std::string> headers{{"authorization", "bad"},
-                                              {"X-Test", "old"}};
+                                             {"X-Test", "old"}};
   core::merge_headers_case_insensitive(
       headers, {{"Authorization", "good"}, {"x-test", "new"}});
-  if (headers.size() != 2 || headers.at("Authorization") != "good" ||
-      headers.at("x-test") != "new")
-    return 1;
-
-  std::cout << "auth resolver: provider-scoped credentials and headers passed\n";
-  return 0;
+  EXPECT_EQ(headers.size(), 2U);
+  EXPECT_EQ(headers.at("Authorization"), "good");
+  EXPECT_EQ(headers.at("x-test"), "new");
+  if (previous_auth_key)
+    ::setenv("PICI_AUTH_TEST_A", previous_auth_key, 1);
+  else
+    ::unsetenv("PICI_AUTH_TEST_A");
 }

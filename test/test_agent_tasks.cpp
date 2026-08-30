@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <gtest/gtest.h>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -25,14 +26,6 @@
 using namespace pi::core;
 
 namespace {
-int failed = 0;
-#define CHECK(value)                                                           \
-  do {                                                                         \
-    if (!(value)) {                                                            \
-      ++failed;                                                                \
-      std::cerr << "FAIL: " << #value << " at " << __LINE__ << "\n";           \
-    }                                                                          \
-  } while (false)
 
 FauxClient::Script response(std::string text) {
   AssistantMessage partial;
@@ -129,8 +122,8 @@ public:
     message->model = model.id;
     if (calls_++ == 0) {
       // First turn: return immediately so its usage is recorded.
-      message->usage = TokenUsage{.input = 1000, .output = 200,
-                                  .total_tokens = 1200};
+      message->usage =
+          TokenUsage{.input = 1000, .output = 200, .total_tokens = 1200};
       message->stop_reason = StopReason::stop;
       return message;
     }
@@ -139,8 +132,8 @@ public:
     entered_->store(true);
     while (!release_->load())
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    message->usage = TokenUsage{.input = 2000, .output = 500,
-                                .total_tokens = 2500};
+    message->usage =
+        TokenUsage{.input = 2000, .output = 500, .total_tokens = 2500};
     message->stop_reason = StopReason::stop;
     return message;
   }
@@ -166,9 +159,9 @@ AgentTaskSnapshot wait_terminal(AgentTaskManager &manager,
     request.after_generation = current.generation;
     request.timeout = std::chrono::seconds(2);
     auto update = manager.wait(request);
-    CHECK(!update.caller_interrupted);
+    EXPECT_TRUE(!update.caller_interrupted);
     if (update.timed_out) {
-      CHECK(!update.timed_out);
+      EXPECT_TRUE(!update.timed_out);
       const auto snapshot = manager.get(current.id).value_or(current);
       std::cout << "wait timed out for task " << current.id
                 << " status=" << agent_task_status_to_string(snapshot.status)
@@ -180,12 +173,12 @@ AgentTaskSnapshot wait_terminal(AgentTaskManager &manager,
       if (changed.id == current.id)
         current = changed;
   }
-  CHECK(false);
+  EXPECT_TRUE(false);
   return current;
 }
 } // namespace
 
-int main() {
+TEST(AgentTasks, LifecycleAndConcurrency) {
   auto faux = std::make_shared<FauxClient>(
       std::vector{response("child result"), response("follow-up result"),
                   response("third result")});
@@ -262,7 +255,7 @@ return {}
             .task_id = task_id,
             .task_path = task_path,
             .owner_agent_id = "root-endpoint"};
-        CHECK(parent_id && *parent_id == "root");
+        EXPECT_TRUE(parent_id && *parent_id == "root");
         registered.push_back(identity);
         return identity;
       },
@@ -274,36 +267,37 @@ return {}
   const auto identity_child =
       identity_manager.spawn({.task_name = "identity", .prompt = "identify"});
   const auto identity_result = wait_terminal(identity_manager, identity_child);
-  CHECK(identity_result.status == AgentTaskStatusKind::completed);
-  CHECK(observed_identity->has_value());
-  CHECK(observed_identity->value().agent_id == "endpoint-1");
-  CHECK(observed_identity->value().session_id == "session-root");
-  CHECK(observed_identity->value().kind == "subagent");
-  CHECK(observed_identity->value().task_id == identity_child.id);
-  CHECK(observed_identity->value().task_path == identity_child.task_path);
+  EXPECT_TRUE(identity_result.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(observed_identity->has_value());
+  EXPECT_TRUE(observed_identity->value().agent_id == "endpoint-1");
+  EXPECT_TRUE(observed_identity->value().session_id == "session-root");
+  EXPECT_TRUE(observed_identity->value().kind == "subagent");
+  EXPECT_TRUE(observed_identity->value().task_id == identity_child.id);
+  EXPECT_TRUE(observed_identity->value().task_path == identity_child.task_path);
   const auto has_tool = [&](std::string_view name) {
     return std::ranges::find(*observed_tools, name) != observed_tools->end();
   };
   for (const auto name :
        {"read", "grep", "find", "ls", "agents_self", "agents_list",
         "agents_send", "agents_request", "agents_reply", "agents_inbox"})
-    CHECK(has_tool(name));
-  CHECK(!has_tool("agents_close"));
-  CHECK(!has_tool("arbitrary_addon"));
+    EXPECT_TRUE(has_tool(name));
+  EXPECT_TRUE(!has_tool("agents_close"));
+  EXPECT_TRUE(!has_tool("arbitrary_addon"));
   identity_manager.shutdown();
 
-  SessionRuntime write_root({.agent_options = identity_options,
-                           .tools = create_coding_tools()});
-  AgentTaskManager write_manager(
-      write_root, identity_options, AgentTaskManager::Limits{}, {},
-      AgentTaskManager::ChildWriteTools::core);
-  const auto write_child = write_manager.spawn(
-      {.task_name = "writer", .prompt = "write", .requested_tools = {"edit"},
-       .allow_write_tools = true});
+  SessionRuntime write_root(
+      {.agent_options = identity_options, .tools = create_coding_tools()});
+  AgentTaskManager write_manager(write_root, identity_options,
+                                 AgentTaskManager::Limits{}, {},
+                                 AgentTaskManager::ChildWriteTools::core);
+  const auto write_child = write_manager.spawn({.task_name = "writer",
+                                                .prompt = "write",
+                                                .requested_tools = {"edit"},
+                                                .allow_write_tools = true});
   const auto write_result = wait_terminal(write_manager, write_child);
-  CHECK(write_result.status == AgentTaskStatusKind::completed);
-  CHECK(has_tool("edit"));
-  CHECK(!has_tool("write"));
+  EXPECT_TRUE(write_result.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(has_tool("edit"));
+  EXPECT_TRUE(!has_tool("write"));
   write_manager.shutdown();
 
   AgentTaskManager rollback_manager(identity_root, identity_options);
@@ -321,10 +315,10 @@ return {}
   } catch (const std::runtime_error &) {
     registration_failed = true;
   }
-  CHECK(registration_failed);
-  CHECK(!unregister_called);
-  CHECK(rollback_manager.resident_tasks() == 0);
-  CHECK(rollback_manager.active_executions() == 0);
+  EXPECT_TRUE(registration_failed);
+  EXPECT_TRUE(!unregister_called);
+  EXPECT_TRUE(rollback_manager.resident_tasks() == 0);
+  EXPECT_TRUE(rollback_manager.active_executions() == 0);
   rollback_manager.shutdown();
 
   AgentTaskManager construction_manager(identity_root, identity_options);
@@ -349,10 +343,10 @@ return {}
   } catch (const AgentTaskError &error) {
     construction_failed = error.kind() == AgentTaskErrorKind::invalid_tool;
   }
-  CHECK(construction_failed);
-  CHECK(construction_unregistered);
-  CHECK(construction_manager.resident_tasks() == 0);
-  CHECK(construction_manager.active_executions() == 0);
+  EXPECT_TRUE(construction_failed);
+  EXPECT_TRUE(construction_unregistered);
+  EXPECT_TRUE(construction_manager.resident_tasks() == 0);
+  EXPECT_TRUE(construction_manager.active_executions() == 0);
   construction_manager.shutdown();
 
   SessionRuntime concurrency_root({.agent_options = identity_options});
@@ -401,8 +395,8 @@ return {}
     duplicate_pending_rejected =
         error.kind() == AgentTaskErrorKind::duplicate_name;
   }
-  CHECK(duplicate_pending_rejected);
-  CHECK(concurrency_manager.list().size() == 1);
+  EXPECT_TRUE(duplicate_pending_rejected);
+  EXPECT_TRUE(concurrency_manager.list().size() == 1);
   std::thread shutting_down([&] { concurrency_manager.shutdown(); });
   while (!concurrency_manager.is_shutting_down())
     std::this_thread::yield();
@@ -413,10 +407,10 @@ return {}
   registration_changed.notify_all();
   blocked_spawn.join();
   shutting_down.join();
-  CHECK(spawn_failed);
-  CHECK(concurrency_manager.resident_tasks() == 0);
-  CHECK(concurrency_manager.active_executions() == 0);
-  CHECK(unregister_count == 1);
+  EXPECT_TRUE(spawn_failed);
+  EXPECT_TRUE(concurrency_manager.resident_tasks() == 0);
+  EXPECT_TRUE(concurrency_manager.active_executions() == 0);
+  EXPECT_TRUE(unregister_count == 1);
 
   SessionRuntime capacity_root({.agent_options = identity_options});
   AgentTaskManager::Limits capacity_limits;
@@ -464,8 +458,8 @@ return {}
   } catch (const AgentTaskError &error) {
     third_rejected = error.kind() == AgentTaskErrorKind::residency_limit;
   }
-  CHECK(third_rejected);
-  CHECK(capacity_manager.list().size() == 1);
+  EXPECT_TRUE(third_rejected);
+  EXPECT_TRUE(capacity_manager.list().size() == 1);
   {
     std::scoped_lock lock(capacity_mutex);
     capacity_release = true;
@@ -473,7 +467,7 @@ return {}
   capacity_changed.notify_all();
   capacity_first.join();
   capacity_second.join();
-  CHECK(capacity_manager.resident_tasks() == 2);
+  EXPECT_TRUE(capacity_manager.resident_tasks() == 2);
   capacity_manager.shutdown();
 
   SessionRuntime parent_root({.agent_options = identity_options});
@@ -506,7 +500,7 @@ return {}
   const auto parent_child =
       parent_manager.spawn({.task_name = "parent", .prompt = "parent"});
   const auto parent_done = wait_terminal(parent_manager, parent_child);
-  CHECK(parent_done.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(parent_done.status == AgentTaskStatusKind::completed);
   std::atomic<bool> nested_failed{false};
   std::thread nested_spawn([&] {
     try {
@@ -521,7 +515,7 @@ return {}
     std::unique_lock lock(parent_mutex);
     parent_changed.wait(lock, [&] { return nested_entered; });
   }
-  CHECK(parent_manager.list().size() == 2);
+  EXPECT_TRUE(parent_manager.list().size() == 2);
   static_cast<void>(parent_manager.close(parent_child.id));
   {
     std::scoped_lock lock(parent_mutex);
@@ -529,9 +523,9 @@ return {}
   }
   parent_changed.notify_all();
   nested_spawn.join();
-  CHECK(nested_failed);
-  CHECK(parent_unregister_count == 2);
-  CHECK(parent_manager.resident_tasks() == 0);
+  EXPECT_TRUE(nested_failed);
+  EXPECT_TRUE(parent_unregister_count == 2);
+  EXPECT_TRUE(parent_manager.resident_tasks() == 0);
   parent_manager.shutdown();
 
   SessionRuntime unregister_root({.agent_options = identity_options});
@@ -583,8 +577,8 @@ return {}
       });
   const auto unregister_parent =
       unregister_manager.spawn({.task_name = "parent", .prompt = "parent"});
-  CHECK(wait_terminal(unregister_manager, unregister_parent).status ==
-        AgentTaskStatusKind::completed);
+  EXPECT_TRUE(wait_terminal(unregister_manager, unregister_parent).status ==
+              AgentTaskStatusKind::completed);
   std::atomic<bool> nested_registration_failed{false};
   std::thread unregister_spawn([&] {
     try {
@@ -627,7 +621,7 @@ return {}
   }
   while (!unregister_manager.is_shutting_down())
     std::this_thread::yield();
-  CHECK(!unregister_shutdown_done.load());
+  EXPECT_TRUE(!unregister_shutdown_done.load());
   {
     std::scoped_lock lock(unregister_mutex);
     unregister_release = true;
@@ -635,51 +629,53 @@ return {}
   unregister_changed.notify_all();
   unregister_spawn.join();
   unregister_shutdown.join();
-  CHECK(nested_registration_failed);
-  CHECK(unregister_shutdown_done.load());
-  CHECK(unregister_manager.resident_tasks() == 0);
+  EXPECT_TRUE(nested_registration_failed);
+  EXPECT_TRUE(unregister_shutdown_done.load());
+  EXPECT_TRUE(unregister_manager.resident_tasks() == 0);
 
   auto child = manager.spawn({.task_name = "review", .prompt = "Review"});
-  CHECK(!child.id.empty());
-  CHECK(child.task_path == "/root/review");
+  EXPECT_TRUE(!child.id.empty());
+  EXPECT_TRUE(child.task_path == "/root/review");
 
   // Context observability: the spawn snapshot carries live context info.
-  CHECK(child.context_info.has_value());
+  EXPECT_TRUE(child.context_info.has_value());
   {
     const auto &info = *child.context_info;
     // Seed prompt is queued in work; the transcript fills on MessageEndEvent,
     // so at spawn time it is still empty.
-    CHECK(info.message_count == 0);
-    CHECK(info.context_bytes == 0);
-    CHECK(info.last_input_tokens == 0);
-    CHECK(info.total_tokens == 0);
+    EXPECT_TRUE(info.message_count == 0);
+    EXPECT_TRUE(info.context_bytes == 0);
+    EXPECT_TRUE(info.last_input_tokens == 0);
+    EXPECT_TRUE(info.total_tokens == 0);
     // Faux model declares no window.
-    CHECK(!info.context_window.has_value());
+    EXPECT_TRUE(!info.context_window.has_value());
   }
 
   auto completed = wait_terminal(manager, child);
-  CHECK(completed.status == AgentTaskStatusKind::completed);
-  CHECK(completed.result.has_value());
-  CHECK(completed.result->text == "child result");
-  CHECK(completed.context_info.has_value());
-  CHECK(completed.context_info->last_input_tokens == 0);
+  EXPECT_TRUE(completed.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(completed.result.has_value());
+  EXPECT_TRUE(completed.result->text == "child result");
+  EXPECT_TRUE(completed.context_info.has_value());
+  EXPECT_TRUE(completed.context_info->last_input_tokens == 0);
   // FauxClient scripts carry no usage; total falls back to input+output = 0.
-  CHECK(completed.context_info->total_tokens == 0);
-  CHECK(completed.context_info->message_count >= 2); // prompt + assistant
+  EXPECT_TRUE(completed.context_info->total_tokens == 0);
+  EXPECT_TRUE(completed.context_info->message_count >= 2); // prompt + assistant
 
   auto queued = manager.send_message(
       child.id, UserMessage{.content = {TextContent{.text = "context"}}});
-  CHECK(queued.queued_message_count == 1);
+  EXPECT_TRUE(queued.queued_message_count == 1);
   auto follow = manager.follow_up(
       child.id, UserMessage{.content = {TextContent{.text = "Summarize"}}});
   auto second = wait_terminal(manager, follow);
-  CHECK(second.status == AgentTaskStatusKind::completed);
-  CHECK(second.result.has_value());
-  CHECK(second.result->text == "follow-up result");
+  EXPECT_TRUE(second.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(second.result.has_value());
+  EXPECT_TRUE(second.result->text == "follow-up result");
   // Context grew across the follow-up turn.
-  CHECK(second.context_info.has_value());
-  CHECK(second.context_info->message_count > completed.context_info->message_count);
-  CHECK(second.context_info->context_bytes > completed.context_info->context_bytes);
+  EXPECT_TRUE(second.context_info.has_value());
+  EXPECT_TRUE(second.context_info->message_count >
+              completed.context_info->message_count);
+  EXPECT_TRUE(second.context_info->context_bytes >
+              completed.context_info->context_bytes);
 
   int accepted = 0;
   UserMessage mailbox_message;
@@ -691,19 +687,19 @@ return {}
   auto reactivated =
       manager.steer_envelopes(child.id, {std::move(mailbox_envelope)});
   auto third = wait_terminal(manager, reactivated);
-  CHECK(third.status == AgentTaskStatusKind::completed);
-  CHECK(third.result && third.result->text == "third result");
-  CHECK(accepted == 1);
+  EXPECT_TRUE(third.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(third.result && third.result->text == "third result");
+  EXPECT_TRUE(accepted == 1);
 
   const auto all = manager.list();
-  CHECK(all.size() == 2);
-  CHECK(all.front().task_path == "/root");
-  CHECK(manager.resident_tasks() == 1);
+  EXPECT_TRUE(all.size() == 2);
+  EXPECT_TRUE(all.front().task_path == "/root");
+  EXPECT_TRUE(manager.resident_tasks() == 1);
 
   const auto closed = manager.close(child.id);
-  CHECK(closed.status == AgentTaskStatusKind::shutdown);
-  CHECK(!manager.get(child.id).has_value());
-  CHECK(manager.resident_tasks() == 0);
+  EXPECT_TRUE(closed.status == AgentTaskStatusKind::shutdown);
+  EXPECT_TRUE(!manager.get(child.id).has_value());
+  EXPECT_TRUE(manager.resident_tasks() == 0);
   manager.shutdown();
 
   auto interrupt_calls = std::make_shared<std::atomic<int>>(0);
@@ -721,32 +717,32 @@ return {}
   AgentTaskManager interrupt_manager(interrupt_root, interrupt_options);
   auto interrupted =
       interrupt_manager.spawn({.task_name = "slow", .prompt = "wait"});
-  const auto running_deadline = std::chrono::steady_clock::now() +
-                                std::chrono::seconds(2);
+  const auto running_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while (interrupt_manager.get(interrupted.id)->status !=
              AgentTaskStatusKind::running &&
          std::chrono::steady_clock::now() < running_deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  CHECK(interrupt_manager.get(interrupted.id)->status ==
-        AgentTaskStatusKind::running);
-  const auto client_deadline = std::chrono::steady_clock::now() +
-                               std::chrono::seconds(2);
+  EXPECT_TRUE(interrupt_manager.get(interrupted.id)->status ==
+              AgentTaskStatusKind::running);
+  const auto client_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while (interrupt_calls->load() == 0 &&
          std::chrono::steady_clock::now() < client_deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  CHECK(interrupt_calls->load() == 1);
+  EXPECT_TRUE(interrupt_calls->load() == 1);
   auto immediate = interrupt_manager.interrupt(interrupted.id,
                                                AgentInterruptReason::timeout);
-  CHECK(immediate.status == AgentTaskStatusKind::running);
+  EXPECT_TRUE(immediate.status == AgentTaskStatusKind::running);
   auto settled = wait_terminal(interrupt_manager, immediate);
-  CHECK(settled.status == AgentTaskStatusKind::interrupted);
-  CHECK(settled.result.has_value());
-  CHECK(settled.result->stop_reason == StopReason::aborted);
+  EXPECT_TRUE(settled.status == AgentTaskStatusKind::interrupted);
+  EXPECT_TRUE(settled.result.has_value());
+  EXPECT_TRUE(settled.result->stop_reason == StopReason::aborted);
   auto reused = interrupt_manager.follow_up(
       interrupted.id, UserMessage{.content = {TextContent{.text = "retry"}}});
   auto reused_result = wait_terminal(interrupt_manager, reused);
-  CHECK(reused_result.status == AgentTaskStatusKind::completed);
-  CHECK(reused_result.result && reused_result.result->text == "reused");
+  EXPECT_TRUE(reused_result.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(reused_result.result && reused_result.result->text == "reused");
   interrupt_manager.shutdown();
 
   // --- Mid-turn context observability -----------------------------------
@@ -757,8 +753,7 @@ return {}
   auto entered = std::make_shared<std::atomic<bool>>(false);
   auto release = std::make_shared<std::atomic<bool>>(false);
   // One shared instance so calls_ counts across turns.
-  auto usage_client =
-      std::make_shared<BlockingUsageClient>(entered, release);
+  auto usage_client = std::make_shared<BlockingUsageClient>(entered, release);
   LLMClientRegistry::instance().register_client(
       "blocking-usage", [usage_client] { return usage_client; });
   Model usage_model;
@@ -774,11 +769,12 @@ return {}
       usage_manager.spawn({.task_name = "observed", .prompt = "observe"});
 
   // Spawn snapshot: seed prompt still queued in work, not yet in state.
-  CHECK(observed_child.context_info.has_value());
-  CHECK(observed_child.context_info->message_count == 0);
-  CHECK(observed_child.context_info->last_input_tokens == 0);
+  EXPECT_TRUE(observed_child.context_info.has_value());
+  EXPECT_TRUE(observed_child.context_info->message_count == 0);
+  EXPECT_TRUE(observed_child.context_info->last_input_tokens == 0);
   // Window resolved from the child's model at spawn time.
-  CHECK(observed_child.context_info->context_window.value_or(0) == 100000);
+  EXPECT_TRUE(observed_child.context_info->context_window.value_or(0) ==
+              100000);
 
   // Queue turn 2 up front: it starts once turn 1 finishes.
   static_cast<void>(usage_manager.follow_up(
@@ -786,33 +782,34 @@ return {}
       Message{UserMessage{.content = {TextContent{.text = "second"}}}}));
 
   // Wait until turn 2 is streaming...
-  const auto entered_deadline = std::chrono::steady_clock::now() +
-                                std::chrono::seconds(5);
-  while (!entered->load() && std::chrono::steady_clock::now() < entered_deadline)
+  const auto entered_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!entered->load() &&
+         std::chrono::steady_clock::now() < entered_deadline)
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  CHECK(entered->load());
+  EXPECT_TRUE(entered->load());
   // ...and observe turn-1 usage live through a plain get().
   const auto mid_turn = usage_manager.get(observed_child.id);
-  CHECK(mid_turn.has_value());
-  CHECK(mid_turn->status == AgentTaskStatusKind::running);
-  CHECK(mid_turn->context_info.has_value());
-  CHECK(mid_turn->context_info->last_input_tokens == 1000);
-  CHECK(mid_turn->context_info->last_output_tokens == 200);
-  CHECK(mid_turn->context_info->total_tokens == 1200);
-  CHECK(mid_turn->context_info->context_window.value_or(0) == 100000);
+  EXPECT_TRUE(mid_turn.has_value());
+  EXPECT_TRUE(mid_turn->status == AgentTaskStatusKind::running);
+  EXPECT_TRUE(mid_turn->context_info.has_value());
+  EXPECT_TRUE(mid_turn->context_info->last_input_tokens == 1000);
+  EXPECT_TRUE(mid_turn->context_info->last_output_tokens == 200);
+  EXPECT_TRUE(mid_turn->context_info->total_tokens == 1200);
+  EXPECT_TRUE(mid_turn->context_info->context_window.value_or(0) == 100000);
   // Turn 1 transcript: prompt + assistant.
-  CHECK(mid_turn->context_info->message_count >= 2);
-  CHECK(mid_turn->context_info->context_bytes > 0);
+  EXPECT_TRUE(mid_turn->context_info->message_count >= 2);
+  EXPECT_TRUE(mid_turn->context_info->context_bytes > 0);
 
   release->store(true);
   const auto usage_done = wait_terminal(usage_manager, observed_child);
-  CHECK(usage_done.status == AgentTaskStatusKind::completed);
-  CHECK(usage_done.context_info.has_value());
+  EXPECT_TRUE(usage_done.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(usage_done.context_info.has_value());
   // Turn-2 usage replaced turn-1 usage; total falls back to input+output.
-  CHECK(usage_done.context_info->last_input_tokens == 2000);
-  CHECK(usage_done.context_info->total_tokens == 2500);
-  CHECK(usage_done.context_info->message_count ==
-        mid_turn->context_info->message_count + 1); // + turn-2 assistant
+  EXPECT_TRUE(usage_done.context_info->last_input_tokens == 2000);
+  EXPECT_TRUE(usage_done.context_info->total_tokens == 2500);
+  EXPECT_TRUE(usage_done.context_info->message_count ==
+              mid_turn->context_info->message_count + 1); // + turn-2 assistant
   usage_manager.shutdown();
 
   // --- Delegated task results never splice into the parent transcript ----
@@ -833,17 +830,18 @@ return {}
   splice_options.model = splice_model;
   SessionRuntime splice_root({.agent_options = splice_options});
   AgentTaskManager splice_manager(splice_root, splice_options);
-  CHECK(splice_root.agent().state().messages().size() == std::size_t{0});
+  EXPECT_TRUE(splice_root.agent().state().messages().size() == std::size_t{0});
   const auto splice_child = splice_manager.spawn(
       {.task_name = "splice-child", .prompt = "produce distinctive output"});
   const auto splice_done = wait_terminal(splice_manager, splice_child);
-  CHECK(splice_done.status == AgentTaskStatusKind::completed);
-  CHECK(splice_done.result.has_value());
-  CHECK(splice_done.result &&
-        splice_done.result->text == "splice-check distinctive child output");
+  EXPECT_TRUE(splice_done.status == AgentTaskStatusKind::completed);
+  EXPECT_TRUE(splice_done.result.has_value());
+  EXPECT_TRUE(splice_done.result &&
+              splice_done.result->text ==
+                  "splice-check distinctive child output");
   // The parent's own transcript must be untouched: no messages appended,
   // and the child's distinctive text must not appear anywhere in it.
-  CHECK(splice_root.agent().state().messages().size() == std::size_t{0});
+  EXPECT_TRUE(splice_root.agent().state().messages().size() == std::size_t{0});
   const bool leaked_into_parent = std::ranges::any_of(
       splice_root.agent().state().messages(), [](const Message &message) {
         const auto *assistant = std::get_if<AssistantMessage>(&message);
@@ -858,11 +856,6 @@ return {}
         }
         return false;
       });
-  CHECK(!leaked_into_parent);
+  EXPECT_TRUE(!leaked_into_parent);
   splice_manager.shutdown();
-
-  if (failed != 0)
-    return 1;
-  std::cout << "agent tasks: all passed\n";
-  return 0;
 }

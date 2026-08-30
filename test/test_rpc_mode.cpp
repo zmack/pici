@@ -1,7 +1,9 @@
 #include "cli/rpc_mode.h"
+
 #include "core/llm_client.h"
 #include "core/providers/faux.h"
 #include "core/session/session_store.h"
+#include <gtest/gtest.h>
 
 #include <chrono>
 #include <filesystem>
@@ -16,24 +18,7 @@
 
 using namespace pi;
 
-namespace tests {
-int passed{0}, failed{0};
-bool check(bool condition, std::string_view expression,
-           std::source_location location = std::source_location::current()) {
-  if (condition) {
-    ++passed;
-    return true;
-  }
-  ++failed;
-  std::cerr << location.file_name() << ':' << location.line() << ": "
-            << expression << "\n";
-  return false;
-}
-} // namespace tests
-
-#define CHECK(expr) tests::check(!!(expr), #expr)
-
-int main() {
+TEST(RpcMode, HandlesSessionAndCompactionEvents) {
   core::AssistantMessage final_message;
   final_message.content.push_back(core::TextContent{.text = "rpc reply"});
   core::FauxClient::Script script;
@@ -88,8 +73,8 @@ int main() {
   options.model = std::move(model);
   options.model_registry = registry;
   core::SessionRuntime session({.agent_options = std::move(options),
-                              .model_registry = registry,
-                              .session_store = store});
+                                .model_registry = registry,
+                                .session_store = store});
   core::SessionHeader header{.id = "rpc-test"};
   const auto session_id = session.create_session(header);
 
@@ -101,8 +86,10 @@ int main() {
   });
 
   mode.handle({{"id", "models"}, {"type", "list_models"}});
-  mode.handle({{"id", "switch"}, {"type", "set_model"},
-               {"provider", "faux"}, {"model", "other"}});
+  mode.handle({{"id", "switch"},
+               {"type", "set_model"},
+               {"provider", "faux"},
+               {"model", "other"}});
   mode.handle({{"id", "state"}, {"type", "get_state"}});
   mode.handle({{"id", "prompt"}, {"type", "prompt"}, {"message", "hello"}});
   mode.wait_for_idle();
@@ -130,22 +117,19 @@ int main() {
     got_state = got_state || (line.value("command", "") == "get_state" &&
                               line.value("success", false) &&
                               line["data"]["model"]["id"] == "other");
-    got_models = got_models ||
-                 (line.value("command", "") == "list_models" &&
-                  line.value("success", false) &&
-                  line["data"]["models"].size() >= 2);
-    got_switch = got_switch ||
-                 (line.value("command", "") == "set_model" &&
-                  line.value("success", false) &&
-                  line["data"]["current"]["id"] == "other");
+    got_models = got_models || (line.value("command", "") == "list_models" &&
+                                line.value("success", false) &&
+                                line["data"]["models"].size() >= 2);
+    got_switch = got_switch || (line.value("command", "") == "set_model" &&
+                                line.value("success", false) &&
+                                line["data"]["current"]["id"] == "other");
     got_ack = got_ack || (line.value("command", "") == "prompt" &&
                           line.value("success", false));
     got_delta = got_delta || (line.value("event", "") == "message_update" &&
                               line["data"].value("kind", "") == "text_delta" &&
                               line["data"].value("delta", "") == "rpc reply");
-    got_sequence = got_sequence ||
-                   (line.value("type", "") == "event" &&
-                    line.value("sequence", 0ULL) > 0ULL);
+    got_sequence = got_sequence || (line.value("type", "") == "event" &&
+                                    line.value("sequence", 0ULL) > 0ULL);
     got_complete = got_complete || line.value("type", "") == "run.completed";
     got_messages =
         got_messages ||
@@ -153,48 +137,42 @@ int main() {
          line.value("success", false) && line["data"]["messages"].size() == 2);
     got_name = got_name || (line.value("command", "") == "set_session_name" &&
                             line.value("success", false));
-    got_compact_ack = got_compact_ack ||
-                      (line.value("command", "") == "compact" &&
-                       line.value("success", false));
+    got_compact_ack =
+        got_compact_ack || (line.value("command", "") == "compact" &&
+                            line.value("success", false));
     got_compact_start_event =
-        got_compact_start_event ||
-        (line.value("type", "") == "event" &&
-         line.value("event", "") == "compaction" &&
-         line["data"].value("kind", "") == "start");
+        got_compact_start_event || (line.value("type", "") == "event" &&
+                                    line.value("event", "") == "compaction" &&
+                                    line["data"].value("kind", "") == "start");
     got_compact_complete_event =
         got_compact_complete_event ||
         (line.value("type", "") == "event" &&
          line.value("event", "") == "compaction" &&
          line["data"].value("kind", "") == "complete" &&
          !line["data"].contains("replacement_messages"));
-    got_compact_complete =
-        got_compact_complete ||
-        (line.value("type", "") == "compact.completed" &&
-         line.value("retained_message_count", 0ULL) == 1ULL);
+    got_compact_complete = got_compact_complete ||
+                           (line.value("type", "") == "compact.completed" &&
+                            line.value("retained_message_count", 0ULL) == 1ULL);
   }
-  CHECK(got_state);
-  CHECK(got_models);
-  CHECK(got_switch);
-  CHECK(got_ack);
-  CHECK(got_delta);
-  CHECK(got_sequence);
-  CHECK(got_complete);
-  CHECK(got_messages);
-  CHECK(got_name);
-  CHECK(got_compact_ack);
-  CHECK(got_compact_start_event);
-  CHECK(got_compact_complete_event);
-  CHECK(got_compact_complete);
+  EXPECT_TRUE(got_state);
+  EXPECT_TRUE(got_models);
+  EXPECT_TRUE(got_switch);
+  EXPECT_TRUE(got_ack);
+  EXPECT_TRUE(got_delta);
+  EXPECT_TRUE(got_sequence);
+  EXPECT_TRUE(got_complete);
+  EXPECT_TRUE(got_messages);
+  EXPECT_TRUE(got_name);
+  EXPECT_TRUE(got_compact_ack);
+  EXPECT_TRUE(got_compact_start_event);
+  EXPECT_TRUE(got_compact_complete_event);
+  EXPECT_TRUE(got_compact_complete);
 
   // Verify through the actual RPC entry point (not just SessionRuntime
   // directly) that the compaction record is durable and reloads correctly:
   // the pre-compaction prompt+reply pair must not resurrect.
   const auto reloaded = store->load(session_id);
-  CHECK(reloaded.has_value());
+  EXPECT_TRUE(reloaded.has_value());
   if (reloaded)
-    CHECK(reloaded->messages.size() == 1);
-
-  std::cout << "rpc mode: " << tests::passed << " passed, " << tests::failed
-            << " failed\n";
-  return tests::failed == 0 ? 0 : 1;
+    EXPECT_TRUE(reloaded->messages.size() == 1);
 }

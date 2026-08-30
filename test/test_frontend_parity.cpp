@@ -55,31 +55,12 @@
 #include <variant>
 #include <vector>
 
+#include <gtest/gtest.h>
+
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
 using namespace pi;
-
-namespace tests {
-int passed{0};
-int failed{0};
-
-bool check(bool condition, std::string_view expression,
-           std::source_location location = std::source_location::current()) {
-  if (condition) {
-    ++passed;
-    return true;
-  }
-  ++failed;
-  std::cout << "FAIL " << location.file_name() << ":" << location.line()
-            << " — " << expression << "\n";
-  return false;
-}
-} // namespace tests
-
-#define CHECK(expression) tests::check((expression), #expression)
-#define CHECK_EQ(left, right)                                                  \
-  tests::check((left) == (right), #left " == " #right)
 
 namespace {
 
@@ -106,9 +87,9 @@ void test_resolution_parity() {
     cli::Args args;
     args.model = "known-provider/known-model";
     const auto resolution = cli::resolve_model_selection(args, registry);
-    CHECK(static_cast<bool>(resolution));
+    EXPECT_TRUE(static_cast<bool>(resolution));
     if (resolution)
-      CHECK_EQ(resolution.model->provider, std::string("known-provider"));
+      EXPECT_EQ(resolution.model->provider, std::string("known-provider"));
   }
 
   // Explicit --provider naming a known provider builds its default model.
@@ -116,10 +97,10 @@ void test_resolution_parity() {
     cli::Args args;
     args.provider = "known-provider";
     const auto resolution = cli::resolve_model_selection(args, registry);
-    CHECK(static_cast<bool>(resolution));
+    EXPECT_TRUE(static_cast<bool>(resolution));
     if (resolution)
-      CHECK_EQ(resolution.model->base_url,
-              std::string("http://known-provider.test/v1"));
+      EXPECT_EQ(resolution.model->base_url,
+                std::string("http://known-provider.test/v1"));
   }
 
   // Unknown --provider with no --base-url errors.
@@ -127,7 +108,7 @@ void test_resolution_parity() {
     cli::Args args;
     args.provider = "no-such-provider";
     const auto resolution = cli::resolve_model_selection(args, registry);
-    CHECK(!resolution);
+    EXPECT_TRUE(!resolution);
   }
 
   // Unknown --provider combined with an explicit --base-url falls through
@@ -142,18 +123,19 @@ void test_resolution_parity() {
     args.provider = "no-such-provider";
     args.base_url = "http://custom.test/v1";
     const auto resolution = cli::resolve_model_selection(args, registry);
-    CHECK(static_cast<bool>(resolution));
+    EXPECT_TRUE(static_cast<bool>(resolution));
     if (resolution)
-      CHECK_EQ(resolution.model->base_url, std::string("http://custom.test/v1"));
+      EXPECT_EQ(resolution.model->base_url,
+                std::string("http://custom.test/v1"));
   }
 
   // No --model/--provider falls back to the local default.
   {
     cli::Args args;
     const auto resolution = cli::resolve_model_selection(args, registry);
-    CHECK(static_cast<bool>(resolution));
+    EXPECT_TRUE(static_cast<bool>(resolution));
     if (resolution)
-      CHECK_EQ(resolution.model->provider, std::string("local"));
+      EXPECT_EQ(resolution.model->provider, std::string("local"));
   }
 }
 
@@ -192,7 +174,7 @@ std::string drive_cli_leg() {
 
   core::SessionRuntime session({.agent_options = options});
   const auto result = session.run_prompt("ping");
-  CHECK(!result.error.has_value());
+  EXPECT_TRUE(!result.error.has_value());
 
   const auto &messages = session.agent().state().messages();
   for (const auto &message : messages | std::views::reverse) {
@@ -367,8 +349,10 @@ void test_acp_concurrent_session_isolation() {
   server_thread.detach();
   for (int attempt = 0; attempt < 50 && port == 0; ++attempt)
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  if (!CHECK(port != 0))
+  if (port == 0) {
+    ADD_FAILURE() << "ACP parity server failed to start";
     return;
+  }
 
   auto request_json = [](const std::string &session_id) {
     return nlohmann::json{
@@ -397,32 +381,34 @@ void test_acp_concurrent_session_isolation() {
   thread_a.join();
   thread_b.join();
 
-  if (!CHECK(result_a != nullptr) || !CHECK(result_b != nullptr))
+  if (result_a == nullptr || result_b == nullptr) {
+    ADD_FAILURE() << "concurrent ACP parity request failed";
     return;
-  CHECK_EQ(result_a->status, 200);
-  CHECK_EQ(result_b->status, 200);
+  }
+  EXPECT_EQ(result_a->status, 200);
+  EXPECT_EQ(result_b->status, 200);
   const auto parsed_a = nlohmann::json::parse(result_a->body);
   const auto parsed_b = nlohmann::json::parse(result_b->body);
-  CHECK_EQ(parsed_a.value("session_id", ""), std::string("parity-concurrent-a"));
-  CHECK_EQ(parsed_b.value("session_id", ""), std::string("parity-concurrent-b"));
+  EXPECT_EQ(parsed_a.value("session_id", ""),
+            std::string("parity-concurrent-a"));
+  EXPECT_EQ(parsed_b.value("session_id", ""),
+            std::string("parity-concurrent-b"));
 }
 
 } // namespace
 
-int main() {
+TEST(FrontendParity, ResolutionAndCrossFrontendBehavior) {
   test_resolution_parity();
 
   const auto cli_text = drive_cli_leg();
   const auto rpc_text = drive_rpc_leg();
   const auto acp_text = drive_acp_leg();
 
-  CHECK_EQ(cli_text, std::string(kParityText));
-  CHECK_EQ(rpc_text, std::string(kParityText));
-  CHECK_EQ(acp_text, std::string(kParityText));
+  EXPECT_EQ(cli_text, std::string(kParityText));
+  EXPECT_EQ(rpc_text, std::string(kParityText));
+  EXPECT_EQ(acp_text, std::string(kParityText));
+}
 
+TEST(FrontendParity, ConcurrentAcpSessionIsolation) {
   test_acp_concurrent_session_isolation();
-
-  std::cout << "passed: " << tests::passed << ", failed: " << tests::failed
-            << "\n";
-  return tests::failed == 0 ? 0 : 1;
 }
