@@ -58,7 +58,7 @@ std::shared_ptr<const core::ModelRegistry> make_model_registry() {
       std::map<std::string, core::ProviderConfig>{{"faux-mode", provider}});
 }
 
-core::AgentSession::Config make_session_config(
+core::SessionRuntime::Config make_session_config(
     const std::shared_ptr<const core::ModelRegistry> &model_registry,
     const std::shared_ptr<core::SessionStore> &store) {
   core::Agent::Options options;
@@ -81,7 +81,7 @@ struct Fixture {
       std::make_shared<core::SessionStore>(
           std::filesystem::temp_directory_path() /
           ("pici-faux-control-mode-" + std::to_string(::getpid())));
-  core::AgentSession session;
+  core::SessionRuntime session;
 
   Fixture() : session(make_session_config(model_registry, store)) {
     core::LLMClientRegistry::instance().register_client(

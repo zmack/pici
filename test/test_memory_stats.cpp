@@ -11,6 +11,7 @@
 
 #include "core/agent_task.h"
 #include "core/memory_stats.h"
+#include "core/session/agent_session.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -200,7 +201,7 @@ void test_heap_reports_safety() {
   model.provider = "unused";
   Agent::Options options;
   options.model = model;
-  AgentSession root({.agent_options = options});
+  SessionRuntime root({.agent_options = options});
   AgentTaskManager manager(root, options);
   manager.bind_root_arena();
   manager.bind_root_arena(); // idempotent
@@ -261,7 +262,7 @@ void test_child_task_arena_attribution() {
   model.provider = "growing-test";
   Agent::Options options;
   options.model = model;
-  AgentSession root({.agent_options = options});
+  SessionRuntime root({.agent_options = options});
   AgentTaskManager manager(root, options);
   manager.bind_root_arena(); // same call main.cpp makes before the REPL loop
 

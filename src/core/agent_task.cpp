@@ -136,8 +136,8 @@ composition_report_for_messages(const std::vector<Message> &messages) {
   return report;
 }
 
-AgentMessageEnvelope message_envelope(Message message) {
-  return AgentMessageEnvelope{.message = std::move(message)};
+AgentInput message_envelope(Message message) {
+  return AgentInput{.message = std::move(message)};
 }
 
 std::vector<Message> normalize_context(std::vector<Message> messages,
@@ -286,8 +286,8 @@ struct AgentTaskManager::Task {
   std::optional<AgentTaskId> parent_id;
   std::string task_name;
   std::size_t depth{0};
-  AgentSession *session{nullptr};
-  std::unique_ptr<AgentSession> owned_session;
+  SessionRuntime *session{nullptr};
+  std::unique_ptr<SessionRuntime> owned_session;
   std::set<AgentTaskId> children;
 
   mutable std::mutex mutex;
@@ -312,12 +312,12 @@ struct AgentTaskManager::Task {
   std::jthread runner;
 };
 
-AgentTaskManager::AgentTaskManager(AgentSession &root,
+AgentTaskManager::AgentTaskManager(SessionRuntime &root,
                                    Agent::Options child_options)
     : AgentTaskManager(root, std::move(child_options), Limits{}, {},
                        ChildWriteTools::none) {}
 
-AgentTaskManager::AgentTaskManager(AgentSession &root,
+AgentTaskManager::AgentTaskManager(SessionRuntime &root,
                                    Agent::Options child_options, Limits limits,
                                    EventCallback on_event,
                                    ChildWriteTools child_write_tools)
@@ -606,7 +606,7 @@ std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
     bind_current_thread(*task_arena);
     task->arena = *task_arena;
   }
-  task->owned_session = std::make_unique<AgentSession>(AgentSession::Config{
+  task->owned_session = std::make_unique<SessionRuntime>(SessionRuntime::Config{
       .agent_options = std::move(options),
       .tools = inherit_tools(parent_context, request.requested_tools,
                              request.allow_write_tools),
@@ -618,7 +618,7 @@ std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
   UserMessage message;
   message.content.emplace_back(TextContent{.text = request.prompt});
   task->work.push_back(
-      WorkItem{.messages = std::vector<AgentMessageEnvelope>{
+      WorkItem{.messages = std::vector<AgentInput>{
                    message_envelope(Message{std::move(message)})}});
   task->execution_reserved = true;
   return task;
@@ -837,7 +837,7 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
 }
 
 void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
-                                    std::vector<AgentMessageEnvelope> messages,
+                                    std::vector<AgentInput> messages,
                                     AgentTaskResult &result, bool &aborted) {
   std::size_t output_bytes = 0;
   bool saw_text_delta = false;
@@ -1105,7 +1105,7 @@ AgentTaskSnapshot AgentTaskManager::send_message(const AgentTaskId &target,
 
 AgentTaskSnapshot
 AgentTaskManager::steer_envelopes(const AgentTaskId &target,
-                                  std::vector<AgentMessageEnvelope> messages) {
+                                  std::vector<AgentInput> messages) {
   if (messages.empty())
     throw AgentTaskError(AgentTaskErrorKind::invalid_context,
                          "steering envelope list must not be empty");
@@ -1118,8 +1118,8 @@ AgentTaskManager::steer_envelopes(const AgentTaskId &target,
   bool steer_running = false;
   AgentTaskStatusKind previous_status = AgentTaskStatusKind::running;
   std::optional<AgentTaskResult> previous_result;
-  std::vector<AgentMessageEnvelope> root_messages;
-  std::vector<AgentMessageEnvelope> running_messages;
+  std::vector<AgentInput> root_messages;
+  std::vector<AgentInput> running_messages;
   {
     std::scoped_lock lock(mutex_);
     task = find_task_locked(target);
@@ -1278,7 +1278,7 @@ AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
     follow_up_message.content.emplace_back(
         TextContent{.text = std::move(prompt)});
     task->work.push_back(
-        WorkItem{.messages = std::vector<AgentMessageEnvelope>{
+        WorkItem{.messages = std::vector<AgentInput>{
                      message_envelope(Message{std::move(follow_up_message)})}});
     touch_locked(task);
   }

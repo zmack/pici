@@ -528,13 +528,13 @@ int main() {
     // --- acceptance criterion #1: a real openai-codex-responses session
     // manually compacts through the dedicated endpoint, end to end ---
     // Every other manual-compaction test in this suite (test_compaction.cpp,
-    // test_rpc_mode.cpp) drives AgentSession::compact_active_session()
+    // test_rpc_mode.cpp) drives SessionRuntime::compact_active_session()
     // through a FauxClient registered under a synthetic api id. This is the
     // one test that registers the *real* OpenAICodexResponsesClient under
     // its real "openai-codex-responses" api id, points it at a local
     // /codex/responses/compact mock, and drives the full manual transaction
     // (Agent::compact -> run_compaction -> journal write -> in-memory
-    // install) through AgentSession, then reloads the session to confirm
+    // install) through SessionRuntime, then reloads the session to confirm
     // durability — proving the dedicated endpoint is reachable through the
     // real provider identity, not just through a test double standing in
     // for "some provider."
@@ -564,14 +564,14 @@ int main() {
       std::filesystem::remove_all(session_dir);
       auto store = std::make_shared<pi::core::SessionStore>(session_dir);
 
-      pi::core::AgentSession::Config config;
+      pi::core::SessionRuntime::Config config;
       config.agent_options.model.id = "gpt-5.3-codex";
       config.agent_options.model.api = "openai-codex-responses";
       config.agent_options.model.provider = "openai-codex";
       config.agent_options.model.base_url =
           "http://127.0.0.1:" + std::to_string(port);
       config.session_store = store;
-      pi::core::AgentSession session(std::move(config));
+      pi::core::SessionRuntime session(std::move(config));
 
       pi::core::SessionHeader header;
       const auto session_id = session.create_session(header);

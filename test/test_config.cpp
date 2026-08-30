@@ -444,7 +444,7 @@ disabled = true
   }
 
   // an out-of-range TOML threshold_pct is ignored (falls back to the
-  // effective default applied at the AgentSession construction site)
+  // effective default applied at the SessionRuntime construction site)
   {
     auto p = write_toml("pici_compaction_invalid.toml", R"toml(
 [compaction]

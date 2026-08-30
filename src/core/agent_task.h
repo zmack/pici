@@ -3,7 +3,6 @@
 #include "core/agent.h"
 #include "core/event_types.h"
 #include "core/memory_stats.h"
-#include "core/session/agent_session.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -26,6 +25,8 @@
 #include <vector>
 
 namespace pi::core {
+
+class SessionRuntime;
 
 // Per-content-block-kind JSON wire-size split of a session transcript
 // (plan: session-memory-stats.md §Design 3). These are escaped-JSON wire
@@ -252,8 +253,8 @@ public:
       const std::optional<AgentTaskId> &)>;
   using UnregisterEndpointCallback = std::function<void(const AgentTaskId &)>;
 
-  AgentTaskManager(AgentSession &root, Agent::Options child_options);
-  AgentTaskManager(AgentSession &root, Agent::Options child_options,
+  AgentTaskManager(SessionRuntime &root, Agent::Options child_options);
+  AgentTaskManager(SessionRuntime &root, Agent::Options child_options,
                    Limits limits, EventCallback on_event = {},
                    ChildWriteTools child_write_tools = ChildWriteTools::none);
   ~AgentTaskManager() noexcept;
@@ -275,7 +276,7 @@ public:
 
   AgentTaskSnapshot send_message(const AgentTaskId &target, Message message);
   AgentTaskSnapshot steer_envelopes(const AgentTaskId &target,
-                                    std::vector<AgentMessageEnvelope> messages);
+                                    std::vector<AgentInput> messages);
   void drop_mailbox_envelopes();
   AgentTaskSnapshot follow_up(const AgentTaskId &target,
                               const Message &message);
@@ -295,7 +296,7 @@ public:
 
   // Allocator-level per-session accounting. The root arena is acquired once
   // and lives for the whole process; child tasks each acquire an arena
-  // before their AgentSession is constructed and release it back to the
+  // before their SessionRuntime is constructed and release it back to the
   // recycle pool after close. Empty when memory stats are unavailable.
   std::vector<SessionHeapReport> heap_reports() const;
 
@@ -336,13 +337,13 @@ private:
   //    child results after close.
   static void release_task_arena(Task &task);
   struct WorkItem {
-    std::vector<AgentMessageEnvelope> messages;
+    std::vector<AgentInput> messages;
     bool mailbox_delivery{false};
     std::optional<AgentTaskStatusKind> previous_status;
     std::optional<AgentTaskResult> previous_result;
   };
 
-  AgentSession &root_;
+  SessionRuntime &root_;
   Agent::Options child_options_;
   Limits limits_;
   EventCallback on_event_;
@@ -376,8 +377,8 @@ private:
   void run_task(const std::shared_ptr<Task> &task,
                 const std::stop_token &stop_token);
   void execute_work(const std::shared_ptr<Task> &task,
-                    std::vector<AgentMessageEnvelope> messages,
-                    AgentTaskResult &result, bool &aborted);
+                    std::vector<AgentInput> messages, AgentTaskResult &result,
+                    bool &aborted);
   std::vector<Message> inherit_context(const AgentContext &parent,
                                        const ContextInheritance &request) const;
   std::vector<std::shared_ptr<const ToolDefinition>>

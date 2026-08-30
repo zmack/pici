@@ -169,7 +169,7 @@ model_summary(const core::Model &model, const core::ModelRegistry &registry,
 
 } // namespace
 
-RpcMode::RpcMode(core::AgentSession &session, Output output,
+RpcMode::RpcMode(core::SessionRuntime &session, Output output,
                  core::AgentTaskManager *task_manager,
                  std::shared_ptr<auth::AuthResolver> auth_resolver)
     : session_(session), task_manager_(task_manager),
@@ -587,7 +587,7 @@ void RpcMode::wait_for_idle() {
     run_thread_.join();
 }
 
-int run_rpc_mode(core::AgentSession &session, std::istream &input,
+int run_rpc_mode(core::SessionRuntime &session, std::istream &input,
                  std::ostream &output, core::AgentTaskManager *task_manager,
                  std::shared_ptr<auth::AuthResolver> auth_resolver) {
   RpcMode mode(

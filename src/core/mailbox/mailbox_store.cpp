@@ -64,7 +64,7 @@ void validate_bounded_text(std::string_view value, std::string_view field) {
                        std::string(field) + " is invalid");
 }
 
-void validate_body(const MailboxBody &body) {
+void validate_body(const MailboxPayload &body) {
   if (body.text.empty() || body.text.size() > kMaxTextBytes)
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "mailbox text exceeds 64 KiB or is empty");
@@ -245,7 +245,7 @@ std::optional<TimestampMs> optional_column_integer(sqlite3_stmt *statement,
   return sqlite3_column_int64(statement, index);
 }
 
-json body_json(const MailboxBody &body) {
+json body_json(const MailboxPayload &body) {
   validate_body(body);
   json metadata = json::object();
   for (const auto &[key, value] : body.metadata)
@@ -253,7 +253,7 @@ json body_json(const MailboxBody &body) {
   return json{{"version", 1}, {"text", body.text}, {"metadata", metadata}};
 }
 
-MailboxBody parse_body(std::string_view serialized) {
+MailboxPayload parse_body(std::string_view serialized) {
   try {
     const auto body = json::parse(serialized);
     if (!body.is_object() || !body.contains("version") ||
@@ -261,7 +261,7 @@ MailboxBody parse_body(std::string_view serialized) {
         !body.contains("text") || !body["text"].is_string() ||
         !body.contains("metadata") || !body["metadata"].is_object())
       throw std::runtime_error("invalid body envelope");
-    MailboxBody result{.text = body["text"].get<std::string>()};
+    MailboxPayload result{.text = body["text"].get<std::string>()};
     for (auto item = body["metadata"].begin(); item != body["metadata"].end();
          ++item) {
       if (!item.value().is_string())
@@ -276,18 +276,18 @@ MailboxBody parse_body(std::string_view serialized) {
   }
 }
 
-MailboxMessage read_message(sqlite3_stmt *statement) {
-  MailboxMessage message{
-      .message_id = column_text(statement, 0),
+MailboxEntry read_message(sqlite3_stmt *statement) {
+  MailboxEntry message{
+      .entry_id = column_text(statement, 0),
       .sender_agent_id = column_text(statement, 1),
       .sender_session_id = column_text(statement, 2),
       .recipient_session_id = column_text(statement, 3),
       .recipient_agent_id = optional_column_text(statement, 4),
       .workspace_id = column_text(statement, 5),
-      .kind = mailbox_message_kind_from_string(column_text(statement, 6))
-                  .value_or(MailboxMessageKind::note),
+      .kind = mailbox_entry_kind_from_string(column_text(statement, 6))
+                  .value_or(MailboxEntryKind::note),
       .body = parse_body(column_text(statement, 7)),
-      .reply_to_message_id = optional_column_text(statement, 8),
+      .reply_to_entry_id = optional_column_text(statement, 8),
       .created_at_ms = sqlite3_column_int64(statement, 9),
       .available_at_ms = sqlite3_column_int64(statement, 10),
       .claim_agent_id = optional_column_text(statement, 11),
@@ -854,14 +854,15 @@ std::vector<AgentRecord> MailboxStore::list_agents(const AgentQuery &query) {
   return result;
 }
 
-SendReceipt MailboxStore::send(const SendRequest &request) {
+MailboxEnqueueReceipt
+MailboxStore::send(const EnqueueMailboxEntryRequest &request) {
   std::scoped_lock lock(mutex_);
   validate_identifier(request.sender_agent_id, "sender agent ID");
   validate_identifier(request.sender_session_id, "sender session ID");
-  if (request.message_id)
-    validate_identifier(*request.message_id, "message ID");
-  if (request.reply_to_message_id)
-    validate_identifier(*request.reply_to_message_id, "reply ID");
+  if (request.entry_id)
+    validate_identifier(*request.entry_id, "message ID");
+  if (request.reply_to_entry_id)
+    validate_identifier(*request.reply_to_entry_id, "reply ID");
   if (request.target.agent_id)
     validate_identifier(*request.target.agent_id, "target agent ID");
   if (request.target.session_id)
@@ -934,7 +935,7 @@ SendReceipt MailboxStore::send(const SendRequest &request) {
       }
     }
     const std::string message_id =
-        request.message_id.value_or(options_.id_generator());
+        request.entry_id.value_or(options_.id_generator());
     const std::string body = body_json(request.body).dump();
     Statement statement(database_, R"sql(
     INSERT INTO messages(message_id,sender_agent_id,sender_session_id,
@@ -948,9 +949,9 @@ SendReceipt MailboxStore::send(const SendRequest &request) {
     bind_text(statement.get(), 4, recipient_session);
     bind_optional_text(statement.get(), 5, recipient_agent);
     bind_text(statement.get(), 6, request.workspace_id);
-    bind_text(statement.get(), 7, mailbox_message_kind_to_string(request.kind));
+    bind_text(statement.get(), 7, mailbox_entry_kind_to_string(request.kind));
     bind_text(statement.get(), 8, body);
-    bind_optional_text(statement.get(), 9, request.reply_to_message_id);
+    bind_optional_text(statement.get(), 9, request.reply_to_entry_id);
     bind_integer(statement.get(), 10, now);
     bind_integer(statement.get(), 11, available);
     const int result = sqlite3_step(statement.get());
@@ -960,24 +961,24 @@ SendReceipt MailboxStore::send(const SendRequest &request) {
     check_sqlite(database_, result, "send mailbox message");
     insert_event(database_, request.workspace_id, "message", message_id, now);
     exec(database_, "COMMIT");
-    return SendReceipt{.message_id = message_id,
-                       .recipient_session_id = recipient_session,
-                       .recipient_agent_id = recipient_agent,
-                       .created_at_ms = now};
+    return MailboxEnqueueReceipt{.entry_id = message_id,
+                                 .recipient_session_id = recipient_session,
+                                 .recipient_agent_id = recipient_agent,
+                                 .created_at_ms = now};
   } catch (...) {
     exec(database_, "ROLLBACK");
     throw;
   }
 }
 
-std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
+std::vector<MailboxEntry> MailboxStore::inspect(const InboxQuery &query) {
   std::scoped_lock lock(mutex_);
   const auto workspace = query.workspace_id.value_or(options_.workspace_id);
   check_workspace(workspace);
   validate_identifier(query.session_id, "session ID");
   validate_optional_identifier(query.workspace_id, "workspace ID");
   validate_optional_identifier(query.agent_id, "agent ID");
-  validate_optional_identifier(query.message_id, "message ID");
+  validate_optional_identifier(query.entry_id, "message ID");
   if ((query.agent_id && query.agent_kind != "root" &&
        query.agent_kind != "subagent") ||
       (!query.agent_id && !query.agent_kind.empty()))
@@ -1012,8 +1013,8 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
   bind_text(statement.get(), 2, workspace);
   bind_integer(statement.get(), 3, now);
   bind_integer(statement.get(), 4, query.include_acknowledged ? 1 : 0);
-  bind_integer(statement.get(), 5, query.message_id ? 0 : 1);
-  bind_optional_text(statement.get(), 6, query.message_id);
+  bind_integer(statement.get(), 5, query.entry_id ? 0 : 1);
+  bind_optional_text(statement.get(), 6, query.entry_id);
   int bind_index = 7;
   if (query.claimable_only)
     bind_integer(statement.get(), bind_index++, now);
@@ -1023,10 +1024,10 @@ std::vector<MailboxMessage> MailboxStore::inspect(const InboxQuery &query) {
   }
   for (const auto kind : query.kinds)
     bind_text(statement.get(), bind_index++,
-              mailbox_message_kind_to_string(kind));
+              mailbox_entry_kind_to_string(kind));
   bind_integer(statement.get(), bind_index,
                static_cast<std::int64_t>(query.limit));
-  std::vector<MailboxMessage> result;
+  std::vector<MailboxEntry> result;
   while (true) {
     const int step = sqlite3_step(statement.get());
     if (step == SQLITE_DONE)
@@ -1095,11 +1096,10 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
     bind_text(query.get(), bind_index++, request.agent_id);
     bind_text(query.get(), bind_index++, claimant_kind);
     for (const auto kind : request.kinds)
-      bind_text(query.get(), bind_index++,
-                mailbox_message_kind_to_string(kind));
+      bind_text(query.get(), bind_index++, mailbox_entry_kind_to_string(kind));
     bind_integer(query.get(), bind_index,
                  static_cast<std::int64_t>(request.limit));
-    std::vector<MailboxMessage> candidates;
+    std::vector<MailboxEntry> candidates;
     while (true) {
       const int step = sqlite3_step(query.get());
       if (step == SQLITE_DONE)
@@ -1119,7 +1119,7 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
       bind_text(update.get(), 1, request.agent_id);
       bind_text(update.get(), 2, token);
       bind_integer(update.get(), 3, now + lease);
-      bind_text(update.get(), 4, message.message_id);
+      bind_text(update.get(), 4, message.entry_id);
       bind_integer(update.get(), 5, now);
       bind_text(update.get(), 6, workspace);
       check_sqlite(database_, sqlite3_step(update.get()),
@@ -1129,7 +1129,7 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
       message.claim_agent_id = request.agent_id;
       message.claim_token = token;
       message.claim_expires_at_ms = now + lease;
-      insert_event(database_, workspace, "message_claimed", message.message_id,
+      insert_event(database_, workspace, "message_claimed", message.entry_id,
                    now);
       result.messages.push_back(std::move(message));
     }
@@ -1141,11 +1141,27 @@ ClaimResult MailboxStore::claim(const ClaimRequest &request) {
   }
 }
 
+void MailboxStore::mark_delivered(const std::string &entry_id,
+                                  const std::string &workspace_id,
+                                  TimestampMs now_ms) {
+  std::scoped_lock lock(mutex_);
+  check_workspace(workspace_id);
+  validate_identifier(entry_id, "message ID");
+  const auto now = now_ms == 0 ? options_.clock() : now_ms;
+  Statement statement(database_, "UPDATE messages SET delivered_at_ms=? "
+                                 "WHERE message_id=? AND workspace_id=?");
+  bind_integer(statement.get(), 1, now);
+  bind_text(statement.get(), 2, entry_id);
+  bind_text(statement.get(), 3, workspace_id);
+  check_sqlite(database_, sqlite3_step(statement.get()),
+               "mark mailbox message delivered");
+}
+
 void MailboxStore::acknowledge(const AcknowledgeRequest &request) {
   std::scoped_lock lock(mutex_);
   const auto workspace = request.workspace_id.value_or(options_.workspace_id);
   check_workspace(workspace);
-  validate_identifier(request.message_id, "message ID");
+  validate_identifier(request.entry_id, "message ID");
   validate_identifier(request.agent_id, "agent ID");
   validate_identifier(request.claim_token, "claim token");
   validate_optional_identifier(request.workspace_id, "workspace ID");
@@ -1159,7 +1175,7 @@ void MailboxStore::acknowledge(const AcknowledgeRequest &request) {
         "claim_expires_at_ms>?)");
     const auto now = request.now_ms == 0 ? options_.clock() : request.now_ms;
     bind_integer(statement.get(), 1, now);
-    bind_text(statement.get(), 2, request.message_id);
+    bind_text(statement.get(), 2, request.entry_id);
     bind_text(statement.get(), 3, request.agent_id);
     bind_text(statement.get(), 4, request.claim_token);
     bind_text(statement.get(), 5, workspace);
@@ -1168,7 +1184,7 @@ void MailboxStore::acknowledge(const AcknowledgeRequest &request) {
                  "acknowledge mailbox message");
     if (sqlite3_changes(database_) != 0) {
       insert_event(database_, workspace, "message_acknowledged",
-                   request.message_id, now);
+                   request.entry_id, now);
       exec(database_, "COMMIT");
       return;
     }
@@ -1176,7 +1192,7 @@ void MailboxStore::acknowledge(const AcknowledgeRequest &request) {
         database_,
         "SELECT acknowledged_at_ms FROM messages WHERE message_id=? AND "
         "claim_agent_id=? AND claim_token=? AND workspace_id=?");
-    bind_text(already.get(), 1, request.message_id);
+    bind_text(already.get(), 1, request.entry_id);
     bind_text(already.get(), 2, request.agent_id);
     bind_text(already.get(), 3, request.claim_token);
     bind_text(already.get(), 4, workspace);

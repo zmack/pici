@@ -2,10 +2,10 @@
 #include "core/agent_loop.h"
 #include "core/agent_runtime_identity.h"
 #include "core/agent_task.h"
+#include "core/input_provenance.h"
 #include "core/mailbox/mailbox_store.h"
 #include "core/mailbox/mailbox_types.h"
 #include "core/message_types.h"
-#include "core/request_presentation.h"
 
 #include <algorithm>
 #include <atomic>
@@ -30,19 +30,19 @@ namespace pi::core {
 
 namespace {
 
-Message mailbox_message_to_message(const MailboxMessage &message) {
+Message mailbox_message_to_message(const MailboxEntry &message) {
   UserMessage user;
   std::string text = "[pici mailbox message]\n";
-  text += "message_id=" + message.message_id + "\n";
-  text += "kind=" + std::string(mailbox_message_kind_to_string(message.kind)) +
-          "\n";
+  text += "message_id=" + message.entry_id + "\n";
+  text +=
+      "kind=" + std::string(mailbox_entry_kind_to_string(message.kind)) + "\n";
   text += "sender_session_id=" + message.sender_session_id + "\n";
   text += "sender_agent_id=" + message.sender_agent_id + "\n";
   text += "recipient_session_id=" + message.recipient_session_id + "\n";
   text += "recipient_agent_id=" +
           message.recipient_agent_id.value_or("(session root)") + "\n";
-  if (message.kind == MailboxMessageKind::request) {
-    text += "Reply with agents_reply(message_id=\"" + message.message_id +
+  if (message.kind == MailboxEntryKind::request) {
+    text += "Reply with agents_reply(message_id=\"" + message.entry_id +
             "\") if a response is appropriate.\n";
   }
   text += "\n" + message.body.text;
@@ -50,12 +50,11 @@ Message mailbox_message_to_message(const MailboxMessage &message) {
   return Message{std::move(user)};
 }
 
-RequestPresentation
-mailbox_request_presentation(const MailboxMessage &message) {
-  return {.source = RequestSource::mailbox,
-          .message_id = message.message_id,
+InputProvenance mailbox_input_provenance(const MailboxEntry &message) {
+  return {.source = InputProvenance::Source::mailbox,
+          .message_id = message.entry_id,
           .message_kind =
-              std::string(mailbox_message_kind_to_string(message.kind)),
+              std::string(mailbox_entry_kind_to_string(message.kind)),
           .sender_agent_id = message.sender_agent_id,
           .sender_session_id = message.sender_session_id};
 }
@@ -496,7 +495,7 @@ bool MailboxCoordinator::idle_root_work_pending() {
         .workspace_id = options_.store.workspace_id,
         .agent_id = std::move(root_agent_id),
         .agent_kind = "root",
-        .kinds = {MailboxMessageKind::steer, MailboxMessageKind::request},
+        .kinds = {MailboxEntryKind::steer, MailboxEntryKind::request},
         .claimable_only = true,
         .limit = 1,
         .now_ms = options_.store.clock()});
@@ -506,7 +505,7 @@ bool MailboxCoordinator::idle_root_work_pending() {
   }
 }
 
-std::vector<AgentMessageEnvelope>
+std::vector<AgentInput>
 MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
   if (limit == 0)
     return {};
@@ -531,7 +530,7 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
           .session_id = session_id,
           .agent_id = root_agent_id,
           .workspace_id = options_.store.workspace_id,
-          .kinds = {MailboxMessageKind::steer, MailboxMessageKind::request},
+          .kinds = {MailboxEntryKind::steer, MailboxEntryKind::request},
           .limit = limit,
           .now_ms = options_.store.clock(),
           .lease_ms = options_.store.claim_lease_ms});
@@ -542,10 +541,10 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
         return {};
       }
 
-      std::vector<AgentMessageEnvelope> result;
+      std::vector<AgentInput> result;
       result.reserve(claimed.messages.size());
       for (const auto &claimed_message : claimed.messages) {
-        const auto message_id = claimed_message.message_id;
+        const auto message_id = claimed_message.entry_id;
         const auto claim_token = claimed_message.claim_token.value_or("");
         const auto endpoint_ref =
             std::make_shared<const std::string>(root_agent_id);
@@ -553,7 +552,8 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
             std::make_shared<const std::string>(message_id);
         const auto claim_token_ref =
             std::make_shared<const std::string>(claim_token);
-        result.push_back(AgentMessageEnvelope{
+        mark_delivered_best_effort(message_id);
+        result.push_back(AgentInput{
             .message = mailbox_message_to_message(claimed_message),
             .on_accepted =
                 [weak = std::weak_ptr<Lifetime>(lifetime_), endpoint_ref,
@@ -583,8 +583,7 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
                       state->condition.notify_all();
                   }
                 },
-            .source = AgentMessageSource::mailbox,
-            .presentation = mailbox_request_presentation(claimed_message)});
+            .presentation = mailbox_input_provenance(claimed_message)});
       }
       return result;
     } catch (...) {
@@ -600,11 +599,22 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
   }
 }
 
+void MailboxCoordinator::mark_delivered_best_effort(
+    const std::string &entry_id) {
+  try {
+    store_->mark_delivered(entry_id, options_.store.workspace_id,
+                           options_.store.clock());
+  } catch (...) {
+    // Best-effort observability field; never fail delivery over it.
+    static_cast<void>(0);
+  }
+}
+
 void MailboxCoordinator::acknowledge_delivery(std::string agent_id,
-                                              std::string message_id,
+                                              std::string entry_id,
                                               std::string claim_token) {
   store_->acknowledge(
-      AcknowledgeRequest{.message_id = std::move(message_id),
+      AcknowledgeRequest{.entry_id = std::move(entry_id),
                          .agent_id = std::move(agent_id),
                          .claim_token = std::move(claim_token),
                          .workspace_id = options_.store.workspace_id,
@@ -666,7 +676,7 @@ void MailboxCoordinator::poll_inbox() {
           .session_id = *session_id,
           .agent_id = agent.agent_id,
           .workspace_id = options_.store.workspace_id,
-          .kinds = {MailboxMessageKind::steer, MailboxMessageKind::request},
+          .kinds = {MailboxEntryKind::steer, MailboxEntryKind::request},
           .limit = 16,
           .now_ms = options_.store.clock(),
           .lease_ms = options_.store.claim_lease_ms});
@@ -675,18 +685,19 @@ void MailboxCoordinator::poll_inbox() {
     }
 
     for (auto &claimed_message : claimed.messages) {
-      const auto message_id = claimed_message.message_id;
+      const auto message_id = claimed_message.entry_id;
       const auto claim_token = claimed_message.claim_token.value_or("");
       const auto endpoint = agent.agent_id;
       const auto task_id = subagent_tasks.contains(endpoint)
                                ? subagent_tasks.at(endpoint)
                                : std::string{};
+      mark_delivered_best_effort(message_id);
       const auto endpoint_ref = std::make_shared<const std::string>(endpoint);
       const auto message_id_ref =
           std::make_shared<const std::string>(message_id);
       const auto claim_token_ref =
           std::make_shared<const std::string>(claim_token);
-      AgentMessageEnvelope envelope{
+      AgentInput envelope{
           .message = mailbox_message_to_message(claimed_message),
           .on_accepted =
               [weak = std::weak_ptr<Lifetime>(lifetime_), endpoint_ref,
@@ -718,17 +729,14 @@ void MailboxCoordinator::poll_inbox() {
                     state->condition.notify_all();
                 }
               },
-          .source = AgentMessageSource::mailbox,
-          .presentation = mailbox_request_presentation(claimed_message)};
+          .presentation = mailbox_input_provenance(claimed_message)};
       bool routed = false;
       try {
         if (is_root)
-          routed = delivery->root(
-              std::vector<AgentMessageEnvelope>{std::move(envelope)});
+          routed = delivery->root(std::vector<AgentInput>{std::move(envelope)});
         else
           routed = delivery->subagent(
-              endpoint, task_id,
-              std::vector<AgentMessageEnvelope>{std::move(envelope)});
+              endpoint, task_id, std::vector<AgentInput>{std::move(envelope)});
       } catch (...) {
         routed = false;
       }
@@ -810,8 +818,9 @@ MailboxCoordinator::list_agents(const AgentRuntimeIdentity &actor,
   return store_->list_agents(query);
 }
 
-SendReceipt MailboxCoordinator::send(const AgentRuntimeIdentity &actor,
-                                     SendRequest request) {
+MailboxEnqueueReceipt
+MailboxCoordinator::send(const AgentRuntimeIdentity &actor,
+                         EnqueueMailboxEntryRequest request) {
   require_actor(actor);
   request.sender_agent_id = actor.agent_id;
   request.sender_session_id = actor.session_id;
@@ -819,18 +828,18 @@ SendReceipt MailboxCoordinator::send(const AgentRuntimeIdentity &actor,
   return store_->send(request);
 }
 
-SendReceipt MailboxCoordinator::reply(const AgentRuntimeIdentity &actor,
-                                      std::string message_id,
-                                      MailboxBody body) {
+MailboxEnqueueReceipt
+MailboxCoordinator::reply(const AgentRuntimeIdentity &actor,
+                          std::string entry_id, MailboxPayload body) {
   require_actor(actor);
-  const auto incoming = inspect(actor, InboxQuery{.message_id = message_id,
+  const auto incoming = inspect(actor, InboxQuery{.entry_id = entry_id,
                                                   .include_acknowledged = true,
                                                   .limit = 1});
   if (incoming.empty())
     throw MailboxError(MailboxErrorCode::not_found,
                        "mailbox message not found");
   const auto &original = incoming.front();
-  if (original.kind != MailboxMessageKind::request)
+  if (original.kind != MailboxEntryKind::request)
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "mailbox reply target is not a request");
   const auto live_sender =
@@ -843,13 +852,14 @@ SendReceipt MailboxCoordinator::reply(const AgentRuntimeIdentity &actor,
     target.agent_id = original.sender_agent_id;
   else
     target.session_id = original.sender_session_id;
-  return send(actor, SendRequest{.target = std::move(target),
-                                 .kind = MailboxMessageKind::reply,
-                                 .body = std::move(body),
-                                 .reply_to_message_id = original.message_id});
+  return send(actor, EnqueueMailboxEntryRequest{.target = std::move(target),
+                                                .kind = MailboxEntryKind::reply,
+                                                .body = std::move(body),
+                                                .reply_to_entry_id =
+                                                    original.entry_id});
 }
 
-std::vector<MailboxMessage>
+std::vector<MailboxEntry>
 MailboxCoordinator::inspect(const AgentRuntimeIdentity &actor,
                             InboxQuery query) {
   require_actor(actor);

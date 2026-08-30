@@ -1,9 +1,19 @@
 #pragma once
 
+// File kept at its historical name (agent_session.h) even though the class
+// it declares was renamed to SessionRuntime by
+// plans/session-runtime-migration.md Phase 6 -- avoids colliding on
+// "session_runtime.h" with the unrelated, CLI-facing
+// cli::SessionRuntimeConfig/Bundle/Capabilities factory types declared in
+// cli/session_runtime.h (that file builds the Config below; this file is
+// what it builds it for).
+
 #include "core/agent.h"
+#include "core/agent_task.h"
 #include "core/compaction.h"
 #include "core/models.h"
 #include "core/sandbox.h"
+#include "core/session/mailbox_runtime.h"
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
 #include "core/stream.h"
@@ -17,9 +27,29 @@
 
 namespace pi::core {
 
-class AgentSession {
+// Owns the active session identity, one Agent activation, its
+// AgentTaskManager, and its mailbox attachment -- the bundle Phase 2's
+// factory used to construct and hand back as three-plus separate pieces
+// (see cli/session_runtime.h's SessionRuntimeBundle, which now holds a
+// single shared_ptr<SessionRuntime> instead) is, as of Phase 6, one class.
+//
+// Construction is still two-phase, matching AgentTaskManager's own
+// constraint: it takes `SessionRuntime &root` by reference and a
+// child-agent Agent::Options whose system_prompt typically isn't finalized
+// until the frontend has registered tools on the live agent. The
+// constructor builds the Agent and the (unconnected, possibly disabled)
+// MailboxRuntime -- neither needs finalized options -- and activate()
+// builds AgentTaskManager and connects the mailbox runtime to it once the
+// caller is ready. A SessionRuntime that never calls activate() simply has
+// no task manager (task_manager() returns null) and an unconnected mailbox
+// runtime -- that's the correct, unchanged shape for e.g. ACP's per-run
+// sessions, which have never supported subagent delegation or mailbox
+// delivery (SessionRuntimeCapabilities keeps those off for ACP).
+class SessionRuntime {
 public:
-  // Phase 5 automatic compaction policy (plan §7). Off by default, matching
+  // Phase 5 automatic compaction policy (plan §7 of
+  // plans/server-side-compaction.md -- unrelated numbering to this
+  // migration plan's own phases). Off by default, matching
   // Args::remote_compaction_enabled's existing default and doc comment
   // ("automatic pre-turn compaction only fires when this is explicitly
   // enabled"). threshold_pct is only consulted when enabled is true.
@@ -35,6 +65,10 @@ public:
     std::shared_ptr<SessionStore> session_store;
     SandboxPolicyPtr sandbox_policy;
     AutoCompactionConfig auto_compaction;
+    // Optional: constructs the owned (unconnected until activate())
+    // MailboxRuntime. Null for every capability-gated caller (ACP always
+    // passes null here; see SessionRuntimeCapabilities::enable_mailbox).
+    std::shared_ptr<MailboxCoordinator> mailbox;
   };
 
   using EventCallback = std::function<void(const AgentEvent &)>;
@@ -43,13 +77,13 @@ public:
     std::optional<std::string> error;
   };
 
-  explicit AgentSession(Config config);
-  ~AgentSession() = default;
+  explicit SessionRuntime(Config config);
+  ~SessionRuntime();
 
-  AgentSession(const AgentSession &) = delete;
-  AgentSession &operator=(const AgentSession &) = delete;
-  AgentSession(AgentSession &&) = delete;
-  AgentSession &operator=(AgentSession &&) = delete;
+  SessionRuntime(const SessionRuntime &) = delete;
+  SessionRuntime &operator=(const SessionRuntime &) = delete;
+  SessionRuntime(SessionRuntime &&) = delete;
+  SessionRuntime &operator=(SessionRuntime &&) = delete;
 
   Agent &agent() { return agent_; }
   const Agent &agent() const { return agent_; }
@@ -111,6 +145,29 @@ public:
   compact_active_session(CompactionTrigger trigger = CompactionTrigger::manual,
                          const EventCallback &callback = {});
 
+  // Phase B of construction (plans/session-runtime-migration.md Phase 6):
+  // builds AgentTaskManager (fanning out extra_task_event_callback alongside
+  // the owned mailbox runtime's own task-event callback -- both must be
+  // known before AgentTaskManager's single construction-time callback
+  // parameter is set) and connects the mailbox runtime to it, forwarding
+  // wake_root. Populates task_manager() and finishes wiring
+  // mailbox_runtime() in place. Must be called at most once; calling it
+  // twice on the same SessionRuntime is a caller bug (asserted).
+  void activate(Agent::Options child_options,
+                AgentTaskManager::Limits limits = {},
+                AgentTaskManager::ChildWriteTools child_write_tools =
+                    AgentTaskManager::ChildWriteTools::none,
+                AgentTaskEventCallback extra_task_event_callback = {},
+                std::function<void()> wake_root = {});
+
+  MailboxRuntime &mailbox_runtime() { return mailbox_runtime_; }
+  const MailboxRuntime &mailbox_runtime() const { return mailbox_runtime_; }
+
+  // Null until activate() is called.
+  const std::shared_ptr<AgentTaskManager> &task_manager() const {
+    return task_manager_;
+  }
+
 private:
   void activate_session_state(std::string session_id,
                               std::vector<Message> messages,
@@ -150,6 +207,18 @@ private:
   std::optional<std::string> active_session_id_;
   std::optional<std::string> last_warning_;
   AutoCompactionConfig auto_compaction_;
+
+  // Declaration order below is load-bearing: members destruct in reverse
+  // declaration order, so task_manager_ (child tasks) is torn down first,
+  // then mailbox_runtime_ (detaching its observer) second, then agent_/the
+  // rest of this session's own state last -- see
+  // core/session/mailbox_runtime.h's "declare it after SessionRuntime and
+  // before AgentTaskManager" comment and the "Destruction follows inverse
+  // dependency order" note in docs/architecture-lexicon.md. Do not reorder
+  // these two fields without re-checking that constraint: getting it wrong
+  // fails silently at teardown, not at compile time.
+  MailboxRuntime mailbox_runtime_;
+  std::shared_ptr<AgentTaskManager> task_manager_;
 };
 
 } // namespace pi::core

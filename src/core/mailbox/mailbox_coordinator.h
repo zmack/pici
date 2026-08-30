@@ -53,9 +53,8 @@ private:
 };
 
 struct MailboxDeliveryTargets {
-  std::function<bool(std::vector<AgentMessageEnvelope>)> root;
-  std::function<bool(std::string, std::string,
-                     std::vector<AgentMessageEnvelope>)>
+  std::function<bool(std::vector<AgentInput>)> root;
+  std::function<bool(std::string, std::string, std::vector<AgentInput>)>
       subagent;
   std::function<void()> drop_queued;
   std::function<void()> drop_root_queued;
@@ -104,19 +103,19 @@ public:
   void pump_inbox();
   void drop_queued_delivery();
   bool idle_root_work_pending();
-  std::vector<AgentMessageEnvelope>
-  claim_idle_root_turn(std::size_t limit = 16);
+  std::vector<AgentInput> claim_idle_root_turn(std::size_t limit = 16);
 
   AgentRecord self(const AgentRuntimeIdentity &actor);
   std::optional<AgentRuntimeIdentity> active_root_identity() const;
   std::vector<AgentRecord> list_agents(AgentQuery query = {});
   std::vector<AgentRecord> list_agents(const AgentRuntimeIdentity &actor,
                                        AgentQuery query = {});
-  SendReceipt send(const AgentRuntimeIdentity &actor, SendRequest request);
-  SendReceipt reply(const AgentRuntimeIdentity &actor, std::string message_id,
-                    MailboxBody body);
-  std::vector<MailboxMessage> inspect(const AgentRuntimeIdentity &actor,
-                                      InboxQuery query = {});
+  MailboxEnqueueReceipt send(const AgentRuntimeIdentity &actor,
+                             EnqueueMailboxEntryRequest request);
+  MailboxEnqueueReceipt reply(const AgentRuntimeIdentity &actor,
+                              std::string entry_id, MailboxPayload body);
+  std::vector<MailboxEntry> inspect(const AgentRuntimeIdentity &actor,
+                                    InboxQuery query = {});
   ClaimResult claim(const AgentRuntimeIdentity &actor, ClaimRequest request);
   void acknowledge(const AgentRuntimeIdentity &actor,
                    AcknowledgeRequest request);
@@ -165,8 +164,14 @@ private:
   void maintenance_once(TimestampMs now, TimestampMs &last_cleanup);
   void poll_inbox();
   void signal_idle_root_work();
-  void acknowledge_delivery(std::string agent_id, std::string message_id,
+  void acknowledge_delivery(std::string agent_id, std::string entry_id,
                             std::string claim_token);
+  // Best-effort delivered_at_ms commit (plans/session-runtime-migration.md
+  // Phase 6): swallows any store error so a failure to record this
+  // observability field never fails delivery itself. A free function, not
+  // inlined at its two call sites, so claim_idle_root_turn()/poll_inbox()
+  // pay a plain call's complexity instead of an inline try/catch's nesting.
+  void mark_delivered_best_effort(const std::string &entry_id);
   void require_actor(const AgentRuntimeIdentity &actor) const;
   static std::string task_status(AgentTaskStatusKind status);
 };

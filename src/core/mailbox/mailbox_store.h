@@ -33,9 +33,20 @@ public:
   void close_agent(std::string_view agent_id, TimestampMs now);
   std::vector<AgentRecord> list_agents(const AgentQuery &query);
 
-  SendReceipt send(const SendRequest &request);
-  std::vector<MailboxMessage> inspect(const InboxQuery &query);
+  MailboxEnqueueReceipt send(const EnqueueMailboxEntryRequest &request);
+  std::vector<MailboxEntry> inspect(const InboxQuery &query);
   ClaimResult claim(const ClaimRequest &request);
+  // Sets delivered_at_ms to `now_ms` on a claimed entry. Callers are the
+  // two MailboxCoordinator sites that convert a claimed entry into an
+  // AgentInput (claim_idle_root_turn(), poll_inbox()) -- per
+  // docs/architecture-lexicon.md's "Delivery converts a claimed actionable
+  // entry into agent input," that conversion is delivery, not claim()
+  // itself (the raw agents_claim Lua API also calls claim() without ever
+  // becoming agent input, so it must not set this). Overwrites on every
+  // call, including redelivery after a lease expiry, so it always reflects
+  // the most recent delivery attempt rather than only the first.
+  void mark_delivered(const std::string &entry_id,
+                      const std::string &workspace_id, TimestampMs now_ms);
   void acknowledge(const AcknowledgeRequest &request);
   WaitResult wait_for_change(const WaitRequest &request,
                              std::stop_token stop_token = {});

@@ -2,8 +2,10 @@
 
 #include "core/agent.h"
 #include "core/agent_loop.h"
+#include "core/agent_task.h"
 #include "core/compaction.h"
 #include "core/event_types.h"
+#include "core/mailbox/mailbox_coordinator.h"
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/sandbox.h"
@@ -48,27 +50,52 @@ with_registry(Agent::Options options,
 
 } // namespace
 
-AgentSession::AgentSession(Config config)
+SessionRuntime::SessionRuntime(Config config)
     : agent_(with_registry(config.agent_options, config.model_registry)),
       session_store_(std::move(config.session_store)),
       sandbox_policy_(std::move(config.sandbox_policy)),
       model_registry_(config.model_registry
                           ? std::move(config.model_registry)
                           : config.agent_options.model_registry),
-      auto_compaction_(config.auto_compaction) {
+      auto_compaction_(config.auto_compaction),
+      mailbox_runtime_(std::move(config.mailbox)) {
   if (!sandbox_policy_)
     sandbox_policy_ = std::make_shared<SandboxPolicy>();
   agent_.set_tools(std::move(config.tools));
 }
 
+SessionRuntime::~SessionRuntime() = default;
+
+void SessionRuntime::activate(
+    Agent::Options child_options, AgentTaskManager::Limits limits,
+    AgentTaskManager::ChildWriteTools child_write_tools,
+    AgentTaskEventCallback extra_task_event_callback,
+    std::function<void()> wake_root) {
+  if (task_manager_)
+    throw std::logic_error("SessionRuntime::activate called more than once");
+
+  std::vector<AgentTaskEventCallback> task_callbacks;
+  if (extra_task_event_callback)
+    task_callbacks.emplace_back(std::move(extra_task_event_callback));
+  if (auto callback = mailbox_runtime_.task_event_callback())
+    task_callbacks.emplace_back(std::move(callback));
+
+  task_manager_ = std::make_shared<AgentTaskManager>(
+      *this, std::move(child_options), limits,
+      fan_out_agent_task_callbacks(std::move(task_callbacks)),
+      child_write_tools);
+
+  mailbox_runtime_.connect(*this, task_manager_, std::move(wake_root));
+}
+
 std::optional<SessionRecord>
-AgentSession::load_session(const std::string &session_id) const {
+SessionRuntime::load_session(const std::string &session_id) const {
   if (!session_store_)
     return std::nullopt;
   return session_store_->load(session_id);
 }
 
-void AgentSession::activate_session(const SessionRecord &record) {
+void SessionRuntime::activate_session(const SessionRecord &record) {
   apply_sandbox_mode(record.header.sandbox_mode, sandbox_policy_);
   last_warning_.reset();
   std::string restored_provider = record.header.provider;
@@ -113,18 +140,19 @@ void AgentSession::activate_session(const SessionRecord &record) {
   active_session_id_ = record.header.id;
 }
 
-SandboxMode AgentSession::sandbox_mode() const {
+SandboxMode SessionRuntime::sandbox_mode() const {
   return sandbox_policy_->mode();
 }
 
 ModelResolution
-AgentSession::resolve_model(const ModelSelection &selection) const {
+SessionRuntime::resolve_model(const ModelSelection &selection) const {
   if (!model_registry_)
     return {.error = "model registry is unavailable"};
   return model_registry_->resolve(selection);
 }
 
-ModelSwitchResult AgentSession::set_model(Model model, ThinkingLevel thinking) {
+ModelSwitchResult SessionRuntime::set_model(Model model,
+                                            ThinkingLevel thinking) {
   last_warning_.reset();
   std::function<void()> persist;
   if (session_store_ && active_session_id_) {
@@ -140,14 +168,14 @@ ModelSwitchResult AgentSession::set_model(Model model, ThinkingLevel thinking) {
   return result;
 }
 
-void AgentSession::set_sandbox_mode(SandboxMode mode) {
+void SessionRuntime::set_sandbox_mode(SandboxMode mode) {
   sandbox_policy_->set_mode(mode);
   if (session_store_ && active_session_id_)
     session_store_->set_sandbox_mode(*active_session_id_,
                                      std::string(sandbox_mode_to_string(mode)));
 }
 
-bool AgentSession::activate_session(const std::string &session_id) {
+bool SessionRuntime::activate_session(const std::string &session_id) {
   auto record = load_session(session_id);
   if (!record)
     return false;
@@ -155,8 +183,8 @@ bool AgentSession::activate_session(const std::string &session_id) {
   return true;
 }
 
-std::string AgentSession::open_session(std::string session_id,
-                                       SessionHeader header) {
+std::string SessionRuntime::open_session(std::string session_id,
+                                         SessionHeader header) {
   if (session_id.empty())
     session_id = header.id;
   if (session_id.empty())
@@ -169,7 +197,7 @@ std::string AgentSession::open_session(std::string session_id,
   return create_session(std::move(header));
 }
 
-std::string AgentSession::create_session(SessionHeader header) {
+std::string SessionRuntime::create_session(SessionHeader header) {
   if (header.model.empty() || header.provider.empty()) {
     const auto current = agent_.state().model();
     if (header.model.empty())
@@ -193,7 +221,7 @@ std::string AgentSession::create_session(SessionHeader header) {
   return active_id;
 }
 
-std::string AgentSession::fork_session(SessionHeader header) {
+std::string SessionRuntime::fork_session(SessionHeader header) {
   if (header.model.empty() || header.provider.empty()) {
     const auto current = agent_.state().model();
     if (header.model.empty())
@@ -216,7 +244,7 @@ std::string AgentSession::fork_session(SessionHeader header) {
   return session_id;
 }
 
-bool AgentSession::truncate_active_session(std::size_t through) {
+bool SessionRuntime::truncate_active_session(std::size_t through) {
   if (!active_session_id_)
     return false;
 
@@ -228,15 +256,15 @@ bool AgentSession::truncate_active_session(std::size_t through) {
   return true;
 }
 
-AgentSession::RunResult
-AgentSession::run_prompt(std::string prompt, const EventCallback &callback) {
+SessionRuntime::RunResult
+SessionRuntime::run_prompt(std::string prompt, const EventCallback &callback) {
   UserMessage message;
   message.content.emplace_back(TextContent{.text = std::move(prompt)});
-  return run_messages(
-      {AgentMessageEnvelope{.message = Message{std::move(message)}}}, callback);
+  return run_messages({AgentInput{.message = Message{std::move(message)}}},
+                      callback);
 }
 
-AgentSession::RunResult AgentSession::drain_agent_stream(
+SessionRuntime::RunResult SessionRuntime::drain_agent_stream(
     EventStream<AgentEvent, std::vector<Message>> stream,
     const EventCallback &callback) {
   RunResult result;
@@ -285,7 +313,8 @@ AgentSession::RunResult AgentSession::drain_agent_stream(
   return result;
 }
 
-AgentSession::RunResult AgentSession::maybe_retry_after_context_window_error(
+SessionRuntime::RunResult
+SessionRuntime::maybe_retry_after_context_window_error(
     RunResult result, const EventCallback &callback, bool &retried) {
   retried = false;
   if (!result.error || !auto_compaction_.enabled)
@@ -323,7 +352,7 @@ AgentSession::RunResult AgentSession::maybe_retry_after_context_window_error(
   return drain_agent_stream(agent_.continue_(), callback);
 }
 
-void AgentSession::maybe_auto_compact_after_turn(
+void SessionRuntime::maybe_auto_compact_after_turn(
     const EventCallback &callback) {
   if (!auto_compaction_.enabled)
     return;
@@ -350,9 +379,9 @@ void AgentSession::maybe_auto_compact_after_turn(
   compact_active_session(CompactionTrigger::automatic_pre_turn, callback);
 }
 
-AgentSession::RunResult
-AgentSession::run_messages(std::vector<AgentMessageEnvelope> messages,
-                           const EventCallback &callback) {
+SessionRuntime::RunResult
+SessionRuntime::run_messages(std::vector<AgentInput> messages,
+                             const EventCallback &callback) {
   auto result =
       drain_agent_stream(agent_.prompt(std::move(messages)), callback);
 
@@ -366,9 +395,9 @@ AgentSession::run_messages(std::vector<AgentMessageEnvelope> messages,
   return result;
 }
 
-AgentSession::CompactionRunResult
-AgentSession::compact_active_session(CompactionTrigger trigger,
-                                     const EventCallback &callback) {
+SessionRuntime::CompactionRunResult
+SessionRuntime::compact_active_session(CompactionTrigger trigger,
+                                       const EventCallback &callback) {
   CompactionRunResult result;
   if (!active_session_id_) {
     result.error = "no active session";
@@ -431,7 +460,7 @@ AgentSession::compact_active_session(CompactionTrigger trigger,
   return result;
 }
 
-void AgentSession::activate_session_state(
+void SessionRuntime::activate_session_state(
     std::string session_id, std::vector<Message> messages,
     std::optional<std::string> session_name) {
   const auto model = agent_.state().model();

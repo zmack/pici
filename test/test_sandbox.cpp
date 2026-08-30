@@ -46,7 +46,7 @@ void test_session_round_trip() {
   auto store = std::make_shared<pi::core::SessionStore>(root);
   auto policy = std::make_shared<pi::core::SandboxPolicy>(
       pi::core::SandboxMode::disabled);
-  pi::core::AgentSession session({.session_store = store,
+  pi::core::SessionRuntime session({.session_store = store,
                                   .sandbox_policy = policy});
   pi::core::SessionHeader header{.id = "sandbox-session",
                                  .model = "test",

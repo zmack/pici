@@ -87,7 +87,7 @@ int main() {
   core::Agent::Options options;
   options.model = std::move(model);
   options.model_registry = registry;
-  core::AgentSession session({.agent_options = std::move(options),
+  core::SessionRuntime session({.agent_options = std::move(options),
                               .model_registry = registry,
                               .session_store = store});
   core::SessionHeader header{.id = "rpc-test"};
@@ -186,7 +186,7 @@ int main() {
   CHECK(got_compact_complete_event);
   CHECK(got_compact_complete);
 
-  // Verify through the actual RPC entry point (not just AgentSession
+  // Verify through the actual RPC entry point (not just SessionRuntime
   // directly) that the compaction record is durable and reloads correctly:
   // the pre-compaction prompt+reply pair must not resurrect.
   const auto reloaded = store->load(session_id);

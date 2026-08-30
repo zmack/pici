@@ -73,24 +73,14 @@ std::vector<ContextFile> load_context_files() {
 
 SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config) {
   // Built into locals first, then assembled into one SessionRuntimeBundle
-  // aggregate-initialization at the end. core::MailboxRuntime has a
-  // user-declared destructor (which suppresses its implicit move
-  // assignment) and an explicitly deleted copy assignment, so
-  // bundle.mailbox_runtime cannot be *reassigned* after a bundle exists --
-  // it must be constructed with its final value in place, which aggregate
-  // init lets us do without an intermediate default-constructed state.
+  // aggregate-initialization at the end.
   auto session_store = std::make_shared<core::SessionStore>(
       config.args.session_dir.empty()
           ? core::SessionStore::default_sessions_dir()
           : std::filesystem::path(config.args.session_dir));
 
-  // core::MailboxRuntime's single-argument constructor is explicit, so an
-  // early-return SessionRuntimeBundle{.error = ...} must construct it
-  // explicitly too -- otherwise -Wextra flags relying on the implicit
-  // default via aggregate init.
   auto fail = [](std::string message) {
-    return SessionRuntimeBundle{.error = std::move(message),
-                                .mailbox_runtime = core::MailboxRuntime()};
+    return SessionRuntimeBundle{.error = std::move(message)};
   };
 
   std::optional<core::SessionRecord> loaded_session;
@@ -215,9 +205,9 @@ SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config) {
 
   auto session_config = build_agent_session_config(
       options_result.options, config.model_registry, /*tools=*/{},
-      session_store, sandbox_policy, config.args, config.capabilities);
-  auto session =
-      std::make_unique<core::AgentSession>(std::move(session_config));
+      session_store, sandbox_policy, config.args, config.capabilities, mailbox);
+  auto runtime =
+      std::make_shared<core::SessionRuntime>(std::move(session_config));
 
   return SessionRuntimeBundle{
       .warning = std::move(warning),
@@ -228,14 +218,11 @@ SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config) {
       .context_files = std::move(context_files),
       .skill_catalog = std::move(skill_catalog),
       .skill_catalog_ptr = skill_catalog_ptr,
-      .mailbox = mailbox,
       .agent_options = std::move(options_result.options),
       .hook_runtime = std::move(options_result.hook_runtime),
       .hooks = std::move(options_result.hooks),
       .hooks_list_saved = std::move(options_result.hooks_list_saved),
-      .session = std::move(session),
-      .mailbox_runtime = core::MailboxRuntime(std::move(mailbox)),
-      .task_manager = nullptr,
+      .runtime = std::move(runtime),
   };
 }
 
@@ -243,19 +230,10 @@ void activate_session_runtime(
     SessionRuntimeBundle &bundle,
     core::AgentTaskEventCallback extra_task_event_callback,
     std::function<void()> wake_root) {
-  std::vector<core::AgentTaskEventCallback> task_callbacks;
-  if (extra_task_event_callback)
-    task_callbacks.emplace_back(std::move(extra_task_event_callback));
-  if (auto callback = bundle.mailbox_runtime.task_event_callback())
-    task_callbacks.emplace_back(std::move(callback));
-
-  bundle.task_manager = std::make_shared<core::AgentTaskManager>(
-      *bundle.session, bundle.agent_options, core::AgentTaskManager::Limits{},
-      core::fan_out_agent_task_callbacks(std::move(task_callbacks)),
-      bundle.child_write_tools);
-
-  bundle.mailbox_runtime.connect(*bundle.session, bundle.task_manager,
-                                 std::move(wake_root));
+  bundle.runtime->activate(
+      bundle.agent_options, core::AgentTaskManager::Limits{},
+      bundle.child_write_tools, std::move(extra_task_event_callback),
+      std::move(wake_root));
 }
 
 } // namespace pi::cli

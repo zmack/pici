@@ -54,10 +54,27 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
     return new httplib::ThreadPool(static_cast<std::size_t>(config.threads));
   };
 
+  // Process-wide scratch SessionRuntime backing the /tasks/* HTTP surface
+  // (list/spawn/get/message/interrupt/close), kept independent of any
+  // durable /runs session: per
+  // plans/session-runtime-migration.md Phase 6, ACP's /runs handling moved
+  // to one SessionRuntime per durable session, looked up/reused by
+  // session_id (see handlers.cpp's per-run registry) -- but /runs has never
+  // wired those sessions to AgentTaskManager (ACP's per-run sessions have
+  // never supported subagent delegation; SessionRuntimeCapabilities keeps
+  // it off), and the /tasks/* wire API has no session_id concept at all to
+  // route by (task ids like "root"/"agent_1" are only unique within one
+  // AgentTaskManager, so a registry-search-by-id across multiple durable
+  // sessions' task trees would collide). Unifying /tasks/* with per-session
+  // task trees is therefore a real wire-protocol question left to a later
+  // phase, not something this restructuring silently resolves -- this
+  // scratch runtime preserves today's behavior exactly, just through the
+  // renamed SessionRuntime type and its activate() method.
+  //
   // ACP never enables auto-compaction (see cli/session_runtime.h); the
   // unused cli::Args{} below is only read when that capability is on.
-  auto task_root =
-      std::make_shared<core::AgentSession>(cli::build_agent_session_config(
+  auto scratch_runtime =
+      std::make_shared<core::SessionRuntime>(cli::build_agent_session_config(
           config.agent_opts, config.model_registry, config.tools, sessions,
           config.sandbox_policy, cli::Args{},
           cli::SessionRuntimeCapabilities{.enable_mailbox = false,
@@ -66,13 +83,14 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
                                           .enable_context_files = false,
                                           .enable_auto_compaction = false}));
   auto task_events = std::make_shared<TaskEventHub>();
-  auto task_manager = std::make_shared<core::AgentTaskManager>(
-      *task_root, config.agent_opts, core::AgentTaskManager::Limits{},
-      [task_events](const core::AgentTaskEvent &event) {
-        task_events->publish(event);
-      });
+  scratch_runtime->activate(config.agent_opts, core::AgentTaskManager::Limits{},
+                            core::AgentTaskManager::ChildWriteTools::none,
+                            [task_events](const core::AgentTaskEvent &event) {
+                              task_events->publish(event);
+                            });
 
-  register_routes(svr, config, sessions, task_manager, task_events);
+  register_routes(svr, config, sessions, scratch_runtime->task_manager(),
+                  task_events);
 
   // Determine listen address
   const char *host = "0.0.0.0";

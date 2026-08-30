@@ -56,7 +56,7 @@ filter_compacted_history(const std::vector<Message> &messages);
 // whether the drain-side durable-write-then-install step succeeded, since
 // that happens after this value is produced by whichever thread observes
 // the `complete`/`error` CompactionEvent. Callers that need the end-to-end
-// result should use AgentSession::compact_active_session (or replicate its
+// result should use SessionRuntime::compact_active_session (or replicate its
 // drain loop), not this struct alone.
 struct CompactionOutcome {
   bool success{false};
@@ -84,9 +84,10 @@ struct CompactionRunRequest {
 // `complete` or `error` CompactionEvent. Never mutates any Agent/session
 // state itself — installation and durable persistence are the caller's
 // responsibility, triggered by observing the `complete` event on whatever
-// thread drains it (see Agent::compact() / AgentSession::compact_active_session
-// for the intended wiring, which keeps that drain on the caller's thread
-// rather than this function's own worker thread).
+// thread drains it (see Agent::compact() /
+// SessionRuntime::compact_active_session for the intended wiring, which
+// keeps that drain on the caller's thread rather than this function's own
+// worker thread).
 CompactionOutcome run_compaction(const CompactionRunRequest &request,
                                  const std::function<bool(AgentEvent)> &push,
                                  const std::stop_token &stop_tok);
@@ -133,7 +134,7 @@ bool has_compactable_history(const AgentContext &context);
 // context is already at or over *our own estimated* budget — e.g. a single
 // oversized pasted-file user message as the first turn. Used by the
 // automatic pre-turn threshold trigger, which only has our own estimate to
-// go on (see the context-window-error path in AgentSession for the
+// go on (see the context-window-error path in SessionRuntime for the
 // provider-reported-error variant, which does not require this estimate to
 // agree since the provider has already said the request is too large).
 bool is_degenerate_oversized_context(const AgentContext &context,

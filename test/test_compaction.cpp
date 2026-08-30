@@ -679,7 +679,7 @@ void test_commit_compaction_persist_runs_before_install_and_blocks_on_failure() 
 
 void test_compact_active_session_persists_then_installs() {
     tests::register_test(
-        "AgentSession::compact_active_session writes the journal record and installs",
+        "SessionRuntime::compact_active_session writes the journal record and installs",
         []() {
             const auto session_dir = std::filesystem::temp_directory_path() /
                                      ("pici-compaction-session-" +
@@ -700,12 +700,12 @@ void test_compact_active_session_persists_then_installs() {
                                                         std::vector<CompactionResult>{success});
                 });
 
-            AgentSession::Config config;
+            SessionRuntime::Config config;
             config.agent_options.model.id = "faux-model";
             config.agent_options.model.api = "compaction-active-session-test";
             config.agent_options.model.provider = "faux";
             config.session_store = store;
-            AgentSession session(std::move(config));
+            SessionRuntime session(std::move(config));
 
             SessionHeader header;
             const auto session_id = session.create_session(header);
@@ -792,7 +792,7 @@ void test_looks_like_context_window_error() {
 
 void test_automatic_compaction_triggers_once_at_threshold() {
     tests::register_test(
-        "AgentSession: automatic compaction triggers once after a completed "
+        "SessionRuntime: automatic compaction triggers once after a completed "
         "turn crosses the threshold",
         []() {
             const auto session_dir =
@@ -823,7 +823,7 @@ void test_automatic_compaction_triggers_once_at_threshold() {
                         std::vector<CompactionResult>{compact_success});
                 });
 
-            AgentSession::Config config;
+            SessionRuntime::Config config;
             config.agent_options.model.id = "gpt-5.3-codex";
             config.agent_options.model.api = "openai-codex-responses";
             config.agent_options.model.provider = "openai-codex";
@@ -832,7 +832,7 @@ void test_automatic_compaction_triggers_once_at_threshold() {
             config.agent_options.model.context_window = 1;
             config.session_store = store;
             config.auto_compaction = {.enabled = true, .threshold_pct = 0.85};
-            AgentSession session(std::move(config));
+            SessionRuntime session(std::move(config));
 
             SessionHeader header;
             session.create_session(header);
@@ -859,7 +859,7 @@ void test_automatic_compaction_triggers_once_at_threshold() {
 
 void test_automatic_compaction_off_by_default() {
     tests::register_test(
-        "AgentSession: automatic compaction stays off unless explicitly "
+        "SessionRuntime: automatic compaction stays off unless explicitly "
         "enabled",
         []() {
             const auto session_dir =
@@ -886,14 +886,14 @@ void test_automatic_compaction_off_by_default() {
                         std::vector<FauxClient::Script>{script});
                 });
 
-            AgentSession::Config config;
+            SessionRuntime::Config config;
             config.agent_options.model.id = "gpt-5.3-codex";
             config.agent_options.model.api = "openai-codex-responses-off";
             config.agent_options.model.provider = "openai-codex";
             config.agent_options.model.context_window = 1;
             config.session_store = store;
             // auto_compaction left at its default: enabled == false.
-            AgentSession session(std::move(config));
+            SessionRuntime session(std::move(config));
 
             SessionHeader header;
             session.create_session(header);
@@ -917,7 +917,7 @@ void test_automatic_compaction_off_by_default() {
 
 void test_context_window_error_triggers_one_compaction_retry() {
     tests::register_test(
-        "AgentSession: a context-window error triggers exactly one "
+        "SessionRuntime: a context-window error triggers exactly one "
         "compaction retry",
         []() {
             const auto session_dir =
@@ -966,13 +966,13 @@ void test_context_window_error_triggers_one_compaction_retry() {
             LLMClientRegistry::instance().register_client(
                 "openai-codex-responses", [client] { return client; });
 
-            AgentSession::Config config;
+            SessionRuntime::Config config;
             config.agent_options.model.id = "gpt-5.3-codex";
             config.agent_options.model.api = "openai-codex-responses";
             config.agent_options.model.provider = "openai-codex";
             config.session_store = store;
             config.auto_compaction = {.enabled = true, .threshold_pct = 0.85};
-            AgentSession session(std::move(config));
+            SessionRuntime session(std::move(config));
 
             SessionHeader header;
             session.create_session(header);
@@ -1014,7 +1014,7 @@ void test_context_window_error_triggers_one_compaction_retry() {
 
 void test_context_window_error_does_not_recursively_retry() {
     tests::register_test(
-        "AgentSession: a second compaction is not recursively triggered by "
+        "SessionRuntime: a second compaction is not recursively triggered by "
         "an already-compacted request",
         []() {
             const auto session_dir =
@@ -1055,13 +1055,13 @@ void test_context_window_error_does_not_recursively_retry() {
             LLMClientRegistry::instance().register_client(
                 "openai-codex-responses", [client] { return client; });
 
-            AgentSession::Config config;
+            SessionRuntime::Config config;
             config.agent_options.model.id = "gpt-5.3-codex";
             config.agent_options.model.api = "openai-codex-responses";
             config.agent_options.model.provider = "openai-codex";
             config.session_store = store;
             config.auto_compaction = {.enabled = true, .threshold_pct = 0.85};
-            AgentSession session(std::move(config));
+            SessionRuntime session(std::move(config));
 
             SessionHeader header;
             session.create_session(header);
@@ -1090,7 +1090,7 @@ void test_context_window_error_does_not_recursively_retry() {
 
 void test_degenerate_first_turn_context_window_error() {
     tests::register_test(
-        "AgentSession: an oversized first turn with no prior history fails "
+        "SessionRuntime: an oversized first turn with no prior history fails "
         "distinctly instead of a no-op compaction",
         []() {
             AssistantMessage error_msg = make_assistant_message(
@@ -1112,12 +1112,12 @@ void test_degenerate_first_turn_context_window_error() {
                         std::vector<FauxClient::Script>{error_script});
                 });
 
-            AgentSession::Config config;
+            SessionRuntime::Config config;
             config.agent_options.model.id = "gpt-5.3-codex";
             config.agent_options.model.api = "openai-codex-responses";
             config.agent_options.model.provider = "openai-codex";
             config.auto_compaction = {.enabled = true, .threshold_pct = 0.85};
-            AgentSession session(std::move(config));
+            SessionRuntime session(std::move(config));
 
             std::size_t compaction_event_count = 0;
             auto result = session.run_prompt(
@@ -1215,7 +1215,7 @@ void test_set_model_races_inflight_compaction_without_corruption() {
 
 void test_compact_active_session_durable_failure_installs_nothing() {
     tests::register_test(
-        "AgentSession::compact_active_session: a durable-write failure installs nothing",
+        "SessionRuntime::compact_active_session: a durable-write failure installs nothing",
         []() {
             const auto session_dir = std::filesystem::temp_directory_path() /
                                      ("pici-compaction-fork-session-" +
@@ -1233,12 +1233,12 @@ void test_compact_active_session_durable_failure_installs_nothing() {
                                                         std::vector<CompactionResult>{success});
                 });
 
-            AgentSession::Config config;
+            SessionRuntime::Config config;
             config.agent_options.model.id = "faux-model";
             config.agent_options.model.api = "compaction-durable-failure-test";
             config.agent_options.model.provider = "faux";
             config.session_store = store;
-            AgentSession session(std::move(config));
+            SessionRuntime session(std::move(config));
 
             SessionHeader parent_header;
             const auto parent_id = session.create_session(parent_header);
@@ -1287,7 +1287,7 @@ public:
 
 void test_compact_active_session_unsupported_provider_leaves_transcript_untouched() {
     tests::register_test(
-        "AgentSession::compact_active_session: an unsupported provider reports "
+        "SessionRuntime::compact_active_session: an unsupported provider reports "
         "unsupported and leaves the transcript/journal untouched",
         []() {
             const auto session_dir = std::filesystem::temp_directory_path() /
@@ -1302,12 +1302,12 @@ void test_compact_active_session_unsupported_provider_leaves_transcript_untouche
                 "compaction-unsupported-test",
                 [] { return std::make_shared<UnsupportedCompactionClient>(); });
 
-            AgentSession::Config config;
+            SessionRuntime::Config config;
             config.agent_options.model.id = "unsupported-model";
             config.agent_options.model.api = "compaction-unsupported-test";
             config.agent_options.model.provider = "unsupported-test";
             config.session_store = store;
-            AgentSession session(std::move(config));
+            SessionRuntime session(std::move(config));
 
             SessionHeader header;
             const auto session_id = session.create_session(header);
@@ -1316,7 +1316,7 @@ void test_compact_active_session_unsupported_provider_leaves_transcript_untouche
             const auto messages_before = session.agent().state().messages();
             // append_message only mutates in-memory state; nothing is
             // journaled until a real prompt/compaction drains through
-            // AgentSession's persistence path. Compare against the actual
+            // SessionRuntime's persistence path. Compare against the actual
             // on-disk state before the attempt, not an assumption about it,
             // so this test asserts "compaction wrote nothing new" rather
             // than a specific message count that happens to depend on how

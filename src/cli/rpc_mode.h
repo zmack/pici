@@ -21,7 +21,7 @@ class RpcMode {
 public:
   using Output = std::function<void(const nlohmann::json &)>;
 
-  RpcMode(core::AgentSession &session, Output output,
+  RpcMode(core::SessionRuntime &session, Output output,
           core::AgentTaskManager *task_manager = nullptr,
           std::shared_ptr<auth::AuthResolver> auth_resolver = {});
   ~RpcMode();
@@ -42,7 +42,7 @@ private:
   void start_compact(const nlohmann::json &command,
                      core::CompactionTrigger trigger);
 
-  core::AgentSession &session_;
+  core::SessionRuntime &session_;
   core::AgentTaskManager *task_manager_{nullptr};
   std::shared_ptr<auth::AuthResolver> auth_resolver_;
   Output output_;
@@ -53,7 +53,7 @@ private:
   std::vector<std::jthread> wait_threads_;
 };
 
-int run_rpc_mode(core::AgentSession &session, std::istream &input,
+int run_rpc_mode(core::SessionRuntime &session, std::istream &input,
                  std::ostream &output,
                  core::AgentTaskManager *task_manager = nullptr,
                  std::shared_ptr<auth::AuthResolver> auth_resolver = {});

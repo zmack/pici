@@ -20,7 +20,7 @@ public:
   using ToolRegistrar = std::function<void(const std::string &)>;
   using EventObserver = std::function<void(const core::AgentEvent &)>;
 
-  FauxControlMode(core::AgentSession &session, core::RemoteFauxClient &client,
+  FauxControlMode(core::SessionRuntime &session, core::RemoteFauxClient &client,
                   std::shared_ptr<core::ScriptedToolRegistry> tool_registry,
                   Output output, ToolRegistrar tool_registrar = {},
                   EventObserver event_observer = {});
@@ -41,7 +41,7 @@ private:
   void handle_round(const nlohmann::json &command);
   void handle_turn(const nlohmann::json &command);
 
-  core::AgentSession &session_;
+  core::SessionRuntime &session_;
   core::RemoteFauxClient &client_;
   std::shared_ptr<core::ScriptedToolRegistry> tool_registry_;
   Output output_;
@@ -55,7 +55,7 @@ private:
 };
 
 int run_faux_control_socket(
-    core::AgentSession &session, core::RemoteFauxClient &client,
+    core::SessionRuntime &session, core::RemoteFauxClient &client,
     const std::shared_ptr<core::ScriptedToolRegistry> &tool_registry,
     const std::string &socket_path,
     const FauxControlMode::ToolRegistrar &tool_registrar = {},

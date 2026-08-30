@@ -4,7 +4,7 @@
 // from src/main.cpp's cmd_run() and src/acp/main.cpp per
 // plans/session-runtime-migration.md Phase 2, to close the gap the
 // architecture lexicon calls out: cmd_run() and ACP independently resolved
-// models/auth and independently assembled Agent::Options/AgentSession::
+// models/auth and independently assembled Agent::Options/core::SessionRuntime::
 // Config, with no shared, testable seam between them.
 //
 // Everything here defaults to CLI's current behavior (all capabilities
@@ -131,37 +131,43 @@ std::shared_ptr<core::LuaHooks>
 reload_hooks(const Args &args, bool mailbox_active,
              std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list_saved);
 
-// Assembles the core::AgentSession::Config literal previously duplicated
+// Assembles the core::SessionRuntime::Config literal previously duplicated
 // ad hoc at cmd_run()'s `AgentSession runtime(...)` call,
 // src/acp/server.cpp's task_root construction, and
 // src/acp/handlers.cpp's per-run session construction. auto_compaction is
 // only populated from args when capabilities.enable_auto_compaction is
-// set; otherwise it's left at AgentSession::AutoCompactionConfig{}'s
+// set; otherwise it's left at SessionRuntime::AutoCompactionConfig{}'s
 // disabled default, matching ACP's pre-existing behavior of never setting
-// it explicitly.
-core::AgentSession::Config build_agent_session_config(
+// it explicitly. `mailbox` constructs the runtime's owned (unconnected
+// until SessionRuntime::activate()) MailboxRuntime; leave it null for any
+// capability-gated caller (ACP always does, per
+// SessionRuntimeCapabilities::enable_mailbox).
+core::SessionRuntime::Config build_agent_session_config(
     const core::Agent::Options &agent_options,
     std::shared_ptr<const core::ModelRegistry> model_registry,
     std::vector<std::shared_ptr<const core::ToolDefinition>> tools,
     std::shared_ptr<core::SessionStore> session_store,
     core::SandboxPolicyPtr sandbox_policy, const Args &args,
-    const SessionRuntimeCapabilities &capabilities);
+    const SessionRuntimeCapabilities &capabilities,
+    std::shared_ptr<core::MailboxCoordinator> mailbox = {});
 
 // The full CLI-shaped runtime bundle: durable session store, resolved
-// sandbox policy, an optionally-loaded/resumed session record, the
-// constructed AgentSession, a constructed (not yet connected) mailbox
-// runtime, context files, and a skill catalog. Built by
+// sandbox policy, an optionally-loaded/resumed session record, context
+// files, a skill catalog, and the constructed core::SessionRuntime itself
+// (which as of Phase 6 owns the Agent, AgentTaskManager, and mailbox
+// attachment that used to be three separate bundle fields). Built by
 // open_session_runtime(); activate_session_runtime() finishes it once the
 // caller has registered tools and finalized the system prompt on the live
 // agent (see that function's comment for why this is two calls, not one).
 //
-// Not (yet) consumed by ACP: ACP's AgentTaskManager is process-wide and
-// reused across runs (src/acp/server.cpp), not rebuilt per session the
-// way this bundle is, so this bundle's shape doesn't fit ACP's lifecycle
-// without the ownership-model decision
-// plans/session-runtime-migration.md Phase 6 explicitly defers. ACP
-// instead calls build_agent_options() and build_agent_session_config()
-// directly.
+// Not (yet) consumed by ACP for its per-run sessions: those never call
+// activate() (ACP has never supported subagent delegation or mailbox
+// delivery -- SessionRuntimeCapabilities keeps both off), so ACP calls
+// build_agent_options() and build_agent_session_config() directly and
+// constructs a bare core::SessionRuntime rather than going through this
+// CLI-shaped bundle (which also resolves CLI-only concerns like
+// --resume/--continue and context-file/skill discovery that ACP doesn't
+// have).
 struct SessionRuntimeConfig {
   Args args;
   core::Model model;
@@ -172,7 +178,7 @@ struct SessionRuntimeConfig {
   // caches the last effective context here): not part of
   // AgentOptionsConfig/build_agent_options() because it typically closes
   // over caller-local state by reference, and it must be set before
-  // AgentSession construction -- unlike system_prompt, there is no
+  // SessionRuntime construction -- unlike system_prompt, there is no
   // post-construction setter for it on the live Agent.
   std::function<void(const core::AgentContext &)> on_effective_context;
   SessionRuntimeCapabilities capabilities;
@@ -205,45 +211,37 @@ struct SessionRuntimeBundle {
   std::vector<ContextFile> context_files;
   std::shared_ptr<const core::SkillCatalog> skill_catalog;
   const core::SkillCatalog *skill_catalog_ptr{nullptr};
-  std::shared_ptr<core::MailboxCoordinator> mailbox;
   // Mutable: the caller (cmd_run()) updates agent_options.system_prompt
   // after tool registration determines the final tool list, then passes
   // this bundle to activate_session_runtime(), which uses the
-  // now-finalized value when constructing AgentTaskManager (so child
-  // agents inherit the final system prompt). This mirrors cmd_run()'s
-  // pre-extraction behavior exactly: the live root Agent's initial system
-  // prompt is set explicitly via agent().state().set_system_prompt(...)
-  // (unaffected by this field), while this field only feeds
-  // AgentTaskManager's child-agent options.
+  // now-finalized value when calling core::SessionRuntime::activate() (so
+  // child agents inherit the final system prompt). This mirrors
+  // cmd_run()'s pre-extraction behavior exactly: the live root Agent's
+  // initial system prompt is set explicitly via
+  // agent().state().set_system_prompt(...) (unaffected by this field),
+  // while this field only feeds AgentTaskManager's child-agent options.
   core::Agent::Options agent_options;
   std::shared_ptr<HookRuntime> hook_runtime;
   std::shared_ptr<core::LuaHooks> hooks;
   std::vector<std::shared_ptr<core::LuaHooks>> hooks_list_saved;
 
-  // Declaration order below is load-bearing: members destruct in reverse
-  // declaration order, so `session` outlives `mailbox_runtime`, which
-  // outlives `task_manager`. This matches core/session/mailbox_runtime.h's
-  // documented requirement ("declare it after AgentSession and before
-  // AgentTaskManager so teardown closes child tasks while the mailbox
-  // observer is still attached") and cmd_run()'s pre-extraction
-  // local-variable order (AgentSession, then MailboxRuntime, then
-  // AgentTaskManager) -- unchanged by Phase 3's relocation of
-  // core::MailboxRuntime out of cli::, since this is the same ordering
-  // constraint, just renamed to its new qualified type. Do not reorder
-  // these three fields without re-checking that constraint -- getting it
-  // wrong fails silently at teardown, not at compile time.
-  std::unique_ptr<core::AgentSession> session;
-  core::MailboxRuntime mailbox_runtime;
-  std::shared_ptr<core::AgentTaskManager> task_manager;
+  // Owns the Agent, AgentTaskManager, and mailbox attachment (Phase 6
+  // folded what used to be three separate bundle fields --
+  // unique_ptr<AgentSession>, MailboxRuntime, shared_ptr<AgentTaskManager>
+  // -- into core::SessionRuntime itself; see that class's own
+  // declaration-order comment for the construction/destruction ordering
+  // constraint, which now lives inside it rather than here). Null only
+  // when `error` is set.
+  std::shared_ptr<core::SessionRuntime> runtime;
 };
 
 // Phase A: resolves the session store, loaded/resumed session, sandbox
 // policy, child-write-tools policy, context files and skill catalog (when
 // enabled), agent options (including hooks, when enabled), mailbox launch
-// (when enabled), and constructs the AgentSession and (unconnected)
-// MailboxRuntime. Does not construct AgentTaskManager or connect the
-// mailbox runtime -- that needs the finalized system prompt, which the
-// caller only knows after registering tools; see
+// (when enabled), and constructs the SessionRuntime (with its mailbox
+// runtime built but not yet connected). Does not call
+// SessionRuntime::activate() -- that needs the finalized system prompt,
+// which the caller only knows after registering tools; see
 // activate_session_runtime().
 //
 // On a validation failure (bad --continue/--resume/--sandbox/
@@ -254,15 +252,10 @@ struct SessionRuntimeBundle {
 SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config);
 
 // Phase B: called after the caller has registered tools on
-// bundle.session->agent() and updated bundle.agent_options.system_prompt
-// to its final value. Builds AgentTaskManager (fanning out
-// extra_task_event_callback, e.g. a REPL activity/wake bridge, alongside
-// the mailbox runtime's own task-event callback -- both must be known
-// before AgentTaskManager's single construction-time callback parameter
-// is set) and connects the mailbox runtime to the now-existing task
-// manager, forwarding wake_root (e.g. the REPL's readline-wake notifier).
-// Populates bundle.task_manager and finishes wiring bundle.mailbox_runtime
-// in place.
+// bundle.runtime->agent() and updated bundle.agent_options.system_prompt
+// to its final value. Calls bundle.runtime->activate(), forwarding
+// extra_task_event_callback (e.g. a REPL activity/wake bridge) and
+// wake_root (e.g. the REPL's readline-wake notifier) through to it.
 void activate_session_runtime(
     SessionRuntimeBundle &bundle,
     core::AgentTaskEventCallback extra_task_event_callback = {},
