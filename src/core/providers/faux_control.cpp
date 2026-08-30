@@ -265,6 +265,200 @@ RemoteFauxClient::stream(const Model &model, const AgentContext &context,
   return final_message;
 }
 
+// The block-kind and tool-call-field helpers below were formerly inlined
+// directly in compile_round()'s content loop; each is factored out purely
+// to shrink that function's branch count, with no behavior change.
+
+bool compile_text_block(const nlohmann::json &block, std::size_t index,
+                        AssistantMessage &partial, FauxClient::Script &script,
+                        std::string &error) {
+  std::string text;
+  if (!require_string(block, "text", text, error))
+    return false;
+  script.events.emplace_back(AssistantMessageTextStartEvent{index, partial});
+  partial.content.emplace_back(TextContent{});
+  std::get<TextContent>(partial.content.back()).text = text;
+  script.events.emplace_back(
+      AssistantMessageTextDeltaEvent{index, text, partial});
+  script.events.emplace_back(
+      AssistantMessageTextEndEvent{index, text, partial});
+  return true;
+}
+
+bool compile_thinking_block(const nlohmann::json &block, std::size_t index,
+                            AssistantMessage &partial,
+                            FauxClient::Script &script, std::string &error) {
+  std::string text;
+  if (!require_string(block, "text", text, error))
+    return false;
+  script.events.emplace_back(
+      AssistantMessageThinkingStartEvent{index, partial});
+  partial.content.emplace_back(ThinkingContent{});
+  std::get<ThinkingContent>(partial.content.back()).thinking = text;
+  script.events.emplace_back(
+      AssistantMessageThinkingDeltaEvent{index, text, partial});
+  script.events.emplace_back(
+      AssistantMessageThinkingEndEvent{index, text, partial});
+  return true;
+}
+
+bool parse_tool_updates(const nlohmann::json &block,
+                        ScriptedToolBehavior &behavior, std::string &error) {
+  if (!block.contains("updates"))
+    return true;
+  if (!block.at("updates").is_array()) {
+    error = "tool_call field 'updates' must be an array";
+    return false;
+  }
+  int previous_after_ms = 0;
+  bool first_update = true;
+  for (const auto &update : block.at("updates")) {
+    if (!update.is_object()) {
+      error = "tool_call updates must be JSON objects";
+      return false;
+    }
+    int after_ms = 0;
+    if (!require_nonnegative_int(update, "after_ms", after_ms, error))
+      return false;
+    if (!first_update && after_ms < previous_after_ms) {
+      error = "tool_call updates must be in ascending after_ms order";
+      return false;
+    }
+    std::string partial_result;
+    if (!require_string(update, "partial", partial_result, error))
+      return false;
+    behavior.updates.push_back(
+        ScriptedToolUpdate{after_ms, std::move(partial_result)});
+    previous_after_ms = after_ms;
+    first_update = false;
+  }
+  return true;
+}
+
+bool parse_tool_result(const nlohmann::json &block,
+                       ScriptedToolBehavior &behavior, std::string &error) {
+  if (!block.contains("result"))
+    return true;
+  if (!block.at("result").is_object()) {
+    error = "tool_call field 'result' must be an object";
+    return false;
+  }
+  const auto &result = block.at("result");
+  if (result.contains("content")) {
+    if (!result.at("content").is_string()) {
+      error = "tool_call result field 'content' must be a string";
+      return false;
+    }
+    behavior.result_content = result.at("content").get<std::string>();
+  }
+  if (result.contains("is_error")) {
+    if (!result.at("is_error").is_boolean()) {
+      error = "tool_call result field 'is_error' must be boolean";
+      return false;
+    }
+    behavior.is_error = result.at("is_error").get<bool>();
+  }
+  return true;
+}
+
+bool parse_tool_presentation(const nlohmann::json &block,
+                             ScriptedToolBehavior &behavior,
+                             std::string &error) {
+  if (!block.contains("presentation"))
+    return true;
+  const auto &presentation = block.at("presentation");
+  if (!presentation.is_object()) {
+    error = "tool_call field 'presentation' must be an object";
+    return false;
+  }
+  std::string kind;
+  if (!require_string(presentation, "kind", kind, error))
+    return false;
+  if (kind != "mailbox_reply_queued") {
+    error = "tool_call presentation field 'kind' must be "
+            "'mailbox_reply_queued'";
+    return false;
+  }
+  MailboxReplyQueuedNotice notice;
+  if (!require_string(presentation, "request_message_id",
+                      notice.request_message_id, error))
+    return false;
+  if (!require_string(presentation, "text", notice.reply_text, error))
+    return false;
+  if (!require_string(presentation, "recipient_session_id",
+                      notice.recipient_session_id, error))
+    return false;
+  if (presentation.contains("recipient_agent_id") &&
+      !presentation.at("recipient_agent_id").is_null() &&
+      !presentation.at("recipient_agent_id").is_string()) {
+    error = "tool_call presentation field 'recipient_agent_id' must be a "
+            "string or null";
+    return false;
+  }
+  if (presentation.contains("recipient_agent_id") &&
+      presentation.at("recipient_agent_id").is_string())
+    notice.recipient_agent_id =
+        presentation.at("recipient_agent_id").get<std::string>();
+  behavior.presentation_notice = std::move(notice);
+  return true;
+}
+
+bool compile_tool_call_block(
+    const nlohmann::json &block, std::size_t index, AssistantMessage &partial,
+    FauxClient::Script &script,
+    std::vector<std::pair<std::string, ScriptedToolBehavior>> &behaviors,
+    std::string &error) {
+  std::string call_id;
+  if (!require_string(block, "call_id", call_id, error))
+    return false;
+  if (call_id.empty()) {
+    error = "tool_call field 'call_id' must not be empty";
+    return false;
+  }
+  std::string name;
+  if (!require_string(block, "name", name, error))
+    return false;
+  if (name.empty()) {
+    error = "tool_call field 'name' must not be empty";
+    return false;
+  }
+
+  nlohmann::json arguments = nlohmann::json::object();
+  if (block.contains("args")) {
+    if (!block.at("args").is_object()) {
+      error = "tool_call field 'args' must be a JSON object";
+      return false;
+    }
+    arguments = block.at("args");
+  }
+
+  ScriptedToolBehavior behavior;
+  if (!parse_tool_updates(block, behavior, error))
+    return false;
+  if (!parse_tool_result(block, behavior, error))
+    return false;
+  if (!parse_tool_presentation(block, behavior, error))
+    return false;
+  if (block.contains("finish_after_ms") &&
+      !require_nonnegative_int(block, "finish_after_ms",
+                               behavior.finish_after_ms, error))
+    return false;
+
+  ToolCall call{.id = call_id,
+                .name = name,
+                .arguments = arguments,
+                .partial_json = arguments.dump()};
+  script.events.emplace_back(
+      AssistantMessageToolCallStartEvent{index, partial});
+  partial.content.emplace_back(call);
+  script.events.emplace_back(
+      AssistantMessageToolCallDeltaEvent{index, call.partial_json, partial});
+  script.events.emplace_back(
+      AssistantMessageToolCallEndEvent{index, call, partial});
+  behaviors.emplace_back(std::move(call_id), std::move(behavior));
+  return true;
+}
+
 std::optional<FauxClient::Script> compile_round(const nlohmann::json &round,
                                                 ScriptedToolRegistry &registry,
                                                 std::string &error) {
@@ -330,32 +524,14 @@ std::optional<FauxClient::Script> compile_round(const nlohmann::json &round,
         return std::nullopt;
 
       if (block_type == "text") {
-        std::string text;
-        if (!require_string(block, "text", text, error))
+        if (!compile_text_block(block, index, partial, script, error))
           return std::nullopt;
-        script.events.emplace_back(
-            AssistantMessageTextStartEvent{index, partial});
-        partial.content.emplace_back(TextContent{});
-        std::get<TextContent>(partial.content.back()).text = text;
-        script.events.emplace_back(
-            AssistantMessageTextDeltaEvent{index, text, partial});
-        script.events.emplace_back(
-            AssistantMessageTextEndEvent{index, text, partial});
         continue;
       }
 
       if (block_type == "thinking") {
-        std::string text;
-        if (!require_string(block, "text", text, error))
+        if (!compile_thinking_block(block, index, partial, script, error))
           return std::nullopt;
-        script.events.emplace_back(
-            AssistantMessageThinkingStartEvent{index, partial});
-        partial.content.emplace_back(ThinkingContent{});
-        std::get<ThinkingContent>(partial.content.back()).thinking = text;
-        script.events.emplace_back(
-            AssistantMessageThinkingDeltaEvent{index, text, partial});
-        script.events.emplace_back(
-            AssistantMessageThinkingEndEvent{index, text, partial});
         continue;
       }
 
@@ -364,133 +540,9 @@ std::optional<FauxClient::Script> compile_round(const nlohmann::json &round,
         return std::nullopt;
       }
 
-      std::string call_id;
-      if (!require_string(block, "call_id", call_id, error))
+      if (!compile_tool_call_block(block, index, partial, script, behaviors,
+                                   error))
         return std::nullopt;
-      if (call_id.empty()) {
-        error = "tool_call field 'call_id' must not be empty";
-        return std::nullopt;
-      }
-      std::string name;
-      if (!require_string(block, "name", name, error))
-        return std::nullopt;
-      if (name.empty()) {
-        error = "tool_call field 'name' must not be empty";
-        return std::nullopt;
-      }
-
-      nlohmann::json arguments = nlohmann::json::object();
-      if (block.contains("args")) {
-        if (!block.at("args").is_object()) {
-          error = "tool_call field 'args' must be a JSON object";
-          return std::nullopt;
-        }
-        arguments = block.at("args");
-      }
-
-      ScriptedToolBehavior behavior;
-      if (block.contains("updates")) {
-        if (!block.at("updates").is_array()) {
-          error = "tool_call field 'updates' must be an array";
-          return std::nullopt;
-        }
-        int previous_after_ms = 0;
-        bool first_update = true;
-        for (const auto &update : block.at("updates")) {
-          if (!update.is_object()) {
-            error = "tool_call updates must be JSON objects";
-            return std::nullopt;
-          }
-          int after_ms = 0;
-          if (!require_nonnegative_int(update, "after_ms", after_ms, error))
-            return std::nullopt;
-          if (!first_update && after_ms < previous_after_ms) {
-            error = "tool_call updates must be in ascending after_ms order";
-            return std::nullopt;
-          }
-          std::string partial_result;
-          if (!require_string(update, "partial", partial_result, error))
-            return std::nullopt;
-          behavior.updates.push_back(
-              ScriptedToolUpdate{after_ms, std::move(partial_result)});
-          previous_after_ms = after_ms;
-          first_update = false;
-        }
-      }
-      if (block.contains("result")) {
-        if (!block.at("result").is_object()) {
-          error = "tool_call field 'result' must be an object";
-          return std::nullopt;
-        }
-        const auto &result = block.at("result");
-        if (result.contains("content")) {
-          if (!result.at("content").is_string()) {
-            error = "tool_call result field 'content' must be a string";
-            return std::nullopt;
-          }
-          behavior.result_content = result.at("content").get<std::string>();
-        }
-        if (result.contains("is_error")) {
-          if (!result.at("is_error").is_boolean()) {
-            error = "tool_call result field 'is_error' must be boolean";
-            return std::nullopt;
-          }
-          behavior.is_error = result.at("is_error").get<bool>();
-        }
-      }
-      if (block.contains("presentation")) {
-        const auto &presentation = block.at("presentation");
-        if (!presentation.is_object()) {
-          error = "tool_call field 'presentation' must be an object";
-          return std::nullopt;
-        }
-        std::string kind;
-        if (!require_string(presentation, "kind", kind, error))
-          return std::nullopt;
-        if (kind != "mailbox_reply_queued") {
-          error = "tool_call presentation field 'kind' must be "
-                  "'mailbox_reply_queued'";
-          return std::nullopt;
-        }
-        MailboxReplyQueuedNotice notice;
-        if (!require_string(presentation, "request_message_id",
-                            notice.request_message_id, error))
-          return std::nullopt;
-        if (!require_string(presentation, "text", notice.reply_text, error))
-          return std::nullopt;
-        if (!require_string(presentation, "recipient_session_id",
-                            notice.recipient_session_id, error))
-          return std::nullopt;
-        if (presentation.contains("recipient_agent_id") &&
-            !presentation.at("recipient_agent_id").is_null() &&
-            !presentation.at("recipient_agent_id").is_string()) {
-          error = "tool_call presentation field 'recipient_agent_id' must be a "
-                  "string or null";
-          return std::nullopt;
-        }
-        if (presentation.contains("recipient_agent_id") &&
-            presentation.at("recipient_agent_id").is_string())
-          notice.recipient_agent_id =
-              presentation.at("recipient_agent_id").get<std::string>();
-        behavior.presentation_notice = std::move(notice);
-      }
-      if (block.contains("finish_after_ms") &&
-          !require_nonnegative_int(block, "finish_after_ms",
-                                   behavior.finish_after_ms, error))
-        return std::nullopt;
-
-      ToolCall call{.id = call_id,
-                    .name = name,
-                    .arguments = arguments,
-                    .partial_json = arguments.dump()};
-      script.events.emplace_back(
-          AssistantMessageToolCallStartEvent{index, partial});
-      partial.content.emplace_back(call);
-      script.events.emplace_back(AssistantMessageToolCallDeltaEvent{
-          index, call.partial_json, partial});
-      script.events.emplace_back(
-          AssistantMessageToolCallEndEvent{index, call, partial});
-      behaviors.emplace_back(std::move(call_id), std::move(behavior));
     }
 
     partial.stop_reason = terminal_reason;
