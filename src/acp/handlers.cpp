@@ -377,57 +377,60 @@ std::shared_ptr<core::SessionRuntime> find_or_create_session_runtime(
   return session;
 }
 
-} // namespace
+// The route handlers below were formerly all inlined as lambdas directly
+// inside register_routes(); each is factored out purely to keep that
+// function's branch count down to route wiring, with no behavior change.
 
-void register_routes(httplib::Server &svr, const ServerConfig &cfg,
-                     const std::shared_ptr<core::SessionStore> &sessions,
-                     const std::shared_ptr<core::AgentTaskManager> &tasks,
-                     const std::shared_ptr<TaskEventHub> &task_events) {
-  const auto manifest_json = nlohmann::json(build_manifest(cfg));
+void health_handler(const httplib::Request &, httplib::Response &res) {
+  res.set_content(R"({"status":"ok"})", "application/json");
+}
 
-  svr.Get("/health", [](const httplib::Request &, httplib::Response &res) {
-    res.set_content(R"({"status":"ok"})", "application/json");
-  });
+httplib::Server::Handler
+make_agents_list_handler(nlohmann::json manifest_json) {
+  // NOLINTNEXTLINE(bugprone-exception-escape)
+  return [manifest_json](const httplib::Request &, httplib::Response &res) {
+    json_response(res, 200, nlohmann::json::array({manifest_json}));
+  };
+}
 
-  svr.Get("/agents",
-          // NOLINTNEXTLINE(bugprone-exception-escape)
-          [manifest_json](const httplib::Request &, httplib::Response &res) {
-            json_response(res, 200, nlohmann::json::array({manifest_json}));
-          });
+httplib::Server::Handler make_agent_get_handler(const ServerConfig &cfg,
+                                                nlohmann::json manifest_json) {
+  // NOLINTNEXTLINE(bugprone-exception-escape)
+  return [&cfg, manifest_json](const httplib::Request &req,
+                               httplib::Response &res) {
+    if (req.path_params.at("name") != cfg.agent_name) {
+      json_response(res, 404, {{"error", "agent not found"}});
+      return;
+    }
+    json_response(res, 200, manifest_json);
+  };
+}
 
-  svr.Get("/agents/:name",
-          // NOLINTNEXTLINE(bugprone-exception-escape)
-          [&cfg, manifest_json](const httplib::Request &req,
-                                httplib::Response &res) {
-            if (req.path_params.at("name") != cfg.agent_name) {
-              json_response(res, 404, {{"error", "agent not found"}});
-              return;
-            }
-            json_response(res, 200, manifest_json);
-          });
+httplib::Server::Handler
+make_tasks_list_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+  return [tasks](const httplib::Request &req, httplib::Response &res) {
+    try {
+      std::optional<std::string_view> prefix;
+      std::string prefix_storage;
+      if (req.has_param("path_prefix")) {
+        prefix_storage = req.get_param_value("path_prefix");
+        prefix = prefix_storage;
+      }
+      nlohmann::json values = nlohmann::json::array();
+      for (const auto &snapshot : tasks->list(prefix))
+        values.push_back(task_snapshot_json(snapshot));
+      json_response(res, 200, values);
+    } catch (const core::AgentTaskError &error) {
+      task_error_response(res, error);
+    } catch (const std::exception &error) {
+      json_response(res, 400, {{"error", error.what()}});
+    }
+  };
+}
 
-  svr.Get("/tasks",
-          [tasks](const httplib::Request &req, httplib::Response &res) {
-            try {
-              std::optional<std::string_view> prefix;
-              std::string prefix_storage;
-              if (req.has_param("path_prefix")) {
-                prefix_storage = req.get_param_value("path_prefix");
-                prefix = prefix_storage;
-              }
-              nlohmann::json values = nlohmann::json::array();
-              for (const auto &snapshot : tasks->list(prefix))
-                values.push_back(task_snapshot_json(snapshot));
-              json_response(res, 200, values);
-            } catch (const core::AgentTaskError &error) {
-              task_error_response(res, error);
-            } catch (const std::exception &error) {
-              json_response(res, 400, {{"error", error.what()}});
-            }
-          });
-
-  svr.Get("/tasks/events", [task_events](const httplib::Request &req,
-                                         httplib::Response &res) {
+httplib::Server::Handler
+make_tasks_events_handler(std::shared_ptr<TaskEventHub> task_events) {
+  return [task_events](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto after = query_uint64(req, "after_generation", 0);
       const auto timeout = query_uint64(req, "timeout_ms", 30000);
@@ -475,10 +478,12 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
     } catch (const std::exception &error) {
       json_response(res, 400, {{"error", error.what()}});
     }
-  });
+  };
+}
 
-  svr.Get("/tasks/:id", [tasks](const httplib::Request &req,
-                                httplib::Response &res) {
+httplib::Server::Handler
+make_task_get_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+  return [tasks](const httplib::Request &req, httplib::Response &res) {
     const auto snapshot = tasks->get(req.path_params.at("id"));
     if (!snapshot) {
       json_response(
@@ -487,10 +492,12 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
       return;
     }
     json_response(res, 200, task_snapshot_json(*snapshot));
-  });
+  };
+}
 
-  svr.Post("/tasks", [tasks](const httplib::Request &req,
-                             httplib::Response &res) {
+httplib::Server::Handler
+make_task_create_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+  return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto snapshot = tasks->spawn(parse_spawn_request(parse_body(req)));
       json_response(res, 202, task_snapshot_json(snapshot));
@@ -499,10 +506,12 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
     } catch (const std::exception &error) {
       json_response(res, 400, {{"error", error.what()}});
     }
-  });
+  };
+}
 
-  svr.Post("/tasks/wait", [tasks](const httplib::Request &req,
-                                  httplib::Response &res) {
+httplib::Server::Handler
+make_task_wait_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+  return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto body = parse_body(req);
       core::AgentWaitRequest request;
@@ -524,35 +533,36 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
     } catch (const std::exception &error) {
       json_response(res, 400, {{"error", error.what()}});
     }
-  });
-
-  auto register_task_message_route = [&svr, tasks](const char *path,
-                                                   bool follow_up) {
-    svr.Post(path, [tasks, follow_up](const httplib::Request &req,
-                                      httplib::Response &res) {
-      try {
-        const auto body = parse_body(req);
-        const auto text =
-            body.value("message", body.value("prompt", std::string{}));
-        if (text.empty())
-          throw std::runtime_error("message must not be empty");
-        const auto target = req.path_params.at("id");
-        const auto snapshot =
-            follow_up ? tasks->follow_up(target, task_message(text))
-                      : tasks->send_message(target, task_message(text));
-        json_response(res, 202, task_snapshot_json(snapshot));
-      } catch (const core::AgentTaskError &error) {
-        task_error_response(res, error);
-      } catch (const std::exception &error) {
-        json_response(res, 400, {{"error", error.what()}});
-      }
-    });
   };
-  register_task_message_route("/tasks/:id/message", false);
-  register_task_message_route("/tasks/:id/follow-up", true);
+}
 
-  svr.Post("/tasks/:id/interrupt", [tasks](const httplib::Request &req,
-                                           httplib::Response &res) {
+httplib::Server::Handler
+make_task_message_handler(std::shared_ptr<core::AgentTaskManager> tasks,
+                          bool follow_up) {
+  return
+      [tasks, follow_up](const httplib::Request &req, httplib::Response &res) {
+        try {
+          const auto body = parse_body(req);
+          const auto text =
+              body.value("message", body.value("prompt", std::string{}));
+          if (text.empty())
+            throw std::runtime_error("message must not be empty");
+          const auto target = req.path_params.at("id");
+          const auto snapshot =
+              follow_up ? tasks->follow_up(target, task_message(text))
+                        : tasks->send_message(target, task_message(text));
+          json_response(res, 202, task_snapshot_json(snapshot));
+        } catch (const core::AgentTaskError &error) {
+          task_error_response(res, error);
+        } catch (const std::exception &error) {
+          json_response(res, 400, {{"error", error.what()}});
+        }
+      };
+}
+
+httplib::Server::Handler
+make_task_interrupt_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+  return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto body =
           req.body.empty() ? nlohmann::json::object() : parse_body(req);
@@ -565,19 +575,264 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
     } catch (const std::exception &error) {
       json_response(res, 400, {{"error", error.what()}});
     }
-  });
+  };
+}
 
-  svr.Post("/tasks/:id/close",
-           [tasks](const httplib::Request &req, httplib::Response &res) {
-             try {
-               const auto snapshot = tasks->close(req.path_params.at("id"));
-               json_response(res, 200, task_snapshot_json(snapshot));
-             } catch (const core::AgentTaskError &error) {
-               task_error_response(res, error);
-             } catch (const std::exception &error) {
-               json_response(res, 400, {{"error", error.what()}});
-             }
-           });
+httplib::Server::Handler
+make_task_close_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+  return [tasks](const httplib::Request &req, httplib::Response &res) {
+    try {
+      const auto snapshot = tasks->close(req.path_params.at("id"));
+      json_response(res, 200, task_snapshot_json(snapshot));
+    } catch (const core::AgentTaskError &error) {
+      task_error_response(res, error);
+    } catch (const std::exception &error) {
+      json_response(res, 400, {{"error", error.what()}});
+    }
+  };
+}
+
+std::string extract_run_prompt(const RunCreateRequest &rcr) {
+  std::string prompt;
+  for (const auto &msg : rcr.input) {
+    for (const auto &part : msg.parts) {
+      if (part.content_type == "text/plain") {
+        if (!prompt.empty())
+          prompt += '\n';
+        prompt += part.content;
+      }
+    }
+  }
+  return prompt;
+}
+
+void open_run_session(const ServerConfig &cfg, core::SessionRuntime &session,
+                      const std::string &session_id) {
+  core::SessionHeader header;
+  header.created =
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  header.model = cfg.agent_opts.model.id;
+  header.provider = cfg.agent_opts.model.provider;
+  session.open_session(session_id, header);
+}
+
+// Applies an explicit provider/model override from the run request, writing
+// an error response and returning false if the caller should stop.
+bool apply_requested_run_model(const RunCreateRequest &rcr,
+                               const ServerConfig &cfg,
+                               core::SessionRuntime &session,
+                               httplib::Response &res) {
+  if (!rcr.model || rcr.model->empty()) {
+    json_response(res, 400,
+                  {{"error", "model is required when selecting a provider"}});
+    return false;
+  }
+  core::ModelSelection selection{.model = *rcr.model, .source = "acp"};
+  if (rcr.provider)
+    selection.provider = *rcr.provider;
+  const auto resolution = session.resolve_model(selection);
+  if (!resolution) {
+    json_response(res, 400, {{"error", resolution.error}});
+    return false;
+  }
+  if (cfg.auth_resolver &&
+      cfg.auth_resolver->availability(resolution.model->provider) ==
+          auth::AuthAvailability::missing) {
+    json_response(res, 400,
+                  {{"error", "missing authentication for provider '" +
+                                 resolution.model->provider + "'"}});
+    return false;
+  }
+  try {
+    session.set_model(*resolution.model,
+                      session.agent().state().thinking_level());
+  } catch (const std::exception &error) {
+    json_response(res, 409, {{"error", error.what()}});
+    return false;
+  }
+  return true;
+}
+
+httplib::ContentProviderWithoutLength
+make_run_stream_provider(const ServerConfig &cfg, std::string run_id,
+                         std::string prompt,
+                         std::optional<std::string> active_session_id,
+                         std::shared_ptr<core::SessionRuntime> session,
+                         core::Model effective_model) {
+  // NOLINTNEXTLINE(bugprone-exception-escape)
+  return [&cfg, run_id = std::move(run_id), prompt = std::move(prompt),
+          active_session_id = std::move(active_session_id), session,
+          effective_model = std::move(effective_model)](
+             std::size_t /*offset*/, httplib::DataSink &sink) mutable -> bool {
+    SseWriter sse(sink);
+
+    Run r;
+    r.run_id = run_id;
+    r.agent_name = cfg.agent_name;
+    r.status = RunStatus::created;
+    r.session_id = active_session_id;
+    r.provider = effective_model.provider;
+    r.model = effective_model.id;
+    sse.emit("run.created",
+             {{"type", "run.created"}, {"run", nlohmann::json(r)}});
+    r.status = RunStatus::in_progress;
+    sse.emit("run.in-progress",
+             {{"type", "run.in-progress"}, {"run", nlohmann::json(r)}});
+
+    AcpSseRenderer renderer(sse, cfg.agent_name);
+    // run.created/run.in-progress are already on the wire by this point, so
+    // a same-session_id collision with another in-flight run (core::Agent
+    // rejects a second concurrent run against the same instance -- see the
+    // audit above durable_run_mutex's old declaration) can no longer become
+    // an HTTP error status; report it the same way any other run_prompt
+    // failure is reported, through the renderer and a failed final run
+    // event.
+    core::SessionRuntime::RunResult result;
+    try {
+      result = session->run_prompt(prompt,
+                                   [&renderer](const core::AgentEvent &event) {
+                                     core::dispatch_event(event, renderer);
+                                   });
+    } catch (const std::exception &error) {
+      result.error = error.what();
+    }
+    if (result.error && !session->agent().state().error_message())
+      renderer.on_error(core::RendererErrorKind::unknown, *result.error);
+
+    renderer.emit_run_final(r);
+    sink.done();
+    return true;
+  };
+}
+
+void send_run_sync_response(
+    const ServerConfig &cfg, const std::string &run_id,
+    const std::string &prompt,
+    const std::optional<std::string> &active_session_id,
+    const std::shared_ptr<core::SessionRuntime> &session,
+    const core::Model &effective_model, httplib::Response &res) {
+  SyncRenderer sr;
+  core::SessionRuntime::RunResult result;
+  try {
+    result = session->run_prompt(prompt, [&sr](const core::AgentEvent &event) {
+      core::dispatch_event(event, sr);
+    });
+  } catch (const std::exception &error) {
+    json_response(res, 409, {{"error", error.what()}});
+    return;
+  }
+  if (result.error && !session->agent().state().error_message())
+    sr.on_error(core::RendererErrorKind::unknown, *result.error);
+
+  Run r;
+  r.run_id = run_id;
+  r.agent_name = cfg.agent_name;
+  r.status = sr.status();
+  r.session_id = active_session_id;
+  r.provider = effective_model.provider;
+  r.model = effective_model.id;
+  if (!sr.accumulated().empty())
+    r.output.push_back({.role = cfg.agent_name,
+                        .parts = {{.content_type = "text/plain",
+                                   .content = sr.accumulated()}}});
+  if (sr.status() == RunStatus::failed)
+    r.error = sr.error();
+
+  json_response(res, 200, nlohmann::json(r));
+}
+
+httplib::Server::Handler make_run_create_handler(
+    const ServerConfig &cfg, std::shared_ptr<core::SessionStore> sessions,
+    std::shared_ptr<std::mutex> session_runtimes_mutex,
+    std::shared_ptr<
+        std::unordered_map<std::string, std::shared_ptr<core::SessionRuntime>>>
+        session_runtimes) {
+  return [&cfg, sessions, session_runtimes_mutex, session_runtimes](
+             const httplib::Request &req,
+             httplib::Response &res) { // NOLINT(bugprone-exception-escape):
+                                       // httplib owns callback errors.
+    RunCreateRequest rcr;
+    try {
+      from_json(parse_body(req), rcr);
+    } catch (const std::exception &e) {
+      json_response(res, 400, {{"error", e.what()}});
+      return;
+    }
+    if (rcr.agent_name != cfg.agent_name) {
+      json_response(res, 404, {{"error", "agent not found"}});
+      return;
+    }
+    if (rcr.input.empty()) {
+      json_response(res, 400, {{"error", "input must not be empty"}});
+      return;
+    }
+
+    const auto prompt = extract_run_prompt(rcr);
+    const std::string run_id = make_run_id();
+
+    auto session = find_or_create_session_runtime(cfg, sessions, rcr.session_id,
+                                                  *session_runtimes_mutex,
+                                                  *session_runtimes);
+
+    // Restore or create durable session history the first time this
+    // SessionRuntime sees rcr.session_id; a reused runtime already has it
+    // active in memory (and re-opening would reload the transcript from
+    // disk, discarding continuity the whole point of reuse is to keep).
+    if (rcr.session_id && !session->active_session_id())
+      open_run_session(cfg, *session, *rcr.session_id);
+    std::optional<std::string> active_session_id;
+    if (rcr.session_id)
+      active_session_id = session->active_session_id();
+
+    // An explicit request selection always wins over the restored model,
+    // and is journaled before the run starts.
+    if ((rcr.provider || rcr.model) &&
+        !apply_requested_run_model(rcr, cfg, *session, res))
+      return;
+
+    const auto effective_model = session->agent().state().model();
+
+    if (rcr.mode == RunMode::stream) {
+      res.set_chunked_content_provider(
+          "text/event-stream",
+          make_run_stream_provider(cfg, run_id, prompt, active_session_id,
+                                   session, effective_model));
+      return;
+    }
+
+    send_run_sync_response(cfg, run_id, prompt, active_session_id, session,
+                           effective_model, res);
+  };
+}
+
+void run_not_found_handler(const httplib::Request &req,
+                           httplib::Response &res) {
+  json_response(
+      res, 404,
+      {{"error", "run not found (streaming runs complete synchronously)"},
+       {"run_id", req.path_params.at("run_id")}});
+}
+
+} // namespace
+
+void register_routes(httplib::Server &svr, const ServerConfig &cfg,
+                     const std::shared_ptr<core::SessionStore> &sessions,
+                     const std::shared_ptr<core::AgentTaskManager> &tasks,
+                     const std::shared_ptr<TaskEventHub> &task_events) {
+  const auto manifest_json = nlohmann::json(build_manifest(cfg));
+
+  svr.Get("/health", health_handler);
+  svr.Get("/agents", make_agents_list_handler(manifest_json));
+  svr.Get("/agents/:name", make_agent_get_handler(cfg, manifest_json));
+  svr.Get("/tasks", make_tasks_list_handler(tasks));
+  svr.Get("/tasks/events", make_tasks_events_handler(task_events));
+  svr.Get("/tasks/:id", make_task_get_handler(tasks));
+  svr.Post("/tasks", make_task_create_handler(tasks));
+  svr.Post("/tasks/wait", make_task_wait_handler(tasks));
+  svr.Post("/tasks/:id/message", make_task_message_handler(tasks, false));
+  svr.Post("/tasks/:id/follow-up", make_task_message_handler(tasks, true));
+  svr.Post("/tasks/:id/interrupt", make_task_interrupt_handler(tasks));
+  svr.Post("/tasks/:id/close", make_task_close_handler(tasks));
 
   // Registry backing find_or_create_session_runtime() above, and the small
   // mutex that protects only its lookup/insert (see the pre-removal audit
@@ -586,189 +841,12 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
   auto session_runtimes_mutex = std::make_shared<std::mutex>();
   auto session_runtimes = std::make_shared<
       std::unordered_map<std::string, std::shared_ptr<core::SessionRuntime>>>();
-
-  svr.Post(
-      "/runs",
-      [&cfg, sessions, session_runtimes_mutex, session_runtimes](
-          const httplib::Request &req,
-          httplib::Response &res) { // NOLINT(bugprone-exception-escape):
-                                    // httplib owns callback errors.
-        RunCreateRequest rcr;
-        try {
-          from_json(parse_body(req), rcr);
-        } catch (const std::exception &e) {
-          json_response(res, 400, {{"error", e.what()}});
-          return;
-        }
-        if (rcr.agent_name != cfg.agent_name) {
-          json_response(res, 404, {{"error", "agent not found"}});
-          return;
-        }
-        if (rcr.input.empty()) {
-          json_response(res, 400, {{"error", "input must not be empty"}});
-          return;
-        }
-
-        // Extract user text from first text/plain part
-        std::string prompt;
-        for (const auto &msg : rcr.input) {
-          for (const auto &part : msg.parts) {
-            if (part.content_type == "text/plain") {
-              if (!prompt.empty())
-                prompt += '\n';
-              prompt += part.content;
-            }
-          }
-        }
-
-        const std::string run_id = make_run_id();
-
-        auto session = find_or_create_session_runtime(
-            cfg, sessions, rcr.session_id, *session_runtimes_mutex,
-            *session_runtimes);
-
-        // Restore or create durable session history the first time this
-        // SessionRuntime sees rcr.session_id; a reused runtime already has it
-        // active in memory (and re-opening would reload the transcript from
-        // disk, discarding continuity the whole point of reuse is to keep).
-        if (rcr.session_id && !session->active_session_id()) {
-          core::SessionHeader header;
-          header.created = std::chrono::system_clock::to_time_t(
-              std::chrono::system_clock::now());
-          header.model = cfg.agent_opts.model.id;
-          header.provider = cfg.agent_opts.model.provider;
-          session->open_session(*rcr.session_id, header);
-        }
-        std::optional<std::string> active_session_id;
-        if (rcr.session_id)
-          active_session_id = session->active_session_id();
-
-        // An explicit request selection always wins over the restored model,
-        // and is journaled before the run starts.
-        if (rcr.provider || rcr.model) {
-          if (!rcr.model || rcr.model->empty()) {
-            json_response(
-                res, 400,
-                {{"error", "model is required when selecting a provider"}});
-            return;
-          }
-          core::ModelSelection selection{.model = *rcr.model, .source = "acp"};
-          if (rcr.provider)
-            selection.provider = *rcr.provider;
-          const auto resolution = session->resolve_model(selection);
-          if (!resolution) {
-            json_response(res, 400, {{"error", resolution.error}});
-            return;
-          }
-          if (cfg.auth_resolver &&
-              cfg.auth_resolver->availability(resolution.model->provider) ==
-                  auth::AuthAvailability::missing) {
-            json_response(res, 400,
-                          {{"error", "missing authentication for provider '" +
-                                         resolution.model->provider + "'"}});
-            return;
-          }
-          try {
-            session->set_model(*resolution.model,
-                               session->agent().state().thinking_level());
-          } catch (const std::exception &error) {
-            json_response(res, 409, {{"error", error.what()}});
-            return;
-          }
-        }
-
-        const auto effective_model = session->agent().state().model();
-
-        if (rcr.mode == RunMode::stream) {
-          res.set_chunked_content_provider(
-              "text/event-stream",
-              // NOLINTNEXTLINE(bugprone-exception-escape)
-              [&cfg, run_id, prompt, rcr, active_session_id, session,
-               effective_model](std::size_t /*offset*/,
-                                httplib::DataSink &sink) mutable -> bool {
-                SseWriter sse(sink);
-
-                Run r;
-                r.run_id = run_id;
-                r.agent_name = cfg.agent_name;
-                r.status = RunStatus::created;
-                r.session_id = active_session_id;
-                r.provider = effective_model.provider;
-                r.model = effective_model.id;
-                sse.emit("run.created",
-                         {{"type", "run.created"}, {"run", nlohmann::json(r)}});
-                r.status = RunStatus::in_progress;
-                sse.emit("run.in-progress", {{"type", "run.in-progress"},
-                                             {"run", nlohmann::json(r)}});
-
-                AcpSseRenderer renderer(sse, cfg.agent_name);
-                // run.created/run.in-progress are already on the wire by
-                // this point, so a same-session_id collision with another
-                // in-flight run (core::Agent rejects a second concurrent
-                // run against the same instance -- see the audit above
-                // durable_run_mutex's old declaration) can no longer become
-                // an HTTP error status; report it the same way any other
-                // run_prompt failure is reported, through the renderer and
-                // a failed final run event.
-                core::SessionRuntime::RunResult result;
-                try {
-                  result = session->run_prompt(
-                      prompt, [&renderer](const core::AgentEvent &event) {
-                        core::dispatch_event(event, renderer);
-                      });
-                } catch (const std::exception &error) {
-                  result.error = error.what();
-                }
-                if (result.error && !session->agent().state().error_message())
-                  renderer.on_error(core::RendererErrorKind::unknown,
-                                    *result.error);
-
-                renderer.emit_run_final(r);
-                sink.done();
-                return true;
-              });
-          return;
-        }
-
-        SyncRenderer sr;
-        core::SessionRuntime::RunResult result;
-        try {
-          result =
-              session->run_prompt(prompt, [&sr](const core::AgentEvent &event) {
-                core::dispatch_event(event, sr);
-              });
-        } catch (const std::exception &error) {
-          json_response(res, 409, {{"error", error.what()}});
-          return;
-        }
-        if (result.error && !session->agent().state().error_message())
-          sr.on_error(core::RendererErrorKind::unknown, *result.error);
-
-        Run r;
-        r.run_id = run_id;
-        r.agent_name = cfg.agent_name;
-        r.status = sr.status();
-        r.session_id = active_session_id;
-        r.provider = effective_model.provider;
-        r.model = effective_model.id;
-        if (!sr.accumulated().empty())
-          r.output.push_back({.role = cfg.agent_name,
-                              .parts = {{.content_type = "text/plain",
-                                         .content = sr.accumulated()}}});
-        if (sr.status() == RunStatus::failed)
-          r.error = sr.error();
-
-        json_response(res, 200, nlohmann::json(r));
-      });
+  svr.Post("/runs",
+           make_run_create_handler(cfg, sessions, session_runtimes_mutex,
+                                   session_runtimes));
 
   // Streaming runs complete synchronously so this is mostly a stub.
-  svr.Get(
-      "/runs/:run_id", [](const httplib::Request &req, httplib::Response &res) {
-        json_response(
-            res, 404,
-            {{"error", "run not found (streaming runs complete synchronously)"},
-             {"run_id", req.path_params.at("run_id")}});
-      });
+  svr.Get("/runs/:run_id", run_not_found_handler);
 }
 
 } // namespace pi::acp
