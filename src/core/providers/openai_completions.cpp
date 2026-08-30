@@ -612,7 +612,7 @@ namespace {
 std::shared_ptr<AssistantMessage> perform_non_streaming_request(
     const std::string &url, const std::string &request_body,
     const std::map<std::string, std::string> &headers,
-    const StreamOptions &options, std::stop_token stop_tok,
+    const StreamOptions &options, const std::stop_token &stop_tok,
     std::shared_ptr<AssistantMessage> result,
     const AssistantEventCallback &on_event) {
   auto auth = options.auth;
@@ -704,7 +704,7 @@ std::shared_ptr<AssistantMessage> perform_non_streaming_request(
 std::shared_ptr<AssistantMessage> perform_streaming_request(
     const std::string &url, const std::string &request_body,
     const std::map<std::string, std::string> &headers,
-    const StreamOptions &options, std::stop_token stop_tok,
+    const StreamOptions &options, const std::stop_token &stop_tok,
     std::shared_ptr<AssistantMessage> result,
     const AssistantEventCallback &on_event) {
   StreamingState state{.result = result,

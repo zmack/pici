@@ -1,85 +1,30 @@
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <chrono>
 #include <csignal>
-#include <cstddef>
-#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <exception>
-#include <format>
 #include <functional>
 #include <iomanip>
 #include <iostream>
-#include <iterator>
-#include <locale>
 #include <map>
 #include <memory>
-#include <mutex>
-#include <numeric>
 #include <optional>
-#include <set>
-#include <sstream>
-#include <stop_token>
 #include <string>
 #include <string_view>
-#include <system_error>
-#include <thread>
-#include <unordered_map>
-#include <utility>
-#include <variant>
 #include <vector>
 
 #include <filesystem>
-#include <fstream>
-#include <unistd.h>
 
 #include "cli/args.h"
 #include "cli/config.h"
-#include "cli/faux_control_mode.h"
-#include "cli/model_selector.h"
-#include "cli/readline.h"
-#include "cli/rpc_mode.h"
-#include "cli/session_runtime.h"
-#include "cli/system_prompt.h"
-#include "cli/tree_selector.h"
-#include "core/agent.h"
-#include "core/agent_loop.h"
-#include "core/agent_state.h"
-#include "core/agent_task.h"
-#include "core/auth/auth_resolver.h"
 #include "core/auth/openai_codex_oauth.h"
-#include "core/auth_types.h"
-#include "core/builtin_tools.h"
-#include "core/compaction.h"
-#include "core/event_types.h"
 #include "core/lua_tool.h"
-#include "core/mailbox/mailbox_bindings.h"
-#include "core/mailbox/mailbox_coordinator.h"
-#include "core/mailbox/mailbox_types.h"
-#include "core/memory_stats.h"
-#include "core/message_types.h"
 #include "core/models.h"
 #include "core/otel_init.h"
-#include "core/providers/faux_control.h"
 #include "core/providers/muse_messages.h"
 #include "core/providers/openai_codex_responses.h"
 #include "core/providers/openai_completions.h"
-#include "core/sandbox.h"
-#include "core/session/agent_session.h"
-#include "core/session/session_id.h"
-#include "core/session/session_record.h"
-#include "core/session/session_store.h"
-#include "core/session/session_tree.h"
-#include "core/skills.h"
-#include "core/stream_diagnostics.h"
-#include "core/stream_renderer.h"
-#include "core/subagent_activity.h"
-#include "core/subagent_panel.h"
 #include "core/terminal.h"
-#include "nlohmann/json_fwd.hpp"
-#include <nlohmann/json.hpp>
 
 #include "cli/cmd_run_session.h"
 
@@ -97,6 +42,29 @@ build_model_registry(const cli::Args &args) {
   auto registry = std::make_shared<core::ModelRegistry>(configured);
   registry->validate_registered_apis();
   return registry;
+}
+
+int run_lua_test_files(const std::vector<std::string> &files) {
+  int total_failed = 0;
+  for (const auto &f : files) {
+    std::cout << "=== " << f << " ===\n";
+    try {
+      auto r = pi::core::run_lua_test_file(f);
+      total_failed += r.failed;
+      std::cout << r.passed << "/" << r.total << " passed";
+      if (r.failed > 0)
+        std::cout << ", " << r.failed << " failed";
+      std::cout << "\n\n";
+    } catch (const std::exception &e) {
+      std::cerr << "error: " << e.what() << "\n\n";
+      ++total_failed;
+    }
+  }
+  if (total_failed == 0)
+    std::cout << "All tests passed.\n";
+  else
+    std::cout << total_failed << " test(s) failed.\n";
+  return total_failed > 0 ? 1 : 0;
 }
 
 int cmd_list_models(
@@ -239,30 +207,8 @@ int main(int argc, char *argv[]) noexcept {
     return pi::cmd_list_models(args, model_registry);
   }
 
-  if (!args.test_files.empty()) {
-    int total_passed = 0;
-    int total_failed = 0;
-    for (const auto &f : args.test_files) {
-      std::cout << "=== " << f << " ===\n";
-      try {
-        auto r = pi::core::run_lua_test_file(f);
-        total_passed += r.passed;
-        total_failed += r.failed;
-        std::cout << r.passed << "/" << r.total << " passed";
-        if (r.failed > 0)
-          std::cout << ", " << r.failed << " failed";
-        std::cout << "\n\n";
-      } catch (const std::exception &e) {
-        std::cerr << "error: " << e.what() << "\n\n";
-        ++total_failed;
-      }
-    }
-    if (total_failed == 0)
-      std::cout << "All tests passed.\n";
-    else
-      std::cout << total_failed << " test(s) failed.\n";
-    return total_failed > 0 ? 1 : 0;
-  }
+  if (!args.test_files.empty())
+    return pi::run_lua_test_files(args.test_files);
 
   return pi::cmd_run(args, model_registry);
 }

@@ -12,7 +12,6 @@
 // than staying a single free function.
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -22,19 +21,16 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
-#include <iterator>
 #include <locale>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <optional>
-#include <set>
 #include <sstream>
 #include <stop_token>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -42,7 +38,6 @@
 #include <vector>
 
 #include <filesystem>
-#include <fstream>
 #include <unistd.h>
 
 #include "cli/args.h"
@@ -58,14 +53,12 @@
 #include "core/agent_state.h"
 #include "core/agent_task.h"
 #include "core/auth/auth_resolver.h"
-#include "core/auth_types.h"
 #include "core/builtin_tools.h"
 #include "core/compaction.h"
 #include "core/event_types.h"
 #include "core/lua_tool.h"
 #include "core/mailbox/mailbox_bindings.h"
 #include "core/mailbox/mailbox_coordinator.h"
-#include "core/mailbox/mailbox_types.h"
 #include "core/memory_stats.h"
 #include "core/message_types.h"
 #include "core/models.h"
@@ -74,7 +67,6 @@
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
-#include "core/session/session_store.h"
 #include "core/session/session_tree.h"
 #include "core/skills.h"
 #include "core/stream_diagnostics.h"
@@ -135,7 +127,7 @@ inline std::string format_skill_catalog(const core::SkillCatalog &catalog) {
   return ss.str();
 }
 
-std::string
+inline std::string
 format_addons(const std::vector<std::shared_ptr<core::LuaHooks>> &hooks_list) {
   if (hooks_list.empty()) {
     return "(no add-ons loaded)\n";
@@ -725,7 +717,7 @@ inline std::string format_memory_bytes(std::uint64_t bytes) {
   return ss.str();
 }
 
-std::string
+inline std::string
 format_ascii_table(const std::vector<std::string> &headers,
                    const std::vector<std::vector<std::string>> &rows,
                    const std::vector<bool> &right_aligned, int max_width = 0) {
@@ -1066,6 +1058,9 @@ private:
         std::cerr << "error: " << resolution.error << "\n";
         return false;
       }
+      // resolution's operator bool() is defined as model.has_value(), so
+      // the !resolution check above already guarantees model is set here.
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
       model_ = *resolution.model;
     } else {
       core::ProviderConfig provider;
@@ -1501,8 +1496,8 @@ private:
       current_session_id_ = bundle_.loaded_session->header.id;
       current_session_name_ = bundle_.loaded_session->header.name;
       runtime().activate_session(*bundle_.loaded_session);
-      if (runtime().last_warning())
-        std::cerr << "warning: " << *runtime().last_warning() << "\n";
+      if (const auto &warning = runtime().last_warning())
+        std::cerr << "warning: " << *warning << "\n";
       if (args_.sandbox_mode_explicit)
         runtime().set_sandbox_mode(sandbox_mode_);
       std::cerr << "[session: " << current_session_id_;
@@ -1545,7 +1540,7 @@ private:
     auto &mailbox_runtime = runtime().mailbox_runtime();
     if (const auto identity = mailbox_runtime.activate_root(
             current_session_id_, current_session_name_)) {
-      agent().set_runtime_identity(*identity);
+      agent().set_runtime_identity(identity);
       const auto current_model = agent().state().model();
       mailbox_runtime.set_model(current_model.provider, current_model.id);
     }
@@ -1761,6 +1756,11 @@ private:
 
   // Run a turn and persist all new messages to the session file.
   core::TokenUsage run_and_persist(const std::string &input) {
+    // title_controller_ is always populated before this method is reachable
+    // -- by setup_interactive_session() on the real run() path, or
+    // bootstrap_for_repl() in tests -- so this is safe despite not being
+    // locally checked.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     core::TerminalTitleActivityGuard title_activity(*title_controller_);
     auto mailbox_turn = runtime().mailbox_runtime().begin_root_turn();
     runtime().mailbox_runtime().pump_inbox();
@@ -1791,6 +1791,9 @@ private:
       if (messages.empty())
         return;
       {
+        // See run_and_persist()'s comment: title_controller_ is always set
+        // by this point.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         core::TerminalTitleActivityGuard title_activity(*title_controller_);
         auto mailbox_turn = mailbox_runtime.adopt_root_turn();
         accumulate(run_message_turn(
@@ -1829,6 +1832,9 @@ private:
     renderer_->set_status_line(status_line);
     if (bundle_.hooks && bundle_.hooks->tab_title) {
       if (auto title = bundle_.hooks->tab_title(context))
+        // See run_and_persist()'s comment: title_controller_ is always set
+        // by this point.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
         title_controller_->set_base_title(*title);
     }
     return status_line;
@@ -2060,6 +2066,9 @@ private:
           "/compact is only available in an interactive terminal session");
       return;
     }
+    // See run_and_persist()'s comment: title_controller_ is always set by
+    // this point.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     core::TerminalTitleActivityGuard activity(*title_controller_);
     auto result = run_compaction_command(
         runtime(), *renderer_, args_.verbose, stream_diagnostics_,
@@ -2119,16 +2128,20 @@ private:
       renderer_->on_command_output("model switch failed: " + resolution.error);
       return;
     }
-    if (auth_resolver_->availability(resolution.model->provider) ==
+    // resolution's operator bool() is defined as model.has_value(), so the
+    // !resolution check above already guarantees model is set here.
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+    const auto &selected_model = resolution.model.value();
+    if (auth_resolver_->availability(selected_model.provider) ==
         pi::auth::AuthAvailability::missing) {
       renderer_->on_command_output(
           "model switch failed: missing authentication for provider '" +
-          resolution.model->provider + "'");
+          selected_model.provider + "'");
       return;
     }
     try {
-      const auto result = runtime().set_model(*resolution.model,
-                                              agent().state().thinking_level());
+      const auto result =
+          runtime().set_model(selected_model, agent().state().thinking_level());
       runtime().mailbox_runtime().set_model(result.current.provider,
                                             result.current.id);
       configure_hooks();
@@ -2211,9 +2224,9 @@ private:
     runtime().activate_session(*loaded);
     if (const auto identity = runtime().mailbox_runtime().activate_root(
             current_session_id_, current_session_name_))
-      agent().set_runtime_identity(*identity);
-    if (runtime().last_warning())
-      std::cerr << "warning: " << *runtime().last_warning() << "\n";
+      agent().set_runtime_identity(identity);
+    if (const auto &warning = runtime().last_warning())
+      std::cerr << "warning: " << *warning << "\n";
     configure_hooks();
     {
       std::scoped_lock lock(effective_context_mutex_);
@@ -2238,7 +2251,7 @@ private:
     current_session_name_.reset();
     if (const auto identity = runtime().mailbox_runtime().activate_root(
             current_session_id_, current_session_name_))
-      agent().set_runtime_identity(*identity);
+      agent().set_runtime_identity(identity);
     {
       std::scoped_lock lock(effective_context_mutex_);
       effective_context_.reset();
@@ -2261,7 +2274,7 @@ private:
     current_session_name_.reset();
     if (const auto identity = runtime().mailbox_runtime().activate_root(
             current_session_id_, current_session_name_))
-      agent().set_runtime_identity(*identity);
+      agent().set_runtime_identity(identity);
     {
       std::scoped_lock lock(effective_context_mutex_);
       effective_context_.reset();

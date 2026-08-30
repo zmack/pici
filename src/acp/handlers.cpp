@@ -3,6 +3,7 @@
 #include "acp/sse.h"
 #include "acp/task_events.h"
 #include "acp/types.h"
+#include "cli/args.h"
 #include "cli/session_runtime.h"
 #include "core/agent.h"
 #include "core/agent_task.h"
@@ -29,7 +30,6 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
-#include <variant>
 #include <vector>
 
 namespace pi::acp {
@@ -386,15 +386,16 @@ void health_handler(const httplib::Request &, httplib::Response &res) {
 }
 
 httplib::Server::Handler
-make_agents_list_handler(nlohmann::json manifest_json) {
+make_agents_list_handler(const nlohmann::json &manifest_json) {
   // NOLINTNEXTLINE(bugprone-exception-escape)
   return [manifest_json](const httplib::Request &, httplib::Response &res) {
     json_response(res, 200, nlohmann::json::array({manifest_json}));
   };
 }
 
-httplib::Server::Handler make_agent_get_handler(const ServerConfig &cfg,
-                                                nlohmann::json manifest_json) {
+httplib::Server::Handler
+make_agent_get_handler(const ServerConfig &cfg,
+                       const nlohmann::json &manifest_json) {
   // NOLINTNEXTLINE(bugprone-exception-escape)
   return [&cfg, manifest_json](const httplib::Request &req,
                                httplib::Response &res) {
@@ -407,7 +408,7 @@ httplib::Server::Handler make_agent_get_handler(const ServerConfig &cfg,
 }
 
 httplib::Server::Handler
-make_tasks_list_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+make_tasks_list_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       std::optional<std::string_view> prefix;
@@ -429,7 +430,7 @@ make_tasks_list_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
 }
 
 httplib::Server::Handler
-make_tasks_events_handler(std::shared_ptr<TaskEventHub> task_events) {
+make_tasks_events_handler(const std::shared_ptr<TaskEventHub> &task_events) {
   return [task_events](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto after = query_uint64(req, "after_generation", 0);
@@ -482,7 +483,7 @@ make_tasks_events_handler(std::shared_ptr<TaskEventHub> task_events) {
 }
 
 httplib::Server::Handler
-make_task_get_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+make_task_get_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     const auto snapshot = tasks->get(req.path_params.at("id"));
     if (!snapshot) {
@@ -496,7 +497,7 @@ make_task_get_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
 }
 
 httplib::Server::Handler
-make_task_create_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+make_task_create_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto snapshot = tasks->spawn(parse_spawn_request(parse_body(req)));
@@ -510,7 +511,7 @@ make_task_create_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
 }
 
 httplib::Server::Handler
-make_task_wait_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+make_task_wait_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto body = parse_body(req);
@@ -537,7 +538,7 @@ make_task_wait_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
 }
 
 httplib::Server::Handler
-make_task_message_handler(std::shared_ptr<core::AgentTaskManager> tasks,
+make_task_message_handler(const std::shared_ptr<core::AgentTaskManager> &tasks,
                           bool follow_up) {
   return
       [tasks, follow_up](const httplib::Request &req, httplib::Response &res) {
@@ -560,8 +561,8 @@ make_task_message_handler(std::shared_ptr<core::AgentTaskManager> tasks,
       };
 }
 
-httplib::Server::Handler
-make_task_interrupt_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+httplib::Server::Handler make_task_interrupt_handler(
+    const std::shared_ptr<core::AgentTaskManager> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto body =
@@ -579,7 +580,7 @@ make_task_interrupt_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
 }
 
 httplib::Server::Handler
-make_task_close_handler(std::shared_ptr<core::AgentTaskManager> tasks) {
+make_task_close_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto snapshot = tasks->close(req.path_params.at("id"));
@@ -635,17 +636,20 @@ bool apply_requested_run_model(const RunCreateRequest &rcr,
     json_response(res, 400, {{"error", resolution.error}});
     return false;
   }
+  // resolution's operator bool() is defined as model.has_value(), so the
+  // !resolution check above already guarantees model is set here.
+  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+  const auto &selected_model = resolution.model.value();
   if (cfg.auth_resolver &&
-      cfg.auth_resolver->availability(resolution.model->provider) ==
+      cfg.auth_resolver->availability(selected_model.provider) ==
           auth::AuthAvailability::missing) {
     json_response(res, 400,
                   {{"error", "missing authentication for provider '" +
-                                 resolution.model->provider + "'"}});
+                                 selected_model.provider + "'"}});
     return false;
   }
   try {
-    session.set_model(*resolution.model,
-                      session.agent().state().thinking_level());
+    session.set_model(selected_model, session.agent().state().thinking_level());
   } catch (const std::exception &error) {
     json_response(res, 409, {{"error", error.what()}});
     return false;
@@ -657,7 +661,7 @@ httplib::ContentProviderWithoutLength
 make_run_stream_provider(const ServerConfig &cfg, std::string run_id,
                          std::string prompt,
                          std::optional<std::string> active_session_id,
-                         std::shared_ptr<core::SessionRuntime> session,
+                         const std::shared_ptr<core::SessionRuntime> &session,
                          core::Model effective_model) {
   // NOLINTNEXTLINE(bugprone-exception-escape)
   return [&cfg, run_id = std::move(run_id), prompt = std::move(prompt),
@@ -742,11 +746,12 @@ void send_run_sync_response(
 }
 
 httplib::Server::Handler make_run_create_handler(
-    const ServerConfig &cfg, std::shared_ptr<core::SessionStore> sessions,
-    std::shared_ptr<std::mutex> session_runtimes_mutex,
-    std::shared_ptr<
+    const ServerConfig &cfg,
+    const std::shared_ptr<core::SessionStore> &sessions,
+    const std::shared_ptr<std::mutex> &session_runtimes_mutex,
+    const std::shared_ptr<
         std::unordered_map<std::string, std::shared_ptr<core::SessionRuntime>>>
-        session_runtimes) {
+        &session_runtimes) {
   return [&cfg, sessions, session_runtimes_mutex, session_runtimes](
              const httplib::Request &req,
              httplib::Response &res) { // NOLINT(bugprone-exception-escape):
