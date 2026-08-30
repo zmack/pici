@@ -72,9 +72,8 @@ std::size_t estimate_context_tokens(const std::vector<Message> &messages) {
   return (bytes + 3) / 4;
 }
 
-std::vector<AgentMessageEnvelope>
-make_message_envelopes(std::vector<Message> messages) {
-  std::vector<AgentMessageEnvelope> envelopes;
+std::vector<AgentInput> make_message_envelopes(std::vector<Message> messages) {
+  std::vector<AgentInput> envelopes;
   envelopes.reserve(messages.size());
   for (auto &message : messages)
     envelopes.push_back({.message = std::move(message)});
@@ -121,7 +120,7 @@ Agent::prompt(std::vector<Message> messages) {
 }
 
 EventStream<AgentEvent, std::vector<Message>>
-Agent::prompt(std::vector<AgentMessageEnvelope> messages) {
+Agent::prompt(std::vector<AgentInput> messages) {
   EventStream<AgentEvent, std::vector<Message>> stream(
       [](const AgentEvent &ev) {
         return std::holds_alternative<AgentEndEvent>(ev);
@@ -309,8 +308,8 @@ Agent::restore_session(Model model, ThinkingLevel thinking,
         "session restoration is unavailable while tool execution is pending");
   {
     std::scoped_lock steering_lock(steering_mutex_);
-    std::erase_if(steering_queue_, [](const AgentMessageEnvelope &envelope) {
-      return envelope.source == AgentMessageSource::mailbox;
+    std::erase_if(steering_queue_, [](const AgentInput &envelope) {
+      return envelope.presentation.source == InputProvenance::Source::mailbox;
     });
     if (!steering_queue_.empty())
       throw std::runtime_error(
@@ -341,8 +340,8 @@ void Agent::set_session_identity(std::string session_id,
     throw std::runtime_error("session changes require an idle agent");
   {
     std::scoped_lock steering_lock(steering_mutex_);
-    std::erase_if(steering_queue_, [](const AgentMessageEnvelope &envelope) {
-      return envelope.source == AgentMessageSource::mailbox;
+    std::erase_if(steering_queue_, [](const AgentInput &envelope) {
+      return envelope.presentation.source == InputProvenance::Source::mailbox;
     });
     if (!steering_queue_.empty())
       throw std::runtime_error(
@@ -361,7 +360,7 @@ void Agent::steer(std::vector<Message> messages) {
   steer_envelopes(make_message_envelopes(std::move(messages)));
 }
 
-void Agent::steer_envelopes(std::vector<AgentMessageEnvelope> messages) {
+void Agent::steer_envelopes(std::vector<AgentInput> messages) {
   std::scoped_lock lock(steering_mutex_);
   steering_queue_.insert(steering_queue_.end(),
                          std::make_move_iterator(messages.begin()),
@@ -375,8 +374,8 @@ void Agent::clear_steering_queue() {
 
 void Agent::clear_mailbox_steering_queue() {
   std::scoped_lock lock(steering_mutex_);
-  std::erase_if(steering_queue_, [](const AgentMessageEnvelope &envelope) {
-    return envelope.source == AgentMessageSource::mailbox;
+  std::erase_if(steering_queue_, [](const AgentInput &envelope) {
+    return envelope.presentation.source == InputProvenance::Source::mailbox;
   });
 }
 

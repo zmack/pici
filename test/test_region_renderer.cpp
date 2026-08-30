@@ -1086,8 +1086,8 @@ void test_explicit_turn_request_sections() {
   state.turns.push_back(std::move(ordinary));
 
   pi::core::RegionTurn mailbox;
-  pi::core::RequestPresentation metadata{.source =
-                                             pi::core::RequestSource::mailbox,
+  pi::core::InputProvenance metadata{.source =
+                                             pi::core::InputProvenance::Source::mailbox,
                                          .sender_task_path = "/root/luna"};
   mailbox.requests.push_back(
       pi::core::RegionRequestBlock{.metadata = metadata,
@@ -1163,8 +1163,8 @@ void test_request_audit_behaviors() {
       pi::core::RegionRequestBlock{.metadata = {}, .raw_text = "ordinary"});
   mixed.requests.push_back(pi::core::RegionRequestBlock{
       .metadata =
-          pi::core::RequestPresentation{.source =
-                                            pi::core::RequestSource::mailbox,
+          pi::core::InputProvenance{.source =
+                                            pi::core::InputProvenance::Source::mailbox,
                                         .sender_task_path = "/root/task"},
       .raw_text = "mailbox"});
   const auto mixed_frame = pi::core::build_region_frame(
@@ -1178,8 +1178,8 @@ void test_request_audit_behaviors() {
                      }),
          "mixed request heading does not claim one provenance");
 
-  pi::core::RequestPresentation long_sender{
-      .source = pi::core::RequestSource::mailbox,
+  pi::core::InputProvenance long_sender{
+      .source = pi::core::InputProvenance::Source::mailbox,
       .sender_agent_id = "abcdefghijklmnopqrstuvwx12345"};
   pi::core::RegionTurn narrow;
   narrow.requests.push_back(pi::core::RegionRequestBlock{
@@ -1272,8 +1272,8 @@ void test_request_audit_behaviors() {
   pi::core::RegionTurn unsafe;
   unsafe.requests.push_back(pi::core::RegionRequestBlock{
       .metadata =
-          pi::core::RequestPresentation{
-              .source = pi::core::RequestSource::mailbox,
+          pi::core::InputProvenance{
+              .source = pi::core::InputProvenance::Source::mailbox,
               .sender_task_path = "\033[31msender\033[0m\033]52;c;bad\007"},
       .raw_text = "visible \033[2Jtext \033[?25l\033[31mred\033[0m"});
   const auto unsafe_frame = pi::core::build_region_frame(

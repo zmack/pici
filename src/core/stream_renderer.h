@@ -1,8 +1,8 @@
 #pragma once
 
 #include "core/event_types.h"
+#include "core/input_provenance.h"
 #include "core/message_types.h"
-#include "core/request_presentation.h"
 #include "core/terminal.h"
 
 #include <cstddef>
@@ -19,7 +19,7 @@
 namespace pi::core {
 
 struct RendererRequest {
-  RequestPresentation presentation;
+  InputProvenance presentation;
   std::string text;
   std::size_t non_text_attachments{0};
 };

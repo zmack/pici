@@ -804,8 +804,8 @@ void test_event_json() {
           event_to_json(MessageStartEvent{Message{std::move(assistant)}});
       CHECK(!assistant_json["data"].contains("request"));
 
-      RequestPresentation presentation{.source = RequestSource::mailbox,
-                                       .message_id = "msg-1",
+      InputProvenance presentation{.source = InputProvenance::Source::mailbox,
+                                   .message_id = "msg-1",
                                        .message_kind = "request",
                                        .sender_agent_id = "agent-1",
                                        .sender_session_id = "session-1",

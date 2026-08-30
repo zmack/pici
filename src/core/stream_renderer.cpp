@@ -23,9 +23,9 @@
 #include <vector>
 
 #include "core/event_types.h"
+#include "core/input_provenance.h"
 #include "core/markdown.h"
 #include "core/message_types.h"
-#include "core/request_presentation.h"
 #include "core/terminal.h"
 
 namespace pi::core {
@@ -767,8 +767,8 @@ void dispatch_event(const AgentEvent &ev, Renderer &r) {
 
         } else if constexpr (std::is_same_v<T, MessageStartEvent>) {
           if (const auto *user = std::get_if<UserMessage>(&e.message)) {
-            RendererRequest request{
-                .presentation = e.request.value_or(RequestPresentation{})};
+            RendererRequest request{.presentation =
+                                        e.request.value_or(InputProvenance{})};
             for (const auto &content : user->content) {
               std::visit(
                   [&request](const auto &block) {

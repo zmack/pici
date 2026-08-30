@@ -1256,7 +1256,7 @@ void test_agent_loop_message_envelopes() {
             message.content.emplace_back(TextContent{.text = std::move(text)});
             return Message{std::move(message)};
         };
-        std::vector<AgentMessageEnvelope> prompts;
+        std::vector<AgentInput> prompts;
         prompts.push_back(
             {.message = make_message("one"),
              .on_accepted =
@@ -1266,9 +1266,9 @@ void test_agent_loop_message_envelopes() {
                    order.push_back("accepted");
                    throw std::runtime_error("observer failure");
                  },
-             .source = AgentMessageSource::mailbox,
-             .presentation = RequestPresentation{
-                 .source = RequestSource::mailbox, .message_id = "one"}});
+             .presentation = InputProvenance{
+                 .source = InputProvenance::Source::mailbox,
+                 .message_id = "one"}});
         prompts.push_back(
             {.message = make_message("two"),
              .on_accepted =
@@ -1277,9 +1277,9 @@ void test_agent_loop_message_envelopes() {
                    ++accepted;
                    order.push_back("accepted");
                  },
-             .source = AgentMessageSource::ordinary,
-             .presentation = RequestPresentation{
-                 .source = RequestSource::follow_up, .message_id = "two"}});
+             .presentation = InputProvenance{
+                 .source = InputProvenance::Source::follow_up,
+                 .message_id = "two"}});
 
         AgentContext context;
         AgentLoopConfig config;
@@ -1289,9 +1289,9 @@ void test_agent_loop_message_envelopes() {
             return messages;
         };
         config.get_steering_envelopes = [] {
-            return std::vector<AgentMessageEnvelope>{};
+            return std::vector<AgentInput>{};
         };
-        std::vector<RequestPresentation> requests;
+        std::vector<InputProvenance> requests;
         auto stream = run_agent_loop_envelopes(
             std::move(prompts), context, config,
             [&order, &requests](const AgentEvent &event) {
@@ -1310,9 +1310,9 @@ void test_agent_loop_message_envelopes() {
                 result = end->messages;
         }
         CHECK_EQ(requests.size(), std::size_t(2));
-        CHECK(requests[0].source == RequestSource::mailbox);
+        CHECK(requests[0].source == InputProvenance::Source::mailbox);
         CHECK_EQ(requests[0].message_id.value(), "one");
-        CHECK(requests[1].source == RequestSource::follow_up);
+        CHECK(requests[1].source == InputProvenance::Source::follow_up);
         CHECK_EQ(requests[1].message_id.value(), "two");
 
         CHECK_EQ(accepted, 2);
@@ -1328,7 +1328,7 @@ void test_agent_loop_message_envelopes() {
 void test_agent_loop_message_envelopes_cancelled() {
     tests::register_test("Agent loop: cancelled envelopes are not accepted", []() {
         int accepted = 0;
-        AgentMessageEnvelope envelope;
+        AgentInput envelope;
         UserMessage message;
         message.content.emplace_back(TextContent{.text = "drop me"});
         envelope.message = Message{std::move(message)};
@@ -1398,15 +1398,15 @@ void test_mailbox_envelope_waits_for_turn_boundary() {
         };
         config.get_steering_envelopes = [injected, &accepted] {
             if (!injected->exchange(false))
-                return std::vector<AgentMessageEnvelope>{};
+                return std::vector<AgentInput>{};
             UserMessage message;
             message.content.emplace_back(TextContent{.text = "mailbox-id"});
-            return std::vector<AgentMessageEnvelope>{AgentMessageEnvelope{
+            return std::vector<AgentInput>{AgentInput{
                 .message = Message{std::move(message)},
                 .on_accepted = [&accepted] { ++accepted; }}};
         };
         auto stream = run_agent_loop_envelopes(
-            {AgentMessageEnvelope{.message = Message{std::move(prompt)}}},
+            {AgentInput{.message = Message{std::move(prompt)}}},
             context, config, [&order](const AgentEvent& event) {
                 if (const auto* end = std::get_if<MessageEndEvent>(&event)) {
                     if (std::holds_alternative<UserMessage>(end->message))
@@ -1465,10 +1465,10 @@ void test_agent_loop_steering_envelopes() {
         config.get_steering_envelopes = [&getter_calls, &accepted] {
             ++getter_calls;
             if (getter_calls != 1)
-                return std::vector<AgentMessageEnvelope>{};
+                return std::vector<AgentInput>{};
             UserMessage message;
             message.content.emplace_back(TextContent{.text = "steer"});
-            return std::vector<AgentMessageEnvelope>{
+            return std::vector<AgentInput>{
                 {.message = Message{std::move(message)},
                  .on_accepted = [&accepted] { ++accepted; }}};
         };

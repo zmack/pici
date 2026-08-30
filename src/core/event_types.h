@@ -11,8 +11,8 @@
 #include <variant>
 #include <vector>
 
+#include "core/input_provenance.h"
 #include "core/message_types.h"
-#include "core/request_presentation.h"
 
 namespace pi::core {
 
@@ -191,14 +191,14 @@ struct TurnAbortedEvent : EventBase {
 struct MessageStartEvent : EventBase {
   static constexpr EventType type = EventType::message_start;
   Message message;
-  std::optional<RequestPresentation> request;
+  std::optional<InputProvenance> request;
   explicit MessageStartEvent(
       Message msg, std::source_location loc = std::source_location::current())
       : EventBase(EventType::message_start, loc), message(std::move(msg)) {}
-  MessageStartEvent(Message msg, RequestPresentation request_presentation,
+  MessageStartEvent(Message msg, InputProvenance provenance,
                     std::source_location loc = std::source_location::current())
       : EventBase(EventType::message_start, loc), message(std::move(msg)),
-        request(std::move(request_presentation)) {}
+        request(std::move(provenance)) {}
 };
 
 struct MessageUpdateEvent : EventBase {
@@ -304,7 +304,7 @@ std::string_view compaction_event_kind_to_string(CompactionEventKind kind);
 // Published by CompactionManager (see core/compaction.h) on the same
 // EventStream mechanism Agent::prompt() uses, so a `complete` event is
 // observed by the caller-drained consumer thread rather than the compaction
-// worker thread. AgentSession's event-drain loop writes the durable journal
+// worker thread. SessionRuntime's event-drain loop writes the durable journal
 // record and installs the replacement transcript in response to `complete`
 // — never in response to a `start` or from inside the worker itself. See
 // plans/server-side-compaction.md §5.

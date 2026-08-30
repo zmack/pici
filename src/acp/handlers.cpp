@@ -3,6 +3,7 @@
 #include "acp/sse.h"
 #include "acp/task_events.h"
 #include "acp/types.h"
+#include "cli/session_runtime.h"
 #include "core/agent.h"
 #include "core/agent_task.h"
 #include "core/auth/auth_resolver.h"
@@ -26,6 +27,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -36,8 +38,30 @@ namespace {
 
 // Translates Renderer callbacks into ACP SSE events.
 
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-std::mutex durable_run_mutex;
+// Phase 7 of plans/session-runtime-migration.md removed the process-wide
+// `durable_run_mutex` that used to wrap the whole /runs request (session
+// lookup/construction through run completion), serializing every ACP run
+// regardless of which session it targeted. Pre-removal audit of what that
+// mutex actually protected, so nothing relies on it silently:
+//   - core::SessionStore already has its own internal mutex_ (see
+//     core/session/session_store.h) -- concurrent access across sessions
+//     was already safe without the coarse lock.
+//   - core::AgentTaskManager already self-locks internally throughout
+//     agent_task.cpp -- also independent of the coarse lock.
+//   - core::Agent (inside SessionRuntime) already rejects a second
+//     concurrent run against *the same instance* by throwing
+//     std::runtime_error ("Agent is already processing...") rather than
+//     corrupting state -- see Agent::prompt() in agent.cpp. So invariant 3
+//     ("one activation binds to at most one active session at a time") was
+//     already mechanically enforced per-SessionRuntime; the coarse mutex
+//     only additionally serialized runs against *different* sessions,
+//     which is exactly the over-serialization this phase removes.
+// The only state that genuinely needed protection is the session_runtimes
+// registry below (a plain, unsynchronized std::unordered_map) -- see
+// session_runtimes_mutex, held only for the brief lookup/insert, not for
+// the run's duration. A same-session_id collision now surfaces as the
+// "already processing" exception, caught at the run call sites below and
+// turned into an explicit response instead of an uncaught throw.
 
 class AcpSseRenderer final : public core::Renderer {
 public:
@@ -299,6 +323,60 @@ std::uint64_t query_uint64(const httplib::Request &req, std::string_view name,
   }
 }
 
+// Durable-session SessionRuntime reuse (plans/session-runtime-migration.md
+// Phase 6, decision (a)): successive /runs calls against the same
+// session_id share one SessionRuntime rather than each rebuilding one from
+// scratch and reloading the transcript from disk. Anonymous runs (no
+// session_id) are never registered, matching pre-Phase-6 behavior exactly.
+// A free function rather than inlined at its call site so the /runs
+// handler's own cognitive-complexity score only pays for one call, not this
+// lookup-or-construct branching.
+//
+// Phase 7 removed the process-wide durable_run_mutex that used to guard
+// this incidentally by wrapping the whole /runs request; registry_mutex
+// below protects only this function's brief lookup/insert, not run
+// execution, so concurrent /runs calls against different session_ids (or
+// anonymous runs) now execute fully in parallel.
+std::shared_ptr<core::SessionRuntime> find_or_create_session_runtime(
+    const ServerConfig &cfg,
+    const std::shared_ptr<core::SessionStore> &sessions,
+    const std::optional<std::string> &session_id, std::mutex &registry_mutex,
+    std::unordered_map<std::string, std::shared_ptr<core::SessionRuntime>>
+        &session_runtimes) {
+  if (session_id && !session_id->empty()) {
+    std::scoped_lock lock(registry_mutex);
+    if (auto existing = session_runtimes.find(*session_id);
+        existing != session_runtimes.end())
+      return existing->second;
+  }
+  // ACP never enables auto-compaction (see cli/session_runtime.h); the
+  // unused cli::Args{} below is only read when that capability is on.
+  auto session =
+      std::make_shared<core::SessionRuntime>(cli::build_agent_session_config(
+          cfg.agent_opts, cfg.model_registry, cfg.tools, sessions,
+          cfg.sandbox_policy, cli::Args{},
+          cli::SessionRuntimeCapabilities{.enable_mailbox = false,
+                                          .enable_hooks = false,
+                                          .enable_skills = false,
+                                          .enable_context_files = false,
+                                          .enable_auto_compaction = false}));
+  if (session_id && !session_id->empty()) {
+    std::scoped_lock lock(registry_mutex);
+    // Another thread may have raced this one and already inserted a
+    // runtime for the same session_id while this one was under
+    // construction (construction happens outside the lock, deliberately,
+    // so it never blocks unrelated sessions' lookups) -- prefer whichever
+    // one won the race so every caller ends up sharing a single runtime
+    // per session_id, rather than the second constructor's result
+    // silently replacing the first and orphaning any run already
+    // in flight against it.
+    auto [it, inserted] = session_runtimes.try_emplace(*session_id, session);
+    if (!inserted)
+      return it->second;
+  }
+  return session;
+}
+
 } // namespace
 
 void register_routes(httplib::Server &svr, const ServerConfig &cfg,
@@ -501,12 +579,20 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
              }
            });
 
+  // Registry backing find_or_create_session_runtime() above, and the small
+  // mutex that protects only its lookup/insert (see the pre-removal audit
+  // above durable_run_mutex's old declaration) -- run execution itself is
+  // no longer serialized through this.
+  auto session_runtimes_mutex = std::make_shared<std::mutex>();
+  auto session_runtimes = std::make_shared<
+      std::unordered_map<std::string, std::shared_ptr<core::SessionRuntime>>>();
+
   svr.Post(
       "/runs",
-      [&cfg,
-       sessions](const httplib::Request &req,
-                 httplib::Response &res) { // NOLINT(bugprone-exception-escape):
-                                           // httplib owns callback errors.
+      [&cfg, sessions, session_runtimes_mutex, session_runtimes](
+          const httplib::Request &req,
+          httplib::Response &res) { // NOLINT(bugprone-exception-escape):
+                                    // httplib owns callback errors.
         RunCreateRequest rcr;
         try {
           from_json(parse_body(req), rcr);
@@ -537,26 +623,25 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
 
         const std::string run_id = make_run_id();
 
-        auto session_lock =
-            std::make_shared<std::unique_lock<std::mutex>>(durable_run_mutex);
-        auto session = std::make_shared<core::AgentSession>(
-            core::AgentSession::Config{.agent_options = cfg.agent_opts,
-                                       .model_registry = cfg.model_registry,
-                                       .tools = cfg.tools,
-                                       .session_store = sessions,
-                                       .sandbox_policy = cfg.sandbox_policy});
+        auto session = find_or_create_session_runtime(
+            cfg, sessions, rcr.session_id, *session_runtimes_mutex,
+            *session_runtimes);
 
-        std::optional<std::string> active_session_id;
-
-        // Restore or create durable session history if provided.
-        if (rcr.session_id) {
+        // Restore or create durable session history the first time this
+        // SessionRuntime sees rcr.session_id; a reused runtime already has it
+        // active in memory (and re-opening would reload the transcript from
+        // disk, discarding continuity the whole point of reuse is to keep).
+        if (rcr.session_id && !session->active_session_id()) {
           core::SessionHeader header;
           header.created = std::chrono::system_clock::to_time_t(
               std::chrono::system_clock::now());
           header.model = cfg.agent_opts.model.id;
           header.provider = cfg.agent_opts.model.provider;
-          active_session_id = session->open_session(*rcr.session_id, header);
+          session->open_session(*rcr.session_id, header);
         }
+        std::optional<std::string> active_session_id;
+        if (rcr.session_id)
+          active_session_id = session->active_session_id();
 
         // An explicit request selection always wins over the restored model,
         // and is journaled before the run starts.
@@ -599,7 +684,6 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
               "text/event-stream",
               // NOLINTNEXTLINE(bugprone-exception-escape)
               [&cfg, run_id, prompt, rcr, active_session_id, session,
-               session_lock,
                effective_model](std::size_t /*offset*/,
                                 httplib::DataSink &sink) mutable -> bool {
                 SseWriter sse(sink);
@@ -618,10 +702,23 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
                                              {"run", nlohmann::json(r)}});
 
                 AcpSseRenderer renderer(sse, cfg.agent_name);
-                auto result = session->run_prompt(
-                    prompt, [&renderer](const core::AgentEvent &event) {
-                      core::dispatch_event(event, renderer);
-                    });
+                // run.created/run.in-progress are already on the wire by
+                // this point, so a same-session_id collision with another
+                // in-flight run (core::Agent rejects a second concurrent
+                // run against the same instance -- see the audit above
+                // durable_run_mutex's old declaration) can no longer become
+                // an HTTP error status; report it the same way any other
+                // run_prompt failure is reported, through the renderer and
+                // a failed final run event.
+                core::SessionRuntime::RunResult result;
+                try {
+                  result = session->run_prompt(
+                      prompt, [&renderer](const core::AgentEvent &event) {
+                        core::dispatch_event(event, renderer);
+                      });
+                } catch (const std::exception &error) {
+                  result.error = error.what();
+                }
                 if (result.error && !session->agent().state().error_message())
                   renderer.on_error(core::RendererErrorKind::unknown,
                                     *result.error);
@@ -634,10 +731,16 @@ void register_routes(httplib::Server &svr, const ServerConfig &cfg,
         }
 
         SyncRenderer sr;
-        auto result =
-            session->run_prompt(prompt, [&sr](const core::AgentEvent &event) {
-              core::dispatch_event(event, sr);
-            });
+        core::SessionRuntime::RunResult result;
+        try {
+          result =
+              session->run_prompt(prompt, [&sr](const core::AgentEvent &event) {
+                core::dispatch_event(event, sr);
+              });
+        } catch (const std::exception &error) {
+          json_response(res, 409, {{"error", error.what()}});
+          return;
+        }
         if (result.error && !session->agent().state().error_message())
           sr.on_error(core::RendererErrorKind::unknown, *result.error);
 

@@ -88,9 +88,43 @@ struct AcpFixture {
     core::ConfiguredModel alternate_model;
     alternate_model.id = "other";
     alternate_provider.models.push_back(alternate_model);
+
+    // A second, deliberately slow faux API: each turn sleeps between
+    // scripted events, giving the Phase 7 concurrency tests below a wide,
+    // reliable window to observe a run still in flight.
+    core::AssistantMessage slow_final_msg;
+    slow_final_msg.content.push_back(
+        core::TextContent{"Hello from slow faux agent"});
+    slow_final_msg.stop_reason = core::StopReason::stop;
+    core::FauxClient::Script slow_script;
+    slow_script.events = {
+        core::AssistantMessageEvent{core::AssistantMessageStartEvent{}},
+        core::AssistantMessageEvent{core::AssistantMessageTextDeltaEvent{
+            0, "Hello from slow faux agent", {}}},
+        core::AssistantMessageEvent{
+            core::AssistantMessageDoneEvent{core::StopReason::stop,
+                                            slow_final_msg}},
+    };
+    slow_script.delay_between = std::chrono::milliseconds(300);
+    core::LLMClientRegistry::instance().register_client(
+        "faux-slow", [slow_script] {
+          return std::make_shared<core::FauxClient>(
+              std::vector{slow_script});
+        });
+    core::ProviderConfig slow_provider;
+    slow_provider.id = "faux-slow-provider";
+    slow_provider.api = "faux-slow";
+    slow_provider.base_url = "http://faux-slow.test/v1";
+    slow_provider.auth = core::ProviderAuthPolicy::none;
+    core::ConfiguredModel slow_model;
+    slow_model.id = "slow";
+    slow_provider.models.push_back(slow_model);
+
     cfg.model_registry = std::make_shared<const core::ModelRegistry>(
-        std::map<std::string, core::ProviderConfig>{{"faux", faux_provider},
-                                                     {"faux-b", alternate_provider}});
+        std::map<std::string, core::ProviderConfig>{
+            {"faux", faux_provider},
+            {"faux-b", alternate_provider},
+            {"faux-slow-provider", slow_provider}});
     cfg.agent_opts.model_registry = cfg.model_registry;
     cfg.agent_opts.get_api_key = [](std::string_view) -> std::optional<std::string> {
       return std::nullopt;
@@ -247,6 +281,191 @@ void test_run_session(AcpFixture &fx) {
 }
 
 
+// plans/session-runtime-migration.md Phase 6, decision (a): successive
+// /runs calls against the same session_id reuse one SessionRuntime, looked
+// up in a session_id-keyed registry (see handlers.cpp's session_runtimes
+// map). This test targets the actual regression risk of that registry --
+// two different session_ids must never share state -- by giving each its
+// own model selection and confirming a later unselected run on either one
+// restores *that session's own* journaled model, not the other session's.
+void test_run_session_isolation(AcpFixture &fx) {
+  auto cli = fx.client();
+  const std::string session_a = "isolation-session-a";
+  const std::string session_b = "isolation-session-b";
+
+  auto make_body = [](const std::string &session_id, std::string text,
+                      bool select_alternate) {
+    nlohmann::json body = {
+        {"agent_name", "test-agent"},
+        {"mode", "sync"},
+        {"session_id", session_id},
+        {"input", {{{"role", "user"},
+                    {"parts", {{{"content_type", "text/plain"},
+                                {"content", std::move(text)}}}}}}}};
+    if (select_alternate) {
+      body["provider"] = "faux-b";
+      body["model"] = "other";
+    }
+    return body.dump();
+  };
+
+  // session_a explicitly selects the alternate model; session_b never does,
+  // so it stays on the default "faux" model throughout.
+  auto a1 = cli.Post("/runs", make_body(session_a, "a1", true),
+                     "application/json");
+  CHECK(a1 != nullptr);
+  CHECK(a1->status == 200);
+  auto b1 = cli.Post("/runs", make_body(session_b, "b1", false),
+                     "application/json");
+  CHECK(b1 != nullptr);
+  CHECK(b1->status == 200);
+
+  // Follow-up on each with no explicit selection must restore that
+  // session's own journaled model -- if the registry ever mixed the two
+  // SessionRuntimes up, session_b would incorrectly see "faux-b"/"other"
+  // here.
+  auto a2 = cli.Post("/runs", make_body(session_a, "a2", false),
+                     "application/json");
+  CHECK(a2 != nullptr);
+  CHECK(a2->status == 200);
+  auto ja2 = nlohmann::json::parse(a2->body);
+  CHECK(ja2.value("session_id", "") == session_a);
+  CHECK(ja2.value("provider", "") == "faux-b");
+  CHECK(ja2.value("model", "") == "other");
+
+  auto b2 = cli.Post("/runs", make_body(session_b, "b2", false),
+                     "application/json");
+  CHECK(b2 != nullptr);
+  CHECK(b2->status == 200);
+  auto jb2 = nlohmann::json::parse(b2->body);
+  CHECK(jb2.value("session_id", "") == session_b);
+  CHECK(jb2.value("provider", "") == "faux");
+  CHECK(jb2.value("model", "") == "faux");
+}
+
+// plans/session-runtime-migration.md Phase 7: removing durable_run_mutex
+// means /runs calls against different session_ids must run fully
+// concurrently rather than being serialized process-wide. Prove it: start a
+// deliberately slow run (faux-slow-provider/slow, ~900ms end to end) in a
+// background thread against one session, then -- while it's still in
+// flight -- run a fast request against a *different* session from the main
+// thread and confirm it completes quickly rather than queuing behind the
+// slow one.
+void test_run_concurrent_sessions_no_blocking(AcpFixture &fx) {
+  auto slow_client = fx.client();
+  auto fast_client = fx.client();
+
+  nlohmann::json slow_body = {
+      {"agent_name", "test-agent"},
+      {"mode", "sync"},
+      {"session_id", "concurrent-slow"},
+      {"provider", "faux-slow-provider"},
+      {"model", "slow"},
+      {"input",
+       {{{"role", "user"},
+         {"parts", {{{"content_type", "text/plain"}, {"content", "slow"}}}}}}}};
+
+  std::optional<httplib::Result> slow_result;
+  std::thread slow_thread([&] {
+    slow_result = slow_client.Post("/runs", slow_body.dump(),
+                                   "application/json");
+  });
+
+  // Give the slow run a head start so it's genuinely in flight (past
+  // session lookup/construction and into Agent::prompt()'s streaming
+  // window) before the fast request races it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  nlohmann::json fast_body = {
+      {"agent_name", "test-agent"},
+      {"mode", "sync"},
+      {"session_id", "concurrent-fast"},
+      {"input",
+       {{{"role", "user"},
+         {"parts", {{{"content_type", "text/plain"}, {"content", "fast"}}}}}}}};
+
+  const auto fast_start = std::chrono::steady_clock::now();
+  auto fast_result =
+      fast_client.Post("/runs", fast_body.dump(), "application/json");
+  const auto fast_elapsed = std::chrono::steady_clock::now() - fast_start;
+
+  slow_thread.join();
+
+  CHECK(fast_result != nullptr);
+  if (fast_result) {
+    CHECK(fast_result->status == 200);
+    auto jf = nlohmann::json::parse(fast_result->body);
+    CHECK(jf.value("session_id", "") == "concurrent-fast");
+    CHECK(jf.value("status", "") == "completed");
+  }
+  // The slow run's script alone takes ~900ms (three scripted events, 300ms
+  // apart); the fast request must not have queued behind it.
+  CHECK(fast_elapsed < std::chrono::milliseconds(500));
+
+  CHECK(slow_result.has_value() && *slow_result != nullptr);
+  if (slow_result && *slow_result) {
+    CHECK((*slow_result)->status == 200);
+    auto js = nlohmann::json::parse((*slow_result)->body);
+    CHECK(js.value("session_id", "") == "concurrent-slow");
+    CHECK(js.value("status", "") == "completed");
+  }
+}
+
+// Same scenario, but the second request targets the *same* session_id as
+// the in-flight slow run. core::Agent already rejects a second concurrent
+// run against one instance (see the pre-removal audit above
+// durable_run_mutex's old declaration); this confirms handlers.cpp turns
+// that into an explicit 409 rather than an uncaught exception, and that the
+// original run still completes normally afterward.
+void test_run_concurrent_same_session_conflict(AcpFixture &fx) {
+  auto slow_client = fx.client();
+  auto conflict_client = fx.client();
+
+  const std::string session_id = "concurrent-conflict";
+  nlohmann::json slow_body = {
+      {"agent_name", "test-agent"},
+      {"mode", "sync"},
+      {"session_id", session_id},
+      {"provider", "faux-slow-provider"},
+      {"model", "slow"},
+      {"input",
+       {{{"role", "user"},
+         {"parts", {{{"content_type", "text/plain"}, {"content", "slow"}}}}}}}};
+
+  std::optional<httplib::Result> slow_result;
+  std::thread slow_thread([&] {
+    slow_result = slow_client.Post("/runs", slow_body.dump(),
+                                   "application/json");
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  nlohmann::json conflict_body = {
+      {"agent_name", "test-agent"},
+      {"mode", "sync"},
+      {"session_id", session_id},
+      {"input",
+       {{{"role", "user"},
+         {"parts",
+          {{{"content_type", "text/plain"}, {"content", "conflict"}}}}}}}};
+  auto conflict_result = conflict_client.Post("/runs", conflict_body.dump(),
+                                              "application/json");
+
+  slow_thread.join();
+
+  CHECK(conflict_result != nullptr);
+  if (conflict_result)
+    CHECK(conflict_result->status == 409);
+
+  CHECK(slow_result.has_value() && *slow_result != nullptr);
+  if (slow_result && *slow_result) {
+    CHECK((*slow_result)->status == 200);
+    auto js = nlohmann::json::parse((*slow_result)->body);
+    CHECK(js.value("session_id", "") == session_id);
+    CHECK(js.value("status", "") == "completed");
+  }
+}
+
 void test_agent_tasks(AcpFixture &fx) {
   auto cli = fx.client();
   nlohmann::json body = {
@@ -367,6 +586,9 @@ int main() {
   test_run_sync(fx);
   test_run_streaming(fx);
   test_run_session(fx);
+  test_run_session_isolation(fx);
+  test_run_concurrent_sessions_no_blocking(fx);
+  test_run_concurrent_same_session_conflict(fx);
   test_agent_tasks(fx);
 
   std::cout << "\n========================================\n"

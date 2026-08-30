@@ -142,14 +142,14 @@ public:
   prompt(std::vector<Message> messages);
 
   EventStream<AgentEvent, std::vector<Message>>
-  prompt(std::vector<AgentMessageEnvelope> messages);
+  prompt(std::vector<AgentInput> messages);
 
   // Continue from current transcript
   EventStream<AgentEvent, std::vector<Message>> continue_();
 
   // Queue a message to be injected after the current turn
   void steer(std::vector<Message> messages);
-  void steer_envelopes(std::vector<AgentMessageEnvelope> messages);
+  void steer_envelopes(std::vector<AgentInput> messages);
   void clear_steering_queue();
   void clear_mailbox_steering_queue();
 
@@ -184,7 +184,7 @@ public:
   // does not corrupt anything: commit_compaction() rechecks the transcript
   // epoch and fails closed (stale snapshot) instead of silently discarding
   // the prompt's messages. See core/compaction.h and
-  // AgentSession::compact_active_session for the intended drain-side wiring
+  // SessionRuntime::compact_active_session for the intended drain-side wiring
   // — the durable journal write and the memory install must both happen on
   // whichever thread drains this stream's `complete` CompactionEvent, never
   // from inside this call's own worker thread.
@@ -221,7 +221,7 @@ private:
 
   // Queue management
   std::mutex steering_mutex_;
-  std::vector<AgentMessageEnvelope> steering_queue_;
+  std::vector<AgentInput> steering_queue_;
 
   std::mutex followup_mutex_;
   std::vector<Message> followup_queue_;

@@ -1,8 +1,8 @@
 #include "core/event_json.h"
 
 #include "core/event_types.h"
+#include "core/input_provenance.h"
 #include "core/message_types.h"
-#include "core/request_presentation.h"
 
 #include <nlohmann/json.hpp>
 #include <type_traits>
@@ -21,14 +21,19 @@ nlohmann::json message_json( // NOLINT(misc-include-cleaner)
 } // namespace
 namespace {
 
-nlohmann::json request_json(const RequestPresentation &request) {
+// Wire shape is unchanged by Phase 7's RequestPresentation split (see
+// plans/session-runtime-migration.md): this always served InputProvenance
+// data (the frontend-owned presentation type never reaches the RPC event
+// stream), so retargeting the parameter type is a rename, not a schema
+// change.
+nlohmann::json request_json(const InputProvenance &request) {
   const auto *const source = [&] {
     switch (request.source) {
-    case RequestSource::ordinary:
+    case InputProvenance::Source::ordinary:
       return "ordinary";
-    case RequestSource::mailbox:
+    case InputProvenance::Source::mailbox:
       return "mailbox";
-    case RequestSource::follow_up:
+    case InputProvenance::Source::follow_up:
       return "follow_up";
     }
     return "ordinary";

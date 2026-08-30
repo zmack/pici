@@ -3,9 +3,9 @@
 #include "core/agent_loop.h"
 #include "core/event_json.h"
 #include "core/event_types.h"
+#include "core/input_provenance.h"
 #include "core/message_types.h"
 #include "core/providers/faux_control.h"
-#include "core/request_presentation.h"
 #include "core/session/agent_session.h"
 #include "nlohmann/json_fwd.hpp"
 
@@ -83,8 +83,8 @@ bool optional_prompt_string(const nlohmann::json &prompt,
   return true;
 }
 
-std::optional<core::AgentMessageEnvelope>
-parse_turn_prompt(const nlohmann::json &command, std::string &error) {
+std::optional<core::AgentInput> parse_turn_prompt(const nlohmann::json &command,
+                                                  std::string &error) {
   if (!command.contains("prompt"))
     return std::nullopt;
   const auto &prompt = command.at("prompt");
@@ -97,7 +97,7 @@ parse_turn_prompt(const nlohmann::json &command, std::string &error) {
     return std::nullopt;
   }
 
-  core::RequestPresentation presentation;
+  core::InputProvenance presentation;
   if (prompt.contains("source")) {
     if (!prompt.at("source").is_string()) {
       error = "turn prompt field 'source' must be a string";
@@ -105,11 +105,11 @@ parse_turn_prompt(const nlohmann::json &command, std::string &error) {
     }
     const auto source = prompt.at("source").get<std::string>();
     if (source == "ordinary")
-      presentation.source = core::RequestSource::ordinary;
+      presentation.source = core::InputProvenance::Source::ordinary;
     else if (source == "mailbox")
-      presentation.source = core::RequestSource::mailbox;
+      presentation.source = core::InputProvenance::Source::mailbox;
     else if (source == "follow_up")
-      presentation.source = core::RequestSource::follow_up;
+      presentation.source = core::InputProvenance::Source::follow_up;
     else {
       error = "turn prompt field 'source' must be 'ordinary', 'mailbox', or "
               "'follow_up'";
@@ -133,18 +133,14 @@ parse_turn_prompt(const nlohmann::json &command, std::string &error) {
   core::UserMessage user;
   user.content.emplace_back(
       core::TextContent{.text = prompt.at("text").get<std::string>()});
-  return core::AgentMessageEnvelope{
-      .message = core::Message{std::move(user)},
-      .source = presentation.source == core::RequestSource::mailbox
-                    ? core::AgentMessageSource::mailbox
-                    : core::AgentMessageSource::ordinary,
-      .presentation = std::move(presentation)};
+  return core::AgentInput{.message = core::Message{std::move(user)},
+                          .presentation = std::move(presentation)};
 }
 
 } // namespace
 
 FauxControlMode::FauxControlMode(
-    core::AgentSession &session, core::RemoteFauxClient &client,
+    core::SessionRuntime &session, core::RemoteFauxClient &client,
     std::shared_ptr<core::ScriptedToolRegistry> tool_registry, Output output,
     ToolRegistrar tool_registrar, EventObserver event_observer)
     : session_(session), client_(client),
@@ -295,7 +291,7 @@ void FauxControlMode::stop(bool close_client) {
 }
 
 int run_faux_control_socket(
-    core::AgentSession &session, core::RemoteFauxClient &client,
+    core::SessionRuntime &session, core::RemoteFauxClient &client,
     const std::shared_ptr<core::ScriptedToolRegistry> &tool_registry,
     const std::string &socket_path,
     const FauxControlMode::ToolRegistrar &tool_registrar,

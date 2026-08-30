@@ -962,7 +962,7 @@ using AgentEventPush = AgentEventStream::PushFn;
 // Shared worker body for run_agent_loop and run_agent_loop_continue.
 // `prompts` is empty for the continue path, in which case the
 // emit-and-seed-new_messages step below is simply a no-op.
-void run_agent_loop_worker_impl(std::vector<AgentMessageEnvelope> prompts,
+void run_agent_loop_worker_impl(std::vector<AgentInput> prompts,
                                 AgentContext context,
                                 const AgentLoopConfig &config,
                                 StreamCallback emit, const AgentEventPush &push,
@@ -987,7 +987,7 @@ void run_agent_loop_worker_impl(std::vector<AgentMessageEnvelope> prompts,
   // Acceptance is deliberately after publication and local context append.
   // Callbacks must remain lock-free with respect to agent and coordinator
   // state; observer failures cannot affect the model loop.
-  auto accept = [&](AgentMessageEnvelope &envelope) {
+  auto accept = [&](AgentInput &envelope) {
     if (stop_tok.stop_requested() || !envelope.on_accepted)
       return;
     try {
@@ -1058,7 +1058,7 @@ void run_agent_loop_worker_impl(std::vector<AgentMessageEnvelope> prompts,
 
   auto pending_messages = config.get_steering_envelopes
                               ? config.get_steering_envelopes()
-                              : std::vector<AgentMessageEnvelope>{};
+                              : std::vector<AgentInput>{};
   if (!config.get_steering_envelopes && config.get_steering_messages) {
     for (auto &message : config.get_steering_messages())
       pending_messages.push_back({.message = std::move(message)});
@@ -1172,7 +1172,7 @@ void run_agent_loop_worker_impl(std::vector<AgentMessageEnvelope> prompts,
 
       pending_messages = config.get_steering_envelopes
                              ? config.get_steering_envelopes()
-                             : std::vector<AgentMessageEnvelope>{};
+                             : std::vector<AgentInput>{};
       if (!config.get_steering_envelopes && config.get_steering_messages) {
         for (auto &message : config.get_steering_messages())
           pending_messages.push_back({.message = std::move(message)});
@@ -1202,7 +1202,7 @@ void run_agent_loop_worker_impl(std::vector<AgentMessageEnvelope> prompts,
 #endif
 }
 
-void run_agent_loop_worker(std::vector<AgentMessageEnvelope> prompts,
+void run_agent_loop_worker(std::vector<AgentInput> prompts,
                            AgentContext context, AgentLoopConfig config,
                            StreamCallback emit, AgentEventPush push,
                            std::stop_token stop_tok) {
@@ -1255,9 +1255,9 @@ void run_agent_loop_worker(std::vector<AgentMessageEnvelope> prompts,
 } // namespace
 
 EventStream<AgentEvent, std::vector<Message>>
-run_agent_loop_envelopes(std::vector<AgentMessageEnvelope> prompts,
-                         AgentContext context, const AgentLoopConfig &config,
-                         StreamCallback emit, const std::stop_token &stop_tok) {
+run_agent_loop_envelopes(std::vector<AgentInput> prompts, AgentContext context,
+                         const AgentLoopConfig &config, StreamCallback emit,
+                         const std::stop_token &stop_tok) {
   EventStream<AgentEvent, std::vector<Message>> stream(
       // Done predicate: agent_end
       [](const AgentEvent &ev) {
@@ -1286,7 +1286,7 @@ EventStream<AgentEvent, std::vector<Message>>
 run_agent_loop(const std::vector<Message> &prompts, AgentContext context,
                const AgentLoopConfig &config, StreamCallback emit,
                const std::stop_token &stop_tok) {
-  std::vector<AgentMessageEnvelope> envelopes;
+  std::vector<AgentInput> envelopes;
   envelopes.reserve(prompts.size());
   for (const auto &message : prompts)
     envelopes.push_back({.message = message});

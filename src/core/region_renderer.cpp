@@ -1,8 +1,8 @@
 #include "core/region_renderer.h"
 
 #include "core/event_types.h"
+#include "core/input_provenance.h"
 #include "core/message_types.h"
-#include "core/request_presentation.h"
 #include "core/stream_renderer.h"
 #include "core/terminal.h"
 
@@ -413,19 +413,19 @@ std::vector<std::string> legacy_region_lines(const RegionState &state,
   return lines;
 }
 
-std::string request_source_label(RequestSource source) {
+std::string request_source_label(InputProvenance::Source source) {
   switch (source) {
-  case RequestSource::ordinary:
+  case InputProvenance::Source::ordinary:
     return {};
-  case RequestSource::mailbox:
+  case InputProvenance::Source::mailbox:
     return "MAILBOX";
-  case RequestSource::follow_up:
+  case InputProvenance::Source::follow_up:
     return "FOLLOW-UP";
   }
   return {};
 }
 
-std::string request_sender_label(const RequestPresentation &metadata) {
+std::string request_sender_label(const InputProvenance &metadata) {
   if (metadata.sender_task_path)
     return *metadata.sender_task_path;
   if (metadata.sender_session_name)
@@ -441,7 +441,7 @@ std::string request_sender_label(const RequestPresentation &metadata) {
     return id.substr(0, kPrefixLength) + "..." +
            id.substr(id.size() - kSuffixLength);
   }
-  if (metadata.source == RequestSource::mailbox)
+  if (metadata.source == InputProvenance::Source::mailbox)
     return "unknown sender";
   return {};
 }
@@ -467,7 +467,7 @@ void append_request_lines(std::vector<std::string> &lines,
     return;
   const auto has_content = [](const RegionRequestBlock &request) {
     return !request.raw_text.empty() || request.non_text_attachments != 0 ||
-           request.metadata.source != RequestSource::ordinary ||
+           request.metadata.source != InputProvenance::Source::ordinary ||
            request.metadata.message_id.has_value() ||
            request.metadata.message_kind.has_value() ||
            request.metadata.sender_agent_id.has_value() ||
@@ -744,7 +744,7 @@ public:
         state_.active_turn_index >= state_.turns.size())
       return;
     if (request.text.empty() && request.non_text_attachments == 0 &&
-        request.presentation.source == RequestSource::ordinary &&
+        request.presentation.source == InputProvenance::Source::ordinary &&
         !request.presentation.message_id &&
         !request.presentation.message_kind &&
         !request.presentation.sender_agent_id &&
@@ -1185,7 +1185,7 @@ public:
       // paint loop treats a pane-height change like a resize and forces a
       // full row repaint, so reserve the band immediately instead of waiting
       // until the next turn (which would make the supposedly live pane stale).
-       state_.pane_rows_reserved = rows.empty() ? 0 : kSubagentReservedRows;
+      state_.pane_rows_reserved = rows.empty() ? 0 : kSubagentReservedRows;
       state_.revision = ++revision_;
       mark_dirty_locked();
       paint_now = !turn_active_;
@@ -1664,11 +1664,10 @@ private:
       if (pane_index < static_cast<int>(snapshot.subagent_rows.size())) {
         const auto &pane_row =
             snapshot.subagent_rows[static_cast<std::size_t>(pane_index)];
-        std::string text =
-            pane_row.last_activity.empty()
-                ? pane_row.name + "  " + pane_row.status
-                : pane_row.name + "  " + pane_row.status + "  " +
-                      pane_row.last_activity;
+        std::string text = pane_row.last_activity.empty()
+                               ? pane_row.name + "  " + pane_row.status
+                               : pane_row.name + "  " + pane_row.status + "  " +
+                                     pane_row.last_activity;
         out += truncate_ansi_line(text, width);
       }
       out += "\033[0m";

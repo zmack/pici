@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/request_presentation.h"
+#include "core/input_provenance.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,7 +20,7 @@ enum class RegionAssistantTextKind {
 };
 
 struct RegionRequestBlock {
-  RequestPresentation metadata;
+  InputProvenance metadata;
   std::string raw_text;
   std::size_t non_text_attachments{0};
 };

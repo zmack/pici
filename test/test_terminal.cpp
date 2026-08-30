@@ -384,7 +384,7 @@ void test_dispatch_tool_update() {
     user.content.emplace_back(
         ImageContent{.data = "base64", .mime_type = "image/png"});
     user.content.emplace_back(ThinkingContent{.thinking = "not user text"});
-    RequestPresentation presentation{.source = RequestSource::mailbox,
+    InputProvenance presentation{.source = InputProvenance::Source::mailbox,
                                      .message_id = "message-1",
                                      .message_kind = "request",
                                      .sender_agent_id = "agent-1",
@@ -397,7 +397,7 @@ void test_dispatch_tool_update() {
     CHECK_EQ(renderer.seen.text, "hello");
     CHECK_EQ(renderer.seen.non_text_attachments, std::size_t{2});
     tests::check_eq_impl(renderer.seen.presentation.source ==
-                             RequestSource::mailbox,
+                             InputProvenance::Source::mailbox,
                          "mailbox source");
     CHECK_EQ(renderer.seen.presentation.message_id.value(), "message-1");
     CHECK_EQ(renderer.seen.presentation.sender_agent_id.value(), "agent-1");
@@ -407,7 +407,7 @@ void test_dispatch_tool_update() {
     dispatch_event(MessageStartEvent{Message{std::move(ordinary)}}, renderer);
     CHECK_EQ(renderer.calls, 2);
     tests::check_eq_impl(renderer.seen.presentation.source ==
-                             RequestSource::ordinary,
+                             InputProvenance::Source::ordinary,
                          "ordinary source");
     tests::check_eq_impl(!renderer.seen.presentation.message_id.has_value(),
                          "ordinary metadata absent");
