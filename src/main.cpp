@@ -978,278 +978,348 @@ std::string format_memory(const core::SessionRuntime &session,
 // with pi-acp via cli::open_session_runtime()/activate_session_runtime();
 // see cli/session_runtime.h and plans/session-runtime-migration.md Phase 2.
 // NOLINTNEXTLINE(readability-function-size)
-int cmd_run(const cli::Args &args,
-            const std::shared_ptr<const core::ModelRegistry> &registry) {
-  auto effective_registry = registry;
-  std::shared_ptr<core::RemoteFauxClient> remote_client;
-  std::shared_ptr<core::ScriptedToolRegistry> scripted_registry;
-  core::Model model;
-  if (args.faux_control_socket.empty()) {
-    const auto resolution = cli::resolve_model_selection(args, registry);
-    if (!resolution) {
-      std::cerr << "error: " << resolution.error << "\n";
-      return 1;
-    }
-    model = *resolution.model;
-  } else {
-    core::ProviderConfig provider;
-    provider.id = "faux-control";
-    provider.api = "faux-control";
-    provider.base_url = "http://faux-control";
-    provider.auth = core::ProviderAuthPolicy::none;
-    core::ConfiguredModel configured;
-    configured.id = "faux-control";
-    configured.name = "faux-control";
-    provider.models.push_back(configured);
-    effective_registry = std::make_shared<const core::ModelRegistry>(
-        std::map<std::string, core::ProviderConfig>{
-            {"faux-control", provider}});
-    model.id = "faux-control";
-    model.name = "faux-control";
-    model.api = "faux-control";
-    model.provider = "faux-control";
-    model.base_url = "http://faux-control";
-    model.input_capabilities = {"text"};
-    model.context_window = 128000;
-    model.max_tokens = 4096;
-    remote_client = std::make_shared<core::RemoteFauxClient>();
-    scripted_registry = std::make_shared<core::ScriptedToolRegistry>();
-    core::LLMClientRegistry::instance().register_client(
-        "faux-control", [remote_client] { return remote_client; });
+nlohmann::json task_error_json(const core::AgentTaskError &error) {
+  return nlohmann::json{
+      {"error", {{"code", error.code()}, {"message", error.what()}}}};
+}
+
+nlohmann::json exception_json(const std::exception &error) {
+  return nlohmann::json{
+      {"error", {{"code", "internal"}, {"message", error.what()}}}};
+}
+
+nlohmann::json snapshot_json(const core::AgentTaskSnapshot &snapshot) {
+  nlohmann::json value = {
+      {"id", snapshot.id},
+      {"task_path", snapshot.task_path},
+      {"task_name", snapshot.task_name},
+      {"model_provider", snapshot.model_provider},
+      {"model", snapshot.model_id},
+      {"status", core::agent_task_status_to_string(snapshot.status)},
+      {"child_count", snapshot.child_count},
+      {"queued_message_count", snapshot.queued_message_count},
+      {"generation", snapshot.generation},
+  };
+  if (snapshot.parent_id)
+    value["parent_id"] = *snapshot.parent_id;
+  else
+    value["parent_id"] = nullptr;
+  if (snapshot.context_info) {
+    const auto &info = *snapshot.context_info;
+    nlohmann::json context = {
+        {"message_count", info.message_count},
+        {"context_bytes", info.context_bytes},
+        {"last_input_tokens", info.last_input_tokens},
+        {"last_output_tokens", info.last_output_tokens},
+        {"total_tokens", info.total_tokens},
+    };
+    context["context_window"] = info.context_window
+                                    ? nlohmann::json(*info.context_window)
+                                    : nlohmann::json(nullptr);
+    value["context"] = std::move(context);
   }
-  if (model.provider == "openai-codex" && !args.api_key.empty()) {
-    std::cerr << "error: --api-key cannot be used with openai-codex; run "
-                 "pi-cli auth login openai-codex\n";
-    return 1;
+  if (snapshot.result) {
+    value["result"] = {
+        {"text", snapshot.result->text},
+        {"stop_reason",
+         core::stop_reason_to_string(snapshot.result->stop_reason)},
+        {"truncated", snapshot.result->truncated},
+        {"usage",
+         {{"input", snapshot.result->usage.input},
+          {"output", snapshot.result->usage.output},
+          {"total_tokens", snapshot.result->usage.total_tokens}}},
+    };
+    if (snapshot.result->error)
+      value["result"]["error"] = *snapshot.result->error;
+    else
+      value["result"]["error"] = nullptr;
+  } else {
+    value["result"] = nullptr;
+  }
+  return value;
+}
+
+core::Message make_agent_message(const nlohmann::json &value) {
+  core::UserMessage message;
+  message.content.emplace_back(
+      core::TextContent{.text = value.value("message", std::string{})});
+  return core::Message{std::move(message)};
+}
+
+void parse_agent_context(const nlohmann::json &value,
+                         core::ContextInheritance &context) {
+  if (!value.is_object())
+    return;
+  const auto mode = value.value("mode", std::string("none"));
+  if (mode == "none")
+    context.mode = core::ContextInheritanceMode::none;
+  else if (mode == "full")
+    context.mode = core::ContextInheritanceMode::full;
+  else if (mode == "through_message")
+    context.mode = core::ContextInheritanceMode::through_message;
+  else if (mode == "recent_messages")
+    context.mode = core::ContextInheritanceMode::recent_messages;
+  else
+    throw core::AgentTaskError(core::AgentTaskErrorKind::invalid_context,
+                               "unknown context inheritance mode");
+  if (value.contains("through"))
+    context.through = value.at("through").get<std::size_t>();
+  if (value.contains("recent_count"))
+    context.recent_count = value.at("recent_count").get<std::size_t>();
+}
+
+// Orchestrates cmd_run(): model/session/tool/hook bootstrap, then dispatch
+// into faux-control, RPC, or the interactive REPL. Extracted from a single
+// 1176-line, CCN-233 free function (see test/test_cmd_run.cpp for the
+// characterization tests taken before this refactor) into a class --
+// mirroring RpcMode/FauxControlMode, the same "stateful command loop" shape
+// this function already had -- so each bootstrap step and each REPL slash
+// command is its own small, named method instead of one continuous function
+// body. Behavior is unchanged; only structure.
+class CmdRunSession {
+public:
+  CmdRunSession(cli::Args args,
+                std::shared_ptr<const core::ModelRegistry> registry)
+      : args_(std::move(args)), registry_(std::move(registry)) {}
+
+  int run() {
+    if (!resolve_model())
+      return 1;
+    if (!init_diagnostics())
+      return 1;
+    init_auth_resolver();
+    if (!open_runtime())
+      return 1;
+
+    load_tools();
+    build_system_prompt();
+
+    // --list-tools / --list-addons (exit immediately after printing)
+    if (args_.list_tools) {
+      std::cout << format_tools(agent().state().tools());
+      return 0;
+    }
+    if (args_.list_addons) {
+      std::cout << format_addons(bundle_.hooks_list_saved);
+      return 0;
+    }
+
+    activate_runtime();
+    compat_counter_ = std::make_shared<std::atomic_uint64_t>(0);
+    configure_hooks();
+
+    resolve_or_create_session();
+    if (!reapply_explicit_model_if_needed())
+      return 1;
+    activate_mailbox_root();
+    configure_hooks();
+
+    if (remote_client_)
+      return run_faux_control();
+
+    if (args_.rpc_mode)
+      return cli::run_rpc_mode(runtime(), std::cin, std::cout,
+                               runtime().task_manager().get(), auth_resolver_);
+
+    setup_interactive_session();
+    build_completion_and_control_fns();
+    if (const auto rc = run_initial_message())
+      return *rc;
+    return run_repl();
   }
 
-  std::shared_ptr<core::StreamDiagnostics> stream_diagnostics;
-  if (!args.stream_trace.empty()) {
+private:
+  core::SessionRuntime &runtime() { return *bundle_.runtime; }
+  core::Agent &agent() { return runtime().agent(); }
+
+  // ─── Bootstrap ───
+
+  bool resolve_model() {
+    effective_registry_ = registry_;
+    if (args_.faux_control_socket.empty()) {
+      const auto resolution = cli::resolve_model_selection(args_, registry_);
+      if (!resolution) {
+        std::cerr << "error: " << resolution.error << "\n";
+        return false;
+      }
+      model_ = *resolution.model;
+    } else {
+      core::ProviderConfig provider;
+      provider.id = "faux-control";
+      provider.api = "faux-control";
+      provider.base_url = "http://faux-control";
+      provider.auth = core::ProviderAuthPolicy::none;
+      core::ConfiguredModel configured;
+      configured.id = "faux-control";
+      configured.name = "faux-control";
+      provider.models.push_back(configured);
+      effective_registry_ = std::make_shared<const core::ModelRegistry>(
+          std::map<std::string, core::ProviderConfig>{
+              {"faux-control", provider}});
+      model_.id = "faux-control";
+      model_.name = "faux-control";
+      model_.api = "faux-control";
+      model_.provider = "faux-control";
+      model_.base_url = "http://faux-control";
+      model_.input_capabilities = {"text"};
+      model_.context_window = 128000;
+      model_.max_tokens = 4096;
+      remote_client_ = std::make_shared<core::RemoteFauxClient>();
+      scripted_registry_ = std::make_shared<core::ScriptedToolRegistry>();
+      core::LLMClientRegistry::instance().register_client(
+          "faux-control", [client = remote_client_] { return client; });
+    }
+    if (model_.provider == "openai-codex" && !args_.api_key.empty()) {
+      std::cerr << "error: --api-key cannot be used with openai-codex; run "
+                   "pi-cli auth login openai-codex\n";
+      return false;
+    }
+    return true;
+  }
+
+  bool init_diagnostics() {
+    if (args_.stream_trace.empty())
+      return true;
     try {
-      stream_diagnostics =
-          std::make_shared<core::StreamDiagnostics>(args.stream_trace);
+      stream_diagnostics_ =
+          std::make_shared<core::StreamDiagnostics>(args_.stream_trace);
     } catch (const std::exception &e) {
       std::cerr << "error: " << e.what() << "\n";
-      return 1;
+      return false;
     }
+    return true;
   }
-  auto auth_resolver =
-      std::make_shared<pi::auth::AuthResolver>(effective_registry);
-  if (!args.api_key.empty())
-    auth_resolver->set_runtime_api_key(model.provider, args.api_key);
 
-  std::mutex effective_context_mutex;
-  std::optional<core::AgentContext> effective_context;
-
-  cli::SessionRuntimeConfig runtime_config{
-      .args = args,
-      .model = model,
-      .model_registry = effective_registry,
-      .auth_resolver = auth_resolver,
-      .diagnostics = stream_diagnostics,
-      .on_effective_context =
-          [&](const core::AgentContext &context) {
-            std::scoped_lock lock(effective_context_mutex);
-            effective_context = context;
-          },
-  };
-  auto bundle = cli::open_session_runtime(runtime_config);
-  if (bundle.error) {
-    std::cerr << "error: " << *bundle.error << "\n";
-    return 1;
+  void init_auth_resolver() {
+    auth_resolver_ =
+        std::make_shared<pi::auth::AuthResolver>(effective_registry_);
+    if (!args_.api_key.empty())
+      auth_resolver_->set_runtime_api_key(model_.provider, args_.api_key);
   }
-  if (bundle.warning)
-    std::cerr << "warning: " << *bundle.warning << "\n";
 
-  auto &store = bundle.session_store;
-  auto &sandbox_policy = bundle.sandbox_policy;
-  const auto sandbox_mode = sandbox_policy->mode();
-  auto &loaded_session = bundle.loaded_session;
-  auto &context_files = bundle.context_files;
-  auto &skill_catalog_shared = bundle.skill_catalog;
-  const auto *skill_catalog_ptr = bundle.skill_catalog_ptr;
-  auto &opts = bundle.agent_options;
-  auto &hook_runtime = bundle.hook_runtime;
-  auto &hooks = bundle.hooks;
-  auto &hooks_list_saved = bundle.hooks_list_saved;
-  core::SessionRuntime &runtime = *bundle.runtime;
-  core::MailboxRuntime &mailbox_runtime = runtime.mailbox_runtime();
-  auto mailbox = mailbox_runtime.coordinator();
-  auto &agent = runtime.agent();
-  std::function<void(const std::string &)> faux_tool_registrar;
-  if (scripted_registry) {
-    faux_tool_registrar = [scripted_registry, &agent](const std::string &name) {
-      agent.add_tool(
-          std::make_shared<core::ScriptedTool>(name, scripted_registry));
+  bool open_runtime() {
+    cli::SessionRuntimeConfig runtime_config{
+        .args = args_,
+        .model = model_,
+        .model_registry = effective_registry_,
+        .auth_resolver = auth_resolver_,
+        .diagnostics = stream_diagnostics_,
+        .on_effective_context =
+            [this](const core::AgentContext &context) {
+              std::scoped_lock lock(effective_context_mutex_);
+              effective_context_ = context;
+            },
     };
+    bundle_ = cli::open_session_runtime(runtime_config);
+    if (bundle_.error) {
+      std::cerr << "error: " << *bundle_.error << "\n";
+      return false;
+    }
+    if (bundle_.warning)
+      std::cerr << "warning: " << *bundle_.warning << "\n";
+    sandbox_mode_ = bundle_.sandbox_policy->mode();
+    return true;
   }
 
-  if (!args.no_tools && !args.no_builtin_tools &&
-      args.faux_control_socket.empty()) {
-    if (args.tools.empty()) {
-      agent.set_tools(core::create_all_tools(std::filesystem::current_path(),
-                                             sandbox_policy,
-                                             skill_catalog_shared));
-    } else {
-      // Allowlist filter
-      for (auto &t :
-           core::create_all_tools(std::filesystem::current_path(),
-                                  sandbox_policy, skill_catalog_shared)) {
-        for (const auto &name : args.tools) {
-          if (t->name() == name) {
-            agent.add_tool(t);
-            break;
+  void apply_hook_tools() {
+    auto tools = base_tools_;
+    if (bundle_.hooks)
+      tools.insert(tools.end(), bundle_.hooks->registered_tools.begin(),
+                   bundle_.hooks->registered_tools.end());
+    agent().set_tools(std::move(tools));
+  }
+
+  void load_tools() {
+    if (scripted_registry_) {
+      faux_tool_registrar_ = [this](const std::string &name) {
+        agent().add_tool(
+            std::make_shared<core::ScriptedTool>(name, scripted_registry_));
+      };
+    }
+
+    if (!args_.no_tools && !args_.no_builtin_tools &&
+        args_.faux_control_socket.empty()) {
+      if (args_.tools.empty()) {
+        agent().set_tools(core::create_all_tools(
+            std::filesystem::current_path(), bundle_.sandbox_policy,
+            bundle_.skill_catalog));
+      } else {
+        // Allowlist filter
+        for (auto &t : core::create_all_tools(std::filesystem::current_path(),
+                                              bundle_.sandbox_policy,
+                                              bundle_.skill_catalog)) {
+          for (const auto &name : args_.tools) {
+            if (t->name() == name) {
+              agent().add_tool(t);
+              break;
+            }
           }
         }
       }
     }
-  }
 
-  if (!args.no_tools && !args.tools_dir.empty() &&
-      args.faux_control_socket.empty()) {
-    for (auto &t : core::load_lua_tools(args.tools_dir)) {
-      if (args.tools.empty()) {
-        agent.add_tool(t);
-      } else {
-        for (const auto &name : args.tools)
-          if (t->name() == name) {
-            agent.add_tool(t);
-            break;
-          }
+    if (!args_.no_tools && !args_.tools_dir.empty() &&
+        args_.faux_control_socket.empty()) {
+      for (auto &t : core::load_lua_tools(args_.tools_dir)) {
+        if (args_.tools.empty()) {
+          agent().add_tool(t);
+        } else {
+          for (const auto &name : args_.tools)
+            if (t->name() == name) {
+              agent().add_tool(t);
+              break;
+            }
+        }
       }
     }
+
+    base_tools_ = agent().state().tools();
+    if (args_.faux_control_socket.empty())
+      apply_hook_tools();
   }
 
-  const auto base_tools = agent.state().tools();
-  auto apply_hook_tools = [&]() {
-    auto tools = base_tools;
-    if (hooks)
-      tools.insert(tools.end(), hooks->registered_tools.begin(),
-                   hooks->registered_tools.end());
-    agent.set_tools(std::move(tools));
-  };
-  if (args.faux_control_socket.empty())
-    apply_hook_tools();
-
-  std::vector<std::string> tool_names;
-  for (const auto &tool : agent.state().tools())
-    tool_names.emplace_back(tool->name());
-  const auto system = cli::build_system_prompt(
-      args.system_prompt, args.append_system_prompts, context_files, tool_names,
-      std::filesystem::current_path(), skill_catalog_ptr);
-  agent.state().set_system_prompt(system);
-  opts.system_prompt = system;
-
-  // --list-tools / --list-addons (exit immediately after printing)
-  if (args.list_tools) {
-    std::cout << format_tools(agent.state().tools());
-    return 0;
-  }
-  if (args.list_addons) {
-    std::cout << format_addons(hooks_list_saved);
-    return 0;
-  }
-
-  auto repl_wake = std::make_shared<cli::ReadlineWake>();
-  auto activity = std::make_shared<core::SubagentActivityBridge>(
-      [repl_wake] { static_cast<void>(repl_wake->notify()); });
-  cli::activate_session_runtime(
-      bundle,
-      [activity](const core::AgentTaskEvent &event) {
-        activity->observe(event);
-      },
-      [repl_wake] { static_cast<void>(repl_wake->notify()); });
-  auto &task_manager = runtime.task_manager();
-  auto compat_counter = std::make_shared<std::atomic_uint64_t>(0);
-
-  auto task_error_json = [](const core::AgentTaskError &error) {
-    return nlohmann::json{
-        {"error", {{"code", error.code()}, {"message", error.what()}}}};
-  };
-  auto exception_json = [](const std::exception &error) {
-    return nlohmann::json{
-        {"error", {{"code", "internal"}, {"message", error.what()}}}};
-  };
-  auto snapshot_json = [](const core::AgentTaskSnapshot &snapshot) {
-    nlohmann::json value = {
-        {"id", snapshot.id},
-        {"task_path", snapshot.task_path},
-        {"task_name", snapshot.task_name},
-        {"model_provider", snapshot.model_provider},
-        {"model", snapshot.model_id},
-        {"status", core::agent_task_status_to_string(snapshot.status)},
-        {"child_count", snapshot.child_count},
-        {"queued_message_count", snapshot.queued_message_count},
-        {"generation", snapshot.generation},
-    };
-    if (snapshot.parent_id)
-      value["parent_id"] = *snapshot.parent_id;
-    else
-      value["parent_id"] = nullptr;
-    if (snapshot.context_info) {
-      const auto &info = *snapshot.context_info;
-      nlohmann::json context = {
-          {"message_count", info.message_count},
-          {"context_bytes", info.context_bytes},
-          {"last_input_tokens", info.last_input_tokens},
-          {"last_output_tokens", info.last_output_tokens},
-          {"total_tokens", info.total_tokens},
-      };
-      context["context_window"] = info.context_window
-                                      ? nlohmann::json(*info.context_window)
-                                      : nlohmann::json(nullptr);
-      value["context"] = std::move(context);
-    }
-    if (snapshot.result) {
-      value["result"] = {
-          {"text", snapshot.result->text},
-          {"stop_reason",
-           core::stop_reason_to_string(snapshot.result->stop_reason)},
-          {"truncated", snapshot.result->truncated},
-          {"usage",
-           {{"input", snapshot.result->usage.input},
-            {"output", snapshot.result->usage.output},
-            {"total_tokens", snapshot.result->usage.total_tokens}}},
-      };
-      if (snapshot.result->error)
-        value["result"]["error"] = *snapshot.result->error;
-      else
-        value["result"]["error"] = nullptr;
-    } else {
-      value["result"] = nullptr;
-    }
-    return value;
-  };
-
-  auto configure_hooks = [&]() {
-    if (!hooks || !hooks->configure)
-      return;
-
+  void build_system_prompt() {
     std::vector<std::string> tool_names;
-    for (const auto &t : agent.state().tools())
-      tool_names.emplace_back(t->name());
+    for (const auto &tool : agent().state().tools())
+      tool_names.emplace_back(tool->name());
+    const auto system = cli::build_system_prompt(
+        args_.system_prompt, args_.append_system_prompts, bundle_.context_files,
+        tool_names, std::filesystem::current_path(), bundle_.skill_catalog_ptr);
+    agent().state().set_system_prompt(system);
+    bundle_.agent_options.system_prompt = system;
+  }
 
-    std::filesystem::path storage_path;
-    if (!args.hooks_files.empty())
-      storage_path =
-          std::filesystem::path(args.hooks_files[0]).string() + ".storage.json";
+  void activate_runtime() {
+    repl_wake_ = std::make_shared<cli::ReadlineWake>();
+    activity_ = std::make_shared<core::SubagentActivityBridge>(
+        [wake = repl_wake_] { static_cast<void>(wake->notify()); });
+    cli::activate_session_runtime(
+        bundle_,
+        [activity = activity_](const core::AgentTaskEvent &event) {
+          activity->observe(event);
+        },
+        [wake = repl_wake_] { static_cast<void>(wake->notify()); });
+  }
 
-    const auto current_model = agent.state().model();
-    core::LuaHooks::AgentInfo info;
-    info.model_id = current_model.id;
-    info.model_provider = current_model.provider;
-    info.model_api = current_model.api;
-    info.tool_names = std::move(tool_names);
-    info.cwd = std::filesystem::current_path().string();
-    info.storage_path = std::move(storage_path);
+  // Recomputes hooks->configure()'s AgentInfo (model, tools, mailbox
+  // bindings, sub-agent spawn/get/list/send/interrupt/wait/close bindings)
+  // and invokes it. Called once after bootstrap and again whenever the
+  // model or active session changes.
+  // The bind_*() methods below each wire one core::LuaHooks::AgentInfo
+  // field; split out of configure_hooks() purely to shrink that function's
+  // branch count, with no behavior change.
+
+  void
+  bind_run_agent(core::LuaHooks::AgentInfo &info,
+                 const std::shared_ptr<core::AgentTaskManager> &task_manager) {
     info.run_agent = [task_manager,
-                      compat_counter](const core::LuaHooks::AgentRunConfig &cfg)
+                      this](const core::LuaHooks::AgentRunConfig &cfg)
         -> core::LuaHooks::AgentRunResult {
       core::LuaHooks::AgentRunResult result;
       try {
         core::SpawnAgentRequest request;
         request.task_name =
-            "compat_" + std::to_string(compat_counter->fetch_add(1) + 1);
+            "compat_" + std::to_string(compat_counter_->fetch_add(1) + 1);
         request.prompt = cfg.prompt;
         request.system_prompt = cfg.system_prompt;
         request.model_spec = cfg.model_id;
@@ -1297,47 +1367,19 @@ int cmd_run(const cli::Args &args,
       }
       return result;
     };
+  }
 
-    info.mailbox = core::make_mailbox_bindings(mailbox);
-
-    auto make_message = [](const nlohmann::json &value) {
-      core::UserMessage message;
-      message.content.emplace_back(
-          core::TextContent{.text = value.value("message", std::string{})});
-      return core::Message{std::move(message)};
-    };
-    auto parse_context = [](const nlohmann::json &value,
-                            core::ContextInheritance &context) {
-      if (!value.is_object())
-        return;
-      const auto mode = value.value("mode", std::string("none"));
-      if (mode == "none")
-        context.mode = core::ContextInheritanceMode::none;
-      else if (mode == "full")
-        context.mode = core::ContextInheritanceMode::full;
-      else if (mode == "through_message")
-        context.mode = core::ContextInheritanceMode::through_message;
-      else if (mode == "recent_messages")
-        context.mode = core::ContextInheritanceMode::recent_messages;
-      else
-        throw core::AgentTaskError(core::AgentTaskErrorKind::invalid_context,
-                                   "unknown context inheritance mode");
-      if (value.contains("through"))
-        context.through = value.at("through").get<std::size_t>();
-      if (value.contains("recent_count"))
-        context.recent_count = value.at("recent_count").get<std::size_t>();
-    };
-
-    info.agents.spawn = [task_manager, snapshot_json, task_error_json,
-                         exception_json,
-                         parse_context](const nlohmann::json &v) {
+  static void bind_agent_spawn(
+      core::LuaHooks::AgentInfo &info,
+      const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+    info.agents.spawn = [task_manager](const nlohmann::json &v) {
       try {
         core::SpawnAgentRequest request;
         request.parent_id = v.value("parent_id", std::string{});
         request.task_name = v.value("task_name", std::string{});
         request.prompt = v.value("message", v.value("prompt", std::string{}));
         if (v.contains("context"))
-          parse_context(v.at("context"), request.context);
+          parse_agent_context(v.at("context"), request.context);
         if (v.contains("system_prompt") && !v.at("system_prompt").is_null())
           request.system_prompt = v.at("system_prompt").get<std::string>();
         if (v.contains("model") && !v.at("model").is_null())
@@ -1354,7 +1396,12 @@ int cmd_run(const cli::Args &args,
         return exception_json(error);
       }
     };
-    info.agents.get = [task_manager, snapshot_json](const nlohmann::json &v) {
+  }
+
+  static void
+  bind_agent_get(core::LuaHooks::AgentInfo &info,
+                 const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+    info.agents.get = [task_manager](const nlohmann::json &v) {
       try {
         const auto target = v.value("target", v.value("id", std::string{}));
         auto snapshot = task_manager->get(target);
@@ -1368,7 +1415,12 @@ int cmd_run(const cli::Args &args,
             {"error", {{"code", "internal"}, {"message", error.what()}}}};
       }
     };
-    info.agents.list = [task_manager, snapshot_json](const nlohmann::json &v) {
+  }
+
+  static void
+  bind_agent_list(core::LuaHooks::AgentInfo &info,
+                  const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+    info.agents.list = [task_manager](const nlohmann::json &v) {
       nlohmann::json values = nlohmann::json::array();
       const auto prefix = v.value("path_prefix", std::string{});
       for (const auto &snapshot : task_manager->list(
@@ -1377,12 +1429,16 @@ int cmd_run(const cli::Args &args,
         values.push_back(snapshot_json(snapshot));
       return values;
     };
-    auto queue_binding = [task_manager, snapshot_json, task_error_json,
-                          exception_json, make_message](const nlohmann::json &v,
-                                                        bool follow_up) {
+  }
+
+  static void bind_agent_queue(
+      core::LuaHooks::AgentInfo &info,
+      const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+    auto queue_binding = [task_manager](const nlohmann::json &v,
+                                        bool follow_up) {
       try {
         const auto target = v.value("target", std::string{});
-        const auto message = make_message(v);
+        const auto message = make_agent_message(v);
         auto snapshot = follow_up ? task_manager->follow_up(target, message)
                                   : task_manager->send_message(target, message);
         return snapshot_json(snapshot);
@@ -1398,8 +1454,12 @@ int cmd_run(const cli::Args &args,
     info.agents.follow_up = [queue_binding](const nlohmann::json &v) {
       return queue_binding(v, true);
     };
-    info.agents.interrupt = [task_manager, snapshot_json, task_error_json,
-                             exception_json](const nlohmann::json &v) {
+  }
+
+  static void bind_agent_interrupt(
+      core::LuaHooks::AgentInfo &info,
+      const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+    info.agents.interrupt = [task_manager](const nlohmann::json &v) {
       try {
         const auto reason = v.value("reason", std::string("parent"));
         core::AgentInterruptReason parsed = core::AgentInterruptReason::parent;
@@ -1417,8 +1477,12 @@ int cmd_run(const cli::Args &args,
         return exception_json(error);
       }
     };
-    info.agents.wait = [task_manager, snapshot_json, task_error_json,
-                        exception_json](const nlohmann::json &v) {
+  }
+
+  static void
+  bind_agent_wait(core::LuaHooks::AgentInfo &info,
+                  const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+    info.agents.wait = [task_manager](const nlohmann::json &v) {
       try {
         core::AgentWaitRequest request;
         if (v.contains("targets"))
@@ -1440,8 +1504,12 @@ int cmd_run(const cli::Args &args,
         return exception_json(error);
       }
     };
-    info.agents.close = [task_manager, snapshot_json, task_error_json,
-                         exception_json](const nlohmann::json &v) {
+  }
+
+  static void bind_agent_close(
+      core::LuaHooks::AgentInfo &info,
+      const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+    info.agents.close = [task_manager](const nlohmann::json &v) {
       try {
         return snapshot_json(
             task_manager->close(v.value("target", std::string{})));
@@ -1451,270 +1519,310 @@ int cmd_run(const cli::Args &args,
         return exception_json(error);
       }
     };
-
-    hooks->configure(info);
-  };
-
-  std::string current_session_id;
-  std::optional<std::string> current_session_name;
-
-  auto reload_addons = [&]() {
-    hooks =
-        cli::reload_hooks(args, static_cast<bool>(mailbox), hooks_list_saved);
-    {
-      std::scoped_lock lock(hook_runtime->mutex);
-      hook_runtime->hooks = hooks;
-    }
-    if (args.faux_control_socket.empty())
-      apply_hook_tools();
-    configure_hooks();
-  };
-
-  if (loaded_session) {
-    current_session_id = loaded_session->header.id;
-    current_session_name = loaded_session->header.name;
-    runtime.activate_session(*loaded_session);
-    if (runtime.last_warning())
-      std::cerr << "warning: " << *runtime.last_warning() << "\n";
-    if (args.sandbox_mode_explicit)
-      runtime.set_sandbox_mode(sandbox_mode);
-    std::cerr << "[session: " << current_session_id;
-    if (loaded_session->header.name)
-      std::cerr << "  " << *loaded_session->header.name;
-    std::cerr << "]\n";
-  } else {
-    core::SessionHeader hdr;
-    hdr.id = core::generate_session_id();
-    hdr.created =
-        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    const auto current_model = agent.state().model();
-    hdr.model = current_model.id;
-    hdr.provider = current_model.provider;
-    hdr.sandbox_mode = std::string(core::sandbox_mode_to_string(sandbox_mode));
-    current_session_id = runtime.create_session(hdr);
   }
 
-  if (loaded_session && (args.model_explicit || args.provider_explicit ||
-                         args.base_url_explicit)) {
+  void configure_hooks() {
+    if (!bundle_.hooks || !bundle_.hooks->configure)
+      return;
+
+    auto task_manager = runtime().task_manager();
+    auto mailbox = runtime().mailbox_runtime().coordinator();
+
+    std::vector<std::string> tool_names;
+    for (const auto &t : agent().state().tools())
+      tool_names.emplace_back(t->name());
+
+    std::filesystem::path storage_path;
+    if (!args_.hooks_files.empty())
+      storage_path = std::filesystem::path(args_.hooks_files[0]).string() +
+                     ".storage.json";
+
+    const auto current_model = agent().state().model();
+    core::LuaHooks::AgentInfo info;
+    info.model_id = current_model.id;
+    info.model_provider = current_model.provider;
+    info.model_api = current_model.api;
+    info.tool_names = std::move(tool_names);
+    info.cwd = std::filesystem::current_path().string();
+    info.storage_path = std::move(storage_path);
+    info.mailbox = core::make_mailbox_bindings(mailbox);
+
+    bind_run_agent(info, task_manager);
+    bind_agent_spawn(info, task_manager);
+    bind_agent_get(info, task_manager);
+    bind_agent_list(info, task_manager);
+    bind_agent_queue(info, task_manager);
+    bind_agent_interrupt(info, task_manager);
+    bind_agent_wait(info, task_manager);
+    bind_agent_close(info, task_manager);
+
+    bundle_.hooks->configure(info);
+  }
+
+  void reload_addons() {
+    auto mailbox = runtime().mailbox_runtime().coordinator();
+    bundle_.hooks = cli::reload_hooks(args_, static_cast<bool>(mailbox),
+                                      bundle_.hooks_list_saved);
+    {
+      std::scoped_lock lock(bundle_.hook_runtime->mutex);
+      bundle_.hook_runtime->hooks = bundle_.hooks;
+    }
+    if (args_.faux_control_socket.empty())
+      apply_hook_tools();
+    configure_hooks();
+  }
+
+  void resolve_or_create_session() {
+    if (bundle_.loaded_session) {
+      current_session_id_ = bundle_.loaded_session->header.id;
+      current_session_name_ = bundle_.loaded_session->header.name;
+      runtime().activate_session(*bundle_.loaded_session);
+      if (runtime().last_warning())
+        std::cerr << "warning: " << *runtime().last_warning() << "\n";
+      if (args_.sandbox_mode_explicit)
+        runtime().set_sandbox_mode(sandbox_mode_);
+      std::cerr << "[session: " << current_session_id_;
+      if (bundle_.loaded_session->header.name)
+        std::cerr << "  " << *bundle_.loaded_session->header.name;
+      std::cerr << "]\n";
+    } else {
+      core::SessionHeader hdr;
+      hdr.id = core::generate_session_id();
+      hdr.created = std::chrono::system_clock::to_time_t(
+          std::chrono::system_clock::now());
+      const auto current_model = agent().state().model();
+      hdr.model = current_model.id;
+      hdr.provider = current_model.provider;
+      hdr.sandbox_mode =
+          std::string(core::sandbox_mode_to_string(sandbox_mode_));
+      current_session_id_ = runtime().create_session(hdr);
+    }
+  }
+
+  bool reapply_explicit_model_if_needed() {
+    if (!bundle_.loaded_session ||
+        !(args_.model_explicit || args_.provider_explicit ||
+          args_.base_url_explicit))
+      return true;
     try {
       const auto result =
-          runtime.set_model(model, cli::to_core_thinking(args.thinking));
+          runtime().set_model(model_, cli::to_core_thinking(args_.thinking));
       if (result.warning)
         std::cerr << "warning: " << *result.warning << "\n";
     } catch (const std::exception &error) {
       std::cerr << "error: unable to apply explicit model selection: "
                 << error.what() << "\n";
-      return 1;
+      return false;
+    }
+    return true;
+  }
+
+  void activate_mailbox_root() {
+    auto &mailbox_runtime = runtime().mailbox_runtime();
+    if (const auto identity = mailbox_runtime.activate_root(
+            current_session_id_, current_session_name_)) {
+      agent().set_runtime_identity(*identity);
+      const auto current_model = agent().state().model();
+      mailbox_runtime.set_model(current_model.provider, current_model.id);
     }
   }
 
-  if (const auto identity = mailbox_runtime.activate_root(
-          current_session_id, current_session_name)) {
-    agent.set_runtime_identity(*identity);
-    const auto current_model = agent.state().model();
-    mailbox_runtime.set_model(current_model.provider, current_model.id);
-  }
-
-  configure_hooks();
-
-  if (remote_client) {
-    auto faux_renderer = make_renderer(args);
-    VerboseRenderer renderer_adapter(*faux_renderer, args.verbose,
-                                     stream_diagnostics, hook_runtime);
+  int run_faux_control() {
+    auto faux_renderer = make_renderer(args_);
+    VerboseRenderer renderer_adapter(*faux_renderer, args_.verbose,
+                                     stream_diagnostics_, bundle_.hook_runtime);
     return cli::run_faux_control_socket(
-        runtime, *remote_client, scripted_registry, args.faux_control_socket,
-        faux_tool_registrar,
+        runtime(), *remote_client_, scripted_registry_,
+        args_.faux_control_socket, faux_tool_registrar_,
         [&renderer_adapter](const core::AgentEvent &event) {
           core::dispatch_event(event, renderer_adapter);
         });
   }
 
-  if (args.rpc_mode)
-    return cli::run_rpc_mode(runtime, std::cin, std::cout, task_manager.get(),
-                             auth_resolver);
+  // ─── Interactive session setup ───
 
-  std::string startup_cwd;
-  try {
-    startup_cwd = std::filesystem::current_path().string();
-  } catch (...) {
-    startup_cwd = "";
-  }
-  const std::string initial_project_label =
-      core::terminal_project_label(startup_cwd);
-  core::TerminalTitleController title_controller(STDOUT_FILENO,
-                                                 initial_project_label);
+  void setup_interactive_session() {
+    std::string startup_cwd;
+    try {
+      startup_cwd = std::filesystem::current_path().string();
+    } catch (...) {
+      startup_cwd = "";
+    }
+    const std::string initial_project_label =
+        core::terminal_project_label(startup_cwd);
+    title_controller_.emplace(STDOUT_FILENO, initial_project_label);
 
-  auto renderer = make_renderer(args);
-  core::SubagentPanel subagent_panel(*activity);
-  const bool panel_mounted = renderer->owns_subagent_pane();
-  subagent_panel.mount(*renderer);
+    renderer_ = make_renderer(args_);
+    subagent_panel_.emplace(*activity_);
+    panel_mounted_ = renderer_->owns_subagent_pane();
+    subagent_panel_->mount(*renderer_);
 
-  // §Design 2: bind the root session's arena on this (main) thread before
-  // the interactive loop; everything the root session allocates from here on
-  // lands in "root" rather than "shared". No-op without jemalloc.
-  task_manager->bind_root_arena();
+    // §Design 2: bind the root session's arena on this (main) thread before
+    // the interactive loop; everything the root session allocates from here
+    // on lands in "root" rather than "shared". No-op without jemalloc.
+    runtime().task_manager()->bind_root_arena();
 
-  if (sandbox_mode == core::SandboxMode::disabled)
-    std::cerr << "[sandbox: disabled; bash runs without bubblewrap]\n";
-  else if (args.verbose)
-    std::cerr << "[sandbox: " << core::sandbox_mode_to_string(sandbox_mode)
-              << "]\n";
+    if (sandbox_mode_ == core::SandboxMode::disabled)
+      std::cerr << "[sandbox: disabled; bash runs without bubblewrap]\n";
+    else if (args_.verbose)
+      std::cerr << "[sandbox: " << core::sandbox_mode_to_string(sandbox_mode_)
+                << "]\n";
 
-  if (args.verbose) {
-    const auto current_model = agent.state().model();
-    std::cerr << "[model: " << current_model.provider << "/" << current_model.id
-              << "]\n";
-    std::cerr << "[tools: " << agent.state().tools().size() << "]\n";
+    if (args_.verbose) {
+      const auto current_model = agent().state().model();
+      std::cerr << "[model: " << current_model.provider << "/"
+                << current_model.id << "]\n";
+      std::cerr << "[tools: " << agent().state().tools().size() << "]\n";
+    }
   }
 
   // Build completion function.
   // Command-name completion (/... with no space) is handled here from the
   // declared commands list — no Lua needed.  Argument completion (/cmd ...
   // with a space) is delegated to hooks->complete.
-  cli::CompleteFn complete_fn =
-      [&hooks, &agent,
-       &registry](std::string_view partial) -> std::vector<std::string> {
-    std::vector<std::string> result;
-    const bool is_slash = !partial.empty() && partial[0] == '/';
-    const bool has_space = partial.contains(' ');
+  void build_completion_and_control_fns() {
+    complete_fn_ =
+        [this](std::string_view partial) -> std::vector<std::string> {
+      std::vector<std::string> result;
+      const bool is_slash = !partial.empty() && partial[0] == '/';
+      const bool has_space = partial.contains(' ');
 
-    if (is_slash && !has_space) {
-      // Complete command names: builtins + declared add-on commands
-      for (std::string_view b :
-           {std::string_view("/exit"), std::string_view("/quit"),
-            std::string_view("/tools"), std::string_view("/addons"),
-            std::string_view("/reload-addons"), std::string_view("/usage"),
-            std::string_view("/memory"), std::string_view("/model"),
-            std::string_view("/models"), std::string_view("/name"),
-            std::string_view("/fork"), std::string_view("/tree"),
-            std::string_view("/compact"), std::string_view("/skills")}) {
-        if (b.starts_with(partial))
-          result.emplace_back(b);
-      }
-      if (hooks) {
-        for (const auto &cmd : hooks->commands) {
-          std::string full = '/' + cmd.name;
-          if (std::string_view(full).starts_with(partial))
-            result.push_back(std::move(full));
+      if (is_slash && !has_space) {
+        // Complete command names: builtins + declared add-on commands
+        for (std::string_view b :
+             {std::string_view("/exit"), std::string_view("/quit"),
+              std::string_view("/tools"), std::string_view("/addons"),
+              std::string_view("/reload-addons"), std::string_view("/usage"),
+              std::string_view("/memory"), std::string_view("/model"),
+              std::string_view("/models"), std::string_view("/name"),
+              std::string_view("/fork"), std::string_view("/tree"),
+              std::string_view("/compact"), std::string_view("/skills")}) {
+          if (b.starts_with(partial))
+            result.emplace_back(b);
         }
-      }
-      return result;
-    }
-
-    const auto space = partial.find(' ');
-    if (is_slash && has_space && space != std::string_view::npos) {
-      const auto command = partial.substr(0, space);
-      if (command == "/model") {
-        const auto prefix = partial.substr(space + 1);
-        for (const auto &candidate : registry->models()) {
-          const std::string canonical = candidate.provider + "/" + candidate.id;
-          if (std::string_view(canonical).starts_with(prefix))
-            result.push_back(canonical);
+        if (bundle_.hooks) {
+          for (const auto &cmd : bundle_.hooks->commands) {
+            std::string full = '/' + cmd.name;
+            if (std::string_view(full).starts_with(partial))
+              result.push_back(std::move(full));
+          }
         }
         return result;
       }
-    }
 
-    // Argument completion — delegate to hook
-    if (hooks && hooks->complete)
-      return hooks->complete(partial, agent.state().messages());
-    return {};
-  };
+      const auto space = partial.find(' ');
+      if (is_slash && has_space && space != std::string_view::npos) {
+        const auto command = partial.substr(0, space);
+        if (command == "/model") {
+          const auto prefix = partial.substr(space + 1);
+          for (const auto &candidate : registry_->models()) {
+            const std::string canonical =
+                candidate.provider + "/" + candidate.id;
+            if (std::string_view(canonical).starts_with(prefix))
+              result.push_back(canonical);
+          }
+          return result;
+        }
+      }
 
-  cli::ControlFn control_fn = [&renderer](cli::ControlAction action) {
-    switch (action) {
-    case cli::ControlAction::scroll_line_up:
-      renderer->on_scroll(core::RendererScrollCommand::line_up);
-      break;
-    case cli::ControlAction::scroll_line_down:
-      renderer->on_scroll(core::RendererScrollCommand::line_down);
-      break;
-    case cli::ControlAction::scroll_page_up:
-      renderer->on_scroll(core::RendererScrollCommand::page_up);
-      break;
-    case cli::ControlAction::scroll_page_down:
-      renderer->on_scroll(core::RendererScrollCommand::page_down);
-      break;
-    case cli::ControlAction::scroll_top:
-      renderer->on_scroll(core::RendererScrollCommand::top);
-      break;
-    case cli::ControlAction::scroll_bottom:
-      renderer->on_scroll(core::RendererScrollCommand::bottom);
-      break;
-    }
-  };
+      // Argument completion — delegate to hook
+      if (bundle_.hooks && bundle_.hooks->complete)
+        return bundle_.hooks->complete(partial, agent().state().messages());
+      return {};
+    };
 
-  // Interactive REPL — track usage across turns
-  CostAccumulator last_turn;
-  CostAccumulator session;
-  // Last single-turn TokenUsage for Lua prompt_line hook.
-  core::TokenUsage last_usage_for_prompt{};
-  core::TokenUsage session_usage_for_prompt{};
-  auto build_session_usage = [&]() -> core::TokenUsage {
+    control_fn_ = [this](cli::ControlAction action) {
+      switch (action) {
+      case cli::ControlAction::scroll_line_up:
+        renderer_->on_scroll(core::RendererScrollCommand::line_up);
+        break;
+      case cli::ControlAction::scroll_line_down:
+        renderer_->on_scroll(core::RendererScrollCommand::line_down);
+        break;
+      case cli::ControlAction::scroll_page_up:
+        renderer_->on_scroll(core::RendererScrollCommand::page_up);
+        break;
+      case cli::ControlAction::scroll_page_down:
+        renderer_->on_scroll(core::RendererScrollCommand::page_down);
+        break;
+      case cli::ControlAction::scroll_top:
+        renderer_->on_scroll(core::RendererScrollCommand::top);
+        break;
+      case cli::ControlAction::scroll_bottom:
+        renderer_->on_scroll(core::RendererScrollCommand::bottom);
+        break;
+      }
+    };
+  }
+
+  // ─── Turn accounting / execution ───
+
+  core::TokenUsage build_session_usage() const {
     core::TokenUsage u;
-    u.input = session.input_tokens;
-    u.output = session.output_tokens;
-    u.cache_read = session.cache_read_tokens;
-    u.cache_write = session.cache_write_tokens;
-    u.total_tokens = session.total_tokens;
-    u.cost.total = session.total_cost;
+    u.input = session_cost_.input_tokens;
+    u.output = session_cost_.output_tokens;
+    u.cache_read = session_cost_.cache_read_tokens;
+    u.cache_write = session_cost_.cache_write_tokens;
+    u.total_tokens = session_cost_.total_tokens;
+    u.cost.total = session_cost_.total_cost;
     return u;
-  };
-  auto build_ui_context = [&]() {
-    const auto current_model = agent.state().model();
+  }
+
+  core::LuaUiContext build_ui_context() {
+    const auto current_model = agent().state().model();
     core::LuaUiContext context;
     context.model = current_model.id;
-    context.tools = agent.state().tools().size();
-    context.last = last_usage_for_prompt;
-    context.session = session_usage_for_prompt;
-    context.session_id = current_session_id;
-    context.session_name = current_session_name;
-    for (const auto &message : agent.state().messages()) {
+    context.tools = agent().state().tools().size();
+    context.last = last_usage_for_prompt_;
+    context.session = session_usage_for_prompt_;
+    context.session_id = current_session_id_;
+    context.session_name = current_session_name_;
+    for (const auto &message : agent().state().messages()) {
       if (std::holds_alternative<core::AssistantMessage>(message))
         ++context.turn;
     }
     return context;
-  };
-  auto has_current_pricing = [&]() {
-    const auto current_model = agent.state().model();
+  }
+
+  bool has_current_pricing() {
+    const auto current_model = agent().state().model();
     return current_model.cost.input_per_mtok != 0 ||
            current_model.cost.output_per_mtok != 0;
-  };
+  }
 
-  auto accumulate = [&](const core::TokenUsage &u) {
-    last_turn = CostAccumulator{};
-    last_turn.add(u);
-    session.add(u);
-    last_usage_for_prompt = u;
-    session_usage_for_prompt = build_session_usage();
-  };
+  void accumulate(const core::TokenUsage &u) {
+    last_turn_ = CostAccumulator{};
+    last_turn_.add(u);
+    session_cost_.add(u);
+    last_usage_for_prompt_ = u;
+    session_usage_for_prompt_ = build_session_usage();
+  }
 
   // Run a turn and persist all new messages to the session file.
-  auto run_and_persist = [&](const std::string &input) {
-    core::TerminalTitleActivityGuard title_activity(title_controller);
-    auto mailbox_turn = mailbox_runtime.begin_root_turn();
-    mailbox_runtime.pump_inbox();
+  core::TokenUsage run_and_persist(const std::string &input) {
+    core::TerminalTitleActivityGuard title_activity(*title_controller_);
+    auto mailbox_turn = runtime().mailbox_runtime().begin_root_turn();
+    runtime().mailbox_runtime().pump_inbox();
     auto result = run_turn(
-        runtime, input, *renderer, args.verbose, stream_diagnostics,
-        hook_runtime, build_ui_context,
-        (isatty(STDIN_FILENO) != 0 && !args.print_mode && !panel_mounted)
-            ? activity
+        runtime(), input, *renderer_, args_.verbose, stream_diagnostics_,
+        bundle_.hook_runtime, [this] { return build_ui_context(); },
+        (isatty(STDIN_FILENO) != 0 && !args_.print_mode && !panel_mounted_)
+            ? activity_
             : nullptr);
     return result;
-  };
+  }
 
-  constexpr std::size_t kAutonomousBatchLimit = 16;
-  core::MailboxAutonomousTurnBudget autonomous_budget;
-  bool autonomous_budget_exhausted = false;
-  auto run_idle_mailbox_turns = [&] {
-    if (!mailbox_runtime.enabled() || autonomous_budget_exhausted)
+  void run_idle_mailbox_turns() {
+    constexpr std::size_t kAutonomousBatchLimit = 16;
+    auto &mailbox_runtime = runtime().mailbox_runtime();
+    if (!mailbox_runtime.enabled() || autonomous_budget_exhausted_)
       return;
-    while (autonomous_budget.can_run()) {
+    while (autonomous_budget_.can_run()) {
       std::vector<core::AgentInput> messages;
       try {
         messages = mailbox_runtime.claim_idle_root_turn(kAutonomousBatchLimit);
       } catch (const std::exception &error) {
-        if (args.verbose)
+        if (args_.verbose)
           std::cerr << "[mailbox autonomous turn unavailable: " << error.what()
                     << "]\n";
         return;
@@ -1722,26 +1830,27 @@ int cmd_run(const cli::Args &args,
       if (messages.empty())
         return;
       {
-        core::TerminalTitleActivityGuard title_activity(title_controller);
+        core::TerminalTitleActivityGuard title_activity(*title_controller_);
         auto mailbox_turn = mailbox_runtime.adopt_root_turn();
         accumulate(run_message_turn(
-            runtime, std::move(messages), *renderer, args.verbose,
-            stream_diagnostics, hook_runtime, build_ui_context,
-            (isatty(STDIN_FILENO) != 0 && !args.print_mode && !panel_mounted)
-                ? activity
+            runtime(), std::move(messages), *renderer_, args_.verbose,
+            stream_diagnostics_, bundle_.hook_runtime,
+            [this] { return build_ui_context(); },
+            (isatty(STDIN_FILENO) != 0 && !args_.print_mode && !panel_mounted_)
+                ? activity_
                 : nullptr));
       }
-      autonomous_budget.record();
+      autonomous_budget_.record();
     }
-    autonomous_budget_exhausted = autonomous_budget.exhausted();
-  };
+    autonomous_budget_exhausted_ = autonomous_budget_.exhausted();
+  }
 
-  auto update_terminal_ui = [&]() -> std::optional<std::string> {
+  std::optional<std::string> update_terminal_ui() {
     const auto context = build_ui_context();
     std::optional<std::string> status_line;
-    if (hooks && hooks->status_line)
-      status_line = hooks->status_line(context);
-    if (autonomous_budget_exhausted) {
+    if (bundle_.hooks && bundle_.hooks->status_line)
+      status_line = bundle_.hooks->status_line(context);
+    if (autonomous_budget_exhausted_) {
       constexpr std::string_view paused =
           "mailbox autonomous turns paused; submit input to resume";
       if (status_line)
@@ -1749,25 +1858,29 @@ int cmd_run(const cli::Args &args,
       else
         status_line = std::string(paused);
     }
-    const auto subagent_summary = activity->summary();
+    const auto subagent_summary = activity_->summary();
     if (!subagent_summary.empty()) {
       if (status_line)
         *status_line += " | " + subagent_summary;
       else
         status_line = subagent_summary;
     }
-    renderer->set_status_line(status_line);
-    if (hooks && hooks->tab_title) {
-      if (auto title = hooks->tab_title(context))
-        title_controller.set_base_title(*title);
+    renderer_->set_status_line(status_line);
+    if (bundle_.hooks && bundle_.hooks->tab_title) {
+      if (auto title = bundle_.hooks->tab_title(context))
+        title_controller_->set_base_title(*title);
     }
     return status_line;
-  };
+  }
 
-  // Print mode / initial message
-  if (args.print_mode || !args.messages.empty()) {
+  // Print mode / initial message. Returns an exit code if cmd_run() should
+  // return immediately (print mode always does, with or without a prompt);
+  // nullopt to continue into the interactive REPL.
+  std::optional<int> run_initial_message() {
+    if (!args_.print_mode && args_.messages.empty())
+      return std::nullopt;
     std::string prompt;
-    for (const auto &msg : args.messages) {
+    for (const auto &msg : args_.messages) {
       if (!prompt.empty())
         prompt += '\n';
       prompt += msg;
@@ -1781,378 +1894,492 @@ int cmd_run(const cli::Args &args,
       // interactive prompt's on-screen position from what position_prompt_
       // cursor() assumes, which used to surface as a doubled footer hint
       // starting with the session's second prompt.
-      if (!renderer->owns_status_line())
+      if (!renderer_->owns_status_line())
         std::cout << "\n";
     }
-    if (args.print_mode)
+    if (args_.print_mode)
       return 0;
+    return std::nullopt;
   }
 
-  std::string readline_draft;
-  std::size_t readline_cursor = 0;
-  // A full-screen renderer (RegionRenderer) owns a persistent alt-screen
-  // compositor for the whole session, not just while readline() is
-  // blocking. readline() normally enters/leaves raw mode around each call,
-  // which left the terminal in cooked/echo mode for the whole span of a
-  // turn (no readline() call in flight) -- long enough for real turns that
-  // keystrokes typed then got echoed by the tty driver straight into the
-  // compositor's fixed layout, then silently dropped when the next
-  // readline() call re-entered raw mode (TCSAFLUSH discards unread input on
-  // a termios switch). Owning raw mode here for the whole session instead
-  // means those keystrokes stay queued, unechoed, in the kernel's raw input
-  // buffer and simply show up as type-ahead once readline() resumes.
-  const bool owns_full_screen = renderer->owns_status_line();
-  cli::TerminalRawMode session_raw_mode;
-  if (owns_full_screen)
-    session_raw_mode.enter(STDIN_FILENO);
-  while (true) {
-    // Build the prompt — let add-ons customise it. The chevron uses the same
-    // bold-cyan accent as the region renderer's REQUEST heading so the "this
-    // is user input" color reads consistently end to end; \033[22;39m clears
-    // only weight/foreground so the input box's background tint survives.
-    std::string prompt = "\n\033[1;36m›\033[22;39m ";
-    if (hooks && hooks->prompt_line) {
-      const auto &msgs = agent.state().messages();
-      std::size_t turns = 0;
-      for (const auto &m : msgs)
-        if (std::holds_alternative<core::AssistantMessage>(m))
-          ++turns;
-      auto custom = hooks->prompt_line(
-          turns, agent.state().model().id, agent.state().tools().size(),
-          last_usage_for_prompt, session_usage_for_prompt);
-      if (custom)
-        prompt = "\n" + *custom;
+  // ─── Interactive REPL ───
+
+  int run_repl() {
+    // A full-screen renderer (RegionRenderer) owns a persistent alt-screen
+    // compositor for the whole session, not just while readline() is
+    // blocking. readline() normally enters/leaves raw mode around each
+    // call, which left the terminal in cooked/echo mode for the whole span
+    // of a turn (no readline() call in flight) -- long enough for real
+    // turns that keystrokes typed then got echoed by the tty driver
+    // straight into the compositor's fixed layout, then silently dropped
+    // when the next readline() call re-entered raw mode (TCSAFLUSH
+    // discards unread input on a termios switch). Owning raw mode here for
+    // the whole session instead means those keystrokes stay queued,
+    // unechoed, in the kernel's raw input buffer and simply show up as
+    // type-ahead once readline() resumes.
+    owns_full_screen_ = renderer_->owns_status_line();
+    if (owns_full_screen_)
+      session_raw_mode_.enter(STDIN_FILENO);
+    while (true) {
+      // Build the prompt — let add-ons customise it. The chevron uses the
+      // same bold-cyan accent as the region renderer's REQUEST heading so
+      // the "this is user input" color reads consistently end to end;
+      // \033[22;39m clears only weight/foreground so the input box's
+      // background tint survives.
+      std::string prompt = "\n\033[1;36m›\033[22;39m ";
+      if (bundle_.hooks && bundle_.hooks->prompt_line) {
+        const auto &msgs = agent().state().messages();
+        std::size_t turns = 0;
+        for (const auto &m : msgs)
+          if (std::holds_alternative<core::AssistantMessage>(m))
+            ++turns;
+        auto custom = bundle_.hooks->prompt_line(
+            turns, agent().state().model().id, agent().state().tools().size(),
+            last_usage_for_prompt_, session_usage_for_prompt_);
+        if (custom)
+          prompt = "\n" + *custom;
+      }
+      const auto status_line = update_terminal_ui();
+      const std::string_view readline_status =
+          renderer_->owns_status_line() || !status_line ? std::string_view{}
+                                                        : *status_line;
+      const int readline_wake_fd = repl_wake_ && !autonomous_budget_exhausted_
+                                       ? repl_wake_->read_fd()
+                                       : -1;
+      // Full-screen renderers (currently only --render region) echo the
+      // submitted request in their own scrolling history, so the readline
+      // box should empty immediately on submit instead of leaving the
+      // typed text on screen — duplicated — for the whole turn. Such
+      // renderers also own a fixed alt-screen layout that needs repainting
+      // on a terminal resize.
+      const bool full_screen_prompt = renderer_->owns_status_line();
+      const auto on_prompt_resize = [this] { renderer_->on_resize(); };
+      renderer_->prepare_for_prompt();
+      auto readline_result =
+          cli::readline(prompt, complete_fn_, control_fn_, readline_status,
+                        readline_draft_, readline_cursor_, readline_wake_fd,
+                        full_screen_prompt, on_prompt_resize, args_.vim_mode,
+                        owns_full_screen_ ? &session_raw_mode_ : nullptr);
+      if (readline_result.reason == cli::ReadlineExit::eof)
+        break;
+      if (readline_result.reason == cli::ReadlineExit::mailbox_wake) {
+        readline_draft_ = std::move(readline_result.text);
+        readline_cursor_ = readline_result.cursor;
+        activity_->drain(*renderer_);
+        run_idle_mailbox_turns();
+        continue;
+      }
+      if (autonomous_budget_exhausted_ && repl_wake_)
+        repl_wake_->drain();
+      activity_->drain(*renderer_);
+      autonomous_budget_.reset();
+      autonomous_budget_exhausted_ = false;
+      readline_draft_.clear();
+      readline_cursor_ = 0;
+      const std::string &line = readline_result.text;
+      if (line.empty())
+        continue;
+      if (dispatch_line(line))
+        break;
     }
-    const auto status_line = update_terminal_ui();
-    const std::string_view readline_status =
-        renderer->owns_status_line() || !status_line ? std::string_view{}
-                                                     : *status_line;
-    const int readline_wake_fd =
-        repl_wake && !autonomous_budget_exhausted ? repl_wake->read_fd() : -1;
-    // Full-screen renderers (currently only --render region) echo the
-    // submitted request in their own scrolling history, so the readline box
-    // should empty immediately on submit instead of leaving the typed text
-    // on screen — duplicated — for the whole turn. Such renderers also own a
-    // fixed alt-screen layout that needs repainting on a terminal resize.
-    const bool full_screen_prompt = renderer->owns_status_line();
-    const auto on_prompt_resize = [&] { renderer->on_resize(); };
-    renderer->prepare_for_prompt();
-    auto readline_result = cli::readline(
-        prompt, complete_fn, control_fn, readline_status, readline_draft,
-        readline_cursor, readline_wake_fd, full_screen_prompt, on_prompt_resize,
-        args.vim_mode, owns_full_screen ? &session_raw_mode : nullptr);
-    if (readline_result.reason == cli::ReadlineExit::eof)
-      break;
-    if (readline_result.reason == cli::ReadlineExit::mailbox_wake) {
-      readline_draft = std::move(readline_result.text);
-      readline_cursor = readline_result.cursor;
-      activity->drain(*renderer);
-      run_idle_mailbox_turns();
-      continue;
-    }
-    if (autonomous_budget_exhausted && repl_wake)
-      repl_wake->drain();
-    activity->drain(*renderer);
-    autonomous_budget.reset();
-    autonomous_budget_exhausted = false;
-    readline_draft.clear();
-    readline_cursor = 0;
-    const std::string &line = readline_result.text;
-    if (line.empty())
-      continue;
+    return 0;
+  }
+
+  // Returns true iff the REPL should exit (the user typed /exit or /quit).
+  bool dispatch_line(const std::string &line) {
     if (line == "/exit" || line == "/quit")
-      break;
+      return true;
     if (line == "/tools") {
-      renderer->on_command_output(format_tools(agent.state().tools()));
-      continue;
+      handle_tools_command();
+      return false;
     }
     if (line == "/skills") {
-      if (skill_catalog_shared != nullptr) {
-        renderer->on_command_output(
-            format_skill_catalog(*skill_catalog_shared));
-      } else if (args.no_skills) {
-        renderer->on_command_output("skills disabled (--no-skills or "
-                                    "[skills] disabled = true)\n");
-      } else {
-        renderer->on_command_output(
-            "(no skills discovered)\n"
-            "Add SKILL.md files under .pici/skills/, skills/ or "
-            ".agents/skills/ in the workspace, or skills/ under the config "
-            "directory.\n");
-      }
-      continue;
+      handle_skills_command();
+      return false;
     }
     if (line == "/addons") {
-      renderer->on_command_output(format_addons(hooks_list_saved));
-      continue;
+      handle_addons_command();
+      return false;
     }
     if (line == "/reload-addons") {
-      try {
-        reload_addons();
-        renderer->on_command_output("reloaded " +
-                                    std::to_string(hooks_list_saved.size()) +
-                                    " add-on(s)");
-      } catch (const std::exception &e) {
-        renderer->on_command_output("add-on reload failed: " +
-                                    std::string(e.what()));
-      }
-      continue;
+      handle_reload_addons_command();
+      return false;
     }
     if (line == "/compact") {
-      // Manual compaction is interactive-only: it drives a live status
-      // hook and an interruptible network request, neither of which has a
-      // meaningful non-TTY/piped equivalent. The interactive command loop
-      // (this while(true) loop) does run with piped stdin — see /model's
-      // isatty() branch above for the established pattern of a slash
-      // command explicitly degrading for non-interactive input rather than
-      // silently misbehaving — so this guard is reachable and load-bearing,
-      // not defensive dead code.
-      if (isatty(STDIN_FILENO) == 0) {
-        renderer->on_command_output(
-            "/compact is only available in an interactive terminal session");
-        continue;
-      }
-      core::TerminalTitleActivityGuard activity(title_controller);
-      auto result = run_compaction_command(runtime, *renderer, args.verbose,
-                                           stream_diagnostics, hook_runtime,
-                                           core::CompactionTrigger::manual);
-      if (result.success) {
-        renderer->on_command_output(
-            "compacted context: " +
-            std::to_string(result.retained_message_count) +
-            " message(s) retained");
-      } else if (result.unsupported) {
-        renderer->on_command_output(
-            "compaction is not supported by the active provider/model");
-      } else if (result.cancelled) {
-        renderer->on_command_output("compaction cancelled");
-      } else {
-        renderer->on_command_output("compaction failed: " +
-                                    result.error.value_or("unknown error"));
-      }
-      continue;
+      handle_compact_command();
+      return false;
     }
     if (line == "/model" || line.starts_with("/model ")) {
-      std::string spec = line.size() > 6 ? line.substr(6) : "";
-      spec.erase(0, spec.find_first_not_of(" \t"));
-      if (spec.empty()) {
-        const auto current_model = agent.state().model();
-        if (isatty(STDIN_FILENO) == 0) {
-          renderer->on_command_output("model: " + current_model.provider + "/" +
-                                      current_model.id +
-                                      "\nusage: /model <provider/model>");
-          continue;
-        }
-        const auto selected = cli::run_model_selector(
-            registry->search(""), current_model.provider, current_model.id,
-            [auth_resolver](const core::Model &candidate) {
-              switch (auth_resolver->availability(candidate.provider)) {
-              case pi::auth::AuthAvailability::configured:
-                return std::string("configured");
-              case pi::auth::AuthAvailability::not_required:
-                return std::string("not_required");
-              case pi::auth::AuthAvailability::missing:
-                return std::string("missing");
-              case pi::auth::AuthAvailability::expired_or_refresh_needed:
-                return std::string("expired_or_refresh_needed");
-              }
-              return std::string("unknown");
-            },
-            renderer->owns_status_line());
-        renderer->force_full_repaint();
-        if (selected.cancelled || !selected.model)
-          continue;
-        spec = selected.model->provider + "/" + selected.model->id;
-      }
-
-      core::ModelSelection selection{.model = spec, .source = "cli"};
-      const auto resolution = registry->resolve(selection);
-      if (!resolution) {
-        renderer->on_command_output("model switch failed: " + resolution.error);
-        continue;
-      }
-      if (auth_resolver->availability(resolution.model->provider) ==
-          pi::auth::AuthAvailability::missing) {
-        renderer->on_command_output(
-            "model switch failed: missing authentication for provider '" +
-            resolution.model->provider + "'");
-        continue;
-      }
-      try {
-        const auto result = runtime.set_model(*resolution.model,
-                                              agent.state().thinking_level());
-        mailbox_runtime.set_model(result.current.provider, result.current.id);
-        configure_hooks();
-        {
-          std::scoped_lock lock(effective_context_mutex);
-          effective_context.reset();
-        }
-        (void)update_terminal_ui();
-        std::string message =
-            "model: " + result.current.provider + "/" + result.current.id;
-        if (result.warning)
-          message += "\nwarning: " + *result.warning;
-        renderer->on_command_output(std::move(message));
-      } catch (const std::exception &error) {
-        renderer->on_command_output("model switch failed: " +
-                                    std::string(error.what()));
-      }
-      continue;
+      handle_model_command(line);
+      return false;
     }
     if (line == "/models" || line.starts_with("/models ")) {
-      std::string filter = line.size() > 7 ? line.substr(7) : "";
-      filter.erase(0, filter.find_first_not_of(" \t"));
-      renderer->on_command_output(format_model_catalog(filter, registry));
-      continue;
+      handle_models_command(line);
+      return false;
     }
     if (line == "/usage") {
-      renderer->on_command_output(
-          format_usage(last_turn, session, has_current_pricing()));
-      continue;
+      handle_usage_command();
+      return false;
     }
     if (line == "/memory") {
-      renderer->on_command_output(format_memory(runtime, *task_manager));
-      continue;
+      handle_memory_command();
+      return false;
     }
     if (line.starts_with("/name ") || line == "/name") {
-      std::string name = line.size() > 5 ? line.substr(5) : "";
-      name.erase(0, name.find_first_not_of(" \t"));
-      if (name.empty()) {
-        std::cerr << "usage: /name <session name>\n";
-      } else {
-        store->set_name(current_session_id, name);
-        current_session_name = name;
-        mailbox_runtime.set_session_name(name);
-        std::cerr << "[session name: " << name << "]\n";
-      }
-      continue;
+      handle_name_command(line);
+      return false;
     }
     if (line == "/tree") {
-      auto tree_opt = core::build_session_tree(*store, current_session_id);
-      if (!tree_opt) {
-        std::cerr << "no session tree available\n";
-        continue;
-      }
-      auto tree_lines =
-          core::format_session_tree(*tree_opt, current_session_id);
-
-      std::size_t cursor = 0;
-      for (std::size_t i = 0; i < tree_lines.size(); ++i) {
-        if (tree_lines[i].session_id == current_session_id) {
-          cursor = i;
-          break;
-        }
-      }
-
-      auto result = cli::run_tree_selector(
-          tree_lines, current_session_id, cursor, renderer->owns_status_line());
-      renderer->force_full_repaint();
-      if (result.cancelled || result.selected_session_id == current_session_id)
-        continue;
-
-      auto loaded = store->load(result.selected_session_id);
-      if (!loaded) {
-        std::cerr << "error: session not found\n";
-        continue;
-      }
-      current_session_id = result.selected_session_id;
-      current_session_name = loaded->header.name;
-      mailbox_runtime.drop_queued_delivery();
-      runtime.activate_session(*loaded);
-      if (const auto identity = mailbox_runtime.activate_root(
-              current_session_id, current_session_name))
-        agent.set_runtime_identity(*identity);
-      if (runtime.last_warning())
-        std::cerr << "warning: " << *runtime.last_warning() << "\n";
-      configure_hooks();
-      {
-        std::scoped_lock lock(effective_context_mutex);
-        effective_context.reset();
-      }
-      std::cerr << "[session: " << current_session_id;
-      if (loaded->header.name)
-        std::cerr << "  " << *loaded->header.name;
-      std::cerr << "]\n";
-      continue;
+      handle_tree_command();
+      return false;
     }
     if (line == "/new") {
-      core::SessionHeader fresh_hdr;
-      fresh_hdr.id = core::generate_session_id();
-      fresh_hdr.created = std::chrono::system_clock::to_time_t(
-          std::chrono::system_clock::now());
-      const auto current_model = agent.state().model();
-      fresh_hdr.model = current_model.id;
-      fresh_hdr.provider = current_model.provider;
-      mailbox_runtime.drop_queued_delivery();
-      current_session_id = runtime.create_session(fresh_hdr);
-      current_session_name.reset();
-      if (const auto identity = mailbox_runtime.activate_root(
-              current_session_id, current_session_name))
-        agent.set_runtime_identity(*identity);
-      {
-        std::scoped_lock lock(effective_context_mutex);
-        effective_context.reset();
-      }
-      std::cerr << "[new session: " << current_session_id << "]\n";
-      continue;
+      handle_new_command();
+      return false;
     }
     if (line == "/fork") {
-      core::SessionHeader child_hdr;
-      child_hdr.id = core::generate_session_id();
-      child_hdr.created = std::chrono::system_clock::to_time_t(
-          std::chrono::system_clock::now());
-      const auto current_model = agent.state().model();
-      child_hdr.model = current_model.id;
-      child_hdr.provider = current_model.provider;
-      child_hdr.parent_id = current_session_id;
-      child_hdr.parent_offset = agent.state().messages().size();
-      mailbox_runtime.drop_queued_delivery();
-      current_session_id = runtime.fork_session(child_hdr);
-      current_session_name.reset();
-      if (const auto identity = mailbox_runtime.activate_root(
-              current_session_id, current_session_name))
-        agent.set_runtime_identity(*identity);
-      {
-        std::scoped_lock lock(effective_context_mutex);
-        effective_context.reset();
-      }
-      std::cerr << "[fork: " << current_session_id << "]\n";
-      continue;
+      handle_fork_command();
+      return false;
     }
 
     // Slash command dispatch
-    if (line[0] == '/' && hooks && hooks->on_command) {
-      auto space = line.find(' ');
-      std::string cmd = line.substr(
-          1, space == std::string::npos ? std::string::npos : space - 1);
-      std::string rest =
-          space == std::string::npos ? "" : line.substr(space + 1);
-
-      core::LuaContextSnapshot context_snapshot;
-      context_snapshot.raw = agent.context_snapshot();
-      {
-        std::scoped_lock lock(effective_context_mutex);
-        context_snapshot.effective = effective_context;
-      }
-      auto result = hooks->on_command(cmd, rest, context_snapshot.raw.messages,
-                                      context_snapshot);
-      if (result.handled) {
-        if (result.truncate_to) {
-          runtime.truncate_active_session(*result.truncate_to);
-          std::scoped_lock lock(effective_context_mutex);
-          effective_context.reset();
-        }
-        if (result.output)
-          renderer->on_command_output(*result.output);
-        if (result.prompt)
-          accumulate(run_and_persist(*result.prompt));
-        continue;
-      }
+    if (line[0] == '/' && bundle_.hooks && bundle_.hooks->on_command) {
+      if (handle_hook_command(line))
+        return false;
     }
 
     accumulate(run_and_persist(line));
+    return false;
   }
-  return 0;
+
+  void handle_tools_command() {
+    renderer_->on_command_output(format_tools(agent().state().tools()));
+  }
+
+  void handle_skills_command() {
+    if (bundle_.skill_catalog) {
+      renderer_->on_command_output(
+          format_skill_catalog(*bundle_.skill_catalog));
+    } else if (args_.no_skills) {
+      renderer_->on_command_output("skills disabled (--no-skills or "
+                                   "[skills] disabled = true)\n");
+    } else {
+      renderer_->on_command_output(
+          "(no skills discovered)\n"
+          "Add SKILL.md files under .pici/skills/, skills/ or "
+          ".agents/skills/ in the workspace, or skills/ under the config "
+          "directory.\n");
+    }
+  }
+
+  void handle_addons_command() {
+    renderer_->on_command_output(format_addons(bundle_.hooks_list_saved));
+  }
+
+  void handle_reload_addons_command() {
+    try {
+      reload_addons();
+      renderer_->on_command_output(
+          "reloaded " + std::to_string(bundle_.hooks_list_saved.size()) +
+          " add-on(s)");
+    } catch (const std::exception &e) {
+      renderer_->on_command_output("add-on reload failed: " +
+                                   std::string(e.what()));
+    }
+  }
+
+  void handle_compact_command() {
+    // Manual compaction is interactive-only: it drives a live status hook
+    // and an interruptible network request, neither of which has a
+    // meaningful non-TTY/piped equivalent. The interactive command loop
+    // does run with piped stdin — see /model's isatty() branch below for
+    // the established pattern of a slash command explicitly degrading for
+    // non-interactive input rather than silently misbehaving — so this
+    // guard is reachable and load-bearing, not defensive dead code.
+    if (isatty(STDIN_FILENO) == 0) {
+      renderer_->on_command_output(
+          "/compact is only available in an interactive terminal session");
+      return;
+    }
+    core::TerminalTitleActivityGuard activity(*title_controller_);
+    auto result = run_compaction_command(
+        runtime(), *renderer_, args_.verbose, stream_diagnostics_,
+        bundle_.hook_runtime, core::CompactionTrigger::manual);
+    if (result.success) {
+      renderer_->on_command_output(
+          "compacted context: " +
+          std::to_string(result.retained_message_count) +
+          " message(s) retained");
+    } else if (result.unsupported) {
+      renderer_->on_command_output(
+          "compaction is not supported by the active provider/model");
+    } else if (result.cancelled) {
+      renderer_->on_command_output("compaction cancelled");
+    } else {
+      renderer_->on_command_output("compaction failed: " +
+                                   result.error.value_or("unknown error"));
+    }
+  }
+
+  void handle_model_command(const std::string &line) {
+    std::string spec = line.size() > 6 ? line.substr(6) : "";
+    spec.erase(0, spec.find_first_not_of(" \t"));
+    if (spec.empty()) {
+      const auto current_model = agent().state().model();
+      if (isatty(STDIN_FILENO) == 0) {
+        renderer_->on_command_output("model: " + current_model.provider + "/" +
+                                     current_model.id +
+                                     "\nusage: /model <provider/model>");
+        return;
+      }
+      const auto selected = cli::run_model_selector(
+          registry_->search(""), current_model.provider, current_model.id,
+          [this](const core::Model &candidate) {
+            switch (auth_resolver_->availability(candidate.provider)) {
+            case pi::auth::AuthAvailability::configured:
+              return std::string("configured");
+            case pi::auth::AuthAvailability::not_required:
+              return std::string("not_required");
+            case pi::auth::AuthAvailability::missing:
+              return std::string("missing");
+            case pi::auth::AuthAvailability::expired_or_refresh_needed:
+              return std::string("expired_or_refresh_needed");
+            }
+            return std::string("unknown");
+          },
+          renderer_->owns_status_line());
+      renderer_->force_full_repaint();
+      if (selected.cancelled || !selected.model)
+        return;
+      spec = selected.model->provider + "/" + selected.model->id;
+    }
+
+    core::ModelSelection selection{.model = spec, .source = "cli"};
+    const auto resolution = registry_->resolve(selection);
+    if (!resolution) {
+      renderer_->on_command_output("model switch failed: " + resolution.error);
+      return;
+    }
+    if (auth_resolver_->availability(resolution.model->provider) ==
+        pi::auth::AuthAvailability::missing) {
+      renderer_->on_command_output(
+          "model switch failed: missing authentication for provider '" +
+          resolution.model->provider + "'");
+      return;
+    }
+    try {
+      const auto result = runtime().set_model(*resolution.model,
+                                              agent().state().thinking_level());
+      runtime().mailbox_runtime().set_model(result.current.provider,
+                                            result.current.id);
+      configure_hooks();
+      {
+        std::scoped_lock lock(effective_context_mutex_);
+        effective_context_.reset();
+      }
+      (void)update_terminal_ui();
+      std::string message =
+          "model: " + result.current.provider + "/" + result.current.id;
+      if (result.warning)
+        message += "\nwarning: " + *result.warning;
+      renderer_->on_command_output(std::move(message));
+    } catch (const std::exception &error) {
+      renderer_->on_command_output("model switch failed: " +
+                                   std::string(error.what()));
+    }
+  }
+
+  void handle_models_command(const std::string &line) {
+    std::string filter = line.size() > 7 ? line.substr(7) : "";
+    filter.erase(0, filter.find_first_not_of(" \t"));
+    renderer_->on_command_output(format_model_catalog(filter, registry_));
+  }
+
+  void handle_usage_command() {
+    renderer_->on_command_output(
+        format_usage(last_turn_, session_cost_, has_current_pricing()));
+  }
+
+  void handle_memory_command() {
+    renderer_->on_command_output(
+        format_memory(runtime(), *runtime().task_manager()));
+  }
+
+  void handle_name_command(const std::string &line) {
+    std::string name = line.size() > 5 ? line.substr(5) : "";
+    name.erase(0, name.find_first_not_of(" \t"));
+    if (name.empty()) {
+      std::cerr << "usage: /name <session name>\n";
+    } else {
+      bundle_.session_store->set_name(current_session_id_, name);
+      current_session_name_ = name;
+      runtime().mailbox_runtime().set_session_name(name);
+      std::cerr << "[session name: " << name << "]\n";
+    }
+  }
+
+  void handle_tree_command() {
+    auto tree_opt =
+        core::build_session_tree(*bundle_.session_store, current_session_id_);
+    if (!tree_opt) {
+      std::cerr << "no session tree available\n";
+      return;
+    }
+    auto tree_lines = core::format_session_tree(*tree_opt, current_session_id_);
+
+    std::size_t cursor = 0;
+    for (std::size_t i = 0; i < tree_lines.size(); ++i) {
+      if (tree_lines[i].session_id == current_session_id_) {
+        cursor = i;
+        break;
+      }
+    }
+
+    auto result = cli::run_tree_selector(tree_lines, current_session_id_,
+                                         cursor, renderer_->owns_status_line());
+    renderer_->force_full_repaint();
+    if (result.cancelled || result.selected_session_id == current_session_id_)
+      return;
+
+    auto loaded = bundle_.session_store->load(result.selected_session_id);
+    if (!loaded) {
+      std::cerr << "error: session not found\n";
+      return;
+    }
+    current_session_id_ = result.selected_session_id;
+    current_session_name_ = loaded->header.name;
+    runtime().mailbox_runtime().drop_queued_delivery();
+    runtime().activate_session(*loaded);
+    if (const auto identity = runtime().mailbox_runtime().activate_root(
+            current_session_id_, current_session_name_))
+      agent().set_runtime_identity(*identity);
+    if (runtime().last_warning())
+      std::cerr << "warning: " << *runtime().last_warning() << "\n";
+    configure_hooks();
+    {
+      std::scoped_lock lock(effective_context_mutex_);
+      effective_context_.reset();
+    }
+    std::cerr << "[session: " << current_session_id_;
+    if (loaded->header.name)
+      std::cerr << "  " << *loaded->header.name;
+    std::cerr << "]\n";
+  }
+
+  void handle_new_command() {
+    core::SessionHeader fresh_hdr;
+    fresh_hdr.id = core::generate_session_id();
+    fresh_hdr.created =
+        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    const auto current_model = agent().state().model();
+    fresh_hdr.model = current_model.id;
+    fresh_hdr.provider = current_model.provider;
+    runtime().mailbox_runtime().drop_queued_delivery();
+    current_session_id_ = runtime().create_session(fresh_hdr);
+    current_session_name_.reset();
+    if (const auto identity = runtime().mailbox_runtime().activate_root(
+            current_session_id_, current_session_name_))
+      agent().set_runtime_identity(*identity);
+    {
+      std::scoped_lock lock(effective_context_mutex_);
+      effective_context_.reset();
+    }
+    std::cerr << "[new session: " << current_session_id_ << "]\n";
+  }
+
+  void handle_fork_command() {
+    core::SessionHeader child_hdr;
+    child_hdr.id = core::generate_session_id();
+    child_hdr.created =
+        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    const auto current_model = agent().state().model();
+    child_hdr.model = current_model.id;
+    child_hdr.provider = current_model.provider;
+    child_hdr.parent_id = current_session_id_;
+    child_hdr.parent_offset = agent().state().messages().size();
+    runtime().mailbox_runtime().drop_queued_delivery();
+    current_session_id_ = runtime().fork_session(child_hdr);
+    current_session_name_.reset();
+    if (const auto identity = runtime().mailbox_runtime().activate_root(
+            current_session_id_, current_session_name_))
+      agent().set_runtime_identity(*identity);
+    {
+      std::scoped_lock lock(effective_context_mutex_);
+      effective_context_.reset();
+    }
+    std::cerr << "[fork: " << current_session_id_ << "]\n";
+  }
+
+  // Returns true iff an add-on's on_command handled the line.
+  bool handle_hook_command(const std::string &line) {
+    auto space = line.find(' ');
+    std::string cmd = line.substr(
+        1, space == std::string::npos ? std::string::npos : space - 1);
+    std::string rest = space == std::string::npos ? "" : line.substr(space + 1);
+
+    core::LuaContextSnapshot context_snapshot;
+    context_snapshot.raw = agent().context_snapshot();
+    {
+      std::scoped_lock lock(effective_context_mutex_);
+      context_snapshot.effective = effective_context_;
+    }
+    auto result = bundle_.hooks->on_command(
+        cmd, rest, context_snapshot.raw.messages, context_snapshot);
+    if (!result.handled)
+      return false;
+    if (result.truncate_to) {
+      runtime().truncate_active_session(*result.truncate_to);
+      std::scoped_lock lock(effective_context_mutex_);
+      effective_context_.reset();
+    }
+    if (result.output)
+      renderer_->on_command_output(*result.output);
+    if (result.prompt)
+      accumulate(run_and_persist(*result.prompt));
+    return true;
+  }
+
+  cli::Args args_;
+  std::shared_ptr<const core::ModelRegistry> registry_;
+  std::shared_ptr<const core::ModelRegistry> effective_registry_;
+  std::shared_ptr<core::RemoteFauxClient> remote_client_;
+  std::shared_ptr<core::ScriptedToolRegistry> scripted_registry_;
+  core::Model model_;
+  std::shared_ptr<core::StreamDiagnostics> stream_diagnostics_;
+  std::shared_ptr<pi::auth::AuthResolver> auth_resolver_;
+  std::mutex effective_context_mutex_;
+  std::optional<core::AgentContext> effective_context_;
+  cli::SessionRuntimeBundle bundle_;
+  core::SandboxMode sandbox_mode_{core::SandboxMode::auto_mode};
+  std::function<void(const std::string &)> faux_tool_registrar_;
+  std::vector<std::shared_ptr<const core::ToolDefinition>> base_tools_;
+  std::shared_ptr<cli::ReadlineWake> repl_wake_;
+  std::shared_ptr<core::SubagentActivityBridge> activity_;
+  std::shared_ptr<std::atomic_uint64_t> compat_counter_;
+  std::string current_session_id_;
+  std::optional<std::string> current_session_name_;
+  std::unique_ptr<core::Renderer> renderer_;
+  std::optional<core::SubagentPanel> subagent_panel_;
+  bool panel_mounted_{false};
+  std::optional<core::TerminalTitleController> title_controller_;
+  cli::TerminalRawMode session_raw_mode_;
+  bool owns_full_screen_{false};
+  cli::CompleteFn complete_fn_;
+  cli::ControlFn control_fn_;
+  CostAccumulator last_turn_;
+  CostAccumulator session_cost_;
+  core::TokenUsage last_usage_for_prompt_{};
+  core::TokenUsage session_usage_for_prompt_{};
+  core::MailboxAutonomousTurnBudget autonomous_budget_;
+  bool autonomous_budget_exhausted_{false};
+  std::string readline_draft_;
+  std::size_t readline_cursor_{0};
+};
+
+int cmd_run(const cli::Args &args,
+            const std::shared_ptr<const core::ModelRegistry> &registry) {
+  CmdRunSession session(args, registry);
+  return session.run();
 }
 
 } // namespace
