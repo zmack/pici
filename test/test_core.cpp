@@ -23,6 +23,8 @@
 #include "core/session/session_store.h"
 #include "core/stream.h"
 #include "core/stream_renderer.h"
+#include "support/gtest_helpers.h"
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 using namespace pi::core;
@@ -93,7 +95,8 @@ TEST(Message, UserMessageJSONRoundTrip) {
   auto parsed = json::from_json(json_str);
 
   ASSERT_TRUE(parsed.has_value());
-  EXPECT_TRUE(std::holds_alternative<UserMessage>(*parsed));
+  ASSERT_THAT(parsed,
+              testing::Optional(testing::VariantWith<UserMessage>(testing::_)));
 
   auto &parsed_msg = std::get<UserMessage>(*parsed);
   EXPECT_EQ(parsed_msg.timestamp, msg.timestamp);
@@ -124,7 +127,8 @@ TEST(Message, AssistantMessageJSONRoundTrip) {
   auto parsed = json::from_json(json_str);
 
   ASSERT_TRUE(parsed.has_value());
-  EXPECT_TRUE(std::holds_alternative<AssistantMessage>(*parsed));
+  ASSERT_THAT(parsed, testing::Optional(
+                          testing::VariantWith<AssistantMessage>(testing::_)));
 
   auto &parsed_msg = std::get<AssistantMessage>(*parsed);
   EXPECT_EQ(parsed_msg.api, "openai-completions");
@@ -154,12 +158,13 @@ TEST(Message, ToolResultMessageJSONRoundTrip) {
   auto parsed = json::from_json(json_str);
 
   ASSERT_TRUE(parsed.has_value());
-  EXPECT_TRUE(std::holds_alternative<ToolResultMessage>(*parsed));
+  ASSERT_THAT(parsed, testing::Optional(
+                          testing::VariantWith<ToolResultMessage>(testing::_)));
 
   auto &parsed_msg = std::get<ToolResultMessage>(*parsed);
   EXPECT_EQ(parsed_msg.tool_call_id, "call_abc123");
   EXPECT_EQ(parsed_msg.tool_name, "bash");
-  EXPECT_TRUE(!parsed_msg.is_error);
+  EXPECT_FALSE(parsed_msg.is_error);
 }
 
 TEST(Message, ContextCompactionMessageJSONRoundTrip) {
@@ -176,12 +181,14 @@ TEST(Message, ContextCompactionMessageJSONRoundTrip) {
   std::string json_str = json::to_json(msg);
   // The opaque payload must round-trip byte-for-byte and must never be
   // silently dropped, truncated, or reinterpreted.
-  EXPECT_TRUE(json_str.find("opaque-server-bytes-not-plaintext") !=
-              std::string::npos);
+  EXPECT_THAT(json_str,
+              testing::HasSubstr("opaque-server-bytes-not-plaintext"));
 
   auto parsed = json::from_json(json_str);
   ASSERT_TRUE(parsed.has_value());
-  EXPECT_TRUE(std::holds_alternative<ContextCompactionMessage>(*parsed));
+  ASSERT_THAT(parsed,
+              testing::Optional(
+                  testing::VariantWith<ContextCompactionMessage>(testing::_)));
 
   auto &parsed_msg = std::get<ContextCompactionMessage>(*parsed);
   EXPECT_EQ(parsed_msg.api, "openai-codex-responses");
@@ -198,7 +205,9 @@ TEST(Message, ContextCompactionMessageJSONRoundTrip) {
   auto line = json::to_jsonl_line(msg);
   auto parsed_line = json::from_json(line);
   ASSERT_TRUE(parsed_line.has_value());
-  EXPECT_TRUE(std::holds_alternative<ContextCompactionMessage>(*parsed_line));
+  ASSERT_THAT(parsed_line,
+              testing::Optional(
+                  testing::VariantWith<ContextCompactionMessage>(testing::_)));
 }
 
 TEST(TransformMessages, DropsToolResultMessageWithNoMatchingToolCall) {
@@ -223,7 +232,7 @@ TEST(TransformMessages, DropsToolResultMessageWithNoMatchingToolCall) {
   auto result = transform_messages(messages, model);
 
   for (const auto &msg : result)
-    EXPECT_TRUE(!std::holds_alternative<ToolResultMessage>(msg));
+    EXPECT_FALSE(std::holds_alternative<ToolResultMessage>(msg));
   EXPECT_EQ(result.size(), std::size_t(2));
 }
 
@@ -275,13 +284,14 @@ TEST(TransformMessages, DropsContextCompactionMessageForADifferentModel) {
                    .api = "openai-codex-responses",
                    .provider = "openai-codex"};
   auto kept = transform_messages(messages, same_model);
-  EXPECT_EQ(kept.size(), std::size_t(1));
-  EXPECT_TRUE(std::holds_alternative<ContextCompactionMessage>(kept[0]));
+  ASSERT_THAT(kept, testing::SizeIs(1));
+  ASSERT_THAT(kept[0],
+              testing::VariantWith<ContextCompactionMessage>(testing::_));
 
   Model other_model{
       .id = "gpt-4", .api = "openai-completions", .provider = "openai"};
   auto dropped = transform_messages(messages, other_model);
-  EXPECT_EQ(dropped.size(), std::size_t(0));
+  EXPECT_THAT(dropped, testing::IsEmpty());
 }
 
 namespace {
@@ -334,7 +344,7 @@ TEST(TokenUsage, JSON) {
   std::string json_str = json::to_json(usage);
   auto parsed = json::from_json(json_str);
   // TokenUsage doesn't have from_json, just verify to_json doesn't crash
-  EXPECT_TRUE(!json_str.empty());
+  EXPECT_FALSE(json_str.empty());
 }
 
 // ─── Event stream tests ───────────────────────────────────────────────────
@@ -357,11 +367,12 @@ TEST(EventStream, PushAndConsume) {
 
   auto ev = stream.next();
   ASSERT_TRUE(ev.has_value());
-  EXPECT_TRUE(std::holds_alternative<AgentStartEvent>(*ev));
+  ASSERT_THAT(
+      ev, testing::Optional(testing::VariantWith<AgentStartEvent>(testing::_)));
 
   AgentEndEvent end_event(std::vector<Message>{});
   pushed = stream.push_and_check(std::move(end_event));
-  EXPECT_TRUE(!pushed); // Should return false since stream is done
+  EXPECT_FALSE(pushed); // Should return false since stream is done
 
   EXPECT_TRUE(stream.is_done());
 }
@@ -383,7 +394,7 @@ TEST(EventStream, ForEach) {
   stream.for_each([&count](const AgentEvent &) { count++; });
   t.join();
 
-  EXPECT_TRUE(count >= 2);
+  EXPECT_GE(count, 2);
 }
 
 TEST(EventStream, WaitReturnsResult) {
@@ -410,7 +421,7 @@ TEST(EventStream, WaitReturnsResult) {
   stream.push_and_check(std::move(end_event));
 
   auto [result, error] = stream.wait();
-  EXPECT_TRUE(!error.has_value());
+  EXPECT_FALSE(error.has_value());
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->size(), std::size_t(1));
 }
@@ -450,7 +461,7 @@ TEST(AgentState, BasicOperations) {
   AgentState state;
 
   EXPECT_TRUE(state.system_prompt().empty());
-  EXPECT_TRUE(!state.is_streaming());
+  EXPECT_FALSE(state.is_streaming());
   EXPECT_TRUE(state.messages().empty());
   EXPECT_TRUE(state.tools().empty());
 
@@ -496,8 +507,8 @@ TEST(AgentState, Reset) {
   EXPECT_TRUE(state.system_prompt().empty());
   EXPECT_TRUE(state.messages().empty());
   EXPECT_TRUE(state.pending_tool_calls().empty());
-  EXPECT_TRUE(!state.error_message().has_value());
-  EXPECT_TRUE(!state.is_streaming());
+  EXPECT_FALSE(state.error_message().has_value());
+  EXPECT_FALSE(state.is_streaming());
 }
 
 TEST(AgentState, ThreadSafety) {
@@ -531,7 +542,7 @@ TEST(FindModel, SlashHeavyIDMatchesBeforeSplitting) {
   auto m = find_model("accounts/fireworks/models/glm-5p2", "fireworks");
   ASSERT_TRUE(m.has_value());
   EXPECT_EQ(m->provider, "fireworks");
-  EXPECT_TRUE(!m->base_url.empty());
+  EXPECT_FALSE(m->base_url.empty());
 }
 
 TEST(FindModel, SimpleIDWithProviderHint) {
@@ -582,36 +593,38 @@ TEST(ModelRegistry, ConfiguredResolutionAndMerge) {
 
   ModelRegistry registry({{"local", local}, {"remote", remote}});
   const auto *merged = registry.exact("LOCAL", "same");
-  EXPECT_TRUE(merged != nullptr);
+  ASSERT_THAT(merged, testing::NotNull());
   EXPECT_EQ(merged->base_url, "http://local.test/v1");
   EXPECT_EQ(merged->headers.at("X-Provider"), "local");
   EXPECT_EQ(merged->headers.at("X-Model"), "yes");
 
   auto explicit_model = registry.resolve(
       {.provider = "local", .model = "local/same", .source = "test"});
-  EXPECT_TRUE(explicit_model);
-  EXPECT_EQ(explicit_model.model->id, "same");
+  ASSERT_THAT(explicit_model.model, testing::Optional(testing::Field(
+                                        &Model::id, testing::StrEq("same"))));
 
   auto ambiguous = registry.resolve({.model = "same", .source = "test"});
-  EXPECT_TRUE(!ambiguous);
-  EXPECT_TRUE(ambiguous.error.find("local/same") != std::string::npos);
-  EXPECT_TRUE(ambiguous.error.find("remote/same") != std::string::npos);
+  EXPECT_FALSE(ambiguous);
+  EXPECT_THAT(ambiguous.error, testing::HasSubstr("local/same"));
+  EXPECT_THAT(ambiguous.error, testing::HasSubstr("remote/same"));
 
   auto slash = registry.resolve({.provider = "local",
                                  .model = "accounts/company/models/coder",
                                  .source = "test"});
-  EXPECT_TRUE(slash);
-  EXPECT_EQ(slash.model->id, "accounts/company/models/coder");
+  ASSERT_THAT(
+      slash.model,
+      testing::Optional(testing::Field(
+          &Model::id, testing::StrEq("accounts/company/models/coder"))));
 
   auto unknown_provider = registry.resolve(
       {.provider = "missing", .model = "model", .source = "test"});
-  EXPECT_TRUE(!unknown_provider);
+  EXPECT_FALSE(unknown_provider);
   auto custom = registry.resolve({.provider = "missing",
                                   .model = "model",
                                   .base_url = "http://missing.test/v1",
                                   .source = "test"});
-  EXPECT_TRUE(custom);
-  EXPECT_EQ(custom.model->provider, "missing");
+  ASSERT_THAT(custom.model, testing::Optional(testing::Field(
+                                &Model::provider, testing::StrEq("missing"))));
   EXPECT_EQ(custom.model->base_url, "http://missing.test/v1");
 
   ProviderConfig override;
@@ -621,10 +634,10 @@ TEST(ModelRegistry, ConfiguredResolutionAndMerge) {
   override.model_overrides.emplace("gpt-4o", sparse);
   ModelRegistry overridden({{"openai", override}});
   const auto *gpt = overridden.exact("openai", "gpt-4o");
-  EXPECT_TRUE(gpt != nullptr);
+  ASSERT_THAT(gpt, testing::NotNull());
   EXPECT_EQ(gpt->context_window, 999ULL);
   EXPECT_EQ(gpt->max_tokens, 16384ULL);
-  EXPECT_TRUE(!gpt->base_url.empty());
+  EXPECT_FALSE(gpt->base_url.empty());
 }
 
 TEST(ThinkingResolution, ClampsUnsupportedLevels) {
@@ -638,13 +651,13 @@ TEST(ThinkingResolution, ClampsUnsupportedLevels) {
                               {"high", std::string("high")}};
   const auto result = resolve_thinking_level(model, ThinkingLevel::medium);
   EXPECT_EQ(result.level, ThinkingLevel::low);
-  EXPECT_TRUE(result.warning.has_value());
+  EXPECT_THAT(result.warning, testing::Optional(testing::_));
 
   model.reasoning = false;
   model.thinking_level_map.clear();
   const auto off = resolve_thinking_level(model, ThinkingLevel::high);
   EXPECT_EQ(off.level, ThinkingLevel::off);
-  EXPECT_TRUE(off.warning.has_value());
+  EXPECT_THAT(off.warning, testing::Optional(testing::_));
 }
 
 TEST(Model, JSONSerialization) {
@@ -659,9 +672,9 @@ TEST(Model, JSONSerialization) {
   model.max_tokens = 4096;
 
   std::string json_str = json::to_json(model);
-  EXPECT_TRUE(!json_str.empty());
-  EXPECT_TRUE(json_str.find("\"id\"") != std::string::npos);
-  EXPECT_TRUE(json_str.find("\"gpt-4\"") != std::string::npos);
+  EXPECT_FALSE(json_str.empty());
+  EXPECT_THAT(json_str, testing::HasSubstr("\"id\""));
+  EXPECT_THAT(json_str, testing::HasSubstr("\"gpt-4\""));
 }
 
 TEST(AgentEvent, CanonicalJSONEnvelope) {
@@ -682,13 +695,13 @@ TEST(MessageStartEvent, RequestProvenanceJSON) {
   UserMessage user;
   user.content.emplace_back(TextContent{.text = "hello"});
   auto ordinary = event_to_json(MessageStartEvent{Message{user}});
-  EXPECT_TRUE(!ordinary["data"].contains("request"));
+  EXPECT_FALSE(ordinary["data"].contains("request"));
 
   AssistantMessage assistant;
   assistant.content.emplace_back(TextContent{.text = "answer"});
   const auto assistant_json =
       event_to_json(MessageStartEvent{Message{std::move(assistant)}});
-  EXPECT_TRUE(!assistant_json["data"].contains("request"));
+  EXPECT_FALSE(assistant_json["data"].contains("request"));
 
   InputProvenance presentation{.source = InputProvenance::Source::mailbox,
                                .message_id = "msg-1",
@@ -736,9 +749,8 @@ TEST(ToolPresentationEvent, MailboxReceiptJSON) {
 
 TEST(SessionStore, OrderedMessagesAndTruncationReplay) {
 
-  const auto dir =
-      std::filesystem::temp_directory_path() / "pici-session-journal-test";
-  std::filesystem::remove_all(dir);
+  pi::test::TemporaryDirectory directory("pici-session-journal-test");
+  const auto &dir = directory.path();
 
   SessionStore store(dir);
   SessionHeader header{.id = "session-1"};
@@ -776,15 +788,12 @@ TEST(SessionStore, OrderedMessagesAndTruncationReplay) {
   EXPECT_EQ(listed.size(), std::size_t(1));
   EXPECT_EQ(listed.front().provider, "remote");
   EXPECT_EQ(listed.front().model, "accounts/company/models/coder");
-
-  std::filesystem::remove_all(dir);
 }
 
 TEST(SessionStore, CompactionRecordReplacesTranscriptWholesale) {
 
-  const auto dir =
-      std::filesystem::temp_directory_path() / "pici-session-compaction-test";
-  std::filesystem::remove_all(dir);
+  pi::test::TemporaryDirectory directory("pici-session-compaction-test");
+  const auto &dir = directory.path();
 
   SessionStore store(dir);
   SessionHeader header{.id = "session-compact-1"};
@@ -817,8 +826,8 @@ TEST(SessionStore, CompactionRecordReplacesTranscriptWholesale) {
                 std::get<UserMessage>(record->messages[0]).content[0])
                 .text,
             "retained summary");
-  EXPECT_TRUE(
-      std::holds_alternative<ContextCompactionMessage>(record->messages[1]));
+  ASSERT_THAT(record->messages[1],
+              testing::VariantWith<ContextCompactionMessage>(testing::_));
   EXPECT_EQ(
       std::get<ContextCompactionMessage>(record->messages[1]).encrypted_content,
       "opaque-bytes");
@@ -827,15 +836,13 @@ TEST(SessionStore, CompactionRecordReplacesTranscriptWholesale) {
                 .text,
             "after compaction");
   EXPECT_EQ(record->header.min_schema_version, 2);
-
-  std::filesystem::remove_all(dir);
 }
 
 TEST(SessionStore, MalformedCompactionRecordFailsLoudly) {
 
-  const auto dir = std::filesystem::temp_directory_path() /
-                   "pici-session-compaction-malformed-test";
-  std::filesystem::remove_all(dir);
+  pi::test::TemporaryDirectory directory(
+      "pici-session-compaction-malformed-test");
+  const auto &dir = directory.path();
 
   SessionStore store(dir);
   SessionHeader header{.id = "session-compact-bad"};
@@ -857,14 +864,11 @@ TEST(SessionStore, MalformedCompactionRecordFailsLoudly) {
     threw = true;
   }
   EXPECT_TRUE(threw);
-
-  std::filesystem::remove_all(dir);
 }
 
 TEST(SessionStore, CompactionRecordFromANewerSchemaFailsClosed) {
-  const auto dir = std::filesystem::temp_directory_path() /
-                   "pici-session-compaction-future-test";
-  std::filesystem::remove_all(dir);
+  pi::test::TemporaryDirectory directory("pici-session-compaction-future-test");
+  const auto &dir = directory.path();
 
   SessionStore store(dir);
   SessionHeader header{.id = "session-compact-future"};
@@ -884,22 +888,19 @@ TEST(SessionStore, CompactionRecordFromANewerSchemaFailsClosed) {
     what = e.what();
   }
   EXPECT_TRUE(threw);
-  EXPECT_TRUE(what.find("99") != std::string::npos);
-
-  std::filesystem::remove_all(dir);
+  EXPECT_THAT(what, testing::HasSubstr("99"));
 }
 
 TEST(SessionStore, RefusesToCompactASessionWithForkedChildren) {
-  const auto dir = std::filesystem::temp_directory_path() /
-                   "pici-session-compaction-fork-test";
-  std::filesystem::remove_all(dir);
+  pi::test::TemporaryDirectory directory("pici-session-compaction-fork-test");
+  const auto &dir = directory.path();
 
   SessionStore store(dir);
   SessionHeader parent_header{.id = "session-parent"};
   const auto parent_id = store.create(parent_header);
   store.append_message(parent_id, make_user_message("parent msg"));
 
-  EXPECT_TRUE(!store.has_children(parent_id));
+  EXPECT_FALSE(store.has_children(parent_id));
 
   SessionHeader child_header{.id = "session-child",
                              .parent_id = parent_id,
@@ -932,6 +933,4 @@ TEST(SessionStore, RefusesToCompactASessionWithForkedChildren) {
   auto child_record = store.load(child_id);
   ASSERT_TRUE(child_record.has_value());
   EXPECT_EQ(child_record->messages.size(), std::size_t(1));
-
-  std::filesystem::remove_all(dir);
 }

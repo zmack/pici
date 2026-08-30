@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -6,6 +7,7 @@
 #include "core/markdown.h"
 #include "core/stream_renderer.h"
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 using namespace pi::core;
@@ -167,170 +169,189 @@ struct TerminalState {
 
 TEST(Markdown, PlainTextPassesThrough) {
   auto out = render_markdown_plain("Hello, world.");
-  EXPECT_TRUE(out.find("Hello, world.") != std::string::npos);
+  EXPECT_THAT(out, testing::HasSubstr("Hello, world."));
 }
 
 TEST(Markdown, BoldHasANSIAndPlainContent) {
   auto ansi = render_markdown_ansi("**bold text**");
-  EXPECT_TRUE(has_ansi(ansi));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
   auto plain = strip_ansi(ansi);
-  EXPECT_TRUE(plain.find("bold text") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("bold text"));
 }
 
 TEST(Markdown, ItalicHasANSIAndPlainContent) {
   auto ansi = render_markdown_ansi("*italic text*");
-  EXPECT_TRUE(has_ansi(ansi));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
   auto plain = strip_ansi(ansi);
-  EXPECT_TRUE(plain.find("italic text") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("italic text"));
 }
 
 TEST(Markdown, InlineCodeHasANSIAndPlainContent) {
   auto ansi = render_markdown_ansi("Use `foo()` here.");
-  EXPECT_TRUE(has_ansi(ansi));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
   auto plain = strip_ansi(ansi);
-  EXPECT_TRUE(plain.find("foo()") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("foo()"));
 }
 
 TEST(Markdown, HeadingsHavePrefixAndANSI) {
   auto h1 = render_markdown_ansi("# Title");
-  EXPECT_TRUE(has_ansi(h1));
-  EXPECT_TRUE(strip_ansi(h1).find("# Title") != std::string::npos);
+  EXPECT_THAT(h1, testing::HasSubstr("\033["));
+  EXPECT_THAT(strip_ansi(h1), testing::HasSubstr("# Title"));
 
   auto h2 = render_markdown_ansi("## Section");
-  EXPECT_TRUE(strip_ansi(h2).find("## Section") != std::string::npos);
+  EXPECT_THAT(strip_ansi(h2), testing::HasSubstr("## Section"));
 
   auto h3 = render_markdown_ansi("### Sub");
-  EXPECT_TRUE(strip_ansi(h3).find("### Sub") != std::string::npos);
+  EXPECT_THAT(strip_ansi(h3), testing::HasSubstr("### Sub"));
 }
 
 TEST(Markdown, FencedCodeBlockHasANSIAndContent) {
   auto ansi = render_markdown_ansi("```\nfn main() {}\n```");
-  EXPECT_TRUE(has_ansi(ansi));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
   auto plain = strip_ansi(ansi);
-  EXPECT_TRUE(plain.find("fn main()") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("fn main()"));
 }
 
 TEST(Markdown, CodeBlockLanguageShown) {
   auto plain = strip_ansi(render_markdown_ansi("```rust\nlet x = 1;\n```"));
-  EXPECT_TRUE(plain.find("rust") != std::string::npos);
-  EXPECT_TRUE(plain.find("let x = 1;") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("rust"));
+  EXPECT_THAT(plain, testing::HasSubstr("let x = 1;"));
 }
 
 TEST(Markdown, SupportedFencedCodeBlockGetsSyntaxHighlighting) {
   const auto ansi =
       render_markdown_ansi("```cpp\nint main() { return 42; }\n```");
   const auto plain = strip_ansi(ansi);
-  EXPECT_TRUE(plain.find("cpp") != std::string::npos);
-  EXPECT_TRUE(plain.find("int main() { return 42; }") != std::string::npos);
-  EXPECT_TRUE(has_ansi(ansi));
-  EXPECT_TRUE(count_ansi_sequences(ansi) >= 4);
+  EXPECT_THAT(plain, testing::HasSubstr("cpp"));
+  EXPECT_THAT(plain, testing::HasSubstr("int main() { return 42; }"));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
+  EXPECT_GE(count_ansi_sequences(ansi), 4);
 }
 
 TEST(Markdown, FencedLanguageInfoIgnoresTrailingMetadata) {
   const auto ansi = render_markdown_ansi(
       "```cpp linenums title=demo\nint main() { return 42; }\n```");
   const auto plain = strip_ansi(ansi);
-  EXPECT_TRUE(plain.find("cpp") != std::string::npos);
-  EXPECT_TRUE(plain.find("int main() { return 42; }") != std::string::npos);
-  EXPECT_TRUE(has_ansi(ansi));
-  EXPECT_TRUE(count_ansi_sequences(ansi) >= 4);
+  EXPECT_THAT(plain, testing::HasSubstr("cpp"));
+  EXPECT_THAT(plain, testing::HasSubstr("int main() { return 42; }"));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
+  EXPECT_GE(count_ansi_sequences(ansi), 4);
 }
 
 TEST(Markdown, PythonFencedCodeBlockGetsSyntaxHighlighting) {
   const auto ansi = render_markdown_ansi(
       "```python\ndef greet(name):\n    return f\"Hello, {name}\"\n```");
   const auto plain = strip_ansi(ansi);
-  EXPECT_TRUE(plain.find("python") != std::string::npos);
-  EXPECT_TRUE(plain.find("def greet(name):") != std::string::npos);
-  EXPECT_TRUE(plain.find("return f\"Hello, {name}\"") != std::string::npos);
-  EXPECT_TRUE(has_ansi(ansi));
-  EXPECT_TRUE(count_ansi_sequences(ansi) >= 4);
+  EXPECT_THAT(plain, testing::HasSubstr("python"));
+  EXPECT_THAT(plain, testing::HasSubstr("def greet(name):"));
+  EXPECT_THAT(plain, testing::HasSubstr("return f\"Hello, {name}\""));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
+  EXPECT_GE(count_ansi_sequences(ansi), 4);
 }
 
-TEST(Markdown, RequestedLanguageCodeBlockSyntaxHighlighting) {
-  struct Case {
-    std::string_view name;
-    std::string_view markdown;
-    std::string_view expected;
-  };
+struct RequestedLanguageCase {
+  std::string_view name;
+  std::string_view markdown;
+  std::string_view expected;
+};
 
-  const Case cases[] = {
-      {"javascript",
-       "```javascript\nfunction greet(name) { return 'Hi ' + name; }\n```",
-       "function greet(name)"},
-      {"typescript",
-       "```typescript\ntype User = { name: string };\n"
-       "function greet(user: User) { return user.name; }\n```",
-       "function greet(user: User)"},
-      {"tsx",
-       "```tsx\nexport function Card() { return <div>{\"Hi\"}</div>; }\n```",
-       "export function Card()"},
-      {"rust", "```rust\nfn main() { let answer = 42; }\n```", "fn main()"},
-      {"go", "```go\npackage main\nfunc main() { println(\"hi\") }\n```",
-       "func main()"},
-      {"markdown", "```markdown\n# Title\n\n- item\n```", "# Title"},
-      {"ruby", "```ruby\ndef greet(name)\n  puts \"Hi #{name}\"\nend\n```",
-       "def greet(name)"},
-      {"lua",
-       "```lua\nlocal function greet(name)\n  return \"Hi \" .. name\nend\n```",
-       "local function greet(name)"},
-  };
-
-  for (const auto &c : cases) {
-
-    const auto ansi = render_markdown_ansi(c.markdown);
-    const auto plain = strip_ansi(ansi);
-    EXPECT_TRUE(plain.find(c.name) != std::string::npos);
-    EXPECT_TRUE(plain.find(c.expected) != std::string::npos);
-    EXPECT_TRUE(has_ansi(ansi));
-    EXPECT_TRUE(count_ansi_sequences(ansi) >= 4);
-  }
+void PrintTo(const RequestedLanguageCase &value, std::ostream *stream) {
+  *stream << "{language=" << value.name << ", expected=" << value.expected
+          << ", markdown=" << value.markdown << "}";
 }
+
+class RequestedLanguageCodeBlockTest
+    : public testing::TestWithParam<RequestedLanguageCase> {};
+
+TEST_P(RequestedLanguageCodeBlockTest, SyntaxHighlighting) {
+  const auto &c = GetParam();
+  const auto ansi = render_markdown_ansi(c.markdown);
+  const auto plain = strip_ansi(ansi);
+  EXPECT_THAT(plain, testing::HasSubstr(c.name));
+  EXPECT_THAT(plain, testing::HasSubstr(c.expected));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
+  EXPECT_GE(count_ansi_sequences(ansi), 4);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    SupportedLanguages, RequestedLanguageCodeBlockTest,
+    testing::Values(
+        RequestedLanguageCase{
+            "javascript",
+            "```javascript\nfunction greet(name) { return 'Hi ' + name; }\n```",
+            "function greet(name)"},
+        RequestedLanguageCase{
+            "typescript",
+            "```typescript\ntype User = { name: string };\n"
+            "function greet(user: User) { return user.name; }\n```",
+            "function greet(user: User)"},
+        RequestedLanguageCase{"tsx",
+                              "```tsx\nexport function Card() { return "
+                              "<div>{\"Hi\"}</div>; }\n```",
+                              "export function Card()"},
+        RequestedLanguageCase{"rust",
+                              "```rust\nfn main() { let answer = 42; }\n```",
+                              "fn main()"},
+        RequestedLanguageCase{
+            "go", "```go\npackage main\nfunc main() { println(\"hi\") }\n```",
+            "func main()"},
+        RequestedLanguageCase{"markdown", "```markdown\n# Title\n\n- item\n```",
+                              "# Title"},
+        RequestedLanguageCase{
+            "ruby", "```ruby\ndef greet(name)\n  puts \"Hi #{name}\"\nend\n```",
+            "def greet(name)"},
+        RequestedLanguageCase{"lua",
+                              "```lua\nlocal function greet(name)\n  return "
+                              "\"Hi \" .. name\nend\n```",
+                              "local function greet(name)"}),
+    [](const testing::TestParamInfo<RequestedLanguageCase> &info) {
+      return std::string(info.param.name);
+    });
 
 TEST(Markdown, UnorderedListHasBulletAndContent) {
   auto plain = strip_ansi(render_markdown_ansi("- alpha\n- beta\n- gamma"));
-  EXPECT_TRUE(plain.find("alpha") != std::string::npos);
-  EXPECT_TRUE(plain.find("beta") != std::string::npos);
-  EXPECT_TRUE(plain.find("gamma") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("alpha"));
+  EXPECT_THAT(plain, testing::HasSubstr("beta"));
+  EXPECT_THAT(plain, testing::HasSubstr("gamma"));
   // Each item should be on its own line
-  EXPECT_TRUE(plain.find('\n') != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("\n"));
 }
 
 TEST(Markdown, OrderedListHasNumbersAndContent) {
   auto plain =
       strip_ansi(render_markdown_ansi("1. first\n2. second\n3. third"));
-  EXPECT_TRUE(plain.find("1.") != std::string::npos);
-  EXPECT_TRUE(plain.find("first") != std::string::npos);
-  EXPECT_TRUE(plain.find("2.") != std::string::npos);
-  EXPECT_TRUE(plain.find("second") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("1."));
+  EXPECT_THAT(plain, testing::HasSubstr("first"));
+  EXPECT_THAT(plain, testing::HasSubstr("2."));
+  EXPECT_THAT(plain, testing::HasSubstr("second"));
 }
 
 TEST(Markdown, StrikethroughHasANSIAndContent) {
   auto ansi = render_markdown_ansi("~~deleted~~");
-  EXPECT_TRUE(has_ansi(ansi));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
   auto plain = strip_ansi(ansi);
-  EXPECT_TRUE(plain.find("deleted") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("deleted"));
 }
 
 TEST(Markdown, LinkShowsTextAndURL) {
   auto plain =
       strip_ansi(render_markdown_ansi("[click here](https://example.com)"));
-  EXPECT_TRUE(plain.find("click here") != std::string::npos);
-  EXPECT_TRUE(plain.find("https://example.com") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("click here"));
+  EXPECT_THAT(plain, testing::HasSubstr("https://example.com"));
 }
 
 TEST(Markdown, HorizontalRuleRenders) {
   auto plain = strip_ansi(render_markdown_ansi("---"));
-  EXPECT_TRUE(plain.find('\n') != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("\n"));
   // Should contain some kind of line character
-  EXPECT_TRUE(plain.size() > 2);
+  EXPECT_GT(plain.size(), 2U);
 }
 
 TEST(RenderMarkdownPlain, NoANSICodes) {
   auto plain = render_markdown_plain("**bold** and *italic*");
-  EXPECT_TRUE(!has_ansi(plain));
-  EXPECT_TRUE(plain.find("bold") != std::string::npos);
-  EXPECT_TRUE(plain.find("italic") != std::string::npos);
+  EXPECT_THAT(plain, testing::Not(testing::HasSubstr("\033[")));
+  EXPECT_THAT(plain, testing::HasSubstr("bold"));
+  EXPECT_THAT(plain, testing::HasSubstr("italic"));
 }
 
 TEST(Markdown, MixedFormattingRendersCorrectly) {
@@ -340,13 +361,13 @@ TEST(Markdown, MixedFormattingRendersCorrectly) {
                     "- item two\n\n"
                     "```cpp\nint x = 42;\n```\n";
   auto ansi = render_markdown_ansi(src);
-  EXPECT_TRUE(has_ansi(ansi));
+  EXPECT_THAT(ansi, testing::HasSubstr("\033["));
   auto plain = strip_ansi(ansi);
-  EXPECT_TRUE(plain.find("# Hello") != std::string::npos);
-  EXPECT_TRUE(plain.find("bold") != std::string::npos);
-  EXPECT_TRUE(plain.find("italic") != std::string::npos);
-  EXPECT_TRUE(plain.find("item one") != std::string::npos);
-  EXPECT_TRUE(plain.find("int x = 42;") != std::string::npos);
+  EXPECT_THAT(plain, testing::HasSubstr("# Hello"));
+  EXPECT_THAT(plain, testing::HasSubstr("bold"));
+  EXPECT_THAT(plain, testing::HasSubstr("italic"));
+  EXPECT_THAT(plain, testing::HasSubstr("item one"));
+  EXPECT_THAT(plain, testing::HasSubstr("int x = 42;"));
 }
 
 TEST(Markdown, EmptyInputProducesSingleNewline) {
@@ -420,7 +441,7 @@ TEST(StreamRenderer, ParagraphGrowthAppendsWithoutRedraw) {
 TEST(StreamRenderer, TrailingNewlinesArePreservedBetweenUpdates) {
   int fds[2];
   EXPECT_EQ(::pipe(fds), 0);
-  EXPECT_TRUE(::fcntl(fds[0], F_SETFL, O_NONBLOCK) >= 0);
+  ASSERT_GE(::fcntl(fds[0], F_SETFL, O_NONBLOCK), 0);
 
   {
     auto renderer = make_diff_renderer(fds[1]);
@@ -447,7 +468,7 @@ TEST(StreamRenderer, TrailingNewlinesArePreservedBetweenUpdates) {
 TEST(StreamRenderer, SingleNewlineDeltaStaysVisible) {
   int fds[2];
   EXPECT_EQ(::pipe(fds), 0);
-  EXPECT_TRUE(::fcntl(fds[0], F_SETFL, O_NONBLOCK) >= 0);
+  ASSERT_GE(::fcntl(fds[0], F_SETFL, O_NONBLOCK), 0);
 
   {
     auto renderer = make_diff_renderer(fds[1]);
@@ -459,7 +480,7 @@ TEST(StreamRenderer, SingleNewlineDeltaStaysVisible) {
 
     renderer->on_text_delta("World");
     auto next = read_fd_available(fds[0]);
-    EXPECT_TRUE(!next.empty());
+    EXPECT_FALSE(next.empty());
   }
 
   ::close(fds[1]);
@@ -470,7 +491,7 @@ TEST(StreamRenderer, SingleNewlineDeltaStaysVisible) {
 TEST(StreamRenderer, FencedCodeBlockGainsSyntaxHighlightingWhenClosed) {
   int fds[2];
   EXPECT_EQ(::pipe(fds), 0);
-  EXPECT_TRUE(::fcntl(fds[0], F_SETFL, O_NONBLOCK) >= 0);
+  ASSERT_GE(::fcntl(fds[0], F_SETFL, O_NONBLOCK), 0);
 
   TerminalState term;
   std::string raw_out;
@@ -506,9 +527,9 @@ TEST(StreamRenderer, FencedCodeBlockGainsSyntaxHighlightingWhenClosed) {
     const auto completed =
         "```python\ndef greet(name):\n    return f\"Hello, {name}\"\n```";
     EXPECT_EQ(term.plain(), visible_markdown_plain(completed));
-    EXPECT_TRUE(chunk.find("\033[35mdef\033[0m") != std::string::npos);
-    EXPECT_TRUE(chunk.find("\033[1;36mgreet\033[0m") != std::string::npos);
-    EXPECT_TRUE(chunk.find("\033[35mreturn\033[0m") != std::string::npos);
+    EXPECT_THAT(chunk, testing::HasSubstr("\033[35mdef\033[0m"));
+    EXPECT_THAT(chunk, testing::HasSubstr("\033[1;36mgreet\033[0m"));
+    EXPECT_THAT(chunk, testing::HasSubstr("\033[35mreturn\033[0m"));
 
     renderer->on_message_end({});
     chunk = read_fd_available(fds[0]);
@@ -531,17 +552,20 @@ TEST(StreamRenderer, VisibleStateMatchesMarkdownRenderAfterEachDelta) {
       {"Para", "\n\n", "> quote", "\n", "tail"},
   };
 
-  for (const auto &parts : cases) {
+  for (std::size_t case_index = 0; case_index < cases.size(); ++case_index) {
+    SCOPED_TRACE("stream case " + std::to_string(case_index));
+    const auto &parts = cases[case_index];
     std::size_t part_index = 0;
     int fds[2];
     EXPECT_EQ(::pipe(fds), 0);
-    EXPECT_TRUE(::fcntl(fds[0], F_SETFL, O_NONBLOCK) >= 0);
+    ASSERT_GE(::fcntl(fds[0], F_SETFL, O_NONBLOCK), 0);
 
     TerminalState term;
     auto renderer = make_diff_renderer(fds[1]);
     std::string input;
 
     for (const auto &part : parts) {
+      SCOPED_TRACE("stream part " + std::to_string(part_index));
       input += part;
       renderer->on_text_delta(part);
       term.apply(read_fd_available(fds[0]));

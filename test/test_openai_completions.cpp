@@ -5,6 +5,7 @@
 #include "core/message_types.h"
 
 #include "core/providers/openai_completions.h"
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 using namespace pi::core;
@@ -34,7 +35,7 @@ TEST(OpenAICompletions, BuildRequestBasic) {
 
   EXPECT_EQ(json["model"].get<std::string>(), std::string("gpt-4o"));
   EXPECT_EQ(json["stream"].get<bool>(), true);
-  EXPECT_TRUE(json["messages"].is_array());
+  ASSERT_TRUE(json["messages"].is_array());
 }
 TEST(OpenAICompletions, BuildRequestSystemPrompt) {
 
@@ -46,8 +47,8 @@ TEST(OpenAICompletions, BuildRequestSystemPrompt) {
 
   auto json = client.build_request_json(model, ctx, opts);
 
-  EXPECT_TRUE(json["messages"].is_array());
-  EXPECT_TRUE(!json["messages"].empty());
+  ASSERT_TRUE(json["messages"].is_array());
+  EXPECT_FALSE(json["messages"].empty());
   EXPECT_EQ(json["messages"][0]["role"].get<std::string>(),
             std::string("system"));
   EXPECT_EQ(json["messages"][0]["content"].get<std::string>(),
@@ -66,6 +67,7 @@ TEST(OpenAICompletions, BuildRequestUserMessage) {
 
   auto json = client.build_request_json(model, ctx, opts);
   auto &msgs = json["messages"];
+  ASSERT_FALSE(msgs.empty());
 
   bool found_user = false;
   for (const auto &m : msgs) {
@@ -96,8 +98,8 @@ TEST(OpenAICompletions, BuildRequestRuntimeIdentity) {
   const auto json = client.build_request_json(model, ctx, opts);
   EXPECT_EQ(json["messages"].size(), std::size_t(3));
   EXPECT_EQ(json["messages"][1]["role"].get<std::string>(), "user");
-  EXPECT_TRUE(json["messages"][1]["content"].get<std::string>().starts_with(
-      "[pici runtime context; not user-authored]"));
+  EXPECT_THAT(json["messages"][1]["content"].get<std::string>(),
+              testing::StartsWith("[pici runtime context; not user-authored]"));
   EXPECT_EQ(json["messages"][2]["content"].get<std::string>(), "hello");
 }
 TEST(OpenAICompletions, BuildRequestTemperature) {
@@ -124,8 +126,8 @@ TEST(OpenAICompletions, BuildRequestMaxTokens) {
     opts.max_tokens = 1024;
 
     auto json = client.build_request_json(model, ctx, opts);
-    EXPECT_TRUE(json.contains("max_completion_tokens"));
-    EXPECT_TRUE(!json.contains("max_tokens"));
+    ASSERT_TRUE(json.contains("max_completion_tokens"));
+    EXPECT_FALSE(json.contains("max_tokens"));
     EXPECT_EQ(json["max_completion_tokens"].get<int>(), 1024);
   }
 
@@ -137,8 +139,8 @@ TEST(OpenAICompletions, BuildRequestMaxTokens) {
     opts.max_tokens = 512;
 
     auto json = client.build_request_json(model, ctx, opts);
-    EXPECT_TRUE(json.contains("max_tokens"));
-    EXPECT_TRUE(!json.contains("max_completion_tokens"));
+    ASSERT_TRUE(json.contains("max_tokens"));
+    EXPECT_FALSE(json.contains("max_completion_tokens"));
     EXPECT_EQ(json["max_tokens"].get<int>(), 512);
   }
 }
@@ -155,10 +157,10 @@ TEST(OpenAICompletions, BuildRequestLlamaCpp) {
 
   EXPECT_EQ(json["model"].get<std::string>(),
             std::string("Qwen3.6-35B-A3B-UD-IQ4_NL.gguf"));
-  EXPECT_TRUE(json.contains("max_tokens"));
-  EXPECT_TRUE(!json.contains("max_completion_tokens"));
-  EXPECT_TRUE(!json.contains("store"));
-  EXPECT_TRUE(!json.contains("stream_options"));
+  ASSERT_TRUE(json.contains("max_tokens"));
+  EXPECT_FALSE(json.contains("max_completion_tokens"));
+  EXPECT_FALSE(json.contains("store"));
+  EXPECT_FALSE(json.contains("stream_options"));
   EXPECT_EQ(json["stream"].get<bool>(), true);
   EXPECT_TRUE(json.contains("chat_template_kwargs"));
   EXPECT_EQ(json["chat_template_kwargs"]["enable_thinking"].get<bool>(), false);
@@ -175,8 +177,8 @@ TEST(OpenAICompletions, BuildRequestFireworks) {
   auto json = client.build_request_json(model, ctx, opts);
 
   EXPECT_EQ(json["stream"].get<bool>(), true);
-  EXPECT_TRUE(json.contains("max_tokens"));
-  EXPECT_TRUE(!json.contains("max_completion_tokens"));
+  ASSERT_TRUE(json.contains("max_tokens"));
+  EXPECT_FALSE(json.contains("max_completion_tokens"));
   EXPECT_TRUE(json.contains("stream_options"));
 }
 TEST(OpenAICompletions, BuildRequestPromptCacheMeta) {
@@ -201,7 +203,7 @@ TEST(OpenAICompletions, BuildRequestPromptCacheOther) {
 
   auto json = client.build_request_json(model, ctx, opts);
 
-  EXPECT_TRUE(!json.contains("prompt_cache_key"));
+  EXPECT_FALSE(json.contains("prompt_cache_key"));
 }
 TEST(OpenAICompletions, MapFinishReasonStop) {
 

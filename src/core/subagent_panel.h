@@ -14,6 +14,7 @@ public:
   void mount(Renderer &renderer);
   void unmount();
   ~SubagentPanel();
+
 private:
   struct CallbackState {
     std::mutex mutex;

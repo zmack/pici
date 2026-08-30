@@ -23,6 +23,33 @@
 
 namespace pi::acp {
 
+void ServerControl::request_stop() noexcept {
+  std::function<void()> callback;
+  {
+    std::lock_guard lock(mutex_);
+    stop_requested_ = true;
+    callback = stop_callback_;
+  }
+  if (callback)
+    callback();
+}
+
+void ServerControl::set_stop_callback(std::function<void()> callback) {
+  bool already_requested = false;
+  {
+    std::lock_guard lock(mutex_);
+    stop_callback_ = std::move(callback);
+    already_requested = stop_requested_;
+  }
+  if (already_requested)
+    request_stop();
+}
+
+void ServerControl::clear_stop_callback() {
+  std::lock_guard lock(mutex_);
+  stop_callback_ = {};
+}
+
 AgentManifest build_manifest(const ServerConfig &cfg) {
   AgentManifest m;
   m.name = cfg.agent_name;
@@ -94,22 +121,33 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
 
   // Determine listen address
   const char *host = "0.0.0.0";
-  if (port == 0) {
-    // bind_to_any_port returns the assigned port (negative on failure).
-    const int bound_port = svr.bind_to_any_port(host);
-    if (bound_port <= 0)
-      throw std::runtime_error("Failed to bind to any port");
-    port = bound_port;
-    std::cerr << "[acp] listening on " << host << ":" << port << "\n";
-    if (!svr.listen_after_bind())
-      throw std::runtime_error("Failed to listen after binding");
-  } else {
-    std::cerr << "[acp] listening on " << host << ":" << port << "\n";
-    if (!svr.listen(host, port)) {
-      throw std::runtime_error("Failed to listen on port " +
-                               std::to_string(port));
+  if (config.stop_control)
+    config.stop_control->set_stop_callback([&svr] { svr.stop(); });
+
+  try {
+    if (port == 0) {
+      // bind_to_any_port returns the assigned port (negative on failure).
+      const int bound_port = svr.bind_to_any_port(host);
+      if (bound_port <= 0)
+        throw std::runtime_error("Failed to bind to any port");
+      port = bound_port;
+      std::cerr << "[acp] listening on " << host << ":" << port << "\n";
+      if (!svr.listen_after_bind())
+        throw std::runtime_error("Failed to listen after binding");
+    } else {
+      std::cerr << "[acp] listening on " << host << ":" << port << "\n";
+      if (!svr.listen(host, port)) {
+        throw std::runtime_error("Failed to listen on port " +
+                                 std::to_string(port));
+      }
     }
+  } catch (...) {
+    if (config.stop_control)
+      config.stop_control->clear_stop_callback();
+    throw;
   }
+  if (config.stop_control)
+    config.stop_control->clear_stop_callback();
 }
 
 } // namespace pi::acp

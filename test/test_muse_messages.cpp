@@ -1,4 +1,5 @@
 #include "core/providers/muse_messages.h"
+#include "support/gtest_helpers.h"
 
 #include <gtest/gtest.h>
 
@@ -60,11 +61,14 @@ private:
   mutable TestSchema schema_;
 };
 
-TEST(MuseMessages, RequestAndParserBehavior) {
+class MuseMessagesTest : public testing::Test {
+protected:
+  pi::test::TemporaryDirectory directory{"pici-muse"};
+};
+
+TEST_F(MuseMessagesTest, StreamDiagnosticsRedactsPayload) {
   { // stream diagnostics: privacy-safe JSONL
-    const auto path = std::filesystem::temp_directory_path() /
-                      "pici-stream-diagnostics-test.jsonl";
-    std::filesystem::remove(path);
+    const auto path = directory.path() / "stream-diagnostics-test.jsonl";
     {
       StreamDiagnostics diagnostics(path.string());
       diagnostics.record_transport_chunk(42);
@@ -83,9 +87,10 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     EXPECT_TRUE(trace.find("transport") != std::string::npos);
     EXPECT_TRUE(trace.find("parser") != std::string::npos);
     EXPECT_TRUE(trace.find("renderer") != std::string::npos);
-    std::filesystem::remove(path);
   }
+}
 
+TEST_F(MuseMessagesTest, BuildRequestRequiredShape) {
   { // build_request_json: required shape
     auto model = make_model();
     AgentContext context;
@@ -124,7 +129,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     EXPECT_TRUE(!request.contains("inference_geo"));
     EXPECT_TRUE(!request.contains("prompt_cache_key"));
   }
+}
 
+TEST_F(MuseMessagesTest, BuildRequestOptionsAndMetadata) {
   { // build_request_json: options and metadata
     auto model = make_model();
     AgentContext context;
@@ -139,7 +146,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     EXPECT_EQ(request["temperature"].get<double>(), 0.25);
     EXPECT_EQ(request["metadata"]["request_id"].get<std::string>(), "test-1");
   }
+}
 
+TEST_F(MuseMessagesTest, BuildRequestThinkingEffort) {
   { // build_request_json: thinking effort mapping
     auto model = make_model();
     AgentContext context;
@@ -165,7 +174,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
         MuseMessagesClient::build_request_json(model, context, {});
     EXPECT_TRUE(!off_request.contains("output_config"));
   }
+}
 
+TEST_F(MuseMessagesTest, BuildRequestRejectsInvalidMetadataAndMissingTokens) {
   { // build_request_json: invalid metadata and missing max_tokens
     auto model = make_model();
     AgentContext context;
@@ -189,7 +200,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     }
     EXPECT_TRUE(max_tokens_threw);
   }
+}
 
+TEST_F(MuseMessagesTest, BuildRequestImageConversion) {
   { // build_request_json: image conversion
     auto model = make_model();
     AgentContext context;
@@ -206,7 +219,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
               "image/png");
     EXPECT_EQ(content[1]["source"]["data"].get<std::string>(), "aGVsbG8=");
   }
+}
 
+TEST_F(MuseMessagesTest, BuildRequestThinkingReplay) {
   { // build_request_json: thinking replay
     auto model = make_model();
     AgentContext context;
@@ -242,7 +257,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     EXPECT_EQ(downgraded_content[0]["text"].get<std::string>(), "summary");
     EXPECT_EQ(downgraded_content[1]["text"].get<std::string>(), "answer");
   }
+}
 
+TEST_F(MuseMessagesTest, BuildRequestToolsAndToolResults) {
   { // build_request_json: tools and coalesced tool results
     auto model = make_model();
     AgentContext context;
@@ -301,7 +318,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     EXPECT_EQ(tool_results[1]["content"][0]["type"].get<std::string>(),
               "image");
   }
+}
 
+TEST_F(MuseMessagesTest, ParseSseThinkingTextUsage) {
   { // SSE parser: thinking, text, usage, and block indices
     auto result = std::make_shared<AssistantMessage>();
     std::vector<AssistantMessageEvent> events;
@@ -357,7 +376,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     EXPECT_TRUE(
         std::holds_alternative<AssistantMessageDoneEvent>(events.back()));
   }
+}
 
+TEST_F(MuseMessagesTest, ParseSseRedactedThinking) {
   { // SSE parser: redacted thinking
     auto result = std::make_shared<AssistantMessage>();
     MuseMessagesSseParser parser(result);
@@ -381,7 +402,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     EXPECT_EQ(thinking.thinking, "");
     EXPECT_EQ(thinking.thinking_signature.value_or(""), "encrypted-tail");
   }
+}
 
+TEST_F(MuseMessagesTest, ParseSseToolUsePartialJson) {
   { // SSE parser: tool use and partial JSON
     auto result = std::make_shared<AssistantMessage>();
     std::vector<AssistantMessageEvent> events;
@@ -426,18 +449,22 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     EXPECT_TRUE(
         std::holds_alternative<AssistantMessageDoneEvent>(events.back()));
   }
+}
 
+TEST_F(MuseMessagesTest, ParseSseTransportError) {
   { // SSE parser: transport error envelope
     auto result = std::make_shared<AssistantMessage>();
     MuseMessagesSseParser parser(result);
     parser.feed_line(R"({"error":{"message":"HTTP status 503: overloaded"}})");
     parser.finish();
-    EXPECT_TRUE(parser.error().has_value());
+    ASSERT_TRUE(parser.error().has_value());
     EXPECT_EQ(*parser.error(), "HTTP status 503: overloaded");
     EXPECT_EQ(result->error_message.value_or(""),
               "HTTP status 503: overloaded");
   }
+}
 
+TEST_F(MuseMessagesTest, ParseSseMuseErrorPreservesPrimary) {
   { // SSE parser: Muse error and fallback preservation
     auto result = std::make_shared<AssistantMessage>();
     MuseMessagesSseParser parser(result);
@@ -446,11 +473,13 @@ TEST(MuseMessages, RequestAndParserBehavior) {
         R"(data: {"type":"error","error":{"type":"invalid_request_error","message":"bad input"}})");
     parser.feed_line(R"({"error":{"message":"HTTP status 400: fallback"}})");
     parser.finish();
-    EXPECT_TRUE(parser.error().has_value());
+    ASSERT_TRUE(parser.error().has_value());
     EXPECT_EQ(*parser.error(), "bad input");
     EXPECT_EQ(result->error_message.value_or(""), "bad input");
   }
+}
 
+TEST_F(MuseMessagesTest, ParseSseMalformedAndDuplicateFrames) {
   { // SSE parser: malformed and duplicate frames
     auto result = std::make_shared<AssistantMessage>();
     std::vector<AssistantMessageEvent> events;
@@ -486,7 +515,9 @@ TEST(MuseMessages, RequestAndParserBehavior) {
     EXPECT_TRUE(
         std::holds_alternative<AssistantMessageDoneEvent>(events.back()));
   }
+}
 
+TEST_F(MuseMessagesTest, ParseSseRefusal) {
   { // SSE parser: refusal is an error
     auto result = std::make_shared<AssistantMessage>();
     MuseMessagesSseParser parser(result);
@@ -495,11 +526,13 @@ TEST(MuseMessages, RequestAndParserBehavior) {
         "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}");
     parser.finish();
     EXPECT_EQ(result->stop_reason, StopReason::error);
-    EXPECT_TRUE(parser.error().has_value());
+    ASSERT_TRUE(parser.error().has_value());
     EXPECT_EQ(*parser.error(), "Muse refused the request");
     EXPECT_EQ(result->error_message.value_or(""), "Muse refused the request");
   }
+}
 
+TEST_F(MuseMessagesTest, MapStopReasons) {
   { // map_stop_reason
     EXPECT_EQ(MuseMessagesClient::map_stop_reason("end_turn"),
               StopReason::stop);

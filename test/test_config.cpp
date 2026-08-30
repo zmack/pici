@@ -1,6 +1,7 @@
 #include "cli/args.h"
 
 #include "cli/config.h"
+#include "support/gtest_helpers.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -10,16 +11,22 @@
 #include <initializer_list>
 #include <iostream>
 #include <source_location>
+#include <string>
 #include <string_view>
 #include <vector>
 
 using namespace pi::cli;
 
-static std::filesystem::path write_toml(const char *name, const char *src) {
-  auto p = std::filesystem::temp_directory_path() / name;
-  std::ofstream(p) << src;
-  return p;
-}
+class ConfigTest : public testing::Test {
+protected:
+  pi::test::TemporaryDirectory directory{"pici-config"};
+
+  std::filesystem::path write_toml(std::string_view name, const char *src) {
+    const auto path = directory.path() / name;
+    std::ofstream(path) << src;
+    return path;
+  }
+};
 
 static Args parse(std::initializer_list<std::string> values) {
   std::vector<std::string> storage(values);
@@ -36,18 +43,21 @@ static bool has_diagnostic(const Config &config, std::string_view needle) {
   });
 }
 
-TEST(Config, ParsingAndMerging) {
-
+TEST_F(ConfigTest, DefaultConfigPathDoesNotThrow) {
   // default_config_path doesn't throw
   EXPECT_TRUE(!default_config_path().empty());
+}
 
+TEST_F(ConfigTest, MissingConfigReturnsEmptyArgs) {
   // Missing file returns empty Args (not an error)
   {
     auto cfg = load_config("/tmp/pici-nonexistent-config.toml");
     EXPECT_TRUE(cfg.model.empty());
     EXPECT_TRUE(cfg.provider.empty());
   }
+}
 
+TEST_F(ConfigTest, FullConfigRoundTrip) {
   // Full config round-trip
   {
     auto p = write_toml("pici_test.toml", R"toml(
@@ -118,7 +128,9 @@ retention_days = 45
     EXPECT_EQ(document.mailbox.heartbeat_interval_ms, std::int64_t{3000});
     EXPECT_EQ(document.mailbox.retention_days, std::int64_t{45});
   }
+}
 
+TEST_F(ConfigTest, ProviderAndModelDefinitions) {
   // Provider and custom-model definitions remain separate from Args defaults.
   {
     auto p = write_toml("pici_providers.toml", R"toml(
@@ -180,7 +192,9 @@ context_window = 200000
                   .context_window.value(),
               std::uint64_t(200000));
   }
+}
 
+TEST_F(ConfigTest, ProviderModelDiagnostics) {
   // Recognized provider/model schema errors carry their TOML paths.
   {
     auto p = write_toml("pici_invalid_providers.toml", R"toml(
@@ -216,7 +230,9 @@ id = "duplicate"
         config, "providers.bad.models[0].thinking_level_map.unsupported"));
     EXPECT_TRUE(has_diagnostic(config, "duplicate model id"));
   }
+}
 
+TEST_F(ConfigTest, OAuthProviderRejectsKeys) {
   // OAuth-only built-in providers cannot be given a plaintext or env key.
   {
     auto p = write_toml("pici_invalid_oauth.toml", R"toml(
@@ -229,7 +245,9 @@ api_key_env = "PICI_CODEX_KEY"
     auto config = load_config_document(p);
     EXPECT_TRUE(has_diagnostic(config, "providers.openai-codex"));
   }
+}
 
+TEST_F(ConfigTest, MergeCliStringPrecedence) {
   // merge: CLI string wins over config
   {
     Args conf;
@@ -242,7 +260,9 @@ api_key_env = "PICI_CODEX_KEY"
     EXPECT_EQ(out.model, std::string("gpt-4o-mini")); // CLI wins
     EXPECT_EQ(out.provider, std::string("openai"));   // config wins (CLI empty)
   }
+}
 
+TEST_F(ConfigTest, MergeSandboxMode) {
   // sandbox mode merges like other scalar configuration values
   {
     Args conf;
@@ -252,7 +272,9 @@ api_key_env = "PICI_CODEX_KEY"
     auto out = merge_args(conf, cli);
     EXPECT_EQ(out.sandbox_mode, std::string("disabled"));
   }
+}
 
+TEST_F(ConfigTest, MergeStreamTrace) {
   // stream trace is a CLI-only diagnostic path
   {
     Args cli;
@@ -260,7 +282,9 @@ api_key_env = "PICI_CODEX_KEY"
     auto out = merge_args({}, cli);
     EXPECT_EQ(out.stream_trace, std::string("/tmp/pici-stream.jsonl"));
   }
+}
 
+TEST_F(ConfigTest, MergeBooleanFlags) {
   // merge: booleans are OR'd
   {
     Args conf;
@@ -273,7 +297,9 @@ api_key_env = "PICI_CODEX_KEY"
     EXPECT_TRUE(out.no_tools); // conf true OR cli false → true
     EXPECT_TRUE(out.verbose);  // conf false OR cli true → true
   }
+}
 
+TEST_F(ConfigTest, MergeHooksFiles) {
   // merge: hooks_files accumulate (config first then CLI)
   {
     Args conf;
@@ -285,7 +311,9 @@ api_key_env = "PICI_CODEX_KEY"
     EXPECT_EQ(out.hooks_files[0], std::string("/conf/hook.lua"));
     EXPECT_EQ(out.hooks_files[1], std::string("/cli/hook.lua"));
   }
+}
 
+TEST_F(ConfigTest, MergeTools) {
   // merge: CLI tools vector wins over config
   {
     Args conf;
@@ -296,7 +324,9 @@ api_key_env = "PICI_CODEX_KEY"
     EXPECT_EQ(out.tools.size(), std::size_t(1));
     EXPECT_EQ(out.tools[0], std::string("grep")); // CLI wins
   }
+}
 
+TEST_F(ConfigTest, MailboxPathPrecedence) {
   // Mailbox path precedence is CLI, then environment, then TOML.
   {
     auto p = write_toml("pici_mailbox_precedence.toml", R"toml(
@@ -304,7 +334,8 @@ api_key_env = "PICI_CODEX_KEY"
 enabled = false
 path = "/toml/mailbox.sqlite3"
 )toml");
-    setenv("PICI_MAILBOX", "/env/mailbox.sqlite3", 1);
+    pi::test::ScopedEnvironmentVariable mailbox_env("PICI_MAILBOX",
+                                                    "/env/mailbox.sqlite3");
     std::vector<std::string> values{"pi", "--config", p.string()};
     std::vector<char *> argv;
     for (auto &value : values)
@@ -329,9 +360,10 @@ path = "/toml/mailbox.sqlite3"
       argv.push_back(value.data());
     auto disabled = load_and_merge(static_cast<int>(argv.size()), argv.data());
     EXPECT_TRUE(!disabled.mailbox_enabled);
-    unsetenv("PICI_MAILBOX");
   }
+}
 
+TEST_F(ConfigTest, InvalidTomlThrows) {
   // parse error throws
   {
     auto p = write_toml("pici_bad.toml", "not = valid [ toml");
@@ -343,7 +375,9 @@ path = "/toml/mailbox.sqlite3"
     }
     EXPECT_TRUE(threw);
   }
+}
 
+TEST_F(ConfigTest, FauxControlArguments) {
   // faux-control selects a Unix socket without consuming unrelated arguments
   {
     auto args =
@@ -358,7 +392,9 @@ path = "/toml/mailbox.sqlite3"
     auto merged = load_and_merge(static_cast<int>(argv.size()), argv.data());
     EXPECT_EQ(merged.faux_control_socket, std::string("/tmp/merged.sock"));
   }
+}
 
+TEST_F(ConfigTest, AuthCommandGrammar) {
   // auth commands have an explicit, CLI-only grammar
   {
     auto args = parse({"pi", "--config", "/tmp/config.toml", "auth", "login",
@@ -374,7 +410,9 @@ path = "/toml/mailbox.sqlite3"
     EXPECT_TRUE(!invalid.diagnostics.empty());
     EXPECT_TRUE(invalid.diagnostics.front().is_error);
   }
+}
 
+TEST_F(ConfigTest, CompactionThresholdValid) {
   // --compaction-threshold parses a valid fraction
   {
     auto args =
@@ -384,21 +422,27 @@ path = "/toml/mailbox.sqlite3"
     EXPECT_TRUE(args.compaction_threshold_pct < 0.701);
     EXPECT_TRUE(args.diagnostics.empty());
   }
+}
 
+TEST_F(ConfigTest, CompactionThresholdOutOfRange) {
   // --compaction-threshold rejects an out-of-range fraction
   {
     auto args = parse({"pi", "--compaction-threshold", "1.5"});
     EXPECT_TRUE(!args.diagnostics.empty());
     EXPECT_TRUE(args.diagnostics.front().is_error);
   }
+}
 
+TEST_F(ConfigTest, CompactionThresholdMalformed) {
   // --compaction-threshold rejects garbage
   {
     auto args = parse({"pi", "--compaction-threshold", "not-a-number"});
     EXPECT_TRUE(!args.diagnostics.empty());
     EXPECT_TRUE(args.diagnostics.front().is_error);
   }
+}
 
+TEST_F(ConfigTest, CompactionThresholdFromToml) {
   // [compaction] threshold_pct loads from TOML
   {
     auto p = write_toml("pici_compaction.toml", R"toml(
@@ -411,7 +455,9 @@ threshold_pct = 0.65
     EXPECT_TRUE(cfg.compaction_threshold_pct > 0.649);
     EXPECT_TRUE(cfg.compaction_threshold_pct < 0.651);
   }
+}
 
+TEST_F(ConfigTest, SkillsDisabledFromToml) {
   // [skills] disabled loads from TOML and merges with the CLI flag
   {
     auto p = write_toml("pici_skills.toml", R"toml(
@@ -426,7 +472,9 @@ disabled = true
     auto cli_wins = merge_args(cfg, parse({"pi"}));
     EXPECT_TRUE(cli_wins.no_skills);
   }
+}
 
+TEST_F(ConfigTest, InvalidTomlThresholdFallback) {
   // an out-of-range TOML threshold_pct is ignored (falls back to the
   // effective default applied at the SessionRuntime construction site)
   {
@@ -437,7 +485,9 @@ threshold_pct = 1.5
     auto cfg = load_config(p);
     EXPECT_EQ(cfg.compaction_threshold_pct, 0.0);
   }
+}
 
+TEST_F(ConfigTest, MergeCompactionThresholdCli) {
   // merge: CLI threshold wins over config
   {
     Args conf;
@@ -448,7 +498,9 @@ threshold_pct = 1.5
     EXPECT_TRUE(out.compaction_threshold_pct > 0.899);
     EXPECT_TRUE(out.compaction_threshold_pct < 0.901);
   }
+}
 
+TEST_F(ConfigTest, MergeCompactionThresholdConfig) {
   // merge: config threshold survives when CLI leaves it unset
   {
     Args conf;

@@ -1,6 +1,10 @@
 ## General Info
 This is an agentic cli in c++ using cmake.
 
+For C++ test work, read [docs/testing-with-googletest.md](docs/testing-with-googletest.md)
+for the repository's GoogleTest patterns, test commands, and boundary-safety
+guidance.
+
 ## Development Rules
 Before each commit run `make test`, or the equivalent
 `cmake --build build --parallel` and

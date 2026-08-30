@@ -3,7 +3,8 @@
 namespace pi::core {
 void SubagentPanel::mount(Renderer &renderer) {
   unmount();
-  if (!renderer.owns_subagent_pane()) return;
+  if (!renderer.owns_subagent_pane())
+    return;
   auto state = std::make_shared<CallbackState>();
   state->mounted = true;
   callback_state_ = state;

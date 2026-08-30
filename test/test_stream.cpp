@@ -9,6 +9,7 @@
 #include "core/message_types.h"
 
 #include "core/stream.h"
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 using namespace pi::core;
@@ -45,7 +46,7 @@ TEST(EventStream, StreamBlockingNext) {
   consumer.join();
   stream.wait();
 
-  EXPECT_TRUE(consumed >= 3);
+  EXPECT_GE(consumed, 3);
 }
 
 TEST(EventStream, StreamIterator) {
@@ -70,7 +71,7 @@ TEST(EventStream, StreamIterator) {
     count++;
   }
 
-  EXPECT_TRUE(count >= 4);
+  EXPECT_GE(count, 4);
 }
 
 TEST(EventStream, StreamConcurrentPushes) {
@@ -141,7 +142,7 @@ TEST(EventStream, StreamFinishEmpty) {
   stream.finish();
 
   auto [result, error] = stream.wait();
-  EXPECT_TRUE(!error.has_value());
+  EXPECT_FALSE(error.has_value());
 }
 
 TEST(EventStream, StreamSecondPushAfterFinish) {
@@ -160,7 +161,7 @@ TEST(EventStream, StreamSecondPushAfterFinish) {
   stream.finish(std::vector<Message>{});
 
   bool pushed = stream.push(AgentEndEvent(std::vector<Message>{}));
-  EXPECT_TRUE(!pushed);
+  EXPECT_FALSE(pushed);
 }
 
 TEST(EventStream, AsyncStreamCallback) {
@@ -171,7 +172,7 @@ TEST(EventStream, AsyncStreamCallback) {
   stream.push(AgentEndEvent(std::vector<Message>{}));
   stream.wait();
 
-  EXPECT_TRUE(callback_called);
+  EXPECT_TRUE(callback_called.load());
   EXPECT_TRUE(stream.is_complete());
 }
 

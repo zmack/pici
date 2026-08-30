@@ -4,6 +4,7 @@
 #include "core/lua_tool.h"
 #include "core/providers/faux.h"
 #include "core/session/agent_session.h"
+#include "support/gtest_helpers.h"
 
 #include <algorithm>
 #include <atomic>
@@ -176,23 +177,49 @@ AgentTaskSnapshot wait_terminal(AgentTaskManager &manager,
   EXPECT_TRUE(false);
   return current;
 }
+
+void register_scripted_client(std::string provider,
+                              std::vector<FauxClient::Script> scripts) {
+  auto client = std::make_shared<FauxClient>(std::move(scripts));
+  LLMClientRegistry::instance().register_client(std::move(provider),
+                                                [client] { return client; });
+}
+
+class AgentTaskManagerShutdown {
+public:
+  explicit AgentTaskManagerShutdown(AgentTaskManager &manager)
+      : manager_(&manager) {}
+
+  AgentTaskManagerShutdown(const AgentTaskManagerShutdown &) = delete;
+  AgentTaskManagerShutdown &
+  operator=(const AgentTaskManagerShutdown &) = delete;
+
+  ~AgentTaskManagerShutdown() {
+    if (manager_ != nullptr)
+      manager_->shutdown();
+  }
+
+  void shutdown() {
+    if (manager_ != nullptr) {
+      manager_->shutdown();
+      manager_ = nullptr;
+    }
+  }
+
+  void release() noexcept { manager_ = nullptr; }
+
+private:
+  AgentTaskManager *manager_;
+};
 } // namespace
 
-TEST(AgentTasks, LifecycleAndConcurrency) {
-  auto faux = std::make_shared<FauxClient>(
-      std::vector{response("child result"), response("follow-up result"),
-                  response("third result")});
-  LLMClientRegistry::instance().register_client("faux",
-                                                [faux] { return faux; });
-
+TEST(AgentTasks, PropagatesRuntimeIdentityAndFiltersTools) {
   Model model;
   model.id = "task-model";
-  model.api = "faux";
-  model.provider = "faux";
+  model.api = "identity-test";
+  model.provider = "identity-test";
   Agent::Options options;
   options.model = model;
-  SessionRuntime root({.agent_options = options});
-  AgentTaskManager manager(root, options);
   auto observed_identity =
       std::make_shared<std::optional<AgentRuntimeIdentity>>();
   auto observed_tools = std::make_shared<std::vector<std::string>>();
@@ -244,6 +271,7 @@ return {}
   SessionRuntime identity_root(
       {.agent_options = identity_options, .tools = std::move(identity_tools)});
   AgentTaskManager identity_manager(identity_root, identity_options);
+  AgentTaskManagerShutdown identity_shutdown(identity_manager);
   std::vector<AgentRuntimeIdentity> registered;
   identity_manager.set_endpoint_registration(
       [&](const AgentTaskId &task_id, const std::string &task_path,
@@ -268,7 +296,7 @@ return {}
       identity_manager.spawn({.task_name = "identity", .prompt = "identify"});
   const auto identity_result = wait_terminal(identity_manager, identity_child);
   EXPECT_TRUE(identity_result.status == AgentTaskStatusKind::completed);
-  EXPECT_TRUE(observed_identity->has_value());
+  ASSERT_TRUE(observed_identity->has_value());
   EXPECT_TRUE(observed_identity->value().agent_id == "endpoint-1");
   EXPECT_TRUE(observed_identity->value().session_id == "session-root");
   EXPECT_TRUE(observed_identity->value().kind == "subagent");
@@ -283,13 +311,14 @@ return {}
     EXPECT_TRUE(has_tool(name));
   EXPECT_TRUE(!has_tool("agents_close"));
   EXPECT_TRUE(!has_tool("arbitrary_addon"));
-  identity_manager.shutdown();
+  identity_shutdown.shutdown();
 
   SessionRuntime write_root(
       {.agent_options = identity_options, .tools = create_coding_tools()});
   AgentTaskManager write_manager(write_root, identity_options,
                                  AgentTaskManager::Limits{}, {},
                                  AgentTaskManager::ChildWriteTools::core);
+  AgentTaskManagerShutdown write_shutdown(write_manager);
   const auto write_child = write_manager.spawn({.task_name = "writer",
                                                 .prompt = "write",
                                                 .requested_tools = {"edit"},
@@ -298,9 +327,10 @@ return {}
   EXPECT_TRUE(write_result.status == AgentTaskStatusKind::completed);
   EXPECT_TRUE(has_tool("edit"));
   EXPECT_TRUE(!has_tool("write"));
-  write_manager.shutdown();
+  write_shutdown.shutdown();
 
   AgentTaskManager rollback_manager(identity_root, identity_options);
+  AgentTaskManagerShutdown rollback_shutdown(rollback_manager);
   bool unregister_called = false;
   rollback_manager.set_endpoint_registration(
       [](const AgentTaskId &, const std::string &,
@@ -319,9 +349,10 @@ return {}
   EXPECT_TRUE(!unregister_called);
   EXPECT_TRUE(rollback_manager.resident_tasks() == 0);
   EXPECT_TRUE(rollback_manager.active_executions() == 0);
-  rollback_manager.shutdown();
+  rollback_shutdown.shutdown();
 
   AgentTaskManager construction_manager(identity_root, identity_options);
+  AgentTaskManagerShutdown construction_shutdown(construction_manager);
   bool construction_unregistered = false;
   construction_manager.set_endpoint_registration(
       [](const AgentTaskId &task_id, const std::string &task_path,
@@ -347,10 +378,24 @@ return {}
   EXPECT_TRUE(construction_unregistered);
   EXPECT_TRUE(construction_manager.resident_tasks() == 0);
   EXPECT_TRUE(construction_manager.active_executions() == 0);
-  construction_manager.shutdown();
+  construction_shutdown.shutdown();
+}
 
+TEST(AgentTasks, RejectsDuplicatePendingTaskDuringShutdown) {
+  Model model;
+  model.id = "identity-model";
+  model.api = "identity-test";
+  model.provider = "identity-test";
+  Agent::Options options;
+  options.model = model;
+  Agent::Options identity_options = options;
+  LLMClientRegistry::instance().register_client("identity-test", [] {
+    return std::make_shared<IdentityClient>(
+        std::make_shared<std::optional<AgentRuntimeIdentity>>());
+  });
   SessionRuntime concurrency_root({.agent_options = identity_options});
   AgentTaskManager concurrency_manager(concurrency_root, identity_options);
+  AgentTaskManagerShutdown concurrency_shutdown(concurrency_manager);
   std::mutex registration_mutex;
   std::condition_variable registration_changed;
   bool registration_entered = false;
@@ -397,7 +442,7 @@ return {}
   }
   EXPECT_TRUE(duplicate_pending_rejected);
   EXPECT_TRUE(concurrency_manager.list().size() == 1);
-  std::thread shutting_down([&] { concurrency_manager.shutdown(); });
+  std::thread shutting_down([&] { concurrency_shutdown.shutdown(); });
   while (!concurrency_manager.is_shutting_down())
     std::this_thread::yield();
   {
@@ -407,16 +452,31 @@ return {}
   registration_changed.notify_all();
   blocked_spawn.join();
   shutting_down.join();
+  concurrency_shutdown.release();
   EXPECT_TRUE(spawn_failed);
   EXPECT_TRUE(concurrency_manager.resident_tasks() == 0);
   EXPECT_TRUE(concurrency_manager.active_executions() == 0);
   EXPECT_TRUE(unregister_count == 1);
+}
 
+TEST(AgentTasks, EnforcesDirectChildCapacity) {
+  Model model;
+  model.id = "identity-model";
+  model.api = "identity-test";
+  model.provider = "identity-test";
+  Agent::Options options;
+  options.model = model;
+  Agent::Options identity_options = options;
+  LLMClientRegistry::instance().register_client("identity-test", [] {
+    return std::make_shared<IdentityClient>(
+        std::make_shared<std::optional<AgentRuntimeIdentity>>());
+  });
   SessionRuntime capacity_root({.agent_options = identity_options});
   AgentTaskManager::Limits capacity_limits;
   capacity_limits.max_direct_children = 2;
   AgentTaskManager capacity_manager(capacity_root, identity_options,
                                     capacity_limits);
+  AgentTaskManagerShutdown capacity_shutdown(capacity_manager);
   std::mutex capacity_mutex;
   std::condition_variable capacity_changed;
   std::size_t capacity_entered = 0;
@@ -468,10 +528,24 @@ return {}
   capacity_first.join();
   capacity_second.join();
   EXPECT_TRUE(capacity_manager.resident_tasks() == 2);
-  capacity_manager.shutdown();
+  capacity_shutdown.shutdown();
+}
 
+TEST(AgentTasks, RejectsNestedSpawnAfterParentClose) {
+  Model model;
+  model.id = "identity-model";
+  model.api = "identity-test";
+  model.provider = "identity-test";
+  Agent::Options options;
+  options.model = model;
+  Agent::Options identity_options = options;
+  LLMClientRegistry::instance().register_client("identity-test", [] {
+    return std::make_shared<IdentityClient>(
+        std::make_shared<std::optional<AgentRuntimeIdentity>>());
+  });
   SessionRuntime parent_root({.agent_options = identity_options});
   AgentTaskManager parent_manager(parent_root, identity_options);
+  AgentTaskManagerShutdown parent_shutdown(parent_manager);
   std::mutex parent_mutex;
   std::condition_variable parent_changed;
   bool nested_entered = false;
@@ -526,8 +600,21 @@ return {}
   EXPECT_TRUE(nested_failed);
   EXPECT_TRUE(parent_unregister_count == 2);
   EXPECT_TRUE(parent_manager.resident_tasks() == 0);
-  parent_manager.shutdown();
+  parent_shutdown.shutdown();
+}
 
+TEST(AgentTasks, WaitsForUnregisterBeforeShutdown) {
+  Model model;
+  model.id = "identity-model";
+  model.api = "identity-test";
+  model.provider = "identity-test";
+  Agent::Options options;
+  options.model = model;
+  Agent::Options identity_options = options;
+  LLMClientRegistry::instance().register_client("identity-test", [] {
+    return std::make_shared<IdentityClient>(
+        std::make_shared<std::optional<AgentRuntimeIdentity>>());
+  });
   SessionRuntime unregister_root({.agent_options = identity_options});
   AgentTaskManager unregister_manager(unregister_root, identity_options);
   std::mutex unregister_mutex;
@@ -632,13 +719,27 @@ return {}
   EXPECT_TRUE(nested_registration_failed);
   EXPECT_TRUE(unregister_shutdown_done.load());
   EXPECT_TRUE(unregister_manager.resident_tasks() == 0);
+}
 
+TEST(AgentTasks, RunsLifecycleFollowUpsAndMailboxInput) {
+  register_scripted_client("faux", {response("child result"),
+                                    response("follow-up result"),
+                                    response("third result")});
+  Model model;
+  model.id = "task-model";
+  model.api = "faux";
+  model.provider = "faux";
+  Agent::Options options;
+  options.model = model;
+  SessionRuntime root({.agent_options = options});
+  AgentTaskManager manager(root, options);
+  AgentTaskManagerShutdown manager_shutdown(manager);
   auto child = manager.spawn({.task_name = "review", .prompt = "Review"});
   EXPECT_TRUE(!child.id.empty());
   EXPECT_TRUE(child.task_path == "/root/review");
 
   // Context observability: the spawn snapshot carries live context info.
-  EXPECT_TRUE(child.context_info.has_value());
+  ASSERT_TRUE(child.context_info.has_value());
   {
     const auto &info = *child.context_info;
     // Seed prompt is queued in work; the transcript fills on MessageEndEvent,
@@ -653,9 +754,9 @@ return {}
 
   auto completed = wait_terminal(manager, child);
   EXPECT_TRUE(completed.status == AgentTaskStatusKind::completed);
-  EXPECT_TRUE(completed.result.has_value());
+  ASSERT_TRUE(completed.result.has_value());
   EXPECT_TRUE(completed.result->text == "child result");
-  EXPECT_TRUE(completed.context_info.has_value());
+  ASSERT_TRUE(completed.context_info.has_value());
   EXPECT_TRUE(completed.context_info->last_input_tokens == 0);
   // FauxClient scripts carry no usage; total falls back to input+output = 0.
   EXPECT_TRUE(completed.context_info->total_tokens == 0);
@@ -668,10 +769,10 @@ return {}
       child.id, UserMessage{.content = {TextContent{.text = "Summarize"}}});
   auto second = wait_terminal(manager, follow);
   EXPECT_TRUE(second.status == AgentTaskStatusKind::completed);
-  EXPECT_TRUE(second.result.has_value());
+  ASSERT_TRUE(second.result.has_value());
   EXPECT_TRUE(second.result->text == "follow-up result");
   // Context grew across the follow-up turn.
-  EXPECT_TRUE(second.context_info.has_value());
+  ASSERT_TRUE(second.context_info.has_value());
   EXPECT_TRUE(second.context_info->message_count >
               completed.context_info->message_count);
   EXPECT_TRUE(second.context_info->context_bytes >
@@ -700,8 +801,10 @@ return {}
   EXPECT_TRUE(closed.status == AgentTaskStatusKind::shutdown);
   EXPECT_TRUE(!manager.get(child.id).has_value());
   EXPECT_TRUE(manager.resident_tasks() == 0);
-  manager.shutdown();
+  manager_shutdown.shutdown();
+}
 
+TEST(AgentTasks, InterruptsAndReusesTask) {
   auto interrupt_calls = std::make_shared<std::atomic<int>>(0);
   LLMClientRegistry::instance().register_client(
       "interrupt-test", [interrupt_calls] {
@@ -715,36 +818,34 @@ return {}
   interrupt_options.model = interrupt_model;
   SessionRuntime interrupt_root({.agent_options = interrupt_options});
   AgentTaskManager interrupt_manager(interrupt_root, interrupt_options);
+  AgentTaskManagerShutdown interrupt_shutdown(interrupt_manager);
   auto interrupted =
       interrupt_manager.spawn({.task_name = "slow", .prompt = "wait"});
-  const auto running_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (interrupt_manager.get(interrupted.id)->status !=
-             AgentTaskStatusKind::running &&
-         std::chrono::steady_clock::now() < running_deadline)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  EXPECT_TRUE(interrupt_manager.get(interrupted.id)->status ==
-              AgentTaskStatusKind::running);
-  const auto client_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (interrupt_calls->load() == 0 &&
-         std::chrono::steady_clock::now() < client_deadline)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  EXPECT_TRUE(interrupt_calls->load() == 1);
+  ASSERT_TRUE(pi::test::wait_until(
+      [&] {
+        const auto snapshot = interrupt_manager.get(interrupted.id);
+        return snapshot && snapshot->status == AgentTaskStatusKind::running;
+      },
+      std::chrono::seconds(2), "interrupt task to start"));
+  ASSERT_TRUE(pi::test::wait_until([&] { return interrupt_calls->load() == 1; },
+                                   std::chrono::seconds(2),
+                                   "interrupt client to be called"));
   auto immediate = interrupt_manager.interrupt(interrupted.id,
                                                AgentInterruptReason::timeout);
   EXPECT_TRUE(immediate.status == AgentTaskStatusKind::running);
   auto settled = wait_terminal(interrupt_manager, immediate);
   EXPECT_TRUE(settled.status == AgentTaskStatusKind::interrupted);
-  EXPECT_TRUE(settled.result.has_value());
+  ASSERT_TRUE(settled.result.has_value());
   EXPECT_TRUE(settled.result->stop_reason == StopReason::aborted);
   auto reused = interrupt_manager.follow_up(
       interrupted.id, UserMessage{.content = {TextContent{.text = "retry"}}});
   auto reused_result = wait_terminal(interrupt_manager, reused);
   EXPECT_TRUE(reused_result.status == AgentTaskStatusKind::completed);
   EXPECT_TRUE(reused_result.result && reused_result.result->text == "reused");
-  interrupt_manager.shutdown();
+  interrupt_shutdown.shutdown();
+}
 
+TEST(AgentTasks, ReportsMidTurnUsage) {
   // --- Mid-turn context observability -----------------------------------
   // The child runs two turns: turn 1 returns immediately (usage recorded),
   // turn 2 (queued via follow_up) blocks inside stream() so the test can
@@ -765,11 +866,12 @@ return {}
   usage_options.model = usage_model;
   SessionRuntime usage_root({.agent_options = usage_options});
   AgentTaskManager usage_manager(usage_root, usage_options);
+  AgentTaskManagerShutdown usage_shutdown(usage_manager);
   auto observed_child =
       usage_manager.spawn({.task_name = "observed", .prompt = "observe"});
 
   // Spawn snapshot: seed prompt still queued in work, not yet in state.
-  EXPECT_TRUE(observed_child.context_info.has_value());
+  ASSERT_TRUE(observed_child.context_info.has_value());
   EXPECT_TRUE(observed_child.context_info->message_count == 0);
   EXPECT_TRUE(observed_child.context_info->last_input_tokens == 0);
   // Window resolved from the child's model at spawn time.
@@ -782,17 +884,14 @@ return {}
       Message{UserMessage{.content = {TextContent{.text = "second"}}}}));
 
   // Wait until turn 2 is streaming...
-  const auto entered_deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (!entered->load() &&
-         std::chrono::steady_clock::now() < entered_deadline)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  EXPECT_TRUE(entered->load());
+  ASSERT_TRUE(pi::test::wait_until([&] { return entered->load(); },
+                                   std::chrono::seconds(5),
+                                   "usage client to enter second turn"));
   // ...and observe turn-1 usage live through a plain get().
   const auto mid_turn = usage_manager.get(observed_child.id);
-  EXPECT_TRUE(mid_turn.has_value());
+  ASSERT_TRUE(mid_turn.has_value());
   EXPECT_TRUE(mid_turn->status == AgentTaskStatusKind::running);
-  EXPECT_TRUE(mid_turn->context_info.has_value());
+  ASSERT_TRUE(mid_turn->context_info.has_value());
   EXPECT_TRUE(mid_turn->context_info->last_input_tokens == 1000);
   EXPECT_TRUE(mid_turn->context_info->last_output_tokens == 200);
   EXPECT_TRUE(mid_turn->context_info->total_tokens == 1200);
@@ -804,14 +903,16 @@ return {}
   release->store(true);
   const auto usage_done = wait_terminal(usage_manager, observed_child);
   EXPECT_TRUE(usage_done.status == AgentTaskStatusKind::completed);
-  EXPECT_TRUE(usage_done.context_info.has_value());
+  ASSERT_TRUE(usage_done.context_info.has_value());
   // Turn-2 usage replaced turn-1 usage; total falls back to input+output.
   EXPECT_TRUE(usage_done.context_info->last_input_tokens == 2000);
   EXPECT_TRUE(usage_done.context_info->total_tokens == 2500);
   EXPECT_TRUE(usage_done.context_info->message_count ==
               mid_turn->context_info->message_count + 1); // + turn-2 assistant
-  usage_manager.shutdown();
+  usage_shutdown.shutdown();
+}
 
+TEST(AgentTasks, DoesNotSpliceChildResultIntoParent) {
   // --- Delegated task results never splice into the parent transcript ----
   // Lexicon delegated-task flow step 6: "Results use task APIs or explicit
   // mailbox entries; they never silently splice into the parent transcript."
@@ -830,15 +931,15 @@ return {}
   splice_options.model = splice_model;
   SessionRuntime splice_root({.agent_options = splice_options});
   AgentTaskManager splice_manager(splice_root, splice_options);
+  AgentTaskManagerShutdown splice_shutdown(splice_manager);
   EXPECT_TRUE(splice_root.agent().state().messages().size() == std::size_t{0});
   const auto splice_child = splice_manager.spawn(
       {.task_name = "splice-child", .prompt = "produce distinctive output"});
   const auto splice_done = wait_terminal(splice_manager, splice_child);
   EXPECT_TRUE(splice_done.status == AgentTaskStatusKind::completed);
-  EXPECT_TRUE(splice_done.result.has_value());
-  EXPECT_TRUE(splice_done.result &&
-              splice_done.result->text ==
-                  "splice-check distinctive child output");
+  ASSERT_TRUE(splice_done.result.has_value());
+  EXPECT_TRUE(splice_done.result->text ==
+              "splice-check distinctive child output");
   // The parent's own transcript must be untouched: no messages appended,
   // and the child's distinctive text must not appear anywhere in it.
   EXPECT_TRUE(splice_root.agent().state().messages().size() == std::size_t{0});
@@ -857,5 +958,5 @@ return {}
         return false;
       });
   EXPECT_TRUE(!leaked_into_parent);
-  splice_manager.shutdown();
+  splice_shutdown.shutdown();
 }

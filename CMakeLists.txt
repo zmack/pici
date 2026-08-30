@@ -838,7 +838,8 @@ if(PI_CPP_BUILD_TESTS)
         test-frontend-parity
     )
     foreach(test_target IN LISTS PI_CPP_GTEST_TEST_TARGETS)
-        target_link_libraries(${test_target} PRIVATE GTest::gtest_main)
+        target_link_libraries(${test_target} PRIVATE GTest::gtest_main
+                                                       GTest::gmock)
     endforeach()
 endif()
 
