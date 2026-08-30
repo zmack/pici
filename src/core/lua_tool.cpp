@@ -2164,6 +2164,269 @@ tool_formatter_hooks_only(const std::shared_ptr<LuaHooks> &hooks) {
   return filtered;
 }
 
+namespace {
+
+// Each compose_*() below wires one LuaHooks field on `out` to combine every
+// add-on's implementation of that field, per the combination rule named in
+// its comment. Split out of compose_hooks() purely to shrink that
+// function's branch count; behavior is unchanged from the inline versions
+// they replace.
+
+void compose_before_tool_call(
+    const std::vector<std::shared_ptr<LuaHooks>> &list, LuaHooks &out) {
+  // before_tool_call — run all; first block wins
+  if (!std::ranges::any_of(list,
+                           [](const auto &h) { return !!h->before_tool_call; }))
+    return;
+  out.before_tool_call =
+      [list](const BeforeToolCallContext &ctx,
+             const std::stop_token &st) -> std::optional<BeforeToolCallResult> {
+    for (const auto &h : list) {
+      if (!h->before_tool_call)
+        continue;
+      auto r = h->before_tool_call(ctx, st);
+      if (r && r->block)
+        return r;
+    }
+    return std::nullopt;
+  };
+}
+
+void compose_on_event(const std::vector<std::shared_ptr<LuaHooks>> &list,
+                      LuaHooks &out) {
+  // on_event — notify all observers in load order.
+  if (!std::ranges::any_of(list, [](const auto &h) { return !!h->on_event; }))
+    return;
+  out.on_event = [list](const AgentEvent &event) {
+    for (const auto &h : list) {
+      if (h->on_event)
+        h->on_event(event);
+    }
+  };
+}
+
+void compose_prepare_context(const std::vector<std::shared_ptr<LuaHooks>> &list,
+                             LuaHooks &out) {
+  // prepare_context — first non-null replacement wins.
+  if (!std::ranges::any_of(list,
+                           [](const auto &h) { return !!h->prepare_context; }))
+    return;
+  out.prepare_context =
+      [list](const AgentContext &context, std::size_t estimated_tokens,
+             std::stop_token
+                 stop_tok) // NOLINT(performance-unnecessary-value-param)
+      -> std::optional<std::vector<Message>> {
+    for (const auto &h : list) {
+      if (!h->prepare_context)
+        continue;
+      if (auto result = h->prepare_context(context, estimated_tokens, stop_tok))
+        return result;
+    }
+    return std::nullopt;
+  };
+}
+
+void compose_after_tool_call(const std::vector<std::shared_ptr<LuaHooks>> &list,
+                             LuaHooks &out) {
+  // after_tool_call — run all; first non-null wins
+  if (!std::ranges::any_of(list,
+                           [](const auto &h) { return !!h->after_tool_call; }))
+    return;
+  out.after_tool_call =
+      [list](const AfterToolCallContext &ctx,
+             const std::stop_token &st) -> std::optional<AfterToolCallResult> {
+    for (const auto &h : list) {
+      if (!h->after_tool_call)
+        continue;
+      auto r = h->after_tool_call(ctx, st);
+      if (r)
+        return r;
+    }
+    return std::nullopt;
+  };
+}
+
+void compose_should_stop_after_turn(
+    const std::vector<std::shared_ptr<LuaHooks>> &list, LuaHooks &out) {
+  // should_stop_after_turn — OR
+  if (!std::ranges::any_of(
+          list, [](const auto &h) { return !!h->should_stop_after_turn; }))
+    return;
+  out.should_stop_after_turn =
+      [list](const Message &msg, const std::vector<ToolResultMessage> &results,
+             const AgentContext &ctx) -> bool {
+    return std::ranges::any_of(list, [&](const auto &h) {
+      return h->should_stop_after_turn &&
+             h->should_stop_after_turn(msg, results, ctx);
+    });
+  };
+}
+
+void compose_on_command(const std::vector<std::shared_ptr<LuaHooks>> &list,
+                        LuaHooks &out) {
+  // on_command — first handled wins
+  if (!std::ranges::any_of(list, [](const auto &h) { return !!h->on_command; }))
+    return;
+  out.on_command =
+      [list](std::string_view cmd, std::string_view args,
+             const std::vector<Message> &transcript,
+             const LuaContextSnapshot &context) -> LuaHooks::CommandResult {
+    for (const auto &h : list) {
+      if (!h->on_command)
+        continue;
+      auto r = h->on_command(cmd, args, transcript, context);
+      if (r.handled)
+        return r;
+    }
+    return {};
+  };
+}
+
+void compose_commands_and_tools(
+    const std::vector<std::shared_ptr<LuaHooks>> &list, LuaHooks &out) {
+  // commands + registered_tools — union
+  for (const auto &h : list) {
+    out.commands.insert(out.commands.end(), h->commands.begin(),
+                        h->commands.end());
+    out.registered_tools.insert(out.registered_tools.end(),
+                                h->registered_tools.begin(),
+                                h->registered_tools.end());
+  }
+}
+
+void compose_configure(const std::vector<std::shared_ptr<LuaHooks>> &list,
+                       LuaHooks &out) {
+  // configure — forward to all
+  out.configure = [list](const LuaHooks::AgentInfo &info) {
+    for (const auto &h : list)
+      if (h->configure)
+        h->configure(info);
+  };
+}
+
+void compose_prompt_line(const std::vector<std::shared_ptr<LuaHooks>> &list,
+                         LuaHooks &out) {
+  // prompt_line — last non-nil wins (override semantics)
+  if (!std::ranges::any_of(list,
+                           [](const auto &h) { return !!h->prompt_line; }))
+    return;
+  out.prompt_line =
+      [list](std::size_t turn, std::string_view model_id,
+             std::size_t tools_count, const TokenUsage &last,
+             const TokenUsage &session) -> std::optional<std::string> {
+    std::optional<std::string> result;
+    for (const auto &h : list) {
+      if (!h->prompt_line)
+        continue;
+      auto r = h->prompt_line(turn, model_id, tools_count, last, session);
+      if (r)
+        result = std::move(r);
+    }
+    return result;
+  };
+}
+
+void compose_format_tool_call(
+    const std::vector<std::shared_ptr<LuaHooks>> &list, LuaHooks &out) {
+  // format_tool_call — last non-nil wins (override semantics)
+  if (!std::ranges::any_of(list,
+                           [](const auto &h) { return !!h->format_tool_call; }))
+    return;
+  out.format_tool_call = [list](const LuaHooks::FormatToolCallContext &ctx)
+      -> std::optional<std::string> {
+    std::optional<std::string> result;
+    for (const auto &h : list) {
+      if (!h->format_tool_call)
+        continue;
+      auto r = h->format_tool_call(ctx);
+      if (r)
+        result = std::move(r);
+    }
+    return result;
+  };
+}
+
+void compose_format_tool_result(
+    const std::vector<std::shared_ptr<LuaHooks>> &list, LuaHooks &out) {
+  // format_tool_result — last non-nil wins (override semantics)
+  if (!std::ranges::any_of(
+          list, [](const auto &h) { return !!h->format_tool_result; }))
+    return;
+  out.format_tool_result = [list](const LuaHooks::FormatToolResultContext &ctx)
+      -> std::optional<std::string> {
+    std::optional<std::string> result;
+    for (const auto &h : list) {
+      if (!h->format_tool_result)
+        continue;
+      auto r = h->format_tool_result(ctx);
+      if (r)
+        result = std::move(r);
+    }
+    return result;
+  };
+}
+
+void compose_status_line(const std::vector<std::shared_ptr<LuaHooks>> &list,
+                         LuaHooks &out) {
+  // status_line — last non-nil wins (override semantics)
+  if (!std::ranges::any_of(list,
+                           [](const auto &h) { return !!h->status_line; }))
+    return;
+  out.status_line =
+      [list](const LuaUiContext &context) -> std::optional<std::string> {
+    std::optional<std::string> result;
+    for (const auto &h : list) {
+      if (!h->status_line)
+        continue;
+      auto r = h->status_line(context);
+      if (r)
+        result = std::move(r);
+    }
+    return result;
+  };
+}
+
+void compose_tab_title(const std::vector<std::shared_ptr<LuaHooks>> &list,
+                       LuaHooks &out) {
+  // tab_title — last non-nil wins (override semantics)
+  if (!std::ranges::any_of(list, [](const auto &h) { return !!h->tab_title; }))
+    return;
+  out.tab_title =
+      [list](const LuaUiContext &context) -> std::optional<std::string> {
+    std::optional<std::string> result;
+    for (const auto &h : list) {
+      if (!h->tab_title)
+        continue;
+      auto r = h->tab_title(context);
+      if (r)
+        result = std::move(r);
+    }
+    return result;
+  };
+}
+
+void compose_complete(const std::vector<std::shared_ptr<LuaHooks>> &list,
+                      LuaHooks &out) {
+  // complete — union of all results
+  if (!std::ranges::any_of(list, [](const auto &h) { return !!h->complete; }))
+    return;
+  out.complete =
+      [list](
+          std::string_view partial,
+          const std::vector<Message> &transcript) -> std::vector<std::string> {
+    std::vector<std::string> result;
+    for (const auto &h : list) {
+      if (!h->complete)
+        continue;
+      auto r = h->complete(partial, transcript);
+      result.insert(result.end(), r.begin(), r.end());
+    }
+    return result;
+  };
+}
+
+} // namespace
+
 std::shared_ptr<LuaHooks>
 compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
   // Drop nulls
@@ -2175,218 +2438,20 @@ compose_hooks(std::vector<std::shared_ptr<LuaHooks>> list) {
     return list[0];
 
   auto out = std::make_shared<LuaHooks>();
-
-  // before_tool_call — run all; first block wins
-  if (std::ranges::any_of(
-          list, [](const auto &h) { return !!h->before_tool_call; })) {
-    out->before_tool_call =
-        [list](
-            const BeforeToolCallContext &ctx,
-            const std::stop_token &st) -> std::optional<BeforeToolCallResult> {
-      for (const auto &h : list) {
-        if (!h->before_tool_call)
-          continue;
-        auto r = h->before_tool_call(ctx, st);
-        if (r && r->block)
-          return r;
-      }
-      return std::nullopt;
-    };
-  }
-
-  // on_event — notify all observers in load order.
-  if (std::ranges::any_of(list, [](const auto &h) { return !!h->on_event; })) {
-    out->on_event = [list](const AgentEvent &event) {
-      for (const auto &h : list) {
-        if (h->on_event)
-          h->on_event(event);
-      }
-    };
-  }
-
-  // prepare_context — first non-null replacement wins.
-  if (std::ranges::any_of(list,
-                          [](const auto &h) { return !!h->prepare_context; })) {
-    out->prepare_context =
-        [list](const AgentContext &context, std::size_t estimated_tokens,
-               std::stop_token
-                   stop_tok) // NOLINT(performance-unnecessary-value-param)
-        -> std::optional<std::vector<Message>> {
-      for (const auto &h : list) {
-        if (!h->prepare_context)
-          continue;
-        if (auto result =
-                h->prepare_context(context, estimated_tokens, stop_tok))
-          return result;
-      }
-      return std::nullopt;
-    };
-  }
-
-  // after_tool_call — run all; first non-null wins
-  if (std::ranges::any_of(list,
-                          [](const auto &h) { return !!h->after_tool_call; })) {
-    out->after_tool_call =
-        [list](
-            const AfterToolCallContext &ctx,
-            const std::stop_token &st) -> std::optional<AfterToolCallResult> {
-      for (const auto &h : list) {
-        if (!h->after_tool_call)
-          continue;
-        auto r = h->after_tool_call(ctx, st);
-        if (r)
-          return r;
-      }
-      return std::nullopt;
-    };
-  }
-
-  // should_stop_after_turn — OR
-  if (std::ranges::any_of(
-          list, [](const auto &h) { return !!h->should_stop_after_turn; })) {
-    out->should_stop_after_turn =
-        [list](const Message &msg,
-               const std::vector<ToolResultMessage> &results,
-               const AgentContext &ctx) -> bool {
-      return std::ranges::any_of(list, [&](const auto &h) {
-        return h->should_stop_after_turn &&
-               h->should_stop_after_turn(msg, results, ctx);
-      });
-    };
-  }
-
-  // on_command — first handled wins
-  if (std::ranges::any_of(list,
-                          [](const auto &h) { return !!h->on_command; })) {
-    out->on_command =
-        [list](std::string_view cmd, std::string_view args,
-               const std::vector<Message> &transcript,
-               const LuaContextSnapshot &context) -> LuaHooks::CommandResult {
-      for (const auto &h : list) {
-        if (!h->on_command)
-          continue;
-        auto r = h->on_command(cmd, args, transcript, context);
-        if (r.handled)
-          return r;
-      }
-      return {};
-    };
-  }
-
-  // commands + registered_tools — union
-  for (const auto &h : list) {
-    out->commands.insert(out->commands.end(), h->commands.begin(),
-                         h->commands.end());
-    out->registered_tools.insert(out->registered_tools.end(),
-                                 h->registered_tools.begin(),
-                                 h->registered_tools.end());
-  }
-
-  // configure — forward to all
-  out->configure = [list](const LuaHooks::AgentInfo &info) {
-    for (const auto &h : list)
-      if (h->configure)
-        h->configure(info);
-  };
-
-  // prompt_line — last non-nil wins (override semantics)
-  if (std::ranges::any_of(list,
-                          [](const auto &h) { return !!h->prompt_line; })) {
-    out->prompt_line =
-        [list](std::size_t turn, std::string_view model_id,
-               std::size_t tools_count, const TokenUsage &last,
-               const TokenUsage &session) -> std::optional<std::string> {
-      std::optional<std::string> result;
-      for (const auto &h : list) {
-        if (!h->prompt_line)
-          continue;
-        auto r = h->prompt_line(turn, model_id, tools_count, last, session);
-        if (r)
-          result = std::move(r);
-      }
-      return result;
-    };
-  }
-
-  if (std::ranges::any_of(
-          list, [](const auto &h) { return !!h->format_tool_call; })) {
-    out->format_tool_call = [list](const LuaHooks::FormatToolCallContext &ctx)
-        -> std::optional<std::string> {
-      std::optional<std::string> result;
-      for (const auto &h : list) {
-        if (!h->format_tool_call)
-          continue;
-        auto r = h->format_tool_call(ctx);
-        if (r)
-          result = std::move(r);
-      }
-      return result;
-    };
-  }
-  if (std::ranges::any_of(
-          list, [](const auto &h) { return !!h->format_tool_result; })) {
-    out->format_tool_result =
-        [list](const LuaHooks::FormatToolResultContext &ctx)
-        -> std::optional<std::string> {
-      std::optional<std::string> result;
-      for (const auto &h : list) {
-        if (!h->format_tool_result)
-          continue;
-        auto r = h->format_tool_result(ctx);
-        if (r)
-          result = std::move(r);
-      }
-      return result;
-    };
-  }
-
-  // status_line and tab_title — last non-nil wins (override semantics)
-  if (std::ranges::any_of(list,
-                          [](const auto &h) { return !!h->status_line; })) {
-    out->status_line =
-        [list](const LuaUiContext &context) -> std::optional<std::string> {
-      std::optional<std::string> result;
-      for (const auto &h : list) {
-        if (!h->status_line)
-          continue;
-        auto r = h->status_line(context);
-        if (r)
-          result = std::move(r);
-      }
-      return result;
-    };
-  }
-  if (std::ranges::any_of(list, [](const auto &h) { return !!h->tab_title; })) {
-    out->tab_title =
-        [list](const LuaUiContext &context) -> std::optional<std::string> {
-      std::optional<std::string> result;
-      for (const auto &h : list) {
-        if (!h->tab_title)
-          continue;
-        auto r = h->tab_title(context);
-        if (r)
-          result = std::move(r);
-      }
-      return result;
-    };
-  }
-
-  // complete — union of all results
-  if (std::ranges::any_of(list, [](const auto &h) { return !!h->complete; })) {
-    out->complete = [list](std::string_view partial,
-                           const std::vector<Message> &transcript)
-        -> std::vector<std::string> {
-      std::vector<std::string> result;
-      for (const auto &h : list) {
-        if (!h->complete)
-          continue;
-        auto r = h->complete(partial, transcript);
-        result.insert(result.end(), r.begin(), r.end());
-      }
-      return result;
-    };
-  }
-
+  compose_before_tool_call(list, *out);
+  compose_on_event(list, *out);
+  compose_prepare_context(list, *out);
+  compose_after_tool_call(list, *out);
+  compose_should_stop_after_turn(list, *out);
+  compose_on_command(list, *out);
+  compose_commands_and_tools(list, *out);
+  compose_configure(list, *out);
+  compose_prompt_line(list, *out);
+  compose_format_tool_call(list, *out);
+  compose_format_tool_result(list, *out);
+  compose_status_line(list, *out);
+  compose_tab_title(list, *out);
+  compose_complete(list, *out);
   return out;
 }
 
