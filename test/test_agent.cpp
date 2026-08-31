@@ -22,7 +22,7 @@
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 #include "core/session/session_id.h"
 #include "core/session/session_store.h"
 #include "core/stream.h"

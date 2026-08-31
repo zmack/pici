@@ -212,7 +212,8 @@ RuntimeBundle open_runtime_bundle(const RuntimeBuildConfig &config) {
 
   auto session_config = build_agent_session_config(
       options_result.options, config.model_catalog, /*tools=*/{}, session_store,
-      sandbox_policy, config.args, config.capabilities, mailbox);
+      sandbox_policy, config.args, config.capabilities, mailbox,
+      config.authentication);
   auto runtime =
       std::make_shared<core::SessionRuntime>(std::move(session_config));
 

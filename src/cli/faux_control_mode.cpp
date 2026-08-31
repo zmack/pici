@@ -6,7 +6,7 @@
 #include "core/input_provenance.h"
 #include "core/message_types.h"
 #include "core/providers/faux_control.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 #include "nlohmann/json_fwd.hpp"
 
 #include <array>
@@ -285,7 +285,7 @@ void FauxControlMode::wait_for_idle() {
 void FauxControlMode::stop(bool close_client) {
   if (close_client)
     client_.close();
-  session_.agent().interrupt(core::TurnAbortReason::shutdown);
+  session_.cancel(core::TurnAbortReason::shutdown);
   wait_for_idle();
   run_active_ = false;
 }

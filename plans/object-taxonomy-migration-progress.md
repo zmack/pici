@@ -12,11 +12,11 @@ Completed milestones:
 - Phase 2: `777ea9e` — `refactor: establish model catalog taxonomy`
 - Phase 3: `669df17` — `feat: add provider model discovery bindings`
 - Phase 4: `1de80bb` — `feat: make Authentication the process aggregate`
-- Phase 5: complete in the commit containing this progress update, planned
-  subject `feat: introduce PiciProcess as the composition root`
+- Phase 5: `cfa2872` — `feat: introduce PiciProcess as the composition root`
+- Phase 6: complete in the commit containing this progress update, planned
+  subject `refactor: narrow SessionRuntime and centralize model-switch auth checks`
 
-Next milestone: Phase 6 — narrow `SessionRuntime` and establish the session
-contract.
+Next milestone: Phase 7 — move `TaskTree` under `Agent`.
 
 Phase 4 verification: full `make test` passed 44/44 tests; `make format` and
 `git diff --check` passed. Full-repo `make lint` is too slow to complete
@@ -88,6 +88,57 @@ object once Phase 6 renames `agent_session.{h,cpp}` to `session_runtime.{h,cpp}`
 (`cmd_auth()`) deliberately still builds its own throwaway empty catalog/store
 -- forcing it through a full `PiciProcess` (which also resolves a session
 directory) buys nothing for a command that never opens a session.
+
+Phase 6 verification: implemented by a delegated subagent, then independently
+rebuilt/retested/lint-diffed by the orchestrating session before commit (same
+process as Phases 4/5). Full `make test` passed 45/45 (no new test binary this
+phase); `make format` and `git diff --check` passed. Same targeted-`clang-tidy`-
+vs-pre-phase-commit method as prior phases; every touched/renamed file matched
+its pre-phase baseline exactly except one genuinely new diagnostic
+(`acp/handlers.cpp`'s `apply_requested_run_model` lost its `cfg` parameter once
+the parameter went unused, fixed by dropping it and updating its one call
+site). `core/session/agent_session.{h,cpp}` renamed to
+`core/session/session_runtime.{h,cpp}` (19 include sites updated); the file's
+old top-of-file comment explaining why it was kept at its "historical" name to
+avoid colliding with the CLI's `SessionRuntimeConfig`/`Bundle` was rewritten,
+since Phase 5's rename of those CLI types already removed that collision.
+
+`SessionRuntime::Config` gained an `auth_availability` field so
+`set_model()` can reject a switch to a provider with missing authentication
+itself, instead of three frontends (RPC, ACP, the CLI REPL) each duplicating
+`Authentication::availability(...)` before ever calling in -- exactly the
+"must not duplicate domain validation" problem Phase 6 names. One real,
+verified deviation from the plan text: this field is a
+`std::function<AuthAvailability(std::string_view)>` callback, not a
+`shared_ptr<auth::Authentication>` reference. Reason: `SessionRuntime` lives
+in `pi-core`, but `Authentication`'s implementation lives in `pi-http` (it
+needs CURL/OpenSSL for the OpenAI Codex OAuth adapter) -- `pi-core` is linked
+*by* `pi-http`, not the reverse, so calling `Authentication::availability()`
+directly from `pi-core` would force every `pi-core`-only test binary to link
+`pi-http` just to resolve a symbol most of them never call. This mirrors an
+idiom the codebase already uses for the identical problem:
+`ModelCatalog::set_request_auth_resolver` (Phase 3) is the same kind of
+callback seam for the same layering reason. `ModelSwitchResult` gained an
+`error` field (`Agent::set_model`/`restore_session` never populate it; only
+`SessionRuntime::set_model()` does, before ever calling into `Agent`). Also
+added `SessionRuntime::cancel(TurnAbortReason)` as a one-line forwarder over
+`agent_.interrupt(...)`, and moved 5 direct `session.agent().interrupt(...)`
+call sites (CLI REPL, RPC, the faux-control test harness) onto it; the
+*task*-scoped `task_manager_->interrupt(...)` call sites were deliberately
+left untouched (`AgentTaskManager`/`TaskTree` is Phase 7's concern).
+
+Explicitly deferred, not overlooked: injecting an inference-adapter
+collection into `SessionRuntime::Config` (the plan's Phase 6 text lists it
+alongside catalog/authentication/session-store/sandbox, but
+`LLMClientRegistry::instance()` remains the only inference-adapter mechanism
+that exists today; Phase 3 already deferred building an injectable seam for
+it to sometime before the singleton's eventual removal, which is Phase 10's
+job, not a Phase 6 prerequisite). The `RequestPresentation`/`InputProvenance`/
+`RendererRequest` split the plan also mentions was already completed by an
+earlier, unrelated migration (`plans/session-runtime-migration.md` Phase 7,
+commit `c041218`); confirmed zero remaining references. `task_manager()`/
+`mailbox_runtime()` accessors and `TaskTree`/`Mailbox` ownership are
+untouched, per the plan (Phases 7/8).
 
 Current compatibility seams are `ModelRegistry` -> `ModelCatalog`,
 `ProviderDefinition` -> `Provider`, pointer-returning catalog search, the

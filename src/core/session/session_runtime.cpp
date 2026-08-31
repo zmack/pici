@@ -1,8 +1,9 @@
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 
 #include "core/agent.h"
 #include "core/agent_loop.h"
 #include "core/agent_task.h"
+#include "core/auth/authentication_adapter.h"
 #include "core/compaction.h"
 #include "core/event_types.h"
 #include "core/mailbox/mailbox_coordinator.h"
@@ -56,6 +57,7 @@ SessionRuntime::SessionRuntime(Config config)
       sandbox_policy_(std::move(config.sandbox_policy)),
       model_catalog_(config.model_catalog ? std::move(config.model_catalog)
                                           : config.agent_options.model_catalog),
+      auth_availability_(std::move(config.auth_availability)),
       auto_compaction_(config.auto_compaction),
       mailbox_runtime_(std::move(config.mailbox)) {
   if (!sandbox_policy_)
@@ -152,6 +154,15 @@ SessionRuntime::resolve_model(const ModelSelection &selection) const {
 ModelSwitchResult SessionRuntime::set_model(Model model,
                                             ThinkingLevel thinking) {
   last_warning_.reset();
+  if (auth_availability_ && auth_availability_(model.provider) ==
+                                pi::auth::AuthAvailability::missing) {
+    const auto current = agent_.state().model();
+    return ModelSwitchResult{.previous = current,
+                             .current = current,
+                             .thinking_level = agent_.state().thinking_level(),
+                             .error = "missing authentication for provider '" +
+                                      model.provider + "'"};
+  }
   std::function<void()> persist;
   if (session_store_ && active_session_id_) {
     const auto session_id = *active_session_id_;

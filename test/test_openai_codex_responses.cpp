@@ -2,7 +2,7 @@
 
 #include "core/agent.h"
 #include "core/providers/faux.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 #include "core/session/session_store.h"
 #include "core/stream_diagnostics.h"
 

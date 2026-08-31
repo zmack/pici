@@ -10,7 +10,7 @@
 #include "core/mailbox/mailbox_coordinator.h"
 #include "core/mailbox/mailbox_types.h"
 #include "core/message_types.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 #include "core/session/session_id.h"
 
 #include <algorithm>

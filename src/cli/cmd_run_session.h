@@ -64,9 +64,9 @@
 #include "core/models.h"
 #include "core/providers/faux_control.h"
 #include "core/sandbox.h"
-#include "core/session/agent_session.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
+#include "core/session/session_runtime.h"
 #include "core/session/session_store.h"
 #include "core/session/session_tree.h"
 #include "core/skills.h"
@@ -577,7 +577,7 @@ inline core::TokenUsage run_turn_impl(
   std::jthread interrupt_watcher([&session](const std::stop_token &stop_token) {
     while (!stop_token.stop_requested()) {
       if (core::consume_sigint()) {
-        session.agent().interrupt(core::TurnAbortReason::user_interrupt);
+        session.cancel(core::TurnAbortReason::user_interrupt);
         return;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -645,7 +645,7 @@ run_compaction_command(core::SessionRuntime &session, core::Renderer &renderer,
   std::jthread interrupt_watcher([&session](const std::stop_token &stop_token) {
     while (!stop_token.stop_requested()) {
       if (core::consume_sigint()) {
-        session.agent().interrupt(core::TurnAbortReason::user_interrupt);
+        session.cancel(core::TurnAbortReason::user_interrupt);
         return;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -2148,16 +2148,13 @@ private:
     // !resolution check above already guarantees model is set here.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     const auto &selected_model = resolution.model.value();
-    if (authentication_->availability(selected_model.provider) ==
-        pi::auth::AuthAvailability::missing) {
-      renderer_->on_command_output(
-          "model switch failed: missing authentication for provider '" +
-          selected_model.provider + "'");
-      return;
-    }
     try {
       const auto result =
           runtime().set_model(selected_model, agent().state().thinking_level());
+      if (result.error) {
+        renderer_->on_command_output("model switch failed: " + *result.error);
+        return;
+      }
       runtime().mailbox_runtime().set_model(result.current.provider,
                                             result.current.id);
       configure_hooks();

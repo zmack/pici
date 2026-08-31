@@ -36,9 +36,9 @@
 #include "core/mailbox/mailbox_types.h"
 #include "core/models.h"
 #include "core/sandbox.h"
-#include "core/session/agent_session.h"
 #include "core/session/mailbox_runtime.h"
 #include "core/session/session_record.h"
+#include "core/session/session_runtime.h"
 #include "core/session/session_store.h"
 #include "core/skills.h"
 #include "core/stream_diagnostics.h"
@@ -141,7 +141,9 @@ reload_hooks(const Args &args, bool mailbox_active,
 // it explicitly. `mailbox` constructs the runtime's owned (unconnected
 // until SessionRuntime::activate()) MailboxRuntime; leave it null for any
 // capability-gated caller (ACP always does, per
-// SessionRuntimeCapabilities::enable_mailbox).
+// SessionRuntimeCapabilities::enable_mailbox). `authentication`, when set,
+// lets the runtime's set_model() reject a missing-auth provider switch
+// itself; leave it null for a runtime that never exposes model switching.
 core::SessionRuntime::Config build_agent_session_config(
     const core::Agent::Options &agent_options,
     std::shared_ptr<const core::ModelCatalog> model_catalog,
@@ -149,7 +151,8 @@ core::SessionRuntime::Config build_agent_session_config(
     std::shared_ptr<core::SessionStore> session_store,
     core::SandboxPolicyPtr sandbox_policy, const Args &args,
     const SessionRuntimeCapabilities &capabilities,
-    std::shared_ptr<core::MailboxCoordinator> mailbox = {});
+    std::shared_ptr<core::MailboxCoordinator> mailbox = {},
+    std::shared_ptr<pi::auth::Authentication> authentication = {});
 
 // The full CLI-shaped runtime bundle: durable session store, resolved
 // sandbox policy, an optionally-loaded/resumed session record, context

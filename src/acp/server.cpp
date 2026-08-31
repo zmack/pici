@@ -4,8 +4,8 @@
 #include "acp/types.h"
 #include "cli/session_runtime.h"
 #include "core/agent_task.h"
-#include "core/session/agent_session.h"
 #include "core/session/session_id.h"
+#include "core/session/session_runtime.h"
 #include "core/session/session_store.h"
 #include "nlohmann/json_fwd.hpp"
 

@@ -25,7 +25,7 @@
 #include "core/message_types.h"
 #include "core/providers/faux.h"
 #include "core/providers/transform_messages.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 #include "core/session/session_id.h"
 #include "core/session/session_store.h"
 #include <gtest/gtest.h>

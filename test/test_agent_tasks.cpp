@@ -3,7 +3,7 @@
 #include "core/llm_client.h"
 #include "core/lua_tool.h"
 #include "core/providers/faux.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 #include "support/gtest_helpers.h"
 
 #include <algorithm>

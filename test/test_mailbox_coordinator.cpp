@@ -2,7 +2,7 @@
 #include "core/mailbox/mailbox_coordinator.h"
 
 #include "core/providers/faux.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 #include "support/gtest_helpers.h"
 #include <gtest/gtest.h>
 

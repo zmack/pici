@@ -1,6 +1,6 @@
 #include "core/session/mailbox_runtime.h"
 
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 
 #include <mutex>
 #include <utility>

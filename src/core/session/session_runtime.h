@@ -1,16 +1,18 @@
 #pragma once
 
-// File kept at its historical name (agent_session.h) even though the class
-// it declares was renamed to SessionRuntime by
-// plans/session-runtime-migration.md Phase 6 -- avoids colliding on
-// "session_runtime.h" with the unrelated, CLI-facing
-// cli::RuntimeBuildConfig/Bundle/Capabilities factory types declared in
-// cli/session_runtime.h (that file builds the Config below; this file is
-// what it builds it for).
+// Renamed from agent_session.{h,cpp} by
+// plans/object-taxonomy-migration.md Phase 6 -- the file now matches the
+// class it declares, SessionRuntime. cli/session_runtime.h is a different,
+// CLI-only file: it builds this file's SessionRuntime::Config (via
+// cli::build_agent_session_config()) rather than declaring SessionRuntime
+// itself; the two no longer collide on a shared name now that Phase 5
+// renamed the CLI-facing factory types to RuntimeBuildConfig/RuntimeBundle.
 
 #include "core/agent.h"
 #include "core/agent_task.h"
+#include "core/auth/authentication_adapter.h"
 #include "core/compaction.h"
+#include "core/event_types.h"
 #include "core/models.h"
 #include "core/sandbox.h"
 #include "core/session/mailbox_runtime.h"
@@ -23,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace pi::core {
@@ -69,6 +72,21 @@ public:
     // MailboxRuntime. Null for every capability-gated caller (ACP always
     // passes null here; see SessionRuntimeCapabilities::enable_mailbox).
     std::shared_ptr<MailboxCoordinator> mailbox;
+    // Optional: lets set_model() reject a switch to a provider with missing
+    // authentication itself, instead of every frontend duplicating that
+    // check before calling in. A callback rather than a
+    // shared_ptr<pi::auth::Authentication> reference: this class lives in
+    // pi-core, but Authentication's implementation lives in pi-http (it
+    // needs CURL/OpenSSL for the OpenAI Codex OAuth adapter), so calling
+    // Authentication::availability() directly from here would force every
+    // pi-core-only binary to link pi-http just to resolve that symbol, even
+    // though most never construct an Authentication at all. Frontends that
+    // already link pi-http bind this to authentication->availability(...)
+    // (see cli::build_agent_session_config). Null for child/subagent
+    // sessions (see core/agent_task.cpp), which never expose a model-switch
+    // command.
+    std::function<pi::auth::AuthAvailability(std::string_view provider)>
+        auth_availability;
   };
 
   using EventCallback = std::function<void(const AgentEvent &)>;
@@ -87,6 +105,10 @@ public:
 
   Agent &agent() { return agent_; }
   const Agent &agent() const { return agent_; }
+
+  // Forwards to the owned root agent's interrupt(). Lets frontends cancel
+  // the session's active turn without reaching through agent() for it.
+  void cancel(TurnAbortReason reason) { agent_.interrupt(reason); }
 
   SessionStore *session_store() { return session_store_.get(); }
   const SessionStore *session_store() const { return session_store_.get(); }
@@ -204,6 +226,8 @@ private:
   std::shared_ptr<SessionStore> session_store_;
   SandboxPolicyPtr sandbox_policy_;
   std::shared_ptr<const ModelCatalog> model_catalog_;
+  std::function<pi::auth::AuthAvailability(std::string_view)>
+      auth_availability_;
   std::optional<std::string> active_session_id_;
   std::optional<std::string> last_warning_;
   AutoCompactionConfig auto_compaction_;

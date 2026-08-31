@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <iostream>
+#include <string_view>
 #include <utility>
 
 namespace pi::cli {
@@ -278,7 +279,8 @@ core::SessionRuntime::Config build_agent_session_config(
     std::shared_ptr<core::SessionStore> session_store,
     core::SandboxPolicyPtr sandbox_policy, const Args &args,
     const SessionRuntimeCapabilities &capabilities,
-    std::shared_ptr<core::MailboxCoordinator> mailbox) {
+    std::shared_ptr<core::MailboxCoordinator> mailbox,
+    std::shared_ptr<pi::auth::Authentication> authentication) {
   core::SessionRuntime::Config config{
       .agent_options = agent_options,
       .model_catalog = std::move(model_catalog),
@@ -287,6 +289,15 @@ core::SessionRuntime::Config build_agent_session_config(
       .sandbox_policy = std::move(sandbox_policy),
       .mailbox = std::move(mailbox),
   };
+  // SessionRuntime::Config takes a narrow availability callback rather than
+  // the concrete Authentication type (see that struct's comment): this
+  // translation unit already links pi-http, so it's the right place to
+  // close over the real object.
+  if (authentication) {
+    config.auth_availability = [authentication](std::string_view provider) {
+      return authentication->availability(provider);
+    };
+  }
   if (capabilities.enable_auto_compaction) {
     config.auto_compaction = {.enabled = args.remote_compaction_enabled,
                               .threshold_pct =

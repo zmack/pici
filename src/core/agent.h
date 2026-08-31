@@ -32,6 +32,10 @@ struct ModelSwitchResult {
   Model current;
   ThinkingLevel thinking_level{ThinkingLevel::off};
   std::optional<std::string> warning;
+  // Set only by SessionRuntime::set_model() when it rejects a switch for
+  // missing provider authentication before ever calling Agent::set_model();
+  // Agent itself never populates this.
+  std::optional<std::string> error;
 };
 
 class Agent {

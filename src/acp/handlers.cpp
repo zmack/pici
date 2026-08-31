@@ -7,12 +7,11 @@
 #include "cli/session_runtime.h"
 #include "core/agent.h"
 #include "core/agent_task.h"
-#include "core/auth/authentication_adapter.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/models.h"
-#include "core/session/agent_session.h"
 #include "core/session/session_record.h"
+#include "core/session/session_runtime.h"
 #include "core/session/session_store.h"
 #include "core/stream_renderer.h"
 
@@ -359,7 +358,8 @@ std::shared_ptr<core::SessionRuntime> find_or_create_session_runtime(
                                           .enable_hooks = false,
                                           .enable_skills = false,
                                           .enable_context_files = false,
-                                          .enable_auto_compaction = false}));
+                                          .enable_auto_compaction = false},
+          /*mailbox=*/{}, cfg.authentication));
   if (session_id && !session_id->empty()) {
     std::scoped_lock lock(registry_mutex);
     // Another thread may have raced this one and already inserted a
@@ -620,7 +620,6 @@ void open_run_session(const ServerConfig &cfg, core::SessionRuntime &session,
 // Applies an explicit provider/model override from the run request, writing
 // an error response and returning false if the caller should stop.
 bool apply_requested_run_model(const RunCreateRequest &rcr,
-                               const ServerConfig &cfg,
                                core::SessionRuntime &session,
                                httplib::Response &res) {
   if (!rcr.model || rcr.model->empty()) {
@@ -640,16 +639,13 @@ bool apply_requested_run_model(const RunCreateRequest &rcr,
   // !resolution check above already guarantees model is set here.
   // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
   const auto &selected_model = resolution.model.value();
-  if (cfg.authentication &&
-      cfg.authentication->availability(selected_model.provider) ==
-          auth::AuthAvailability::missing) {
-    json_response(res, 400,
-                  {{"error", "missing authentication for provider '" +
-                                 selected_model.provider + "'"}});
-    return false;
-  }
   try {
-    session.set_model(selected_model, session.agent().state().thinking_level());
+    const auto result = session.set_model(
+        selected_model, session.agent().state().thinking_level());
+    if (result.error) {
+      json_response(res, 400, {{"error", *result.error}});
+      return false;
+    }
   } catch (const std::exception &error) {
     json_response(res, 409, {{"error", error.what()}});
     return false;
@@ -792,7 +788,7 @@ httplib::Server::Handler make_run_create_handler(
     // An explicit request selection always wins over the restored model,
     // and is journaled before the run starts.
     if ((rcr.provider || rcr.model) &&
-        !apply_requested_run_model(rcr, cfg, *session, res))
+        !apply_requested_run_model(rcr, *session, res))
       return;
 
     const auto effective_model = session->agent().state().model();

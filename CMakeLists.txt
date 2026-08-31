@@ -505,7 +505,7 @@ add_library(pi-core
     src/core/providers/transform_messages.cpp
     src/core/otel_init.cpp
     src/core/session/session_id.cpp
-    src/core/session/agent_session.cpp
+    src/core/session/session_runtime.cpp
     src/core/session/session_store.cpp
     src/core/session/session_tree.cpp
     src/core/session/mailbox_runtime.cpp

@@ -9,9 +9,9 @@
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/sandbox.h"
-#include "core/session/agent_session.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
+#include "core/session/session_runtime.h"
 
 #include <chrono>
 #include <cstddef>
@@ -310,7 +310,7 @@ void RpcMode::handle_steer_or_follow_up(const nlohmann::json &command,
 }
 
 void RpcMode::handle_abort(const nlohmann::json &command) {
-  session_.agent().interrupt(
+  session_.cancel(
       rpc_abort_reason(command.value("reason", std::string("user"))));
   response(command, true,
            {{"reason", command.value("reason", std::string("user"))}});
@@ -439,14 +439,6 @@ void RpcMode::handle_set_model(const nlohmann::json &command) {
   // !resolution check above already guarantees model is set here.
   // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
   const auto &selected_model = resolution.model.value();
-  if (authentication_ &&
-      authentication_->availability(selected_model.provider) ==
-          pi::auth::AuthAvailability::missing) {
-    response(command, false, nullptr,
-             "missing authentication for provider '" + selected_model.provider +
-                 "'");
-    return;
-  }
   auto requested = session_.agent().state().thinking_level();
   if (command.contains("thinking_level")) {
     const auto parsed =
@@ -458,6 +450,10 @@ void RpcMode::handle_set_model(const nlohmann::json &command) {
     requested = *parsed;
   }
   const auto result = session_.set_model(selected_model, requested);
+  if (result.error) {
+    response(command, false, nullptr, *result.error);
+    return;
+  }
   nlohmann::json data = {{"previous", as_json(result.previous)},
                          {"current", as_json(result.current)},
                          {"thinking_level", core::thinking_level_to_string(
@@ -625,7 +621,7 @@ void RpcMode::handle(const nlohmann::json &command) {
 }
 
 void RpcMode::stop() {
-  session_.agent().interrupt(core::TurnAbortReason::shutdown);
+  session_.cancel(core::TurnAbortReason::shutdown);
   if (task_manager_ != nullptr)
     task_manager_->shutdown();
   wait_for_idle();

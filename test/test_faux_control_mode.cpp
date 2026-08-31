@@ -7,7 +7,7 @@
 #include "core/models.h"
 #include "core/providers/faux.h"
 #include "core/providers/faux_control.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 #include "core/session/session_record.h"
 #include "core/session/session_store.h"
 

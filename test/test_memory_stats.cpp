@@ -11,7 +11,7 @@
 
 #include "core/agent_task.h"
 #include "core/memory_stats.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 
 #include <gtest/gtest.h>
 

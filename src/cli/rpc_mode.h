@@ -3,7 +3,7 @@
 #include "core/agent_task.h"
 #include "core/auth/authentication.h"
 #include "core/compaction.h"
-#include "core/session/agent_session.h"
+#include "core/session/session_runtime.h"
 
 #include <atomic>
 #include <functional>
