@@ -15,6 +15,8 @@
 
 #include "cli/config.h"
 #include "cli/mailbox_runtime.h"
+#include "core/mailbox/mailbox_coordinator.h"
+#include "core/session/mailbox_runtime.h"
 
 #include <filesystem>
 #include <fstream>
@@ -77,6 +79,14 @@ resolve_session_store(const RuntimeBuildConfig &config) {
       config.args.session_dir.empty()
           ? core::SessionStore::default_sessions_dir()
           : std::filesystem::path(config.args.session_dir));
+}
+
+std::shared_ptr<core::Mailbox>
+resolve_mailbox(const RuntimeBuildConfig &config,
+                const core::MailboxLaunchOptions &launch) {
+  if (config.ensure_mailbox)
+    return config.ensure_mailbox(launch.coordinator);
+  return core::start_mailbox(launch);
 }
 
 } // namespace
@@ -176,7 +186,7 @@ RuntimeBundle open_runtime_bundle(const RuntimeBuildConfig &config) {
     try {
       const auto launch = resolve_mailbox_launch_options(
           config.args, config.model, std::filesystem::current_path());
-      mailbox = core::start_mailbox(launch);
+      mailbox = resolve_mailbox(config, launch);
       if (config.args.verbose) {
         const auto &options = launch.coordinator;
         std::cerr << "mailbox enabled: path=" << launch.resolved_path

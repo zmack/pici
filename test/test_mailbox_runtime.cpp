@@ -161,9 +161,9 @@ TEST(MailboxRuntime, TeardownOrder) {
         });
 
     auto coordinator = make_coordinator("a");
-    coordinator->activate_root("session-a", "teardown-a");
     core::SessionRuntime root({.agent_options = agent_opts});
     core::MailboxRuntime mailbox_runtime(coordinator);
+    mailbox_runtime.activate_root("session-a", "teardown-a");
     auto tasks = std::make_shared<core::AgentTaskManager>(
         root.agent(), default_child_factory(), agent_opts,
         core::AgentTaskManager::Limits{},
@@ -216,9 +216,9 @@ TEST(MailboxRuntime, TeardownOrder) {
         });
 
     auto coordinator = make_coordinator("b");
-    coordinator->activate_root("session-b", "teardown-b");
     core::SessionRuntime root({.agent_options = agent_opts});
     core::MailboxRuntime mailbox_runtime(coordinator);
+    mailbox_runtime.activate_root("session-b", "teardown-b");
     auto tasks = std::make_shared<core::AgentTaskManager>(
         root.agent(), default_child_factory(), agent_opts,
         core::AgentTaskManager::Limits{},

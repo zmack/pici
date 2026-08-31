@@ -838,3 +838,107 @@ TEST_F(MailboxCoordinatorTest, RejectsStaleRootAcceptance) {
   coordinator.stop();
   EXPECT_TRUE(!coordinator.status().root_active);
 }
+
+// Phase 8 (plans/object-taxonomy-migration.md): one Mailbox now supports
+// multiple independent attachments. These three tests exercise that
+// directly, beyond what the single-attachment tests above already cover via
+// the default attachment.
+
+TEST_F(MailboxCoordinatorTest, MultiAttachmentRoutingIsolation) {
+  MailboxCoordinator coordinator(options());
+  const auto key_a = coordinator.default_attachment();
+  const auto key_b = coordinator.attach();
+
+  const auto root_a = coordinator.activate_root(key_a, "session-a", "a");
+  const auto root_b = coordinator.activate_root(key_b, "session-b", "b");
+  ASSERT_NE(root_a.agent_id, root_b.agent_id);
+
+  std::vector<AgentInput> delivered_a;
+  std::vector<AgentInput> delivered_b;
+  auto delivery_a = std::make_shared<MailboxDeliveryTargets>();
+  delivery_a->root = [&](std::vector<AgentInput> messages) {
+    for (auto &message : messages)
+      delivered_a.push_back(std::move(message));
+    return true;
+  };
+  auto delivery_b = std::make_shared<MailboxDeliveryTargets>();
+  delivery_b->root = [&](std::vector<AgentInput> messages) {
+    for (auto &message : messages)
+      delivered_b.push_back(std::move(message));
+    return true;
+  };
+  coordinator.attach_delivery(key_a, delivery_a);
+  coordinator.attach_delivery(key_b, delivery_b);
+  coordinator.set_root_running(key_a, true);
+  coordinator.set_root_running(key_b, true);
+
+  coordinator.store().send(EnqueueMailboxEntryRequest{
+      .entry_id = "to-a",
+      .sender_agent_id = "sender-agent",
+      .sender_session_id = "sender-session",
+      .target = MailboxTarget{.session_id = "session-a"},
+      .workspace_id = "workspace",
+      .kind = MailboxEntryKind::steer,
+      .body = MailboxPayload{.text = "for a"},
+      .created_at_ms = now});
+  coordinator.store().send(EnqueueMailboxEntryRequest{
+      .entry_id = "to-b",
+      .sender_agent_id = "sender-agent",
+      .sender_session_id = "sender-session",
+      .target = MailboxTarget{.session_id = "session-b"},
+      .workspace_id = "workspace",
+      .kind = MailboxEntryKind::steer,
+      .body = MailboxPayload{.text = "for b"},
+      .created_at_ms = now});
+  coordinator.pump_inbox();
+
+  ASSERT_EQ(delivered_a.size(), std::size_t{1});
+  ASSERT_EQ(delivered_b.size(), std::size_t{1});
+  EXPECT_EQ(delivered_a.front().presentation.message_id.value(), "to-a");
+  EXPECT_EQ(delivered_b.front().presentation.message_id.value(), "to-b");
+  EXPECT_EQ(coordinator.status(key_a).session_id.value(),
+            std::string("session-a"));
+  EXPECT_EQ(coordinator.status(key_b).session_id.value(),
+            std::string("session-b"));
+}
+
+TEST_F(MailboxCoordinatorTest, DetachingOneAttachmentLeavesOthersActive) {
+  MailboxCoordinator coordinator(options());
+  const auto key_a = coordinator.default_attachment();
+  const auto key_b = coordinator.attach();
+  const auto root_a = coordinator.activate_root(key_a, "session-a", "a");
+  const auto root_b = coordinator.activate_root(key_b, "session-b", "b");
+
+  coordinator.detach(key_b);
+
+  // The other attachment is untouched: still active, its actor still valid.
+  EXPECT_TRUE(coordinator.status(key_a).root_active);
+  EXPECT_EQ(coordinator.self(root_a).agent_id, root_a.agent_id);
+
+  // The detached attachment's own actor and key are both gone.
+  EXPECT_EQ(error_code([&] { static_cast<void>(coordinator.self(root_b)); }),
+            MailboxErrorCode::permission_denied);
+  EXPECT_TRUE(!coordinator.status(key_b).root_active);
+  EXPECT_TRUE(coordinator.status(key_b).session_id.value_or("").empty());
+
+  // Detaching an already-detached (or never-existent) key is a safe no-op.
+  coordinator.detach(key_b);
+}
+
+TEST_F(MailboxCoordinatorTest, StopDetachesEveryAttachment) {
+  auto coordinator = std::make_unique<MailboxCoordinator>(options());
+  const auto key_a = coordinator->default_attachment();
+  const auto key_b = coordinator->attach();
+  coordinator->activate_root(key_a, "session-a", "a");
+  coordinator->activate_root(key_b, "session-b", "b");
+  ASSERT_TRUE(coordinator->status(key_a).root_active);
+  ASSERT_TRUE(coordinator->status(key_b).root_active);
+
+  coordinator->stop();
+
+  EXPECT_TRUE(!coordinator->status(key_a).root_active);
+  EXPECT_TRUE(!coordinator->status(key_b).root_active);
+  const auto live = coordinator->store().list_agents(
+      AgentQuery{.include_stale = true, .include_closed = false, .now_ms = now});
+  EXPECT_TRUE(live.empty());
+}

@@ -2,12 +2,15 @@
 
 #include "core/auth/authentication_adapter.h"
 #include "core/llm_client.h"
+#include "core/mailbox/mailbox_coordinator.h"
+#include "core/mailbox/mailbox_types.h"
 #include "core/models.h"
 #include "core/session/session_record.h"
 #include "support/gtest_helpers.h"
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -68,6 +71,39 @@ TEST(PiciProcess, AccessorsAreStableAcrossRepeatedCalls) {
   EXPECT_EQ(process.model_catalog(), process.model_catalog());
   EXPECT_EQ(process.authentication(), process.authentication());
   EXPECT_EQ(process.session_store(), process.session_store());
+}
+
+TEST(PiciProcess, EnsureMailboxIsLazyAndSharedAcrossSessions) {
+  pi::test::TemporaryDirectory directory{"pici-process-mailbox"};
+  std::filesystem::permissions(directory.path(),
+                               std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace);
+  pi::core::PiciProcess process(two_provider_config());
+
+  pi::core::MailboxOptions options;
+  options.store.path = directory.path() / "mailbox.sqlite3";
+  options.store.workspace_id = "workspace";
+  options.store.workspace_path = directory.path().string();
+  options.store.clock = [] { return pi::core::TimestampMs{1'000}; };
+  options.store.id_generator = [] { return std::string("generated"); };
+  options.process_id = "process-under-test";
+  options.provider = "test";
+  options.model_id = "test-model";
+  options.heartbeat_interval = std::chrono::hours(1);
+  options.stale_after = std::chrono::hours(2);
+
+  const auto first = process.ensure_mailbox(options);
+  const auto second = process.ensure_mailbox(options);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(first, second);
+
+  // Two sessions attaching to the process's one Mailbox get independent
+  // attachments: activating one's root never touches the other's.
+  const auto key_a = first->attach();
+  const auto key_b = first->attach();
+  first->activate_root(key_a, "session-a");
+  EXPECT_TRUE(first->status(key_a).root_active);
+  EXPECT_TRUE(!first->status(key_b).root_active);
 }
 
 TEST(PiciProcess, InvalidProviderThrowsAndLeavesNoUsableObject) {

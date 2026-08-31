@@ -19,6 +19,7 @@
 #include "cli/config.h"
 #include "core/auth/authentication.h"
 #include "core/lua_tool.h"
+#include "core/mailbox/mailbox_coordinator.h"
 #include "core/models.h"
 #include "core/otel_init.h"
 #include "core/process/pici_process.h"
@@ -215,5 +216,8 @@ int main(int argc, char *argv[]) noexcept {
     return pi::run_lua_test_files(args.test_files);
 
   return pi::cmd_run(args, process->model_catalog(), process->authentication(),
-                     process->session_store());
+                     process->session_store(),
+                     [&process](const pi::core::MailboxOptions &options) {
+                       return process->ensure_mailbox(options);
+                     });
 }

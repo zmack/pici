@@ -14,11 +14,11 @@ Completed milestones:
 - Phase 4: `1de80bb` — `feat: make Authentication the process aggregate`
 - Phase 5: `cfa2872` — `feat: introduce PiciProcess as the composition root`
 - Phase 6: `04762ac` — `refactor: narrow SessionRuntime and centralize model-switch auth checks`
-- Phase 7: complete in the commit containing this progress update, planned
-  subject `refactor: move TaskTree under Agent`
+- Phase 7: `98fe46e` — `refactor: move TaskTree under Agent`
+- Phase 8: complete in the commit containing this progress update, planned
+  subject `refactor: make Mailbox multi-attachment and process-owned`
 
-Next milestone: Phase 8 — make `Mailbox` process-owned and sessions attach to
-it.
+Next milestone: Phase 9 — stabilize `ModelPicker` and frontend adapters.
 
 Phase 4 verification: full `make test` passed 44/44 tests; `make format` and
 `git diff --check` passed. Full-repo `make lint` is too slow to complete
@@ -219,6 +219,123 @@ incidental improvement (`agent_task.h`'s and `session_runtime.h`'s
 `test_memory_stats.cpp`'s unused-`<memory>`-include warning, resolved by the
 new helper actually using it). No other diagnostic list changed in content,
 only in line number.
+
+Phase 8 was the largest and highest-risk phase so far -- a genuine concurrent-
+systems redesign, not a mechanical refactor -- so it was implemented directly
+by the orchestrating session (same reasoning as Phase 7) rather than delegated,
+after explicitly checking with the user first given its size (they chose to
+proceed rather than defer it or do Phases 9/10 first).
+
+`MailboxCoordinator` is renamed to `Mailbox` (compat alias kept,
+Phase-10-tagged), and its previously-singular root/session/subagent/delivery
+state is replaced with an `unordered_map<MailboxAttachmentKey, Attachment>`
+registry. `Mailbox::attach()` returns a key; every operation that used to be
+an unqualified method (`activate_root`, `deactivate_root`, `set_model`,
+`register_subagent`, `attach_delivery`, `claim_idle_root_turn`, `status`,
+etc.) now takes that key as its first argument and reads/writes only that
+attachment's `Attachment` entry -- concurrent attachments never see each
+other's state. `MailboxAttachmentKey` is a distinct opaque type (not a
+`std::string` alias): the keyed and unscoped `activate_root` overloads would
+otherwise be genuinely ambiguous for any two-string-literal call (both
+`(key, session_id)` and `(session_id, session_name)` are equally valid
+2-argument calls when both leading parameters are string-constructible).
+`require_actor()`/`status(actor)` resolve an actor identity to its attachment
+by scanning for a matching `session_id` rather than needing an explicit key,
+since actor identities already carry one and are never valid across two
+attachments' sessions.
+
+`MailboxOptions` (renamed from `MailboxCoordinatorOptions`) keeps its
+`root_agent_id`/`initial_session_id`/`initial_session_name`/`provider`/
+`model_id` fields, but their meaning changed: the constructor now always
+creates one "default attachment" (`default_attachment()`), seeded from
+these fields and activated immediately if `initial_session_id` is set, and
+every *unscoped* overload of the methods above operates on it. This is a
+compatibility convenience, not a design limitation: it let every existing
+single-attachment call site (`test_mailbox_coordinator.cpp`'s ~60 direct
+`coordinator.method(...)` calls, `test_mailbox_bindings.cpp`'s
+construction-time auto-activation) keep compiling and passing completely
+unchanged, while `attach()` still produces a genuinely independent second
+(third, fourth, ...) attachment for real multi-attachment callers. New
+`ChildSessionFactory`-style production code should call `attach()` for every
+session and never rely on the default one.
+
+`MailboxRuntime` (the per-session wrapper `SessionRuntime` owns) is renamed
+to `MailboxAttachment`. Its constructor now calls `coordinator_->attach()` to
+obtain its own attachment key, and every method it already forwarded to the
+coordinator (`activate_root`, `set_model`, `pump_inbox`, `claim_idle_root_turn`,
+`begin_root_turn`/`adopt_root_turn`, the `set_endpoint_registration`/delivery
+closures wired in `connect()`) now passes that key through. The one
+behavioral fix this phase exists to make: `shutdown()` used to call
+`coordinator_->stop()`, which stopped the *entire shared* Mailbox (its
+maintenance thread, every attachment) whenever *any one* session using it
+tore down -- exactly the bug that made sharing one Mailbox across sessions
+unsafe before this phase. It now calls `coordinator_->detach(key_)`, which
+only deactivates and removes its own attachment.
+
+`PiciProcess` gained `ensure_mailbox(MailboxOptions)`, lazily constructing
+and caching one process-lifetime `Mailbox` on first call (guarded by a
+mutex) and returning that same instance on every later call regardless of
+the `options` argument -- resolving Phase 5's original deferral (Mailbox
+needs `MailboxOptions`, which needed a resolved model/session identity that
+didn't exist yet at `PiciProcess` construction time; laziness sidesteps this
+instead of restructuring `main.cpp`'s construction order). `cli::RuntimeBuildConfig`
+gained an `ensure_mailbox` callback field threaded from `main.cpp` through
+`CmdRunSession`/`cmd_run()` down to `open_runtime_bundle()`, which now calls
+it (falling back to its pre-existing `core::start_mailbox()` construction
+when null, so any caller that doesn't supply one -- tests included -- is
+unaffected). ACP is untouched: it never enables the mailbox capability, so
+none of this new plumbing is reachable from it, matching "ACP remains
+unattached unless explicitly enabled."
+
+New tests prove the redesign actually does what it claims, not just that it
+didn't break anything: `MailboxCoordinatorTest.MultiAttachmentRoutingIsolation`
+(two attachments, each activated to a different session, each getting only
+its own addressed message), `.DetachingOneAttachmentLeavesOthersActive`
+(detaching one attachment's actor becomes permission-denied while the other
+stays fully live), `.StopDetachesEveryAttachment` (process-level `stop()`
+deactivates all attachments and leaves no live agent records), and
+`PiciProcess.EnsureMailboxIsLazyAndSharedAcrossSessions` (identity-stable
+across repeated calls; two attachments on the process's one Mailbox are
+independent). All four passed alongside 8 rounds of the full mailbox test
+suite run back-to-back with no flakes.
+
+Two real correctness gaps were found and fixed while making default
+attachments work, worth flagging: (1) `MailboxStore` requires a non-empty
+`provider` on every registered `AgentRecord`, so a freshly-`attach()`-created
+attachment (which starts with empty provider/model, unlike the pre-Phase-8
+singular coordinator state seeded once at construction) would throw
+"provider is invalid" the moment it called `activate_root()` before ever
+calling `set_model()` -- fixed by seeding every new attachment's
+provider/model from `MailboxOptions` at `attach()` time, exactly mirroring
+the old constructor-time seeding. (2) `composition_report()`/
+`composition_reports()`/`drop_mailbox_envelopes()` in Phase 7's `TaskTree`
+had `if (task->session != nullptr)` guards that were dead code before this
+phase (the root task's `session` was never null pre-Phase-7) -- unrelated to
+Mailbox itself, but discovered via the same "does an existing guard become
+load-bearing" review technique this phase relied on throughout.
+
+Phase 8 verification: full `make test` 45/45 (2 new test cases in
+`test_pici_process.cpp`, 3 new in `test_mailbox_coordinator.cpp`); 8 rounds of
+`test-mailbox-coordinator`/`test-mailbox-runtime`/`test-mailbox-bindings` run
+back-to-back, no flakes; `make format`/`git diff --check` clean. Targeted-
+`clang-tidy`-vs-pre-phase-commit (`98fe46e`) diff across all 13 touched files:
+one file's baseline run (`cmd_run_session.h`) hit a transient
+`'algorithm' file not found` parse error under the parallel batch's resource
+pressure, making that comparison unreliable -- re-run standalone (both the
+committed pre-Phase-8 version via `git show 98fe46e:...` and the current one)
+to get a trustworthy result: byte-identical diagnostic content, confirming
+zero new issues there. Every other file's genuinely new diagnostics (a
+cognitive-complexity spike in the rewritten `poll_inbox`, an
+implicit-pointer-to-bool conversion, two unchecked-optional-access sites, a
+`const`-eligible method, and several missing direct includes for the new
+`Mailbox`/`MailboxAttachmentKey`/`MailboxOptions` symbols) were all fixed;
+`poll_inbox`'s complexity was brought down via an extracted
+`poll_agent_claims()` helper (72 back down below its pre-Phase-8 baseline of
+54). The two new-test-file complexity/unchecked-optional-access diagnostics
+that remain match this test file's own long-established convention (it
+already had `TestBody` functions up to complexity 150 and unchecked `.value()`
+calls throughout) and were left as-is rather than restructured against that
+grain.
 
 Current compatibility seams are `ModelRegistry` -> `ModelCatalog`,
 `ProviderDefinition` -> `Provider`, pointer-returning catalog search, the

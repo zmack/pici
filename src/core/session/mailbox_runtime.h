@@ -1,12 +1,14 @@
 #pragma once
 
-// Product-runtime mailbox attachment: connects a mailbox coordinator to a
-// root session, task manager, and wake callback. Per
-// docs/architecture-lexicon.md's ownership table, MailboxCoordinator is a
-// runtime/product-service attachment, not a frontend concern -- this used
-// to live in pi::cli (as cli::MailboxRuntime) but had no actual dependency
-// on cli::Args or any other CLI-specific type, so
-// plans/session-runtime-migration.md Phase 3 relocated it here unchanged.
+// Per-session mailbox attachment: connects one Mailbox attachment slot to a
+// root session, task tree, and wake callback. Per
+// docs/architecture-lexicon.md's ownership table, Mailbox is a
+// process-owned aggregate; this class is the per-session binding to it, not
+// a peer owner -- plans/object-taxonomy-migration.md Phase 8 renamed it from
+// MailboxRuntime to MailboxAttachment and fixed shutdown() to detach only
+// this session's attachment (Mailbox::detach()) instead of stopping the
+// whole shared Mailbox (Mailbox::stop()), which used to make sharing one
+// Mailbox across sessions unsafe.
 //
 // What stays in cli::mailbox_runtime.h: resolve_mailbox_launch_options(),
 // which translates cli::Args/config into a MailboxLaunchOptions below --
@@ -30,27 +32,26 @@ namespace pi::core {
 class SessionRuntime;
 
 struct MailboxLaunchOptions {
-  MailboxCoordinatorOptions coordinator;
+  MailboxOptions coordinator;
   std::filesystem::path resolved_path;
   std::filesystem::path workspace_path;
 };
 
-std::shared_ptr<MailboxCoordinator>
-start_mailbox(const MailboxLaunchOptions &options);
+std::shared_ptr<Mailbox> start_mailbox(const MailboxLaunchOptions &options);
 
-// Application-facing adapter for the native mailbox. It owns all wiring
-// between the coordinator, root session, child task tree, and REPL wakeup.
-// SessionRuntime's destructor explicitly shuts its Agent's TaskTree down
-// before any of its members (this one included) destruct, so teardown
-// closes child tasks while the mailbox observer is still attached -- see
-// core/session/session_runtime.h's ~SessionRuntime() and its
-// mailbox_runtime_ declaration-order comment.
-class MailboxRuntime {
+// Application-facing adapter for one session's native mailbox binding. It
+// owns all wiring between its Mailbox attachment, root session, child task
+// tree, and REPL wakeup. SessionRuntime's destructor explicitly shuts its
+// Agent's TaskTree down before any of its members (this one included)
+// destruct, so teardown closes child tasks while the mailbox observer is
+// still attached -- see core/session/session_runtime.h's ~SessionRuntime()
+// and its mailbox_runtime_ declaration-order comment.
+class MailboxAttachment {
 public:
   class RootTurn {
   public:
     RootTurn() = default;
-    RootTurn(std::shared_ptr<MailboxCoordinator> coordinator,
+    RootTurn(std::shared_ptr<Mailbox> coordinator, MailboxAttachmentKey key,
              bool mark_running);
     RootTurn(const RootTurn &) = delete;
     RootTurn &operator=(const RootTurn &) = delete;
@@ -59,17 +60,18 @@ public:
     ~RootTurn() noexcept;
 
   private:
-    std::shared_ptr<MailboxCoordinator> coordinator_;
+    std::shared_ptr<Mailbox> coordinator_;
+    MailboxAttachmentKey key_;
   };
 
-  explicit MailboxRuntime(std::shared_ptr<MailboxCoordinator> coordinator = {});
-  ~MailboxRuntime() noexcept;
+  explicit MailboxAttachment(std::shared_ptr<Mailbox> coordinator = {});
+  ~MailboxAttachment() noexcept;
 
-  MailboxRuntime(const MailboxRuntime &) = delete;
-  MailboxRuntime &operator=(const MailboxRuntime &) = delete;
+  MailboxAttachment(const MailboxAttachment &) = delete;
+  MailboxAttachment &operator=(const MailboxAttachment &) = delete;
 
   bool enabled() const noexcept;
-  std::shared_ptr<MailboxCoordinator> coordinator() const;
+  std::shared_ptr<Mailbox> coordinator() const;
   AgentTaskEventCallback task_event_callback() const;
 
   void connect(SessionRuntime &root,
@@ -90,10 +92,19 @@ public:
 
 private:
   struct Observer;
-  std::shared_ptr<MailboxCoordinator> coordinator_;
+  std::shared_ptr<Mailbox> coordinator_;
+  // Empty (and every method a safe no-op) when coordinator_ is null.
+  // Assigned once, at construction, via coordinator_->attach() -- never
+  // reassigned, so every forwarding call below can use it without a null
+  // check beyond coordinator_ itself.
+  MailboxAttachmentKey key_;
   std::shared_ptr<Observer> observer_;
   std::shared_ptr<MailboxDeliveryTargets> delivery_;
   bool connected_{false};
 };
+
+// TODO(taxonomy-phase-10): remove. MailboxRuntime is the migration-era name;
+// all new code must use MailboxAttachment.
+using MailboxRuntime = MailboxAttachment;
 
 } // namespace pi::core

@@ -86,12 +86,9 @@ fan_out_agent_task_callbacks(std::vector<AgentTaskEventCallback> callbacks) {
   };
 }
 
-MailboxCoordinator::MailboxCoordinator(MailboxCoordinatorOptions options)
-    : options_(std::move(options)),
-      active_root_agent_id_(options_.root_agent_id),
-      provider_(options_.provider), model_id_(options_.model_id),
-      lifetime_(std::make_shared<Lifetime>()) {
-  if (options_.process_id.empty() || options_.root_agent_id.empty())
+Mailbox::Mailbox(MailboxOptions options)
+    : options_(std::move(options)), lifetime_(std::make_shared<Lifetime>()) {
+  if (options_.process_id.empty())
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "mailbox coordinator identities are required");
   if (options_.heartbeat_interval <= std::chrono::milliseconds::zero())
@@ -125,15 +122,79 @@ MailboxCoordinator::MailboxCoordinator(MailboxCoordinatorOptions options)
   maintenance_ = std::jthread([this](const std::stop_token &stop_token) {
     maintenance_loop(stop_token);
   });
+  // Always create the default attachment (not only when initial_session_id
+  // is set): every unscoped (no explicit key) method below operates on it,
+  // and pre-Phase-8 code activates its root explicitly, after construction,
+  // rather than relying on initial_session_id -- see MailboxOptions. Without
+  // this, that pre-existing call pattern would fail with "attachment is not
+  // registered" the first time it touched an unscoped method.
+  default_attachment_ = attach();
+  {
+    std::scoped_lock lock(mutex_);
+    attachments_.at(default_attachment_).active_root_agent_id =
+        options_.root_agent_id;
+  }
   if (!options_.initial_session_id.empty())
-    activate_root(options_.initial_session_id, options_.initial_session_name);
+    activate_root(default_attachment_, options_.initial_session_id,
+                  options_.initial_session_name);
 }
 
-MailboxCoordinator::~MailboxCoordinator() noexcept { stop(); }
+Mailbox::~Mailbox() noexcept { stop(); }
+
+MailboxAttachmentKey Mailbox::new_attachment_key() const {
+  static std::atomic_uint64_t counter{1};
+  std::string key = options_.store.id_generator ? options_.store.id_generator()
+                                                : std::string("attachment");
+  key += ":attachment:" + std::to_string(counter.fetch_add(1));
+  return MailboxAttachmentKey(std::move(key));
+}
+
+MailboxAttachmentKey Mailbox::attach() {
+  std::scoped_lock lock(mutex_);
+  auto key = new_attachment_key();
+  // Seeded from the process-wide configured provider/model (matching this
+  // class's pre-Phase-8 constructor-time seeding) so a fresh attachment can
+  // activate_root() immediately, before ever calling set_model() itself.
+  Attachment attachment;
+  attachment.provider = options_.provider;
+  attachment.model_id = options_.model_id;
+  attachments_.emplace(key, std::move(attachment));
+  return key;
+}
+
+void Mailbox::detach(const MailboxAttachmentKey &key) noexcept {
+  try {
+    deactivate_root(key);
+  } catch (...) {
+    static_cast<void>(0);
+  }
+  std::scoped_lock lock(mutex_);
+  attachments_.erase(key);
+}
+
+Mailbox::Attachment *
+Mailbox::find_attachment_for_session_locked(std::string_view session_id) {
+  for (auto &[key, attachment] : attachments_) {
+    if (attachment.root_active && attachment.session_id &&
+        *attachment.session_id == session_id)
+      return &attachment;
+  }
+  return nullptr;
+}
+
+const Mailbox::Attachment *
+Mailbox::find_attachment_for_session_locked(std::string_view session_id) const {
+  for (const auto &[key, attachment] : attachments_) {
+    if (attachment.root_active && attachment.session_id &&
+        *attachment.session_id == session_id)
+      return &attachment;
+  }
+  return nullptr;
+}
 
 AgentRuntimeIdentity
-MailboxCoordinator::activate_root(std::string session_id,
-                                  std::optional<std::string> session_name) {
+Mailbox::activate_root(const MailboxAttachmentKey &key, std::string session_id,
+                       std::optional<std::string> session_name) {
   if (session_id.empty())
     throw MailboxError(MailboxErrorCode::invalid_message,
                        "mailbox session identity is required");
@@ -144,22 +205,26 @@ MailboxCoordinator::activate_root(std::string session_id,
   std::string provider;
   std::string model;
   std::shared_ptr<MailboxDeliveryTargets> delivery;
-  AgentRuntimeIdentity registered_identity;
   {
     std::scoped_lock lock(mutex_);
     if (stopped_)
       throw MailboxError(MailboxErrorCode::internal,
                          "mailbox coordinator is stopped");
-    old_session = session_id_;
-    old_root_agent_id = active_root_agent_id_;
-    old_subagent_ids = subagent_ids_;
-    provider = provider_;
-    model = model_id_;
-    delivery = delivery_targets_;
-    if (root_registered_)
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end())
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox attachment is not registered");
+    auto &attachment = it->second;
+    old_session = attachment.session_id;
+    old_root_agent_id = attachment.active_root_agent_id;
+    old_subagent_ids = attachment.subagent_ids;
+    provider = attachment.provider;
+    model = attachment.model_id;
+    delivery = attachment.delivery_targets;
+    if (attachment.root_registered || attachment.active_root_agent_id.empty())
       root_agent_id = options_.store.id_generator();
     else
-      root_agent_id = active_root_agent_id_;
+      root_agent_id = attachment.active_root_agent_id;
   }
   if (old_session && delivery && delivery->drop_queued) {
     try {
@@ -193,38 +258,45 @@ MailboxCoordinator::activate_root(std::string session_id,
     }
     throw;
   }
+  AgentRuntimeIdentity registered_identity;
   {
     std::scoped_lock lock(mutex_);
-    active_root_agent_id_ = std::move(root_agent_id);
-    session_id_ = std::move(session_id);
-    session_name_ = std::move(session_name);
-    root_active_ = true;
-    root_running_ = false;
-    root_registered_ = true;
-    subagent_ids_.clear();
-    subagent_endpoint_by_task_.clear();
-    subagent_task_by_endpoint_.clear();
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end())
+      throw MailboxError(MailboxErrorCode::not_found,
+                         "mailbox attachment is not registered");
+    auto &attachment = it->second;
+    attachment.active_root_agent_id = std::move(root_agent_id);
+    attachment.session_id = std::move(session_id);
+    attachment.session_name = std::move(session_name);
+    attachment.root_active = true;
+    attachment.root_running = false;
+    attachment.root_registered = true;
+    attachment.subagent_ids.clear();
+    attachment.subagent_endpoint_by_task.clear();
+    attachment.subagent_task_by_endpoint.clear();
     registered_identity =
-        AgentRuntimeIdentity{.agent_id = active_root_agent_id_,
-                             .session_id = *session_id_,
+        AgentRuntimeIdentity{.agent_id = attachment.active_root_agent_id,
+                             .session_id = *attachment.session_id,
                              .kind = "root"};
   }
   return registered_identity;
 }
 
-void MailboxCoordinator::deactivate_root() {
+void Mailbox::deactivate_root(const MailboxAttachmentKey &key) {
   std::optional<std::string> active;
   std::string root_agent_id;
   std::unordered_set<std::string> subagent_ids;
   std::shared_ptr<MailboxDeliveryTargets> delivery;
   {
     std::scoped_lock lock(mutex_);
-    if (!root_active_)
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end() || !it->second.root_active)
       return;
-    active = session_id_;
-    root_agent_id = active_root_agent_id_;
-    subagent_ids = subagent_ids_;
-    delivery = delivery_targets_;
+    active = it->second.session_id;
+    root_agent_id = it->second.active_root_agent_id;
+    subagent_ids = it->second.subagent_ids;
+    delivery = it->second.delivery_targets;
   }
   if (delivery && delivery->drop_queued) {
     try {
@@ -239,43 +311,54 @@ void MailboxCoordinator::deactivate_root() {
   if (active)
     store_->close_agent(root_agent_id, now);
   std::scoped_lock lock(mutex_);
-  if (root_active_ && active_root_agent_id_ == root_agent_id) {
-    root_active_ = false;
-    root_running_ = false;
-    session_id_.reset();
-    session_name_.reset();
-    subagent_ids_.clear();
-    subagent_endpoint_by_task_.clear();
-    subagent_task_by_endpoint_.clear();
+  const auto it = attachments_.find(key);
+  if (it == attachments_.end())
+    return;
+  auto &attachment = it->second;
+  if (attachment.root_active &&
+      attachment.active_root_agent_id == root_agent_id) {
+    attachment.root_active = false;
+    attachment.root_running = false;
+    attachment.session_id.reset();
+    attachment.session_name.reset();
+    attachment.subagent_ids.clear();
+    attachment.subagent_endpoint_by_task.clear();
+    attachment.subagent_task_by_endpoint.clear();
   }
 }
 
-void MailboxCoordinator::set_session_name(std::string session_name) {
+void Mailbox::set_session_name(const MailboxAttachmentKey &key,
+                               std::string session_name) {
   std::string root_agent_id;
   {
     std::scoped_lock lock(mutex_);
-    if (!root_active_)
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end() || !it->second.root_active)
       return;
-    root_agent_id = active_root_agent_id_;
+    root_agent_id = it->second.active_root_agent_id;
   }
   store_->update_agent(
       AgentUpdate{.agent_id = root_agent_id, .session_name = session_name});
   std::scoped_lock lock(mutex_);
-  if (root_active_ && active_root_agent_id_ == root_agent_id)
-    session_name_ = std::move(session_name);
+  const auto it = attachments_.find(key);
+  if (it != attachments_.end() && it->second.root_active &&
+      it->second.active_root_agent_id == root_agent_id)
+    it->second.session_name = std::move(session_name);
 }
 
-void MailboxCoordinator::set_root_running(bool running) {
+void Mailbox::set_root_running(const MailboxAttachmentKey &key, bool running) {
   std::string status;
   std::string root_agent_id;
   std::shared_ptr<MailboxDeliveryTargets> delivery;
   {
     std::scoped_lock lock(mutex_);
-    if (!root_active_ || root_running_ == running)
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end() || !it->second.root_active ||
+        it->second.root_running == running)
       return;
     status = running ? "running" : "idle";
-    root_agent_id = active_root_agent_id_;
-    delivery = delivery_targets_;
+    root_agent_id = it->second.active_root_agent_id;
+    delivery = it->second.delivery_targets;
   }
   if (!running && delivery && delivery->drop_root_queued) {
     try {
@@ -287,37 +370,45 @@ void MailboxCoordinator::set_root_running(bool running) {
   store_->update_agent(
       AgentUpdate{.agent_id = root_agent_id, .status = std::move(status)});
   std::scoped_lock lock(mutex_);
-  if (root_active_ && active_root_agent_id_ == root_agent_id)
-    root_running_ = running;
+  const auto it = attachments_.find(key);
+  if (it != attachments_.end() && it->second.root_active &&
+      it->second.active_root_agent_id == root_agent_id)
+    it->second.root_running = running;
 }
 
-void MailboxCoordinator::set_model(std::string provider, std::string model_id) {
+void Mailbox::set_model(const MailboxAttachmentKey &key, std::string provider,
+                        std::string model_id) {
   std::optional<std::string> active;
   std::string root_agent_id;
   {
     std::scoped_lock lock(mutex_);
-    active = session_id_;
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end())
+      return;
+    active = it->second.session_id;
     if (!active) {
-      provider_ = std::move(provider);
-      model_id_ = std::move(model_id);
+      it->second.provider = std::move(provider);
+      it->second.model_id = std::move(model_id);
       return;
     }
-    root_agent_id = active_root_agent_id_;
+    root_agent_id = it->second.active_root_agent_id;
   }
   if (active)
     store_->update_agent(AgentUpdate{
         .agent_id = root_agent_id, .provider = provider, .model_id = model_id});
   std::scoped_lock lock(mutex_);
-  if (root_active_ && active_root_agent_id_ == root_agent_id) {
-    provider_ = std::move(provider);
-    model_id_ = std::move(model_id);
+  const auto it = attachments_.find(key);
+  if (it != attachments_.end() && it->second.root_active &&
+      it->second.active_root_agent_id == root_agent_id) {
+    it->second.provider = std::move(provider);
+    it->second.model_id = std::move(model_id);
   }
 }
 
 AgentRuntimeIdentity
-MailboxCoordinator::register_subagent(std::string task_id,
-                                      std::string task_path,
-                                      std::optional<std::string> parent_id) {
+Mailbox::register_subagent(const MailboxAttachmentKey &key, std::string task_id,
+                           std::string task_path,
+                           std::optional<std::string> parent_id) {
   std::optional<std::string> session;
   std::string provider;
   std::string model;
@@ -325,18 +416,21 @@ MailboxCoordinator::register_subagent(std::string task_id,
   std::string owner_agent_id;
   {
     std::scoped_lock lock(mutex_);
-    if (!root_active_)
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end() || !it->second.root_active)
       throw MailboxError(MailboxErrorCode::not_found,
                          "mailbox root session is not active");
-    session = session_id_;
-    provider = provider_;
-    model = model_id_;
-    root_agent_id = active_root_agent_id_;
+    auto &attachment = it->second;
+    session = attachment.session_id;
+    provider = attachment.provider;
+    model = attachment.model_id;
+    root_agent_id = attachment.active_root_agent_id;
     owner_agent_id = root_agent_id;
     if (parent_id && *parent_id != "root") {
-      if (const auto it = subagent_endpoint_by_task_.find(*parent_id);
-          it != subagent_endpoint_by_task_.end())
-        owner_agent_id = it->second;
+      if (const auto endpoint_it =
+              attachment.subagent_endpoint_by_task.find(*parent_id);
+          endpoint_it != attachment.subagent_endpoint_by_task.end())
+        owner_agent_id = endpoint_it->second;
       else
         throw MailboxError(MailboxErrorCode::not_found,
                            "mailbox parent task is not registered");
@@ -347,7 +441,6 @@ MailboxCoordinator::register_subagent(std::string task_id,
                        "mailbox root session is not active");
   std::string endpoint;
   {
-    std::scoped_lock lock(mutex_);
     if (options_.store.id_generator)
       endpoint = options_.store.id_generator();
     else
@@ -372,13 +465,15 @@ MailboxCoordinator::register_subagent(std::string task_id,
   bool belongs_to_current_session = false;
   {
     std::scoped_lock lock(mutex_);
-    belongs_to_current_session = root_active_ && session_id_ == session &&
-                                 active_root_agent_id_ == root_agent_id;
-    if (belongs_to_current_session)
-      subagent_ids_.insert(endpoint);
+    const auto it = attachments_.find(key);
+    belongs_to_current_session =
+        it != attachments_.end() && it->second.root_active &&
+        it->second.session_id == session &&
+        it->second.active_root_agent_id == root_agent_id;
     if (belongs_to_current_session) {
-      subagent_endpoint_by_task_[task_id] = endpoint;
-      subagent_task_by_endpoint_[endpoint] = task_id;
+      it->second.subagent_ids.insert(endpoint);
+      it->second.subagent_endpoint_by_task[task_id] = endpoint;
+      it->second.subagent_task_by_endpoint[endpoint] = task_id;
     }
   }
   if (!belongs_to_current_session) {
@@ -399,27 +494,36 @@ MailboxCoordinator::register_subagent(std::string task_id,
                               .owner_agent_id = std::move(owner_agent_id)};
 }
 
-void MailboxCoordinator::unregister_subagent(std::string_view task_id) {
+void Mailbox::unregister_subagent(const MailboxAttachmentKey &key,
+                                  std::string_view task_id) {
   std::string endpoint;
   {
     std::scoped_lock lock(mutex_);
-    const auto it = subagent_endpoint_by_task_.find(std::string(task_id));
-    if (it == subagent_endpoint_by_task_.end())
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end())
       return;
-    endpoint = it->second;
+    const auto task_it =
+        it->second.subagent_endpoint_by_task.find(std::string(task_id));
+    if (task_it == it->second.subagent_endpoint_by_task.end())
+      return;
+    endpoint = task_it->second;
   }
   store_->close_agent(endpoint, options_.store.clock());
   std::scoped_lock lock(mutex_);
-  subagent_ids_.erase(endpoint);
-  subagent_endpoint_by_task_.erase(std::string(task_id));
-  subagent_task_by_endpoint_.erase(endpoint);
+  const auto it = attachments_.find(key);
+  if (it == attachments_.end())
+    return;
+  it->second.subagent_ids.erase(endpoint);
+  it->second.subagent_endpoint_by_task.erase(std::string(task_id));
+  it->second.subagent_task_by_endpoint.erase(endpoint);
 }
 
-std::string MailboxCoordinator::task_status(AgentTaskStatusKind status) {
+std::string Mailbox::task_status(AgentTaskStatusKind status) {
   return std::string(agent_task_status_to_string(status));
 }
 
-void MailboxCoordinator::observe_task_event(const AgentTaskEvent &event) {
+void Mailbox::observe_task_event(const MailboxAttachmentKey &key,
+                                 const AgentTaskEvent &event) {
   if (const auto *spawned = std::get_if<AgentTaskSpawnedEvent>(&event)) {
     // Registration is synchronous during spawn; this event is observational.
     static_cast<void>(spawned);
@@ -429,10 +533,14 @@ void MailboxCoordinator::observe_task_event(const AgentTaskEvent &event) {
     bool owned = false;
     {
       std::scoped_lock lock(mutex_);
-      const auto it = subagent_endpoint_by_task_.find(changed->id);
-      owned = root_active_ && it != subagent_endpoint_by_task_.end();
-      if (owned)
-        endpoint = it->second;
+      const auto it = attachments_.find(key);
+      if (it != attachments_.end() && it->second.root_active) {
+        const auto endpoint_it =
+            it->second.subagent_endpoint_by_task.find(changed->id);
+        owned = endpoint_it != it->second.subagent_endpoint_by_task.end();
+        if (owned)
+          endpoint = endpoint_it->second;
+      }
     }
     if (owned) {
       const auto status = task_status(changed->current);
@@ -443,51 +551,69 @@ void MailboxCoordinator::observe_task_event(const AgentTaskEvent &event) {
     bool owned = false;
     {
       std::scoped_lock lock(mutex_);
-      const auto it = subagent_endpoint_by_task_.find(closed->id);
-      owned = root_active_ && it != subagent_endpoint_by_task_.end();
-      if (owned)
-        endpoint = it->second;
+      const auto it = attachments_.find(key);
+      if (it != attachments_.end() && it->second.root_active) {
+        const auto endpoint_it =
+            it->second.subagent_endpoint_by_task.find(closed->id);
+        owned = endpoint_it != it->second.subagent_endpoint_by_task.end();
+        if (owned)
+          endpoint = endpoint_it->second;
+      }
     }
     if (owned) {
       store_->close_agent(endpoint, options_.store.clock());
       std::scoped_lock lock(mutex_);
-      subagent_ids_.erase(endpoint);
-      subagent_endpoint_by_task_.erase(closed->id);
-      subagent_task_by_endpoint_.erase(endpoint);
+      const auto it = attachments_.find(key);
+      if (it != attachments_.end()) {
+        it->second.subagent_ids.erase(endpoint);
+        it->second.subagent_endpoint_by_task.erase(closed->id);
+        it->second.subagent_task_by_endpoint.erase(endpoint);
+      }
     }
   }
 }
 
-void MailboxCoordinator::attach_delivery(
-    std::shared_ptr<MailboxDeliveryTargets> targets) {
+void Mailbox::attach_delivery(const MailboxAttachmentKey &key,
+                              std::shared_ptr<MailboxDeliveryTargets> targets) {
   std::scoped_lock lock(mutex_);
-  delivery_targets_ = std::move(targets);
+  const auto it = attachments_.find(key);
+  if (it != attachments_.end())
+    it->second.delivery_targets = std::move(targets);
 }
 
-void MailboxCoordinator::detach_delivery() {
+void Mailbox::detach_delivery(const MailboxAttachmentKey &key) {
   std::scoped_lock lock(mutex_);
-  delivery_targets_.reset();
+  const auto it = attachments_.find(key);
+  if (it != attachments_.end())
+    it->second.delivery_targets.reset();
 }
 
-void MailboxCoordinator::drop_queued_delivery() {
+void Mailbox::drop_queued_delivery(const MailboxAttachmentKey &key) {
   std::shared_ptr<MailboxDeliveryTargets> delivery;
   {
     std::scoped_lock lock(mutex_);
-    delivery = delivery_targets_;
+    const auto it = attachments_.find(key);
+    if (it != attachments_.end())
+      delivery = it->second.delivery_targets;
   }
   if (delivery && delivery->drop_queued)
     delivery->drop_queued();
 }
 
-bool MailboxCoordinator::idle_root_work_pending() {
+bool Mailbox::idle_root_work_pending(const MailboxAttachmentKey &key) {
   std::string root_agent_id;
   std::string session_id;
   {
     std::scoped_lock lock(mutex_);
-    if (!root_active_ || root_running_ || stopped_ || !session_id_)
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end())
       return false;
-    root_agent_id = active_root_agent_id_;
-    session_id = *session_id_;
+    const auto &attachment = it->second;
+    if (!attachment.root_active || attachment.root_running || stopped_ ||
+        !attachment.session_id)
+      return false;
+    root_agent_id = attachment.active_root_agent_id;
+    session_id = *attachment.session_id;
   }
   try {
     const auto messages = store_->inspect(InboxQuery{
@@ -506,7 +632,8 @@ bool MailboxCoordinator::idle_root_work_pending() {
 }
 
 std::vector<AgentInput>
-MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
+Mailbox::claim_idle_root_turn(const MailboxAttachmentKey &key,
+                              std::size_t limit) {
   if (limit == 0)
     return {};
   limit = std::min<std::size_t>(limit, 16);
@@ -515,16 +642,21 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
   std::string session_id;
   {
     std::scoped_lock lock(mutex_);
-    if (!root_active_ || root_running_ || stopped_ || !session_id_)
+    const auto it = attachments_.find(key);
+    if (it == attachments_.end())
       return {};
-    root_agent_id = active_root_agent_id_;
-    session_id = *session_id_;
+    auto &attachment = it->second;
+    if (!attachment.root_active || attachment.root_running || stopped_ ||
+        !attachment.session_id)
+      return {};
+    root_agent_id = attachment.active_root_agent_id;
+    session_id = *attachment.session_id;
 
     // Reserve the root turn before claiming.  This makes the claim and the
     // main-thread running transition one coordinator-serialized decision.
     store_->update_agent(
         AgentUpdate{.agent_id = root_agent_id, .status = "running"});
-    root_running_ = true;
+    attachment.root_running = true;
     try {
       const auto claimed = store_->claim(ClaimRequest{
           .session_id = session_id,
@@ -537,7 +669,7 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
       if (claimed.messages.empty()) {
         store_->update_agent(
             AgentUpdate{.agent_id = root_agent_id, .status = "idle"});
-        root_running_ = false;
+        attachment.root_running = false;
         return {};
       }
 
@@ -561,7 +693,7 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
                   auto state = weak.lock();
                   if (!state)
                     return;
-                  MailboxCoordinator *owner = nullptr;
+                  Mailbox *owner = nullptr;
                   {
                     std::scoped_lock lock(state->mutex);
                     if (!state->active || state->owner == nullptr)
@@ -593,14 +725,13 @@ MailboxCoordinator::claim_idle_root_turn(std::size_t limit) {
       } catch (...) {
         static_cast<void>(0);
       }
-      root_running_ = false;
+      it->second.root_running = false;
       throw;
     }
   }
 }
 
-void MailboxCoordinator::mark_delivered_best_effort(
-    const std::string &entry_id) {
+void Mailbox::mark_delivered_best_effort(const std::string &entry_id) {
   try {
     store_->mark_delivered(entry_id, options_.store.workspace_id,
                            options_.store.clock());
@@ -610,9 +741,8 @@ void MailboxCoordinator::mark_delivered_best_effort(
   }
 }
 
-void MailboxCoordinator::acknowledge_delivery(std::string agent_id,
-                                              std::string entry_id,
-                                              std::string claim_token) {
+void Mailbox::acknowledge_delivery(std::string agent_id, std::string entry_id,
+                                   std::string claim_token) {
   store_->acknowledge(
       AcknowledgeRequest{.entry_id = std::move(entry_id),
                          .agent_id = std::move(agent_id),
@@ -621,27 +751,40 @@ void MailboxCoordinator::acknowledge_delivery(std::string agent_id,
                          .now_ms = options_.store.clock()});
 }
 
-void MailboxCoordinator::pump_inbox() { poll_inbox(); }
+void Mailbox::pump_inbox() { poll_inbox(); }
 
-void MailboxCoordinator::poll_inbox() {
+// One (attachment key, delivery, root agent/session/running, subagent maps)
+// snapshot per currently-active attachment, taken under one lock so a
+// concurrent attach()/detach() can't be observed half-applied.
+struct Mailbox::AttachmentSnapshot {
   std::shared_ptr<MailboxDeliveryTargets> delivery;
   std::string root_agent_id;
-  std::optional<std::string> session_id;
-  bool root_running = false;
+  std::string session_id;
+  bool root_running{false};
   std::unordered_set<std::string> subagent_ids;
   std::unordered_map<std::string, std::string> subagent_tasks;
+};
+
+void Mailbox::poll_inbox() {
+  std::vector<AttachmentSnapshot> snapshots;
   {
     std::scoped_lock lock(mutex_);
-    delivery = delivery_targets_;
-    if (!root_active_ || !delivery)
-      return;
-    root_agent_id = active_root_agent_id_;
-    session_id = session_id_;
-    root_running = root_running_;
-    subagent_ids = subagent_ids_;
-    subagent_tasks = subagent_task_by_endpoint_;
+    snapshots.reserve(attachments_.size());
+    for (const auto &[key, attachment] : attachments_) {
+      if (!attachment.root_active || !attachment.delivery_targets ||
+          !attachment.session_id)
+        continue;
+      snapshots.push_back(AttachmentSnapshot{
+          .delivery = attachment.delivery_targets,
+          .root_agent_id = attachment.active_root_agent_id,
+          .session_id = *attachment.session_id,
+          .root_running = attachment.root_running,
+          .subagent_ids = attachment.subagent_ids,
+          .subagent_tasks = attachment.subagent_task_by_endpoint,
+      });
+    }
   }
-  if (!session_id)
+  if (snapshots.empty())
     return;
 
   std::vector<AgentRecord> local_agents;
@@ -656,114 +799,118 @@ void MailboxCoordinator::poll_inbox() {
     return;
   }
 
-  for (const auto &agent : local_agents) {
-    if (agent.process_id != options_.process_id || agent.agent_id.empty())
-      continue;
-    const bool is_root = agent.agent_id == root_agent_id;
-    if (is_root) {
-      if (!root_running || !delivery->root)
+  for (const auto &snapshot : snapshots) {
+    for (const auto &agent : local_agents) {
+      if (agent.process_id != options_.process_id || agent.agent_id.empty())
         continue;
-    } else if (!subagent_ids.contains(agent.agent_id) ||
-               !subagent_tasks.contains(agent.agent_id) ||
-               !delivery->subagent || agent.status == "closing" ||
-               agent.status == "closed" || agent.status == "shutdown") {
-      continue;
-    }
-
-    ClaimResult claimed;
-    try {
-      claimed = store_->claim(ClaimRequest{
-          .session_id = *session_id,
-          .agent_id = agent.agent_id,
-          .workspace_id = options_.store.workspace_id,
-          .kinds = {MailboxEntryKind::steer, MailboxEntryKind::request},
-          .limit = 16,
-          .now_ms = options_.store.clock(),
-          .lease_ms = options_.store.claim_lease_ms});
-    } catch (...) {
-      continue;
-    }
-
-    for (auto &claimed_message : claimed.messages) {
-      const auto message_id = claimed_message.entry_id;
-      const auto claim_token = claimed_message.claim_token.value_or("");
-      const auto endpoint = agent.agent_id;
-      const auto task_id = subagent_tasks.contains(endpoint)
-                               ? subagent_tasks.at(endpoint)
-                               : std::string{};
-      mark_delivered_best_effort(message_id);
-      const auto endpoint_ref = std::make_shared<const std::string>(endpoint);
-      const auto message_id_ref =
-          std::make_shared<const std::string>(message_id);
-      const auto claim_token_ref =
-          std::make_shared<const std::string>(claim_token);
-      AgentInput envelope{
-          .message = mailbox_message_to_message(claimed_message),
-          .on_accepted =
-              [weak = std::weak_ptr<Lifetime>(lifetime_), endpoint_ref,
-               message_id_ref, claim_token_ref] noexcept {
-                auto state = weak.lock();
-                if (!state)
-                  return;
-                MailboxCoordinator *owner = nullptr;
-                {
-                  std::scoped_lock lock(state->mutex);
-                  if (!state->active || state->owner == nullptr)
-                    return;
-                  owner = state->owner;
-                  ++state->in_flight;
-                }
-                try {
-                  owner->acknowledge_delivery(*endpoint_ref, *message_id_ref,
-                                              *claim_token_ref);
-                } catch (...) {
-                  // Lease expiry provides redelivery when acknowledgement
-                  // fails.
-                  static_cast<void>(0);
-                }
-                {
-                  std::scoped_lock lock(state->mutex);
-                  if (state->in_flight > 0)
-                    --state->in_flight;
-                  if (state->in_flight == 0)
-                    state->condition.notify_all();
-                }
-              },
-          .presentation = mailbox_input_provenance(claimed_message)};
-      bool routed = false;
-      try {
-        if (is_root)
-          routed = delivery->root(std::vector<AgentInput>{std::move(envelope)});
-        else
-          routed = delivery->subagent(
-              endpoint, task_id, std::vector<AgentInput>{std::move(envelope)});
-      } catch (...) {
-        routed = false;
+      const bool is_root = agent.agent_id == snapshot.root_agent_id;
+      if (is_root) {
+        if (!snapshot.root_running || !snapshot.delivery->root)
+          continue;
+      } else if (!snapshot.subagent_ids.contains(agent.agent_id) ||
+                 !snapshot.subagent_tasks.contains(agent.agent_id) ||
+                 !snapshot.delivery->subagent || agent.status == "closing" ||
+                 agent.status == "closed" || agent.status == "shutdown") {
+        continue;
       }
-      if (!routed)
-        continue;
+      poll_agent_claims(snapshot, agent, is_root);
     }
   }
 }
 
-void MailboxCoordinator::require_actor(
-    const AgentRuntimeIdentity &actor) const {
+void Mailbox::poll_agent_claims(const AttachmentSnapshot &snapshot,
+                                const AgentRecord &agent, bool is_root) {
+  ClaimResult claimed;
+  try {
+    claimed = store_->claim(ClaimRequest{
+        .session_id = snapshot.session_id,
+        .agent_id = agent.agent_id,
+        .workspace_id = options_.store.workspace_id,
+        .kinds = {MailboxEntryKind::steer, MailboxEntryKind::request},
+        .limit = 16,
+        .now_ms = options_.store.clock(),
+        .lease_ms = options_.store.claim_lease_ms});
+  } catch (...) {
+    return;
+  }
+
+  for (auto &claimed_message : claimed.messages) {
+    const auto message_id = claimed_message.entry_id;
+    const auto claim_token = claimed_message.claim_token.value_or("");
+    const auto endpoint = agent.agent_id;
+    const auto task_id = snapshot.subagent_tasks.contains(endpoint)
+                             ? snapshot.subagent_tasks.at(endpoint)
+                             : std::string{};
+    mark_delivered_best_effort(message_id);
+    const auto endpoint_ref = std::make_shared<const std::string>(endpoint);
+    const auto message_id_ref = std::make_shared<const std::string>(message_id);
+    const auto claim_token_ref =
+        std::make_shared<const std::string>(claim_token);
+    AgentInput envelope{
+        .message = mailbox_message_to_message(claimed_message),
+        .on_accepted =
+            [weak = std::weak_ptr<Lifetime>(lifetime_), endpoint_ref,
+             message_id_ref, claim_token_ref] noexcept {
+              auto state = weak.lock();
+              if (!state)
+                return;
+              Mailbox *owner = nullptr;
+              {
+                std::scoped_lock lock(state->mutex);
+                if (!state->active || state->owner == nullptr)
+                  return;
+                owner = state->owner;
+                ++state->in_flight;
+              }
+              try {
+                owner->acknowledge_delivery(*endpoint_ref, *message_id_ref,
+                                            *claim_token_ref);
+              } catch (...) {
+                // Lease expiry provides redelivery when acknowledgement
+                // fails.
+                static_cast<void>(0);
+              }
+              {
+                std::scoped_lock lock(state->mutex);
+                if (state->in_flight > 0)
+                  --state->in_flight;
+                if (state->in_flight == 0)
+                  state->condition.notify_all();
+              }
+            },
+        .presentation = mailbox_input_provenance(claimed_message)};
+    try {
+      if (is_root)
+        snapshot.delivery->root(std::vector<AgentInput>{std::move(envelope)});
+      else
+        snapshot.delivery->subagent(
+            endpoint, task_id, std::vector<AgentInput>{std::move(envelope)});
+    } catch (...) {
+      static_cast<void>(0);
+    }
+  }
+}
+
+void Mailbox::require_actor(const AgentRuntimeIdentity &actor) const {
   if (actor.agent_id.empty() || actor.session_id.empty() ||
       (actor.kind != "root" && actor.kind != "subagent"))
     throw MailboxError(MailboxErrorCode::permission_denied,
                        "mailbox actor identity is invalid");
   {
     std::scoped_lock lock(mutex_);
-    if (!root_active_ || session_id_ != actor.session_id)
+    const auto *attachment =
+        find_attachment_for_session_locked(actor.session_id);
+    if (attachment == nullptr)
       throw MailboxError(MailboxErrorCode::permission_denied,
                          "mailbox actor is not active");
     if (actor.kind == "root") {
-      if (actor.agent_id != active_root_agent_id_)
+      if (actor.agent_id != attachment->active_root_agent_id)
         throw MailboxError(MailboxErrorCode::permission_denied,
                            "mailbox actor is not the active root");
     } else {
-      const auto it = subagent_task_by_endpoint_.find(actor.agent_id);
-      if (it == subagent_task_by_endpoint_.end() || !actor.task_id ||
+      const auto it =
+          attachment->subagent_task_by_endpoint.find(actor.agent_id);
+      if (it == attachment->subagent_task_by_endpoint.end() || !actor.task_id ||
           *actor.task_id != it->second)
         throw MailboxError(MailboxErrorCode::permission_denied,
                            "mailbox subagent actor is not active");
@@ -780,7 +927,7 @@ void MailboxCoordinator::require_actor(
                        "mailbox actor lease is not live");
 }
 
-AgentRecord MailboxCoordinator::self(const AgentRuntimeIdentity &actor) {
+AgentRecord Mailbox::self(const AgentRuntimeIdentity &actor) {
   require_actor(actor);
   auto agents = list_agents(AgentQuery{.agent_id = actor.agent_id,
                                        .include_stale = true,
@@ -792,25 +939,28 @@ AgentRecord MailboxCoordinator::self(const AgentRuntimeIdentity &actor) {
 }
 
 std::optional<AgentRuntimeIdentity>
-MailboxCoordinator::active_root_identity() const {
+Mailbox::active_root_identity(const MailboxAttachmentKey &key) const {
   std::scoped_lock lock(mutex_);
-  if (!root_active_ || !session_id_)
+  const auto it = attachments_.find(key);
+  if (it == attachments_.end())
     return std::nullopt;
-  return AgentRuntimeIdentity{.agent_id = active_root_agent_id_,
-                              .session_id = *session_id_,
+  const auto &attachment = it->second;
+  if (!attachment.root_active || !attachment.session_id)
+    return std::nullopt;
+  return AgentRuntimeIdentity{.agent_id = attachment.active_root_agent_id,
+                              .session_id = *attachment.session_id,
                               .kind = "root"};
 }
 
-std::vector<AgentRecord> MailboxCoordinator::list_agents(AgentQuery query) {
+std::vector<AgentRecord> Mailbox::list_agents(AgentQuery query) {
   query.workspace_id = options_.store.workspace_id;
   if (query.now_ms == 0)
     query.now_ms = options_.store.clock();
   return store_->list_agents(query);
 }
 
-std::vector<AgentRecord>
-MailboxCoordinator::list_agents(const AgentRuntimeIdentity &actor,
-                                AgentQuery query) {
+std::vector<AgentRecord> Mailbox::list_agents(const AgentRuntimeIdentity &actor,
+                                              AgentQuery query) {
   require_actor(actor);
   query.workspace_id = options_.store.workspace_id;
   if (query.now_ms == 0)
@@ -818,9 +968,8 @@ MailboxCoordinator::list_agents(const AgentRuntimeIdentity &actor,
   return store_->list_agents(query);
 }
 
-MailboxEnqueueReceipt
-MailboxCoordinator::send(const AgentRuntimeIdentity &actor,
-                         EnqueueMailboxEntryRequest request) {
+MailboxEnqueueReceipt Mailbox::send(const AgentRuntimeIdentity &actor,
+                                    EnqueueMailboxEntryRequest request) {
   require_actor(actor);
   request.sender_agent_id = actor.agent_id;
   request.sender_session_id = actor.session_id;
@@ -828,9 +977,9 @@ MailboxCoordinator::send(const AgentRuntimeIdentity &actor,
   return store_->send(request);
 }
 
-MailboxEnqueueReceipt
-MailboxCoordinator::reply(const AgentRuntimeIdentity &actor,
-                          std::string entry_id, MailboxPayload body) {
+MailboxEnqueueReceipt Mailbox::reply(const AgentRuntimeIdentity &actor,
+                                     std::string entry_id,
+                                     MailboxPayload body) {
   require_actor(actor);
   const auto incoming = inspect(actor, InboxQuery{.entry_id = entry_id,
                                                   .include_acknowledged = true,
@@ -859,9 +1008,8 @@ MailboxCoordinator::reply(const AgentRuntimeIdentity &actor,
                                                     original.entry_id});
 }
 
-std::vector<MailboxEntry>
-MailboxCoordinator::inspect(const AgentRuntimeIdentity &actor,
-                            InboxQuery query) {
+std::vector<MailboxEntry> Mailbox::inspect(const AgentRuntimeIdentity &actor,
+                                           InboxQuery query) {
   require_actor(actor);
   query.session_id = actor.session_id;
   query.agent_id = actor.agent_id;
@@ -872,8 +1020,8 @@ MailboxCoordinator::inspect(const AgentRuntimeIdentity &actor,
   return store_->inspect(query);
 }
 
-ClaimResult MailboxCoordinator::claim(const AgentRuntimeIdentity &actor,
-                                      ClaimRequest request) {
+ClaimResult Mailbox::claim(const AgentRuntimeIdentity &actor,
+                           ClaimRequest request) {
   require_actor(actor);
   request.session_id = actor.session_id;
   request.agent_id = actor.agent_id;
@@ -883,8 +1031,8 @@ ClaimResult MailboxCoordinator::claim(const AgentRuntimeIdentity &actor,
   return store_->claim(request);
 }
 
-void MailboxCoordinator::acknowledge(const AgentRuntimeIdentity &actor,
-                                     AcknowledgeRequest request) {
+void Mailbox::acknowledge(const AgentRuntimeIdentity &actor,
+                          AcknowledgeRequest request) {
   require_actor(actor);
   if (!request.agent_id.empty() && request.agent_id != actor.agent_id)
     throw MailboxError(MailboxErrorCode::permission_denied,
@@ -896,13 +1044,12 @@ void MailboxCoordinator::acknowledge(const AgentRuntimeIdentity &actor,
   store_->acknowledge(request);
 }
 
-WaitResult MailboxCoordinator::wait(WaitRequest request,
-                                    std::stop_token stop_token) {
+WaitResult Mailbox::wait(WaitRequest request, std::stop_token stop_token) {
   request.workspace_id = options_.store.workspace_id;
   return store_->wait_for_change(request, std::move(stop_token));
 }
 
-void MailboxCoordinator::maintenance_loop(const std::stop_token &stop_token) {
+void Mailbox::maintenance_loop(const std::stop_token &stop_token) {
   while (!stop_token.stop_requested()) {
     const auto now = options_.store.clock();
     maintenance_once(now, last_cleanup_ms_);
@@ -914,8 +1061,7 @@ void MailboxCoordinator::maintenance_loop(const std::stop_token &stop_token) {
   }
 }
 
-void MailboxCoordinator::maintenance_once(TimestampMs now,
-                                          TimestampMs &last_cleanup) {
+void Mailbox::maintenance_once(TimestampMs now, TimestampMs &last_cleanup) {
   std::scoped_lock maintenance_lock(maintenance_mutex_);
   try {
     if (next_heartbeat_ms_ == 0 || now >= next_heartbeat_ms_) {
@@ -945,55 +1091,109 @@ void MailboxCoordinator::maintenance_once(TimestampMs now,
   }
 }
 
-void MailboxCoordinator::signal_idle_root_work() {
-  if (!idle_root_work_pending())
-    return;
-  std::shared_ptr<MailboxDeliveryTargets> delivery;
+void Mailbox::signal_idle_root_work() {
+  std::vector<MailboxAttachmentKey> keys;
   {
     std::scoped_lock lock(mutex_);
-    delivery = delivery_targets_;
+    keys.reserve(attachments_.size());
+    for (const auto &[key, attachment] : attachments_)
+      keys.push_back(key);
   }
-  if (delivery && delivery->root_wake) {
-    try {
-      delivery->root_wake();
-    } catch (...) {
-      static_cast<void>(0);
+  for (const auto &key : keys) {
+    if (!idle_root_work_pending(key))
+      continue;
+    std::shared_ptr<MailboxDeliveryTargets> delivery;
+    {
+      std::scoped_lock lock(mutex_);
+      const auto it = attachments_.find(key);
+      if (it != attachments_.end())
+        delivery = it->second.delivery_targets;
+    }
+    if (delivery && delivery->root_wake) {
+      try {
+        delivery->root_wake();
+      } catch (...) {
+        static_cast<void>(0);
+      }
     }
   }
 }
 
-void MailboxCoordinator::maintenance_tick() {
+void Mailbox::maintenance_tick() {
   maintenance_once(options_.store.clock(), last_cleanup_ms_);
 }
 
-MailboxCoordinatorStatus MailboxCoordinator::status() const {
-  MailboxCoordinatorStatus result;
+MailboxAttachmentStatus Mailbox::status(const MailboxAttachmentKey &key) const {
+  MailboxAttachmentStatus result;
   {
     std::scoped_lock lock(mutex_);
     result.process_id = options_.process_id;
-    result.root_agent_id = active_root_agent_id_;
-    result.session_id = session_id_;
-    result.session_name = session_name_;
-    result.provider = provider_;
-    result.model_id = model_id_;
-    result.root_active = root_active_;
-    result.root_running = root_running_;
-    if (root_running_)
-      result.status = "running";
-    else if (root_active_)
-      result.status = "idle";
-    else
+    const auto it = attachments_.find(key);
+    if (it != attachments_.end()) {
+      const auto &attachment = it->second;
+      result.root_agent_id = attachment.active_root_agent_id;
+      result.session_id = attachment.session_id;
+      result.session_name = attachment.session_name;
+      result.provider = attachment.provider;
+      result.model_id = attachment.model_id;
+      result.root_active = attachment.root_active;
+      result.root_running = attachment.root_running;
+      if (attachment.root_running)
+        result.status = "running";
+      else if (attachment.root_active)
+        result.status = "idle";
+      else
+        result.status = "closed";
+    } else {
       result.status = "closed";
+    }
   }
   result.mailbox = store_->status(
       StatusRequest{.workspace_id = options_.store.workspace_id});
   return result;
 }
 
-MailboxStore &MailboxCoordinator::store() { return *store_; }
-const MailboxStore &MailboxCoordinator::store() const { return *store_; }
+MailboxAttachmentStatus
+Mailbox::status(const AgentRuntimeIdentity &actor) const {
+  require_actor(actor);
+  MailboxAttachmentStatus result;
+  {
+    std::scoped_lock lock(mutex_);
+    result.process_id = options_.process_id;
+    const auto *attachment =
+        find_attachment_for_session_locked(actor.session_id);
+    if (attachment != nullptr) {
+      result.root_agent_id = attachment->active_root_agent_id;
+      result.session_id = attachment->session_id;
+      result.session_name = attachment->session_name;
+      result.provider = attachment->provider;
+      result.model_id = attachment->model_id;
+      result.root_active = attachment->root_active;
+      result.root_running = attachment->root_running;
+      if (attachment->root_running)
+        result.status = "running";
+      else if (attachment->root_active)
+        result.status = "idle";
+      else
+        result.status = "closed";
+    } else {
+      result.status = "closed";
+    }
+  }
+  result.mailbox = store_->status(
+      StatusRequest{.workspace_id = options_.store.workspace_id});
+  return result;
+}
 
-void MailboxCoordinator::stop() noexcept {
+MailboxStatus Mailbox::mailbox_status() const {
+  return store_->status(
+      StatusRequest{.workspace_id = options_.store.workspace_id});
+}
+
+MailboxStore &Mailbox::store() { return *store_; }
+const MailboxStore &Mailbox::store() const { return *store_; }
+
+void Mailbox::stop() noexcept {
   {
     std::scoped_lock lock(mutex_);
     if (stopped_)
@@ -1014,8 +1214,21 @@ void MailboxCoordinator::stop() noexcept {
   maintenance_wakeup_.notify_all();
   if (maintenance_.joinable())
     maintenance_.join();
+  std::vector<MailboxAttachmentKey> keys;
+  {
+    std::scoped_lock lock(mutex_);
+    keys.reserve(attachments_.size());
+    for (const auto &[key, attachment] : attachments_)
+      keys.push_back(key);
+  }
+  for (const auto &key : keys) {
+    try {
+      deactivate_root(key);
+    } catch (...) {
+      static_cast<void>(0);
+    }
+  }
   try {
-    deactivate_root();
     store_->close_process(options_.process_id, options_.store.clock());
   } catch (...) {
     static_cast<void>(0);

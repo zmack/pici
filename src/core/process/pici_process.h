@@ -14,11 +14,13 @@
 
 #include "core/auth/authentication.h"
 #include "core/auth/credential_store.h"
+#include "core/mailbox/mailbox_coordinator.h"
 #include "core/models.h"
 #include "core/session/session_store.h"
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace pi::core {
@@ -45,11 +47,25 @@ public:
     return session_store_;
   }
 
+  // Lazily constructs the process's one Mailbox on first call (using
+  // `options`) and returns it; every later call returns that same instance
+  // and ignores its `options` argument. Mailbox construction is deferred to
+  // first use, rather than done eagerly alongside the catalog/authentication/
+  // session store above, because callers (CLI session bootstrap) only know
+  // MailboxOptions once model/args resolution -- which happens after
+  // PiciProcess itself is constructed -- has completed. Returns the same
+  // shared_ptr from every session that calls this, so all of a process's
+  // sessions share one Mailbox and attach their own independent
+  // MailboxAttachment to it (plans/object-taxonomy-migration.md Phase 8).
+  std::shared_ptr<Mailbox> ensure_mailbox(const MailboxOptions &options) const;
+
 private:
   std::shared_ptr<const ModelCatalog> model_catalog_;
   auth::CredentialStore credential_store_;
   std::shared_ptr<auth::Authentication> authentication_;
   std::shared_ptr<SessionStore> session_store_;
+  mutable std::mutex mailbox_mutex_;
+  mutable std::shared_ptr<Mailbox> mailbox_;
 };
 
 } // namespace pi::core

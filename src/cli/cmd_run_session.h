@@ -994,10 +994,14 @@ public:
   CmdRunSession(cli::Args args,
                 std::shared_ptr<const core::ModelCatalog> registry,
                 std::shared_ptr<pi::auth::Authentication> authentication = {},
-                std::shared_ptr<core::SessionStore> session_store = {})
+                std::shared_ptr<core::SessionStore> session_store = {},
+                std::function<std::shared_ptr<core::Mailbox>(
+                    const core::MailboxOptions &)>
+                    ensure_mailbox = {})
       : args_(std::move(args)), registry_(std::move(registry)),
         injected_authentication_(std::move(authentication)),
-        injected_session_store_(std::move(session_store)) {}
+        injected_session_store_(std::move(session_store)),
+        injected_ensure_mailbox_(std::move(ensure_mailbox)) {}
 
   int run() {
     if (!resolve_model())
@@ -1144,6 +1148,7 @@ private:
               effective_context_ = context;
             },
         .session_store = injected_session_store_,
+        .ensure_mailbox = injected_ensure_mailbox_,
     };
     bundle_ = cli::open_runtime_bundle(runtime_config);
     if (bundle_.error) {
@@ -2335,6 +2340,8 @@ private:
   std::shared_ptr<pi::auth::Authentication> authentication_;
   std::shared_ptr<pi::auth::Authentication> injected_authentication_;
   std::shared_ptr<core::SessionStore> injected_session_store_;
+  std::function<std::shared_ptr<core::Mailbox>(const core::MailboxOptions &)>
+      injected_ensure_mailbox_;
   std::mutex effective_context_mutex_;
   std::optional<core::AgentContext> effective_context_;
   cli::RuntimeBundle bundle_;
@@ -2364,13 +2371,15 @@ private:
   std::size_t readline_cursor_{0};
 };
 
-inline int
-cmd_run(const cli::Args &args,
-        const std::shared_ptr<const core::ModelCatalog> &registry,
-        std::shared_ptr<pi::auth::Authentication> authentication = {},
-        std::shared_ptr<core::SessionStore> session_store = {}) {
+inline int cmd_run(
+    const cli::Args &args,
+    const std::shared_ptr<const core::ModelCatalog> &registry,
+    std::shared_ptr<pi::auth::Authentication> authentication = {},
+    std::shared_ptr<core::SessionStore> session_store = {},
+    std::function<std::shared_ptr<core::Mailbox>(const core::MailboxOptions &)>
+        ensure_mailbox = {}) {
   CmdRunSession session(args, registry, std::move(authentication),
-                        std::move(session_store));
+                        std::move(session_store), std::move(ensure_mailbox));
   return session.run();
 }
 

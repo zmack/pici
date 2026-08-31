@@ -190,6 +190,13 @@ struct RuntimeBuildConfig {
   // it instead of constructing its own from args.session_dir. Null preserves
   // the pre-existing fallback construction exactly.
   std::shared_ptr<core::SessionStore> session_store;
+  // Set by a caller (e.g. PiciProcess-backed frontends) that wants
+  // open_runtime_bundle()'s mailbox (when args.mailbox_enabled) to come from
+  // a process-owned core::Mailbox instead of a fresh one built just for this
+  // session -- see core::PiciProcess::ensure_mailbox(). Null preserves the
+  // pre-existing core::start_mailbox() fallback exactly.
+  std::function<std::shared_ptr<core::Mailbox>(const core::MailboxOptions &)>
+      ensure_mailbox;
 };
 
 struct RuntimeBundle {
