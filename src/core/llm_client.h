@@ -173,4 +173,24 @@ private:
   mutable std::mutex mutex_;
 };
 
+// Process-owned inference adapter collection. This is the injectable seam
+// for Provider::inference while LLMClientRegistry remains a compatibility
+// singleton during the taxonomy migration.
+class InferenceAdapterCollection {
+public:
+  explicit InferenceAdapterCollection(
+      LLMClientRegistry &registry = LLMClientRegistry::instance())
+      : registry_(&registry) {}
+
+  void register_adapter(std::string adapter_id,
+                        LLMClientRegistry::Factory factory);
+  bool has_adapter(std::string_view adapter_id) const;
+  std::shared_ptr<LLMClient> get_client(const Model &model) const;
+
+private:
+  LLMClientRegistry *registry_;
+  mutable std::mutex mutex_;
+  std::map<std::string, LLMClientRegistry::Factory> factories_;
+};
+
 } // namespace pi::core

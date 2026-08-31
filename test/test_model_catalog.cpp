@@ -4,10 +4,16 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <stdexcept>
+#include <thread>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <ranges>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -32,6 +38,7 @@ ModelCatalogEntry project_model(const Model &model) {
 }
 
 } // namespace
+static const ProviderRefreshStatus &status_for_fake(const std::vector<ProviderRefreshStatus> &statuses);
 
 static_assert(!std::is_pointer_v<decltype(ModelCatalogEntry{}.key)>);
 static_assert(!std::is_pointer_v<decltype(ModelCatalogEntry{}.display_name)>);
@@ -230,4 +237,200 @@ TEST(ModelCatalog, StableSearchAndKeyResolutionUseValues) {
   ASSERT_TRUE(resolved);
   EXPECT_EQ(resolved.model->provider, key.provider_id);
   EXPECT_EQ(resolved.model->id, key.model_id);
+}
+
+class DeterministicDiscovery final : public ModelDiscoveryAdapter {
+public:
+  ProviderModelReport report;
+  bool fail{false};
+  std::atomic<int> calls{0};
+
+  ProviderModelReport discover(const ProviderDiscoveryRequest &request,
+                               std::stop_token stop_token) override {
+    ++calls;
+    if (stop_token.stop_requested())
+      return {};
+    if (fail)
+      throw std::runtime_error("fake discovery failed");
+    EXPECT_EQ(request.provider.id, report.provider_id);
+    return report;
+  }
+};
+
+static ModelCatalogEntry discovered_entry(std::string provider,
+                                           std::string id,
+                                           std::string name) {
+  return {.key = {.provider_id = std::move(provider),
+                   .model_id = std::move(id)},
+          .display_name = std::move(name),
+          .api = "fake-inference",
+          .input_capabilities = {"text"},
+          .context_window = 128000,
+          .max_tokens = 4096};
+}
+
+static ProviderConfig fake_provider() {
+  ProviderConfig config;
+  config.id = "fake";
+  config.api = "fake-inference";
+  config.base_url = "http://fake.test/v1";
+  config.auth = ProviderAuthPolicy::none;
+  config.discovery_adapter = "deterministic";
+  return config;
+}
+
+TEST(ModelCatalog, RefreshPublishesZeroOneAndManyReportedModels) {
+  auto adapter = std::make_shared<DeterministicDiscovery>();
+  adapter->report = {.provider_id = "fake",
+                     .models = {discovered_entry("fake", "one", "One"),
+                                discovered_entry("fake", "two", "Two"),
+                                discovered_entry("fake", "three", "Three")},
+                     .observed_at = std::chrono::system_clock::now()};
+  auto adapters = std::make_shared<ModelDiscoveryAdapterCollection>();
+  adapters->register_adapter("deterministic", adapter);
+  ModelCatalog catalog({{"fake", fake_provider()}}, adapters);
+
+  const auto succeeded = catalog.refresh();
+  ASSERT_EQ(status_for_fake(succeeded).provider_id, "fake");
+  EXPECT_EQ(status_for_fake(succeeded).state, ProviderRefreshState::succeeded);
+  EXPECT_EQ(catalog.search("fake").size(), 3U);
+
+  adapter->report.models.clear();
+  catalog.refresh();
+  EXPECT_TRUE(catalog.search("fake").empty());
+
+  adapter->report.models.push_back(
+      discovered_entry("fake", "one", "One"));
+  catalog.refresh();
+  EXPECT_EQ(catalog.search("fake").size(), 1U);
+}
+
+TEST(ModelCatalog, ConfiguredModelsBeatDiscoveryReports) {
+  auto config = fake_provider();
+  config.models.push_back(
+      {.id = "same", .name = "Configured", .api = "fake-inference"});
+  auto adapter = std::make_shared<DeterministicDiscovery>();
+  adapter->report = {.provider_id = "fake",
+                     .models = {discovered_entry("fake", "same", "Remote"),
+                                discovered_entry("fake", "new", "New")},
+                     .observed_at = std::chrono::system_clock::now()};
+  auto adapters = std::make_shared<ModelDiscoveryAdapterCollection>();
+  adapters->register_adapter("deterministic", adapter);
+  ModelCatalog catalog({{"fake", config}}, adapters);
+
+  catalog.refresh();
+  const auto configured = catalog.entry({"fake", "same"});
+  ASSERT_TRUE(configured.has_value());
+  EXPECT_EQ(configured->display_name, "Configured");
+  EXPECT_TRUE(catalog.entry({"fake", "new"}).has_value());
+}
+
+TEST(ModelCatalog, PartialFailureRetainsLastGoodProviderModels) {
+  auto adapter = std::make_shared<DeterministicDiscovery>();
+  adapter->report = {.provider_id = "fake",
+                     .models = {discovered_entry("fake", "good", "Good")},
+                     .observed_at = std::chrono::system_clock::now()};
+  auto adapters = std::make_shared<ModelDiscoveryAdapterCollection>();
+  adapters->register_adapter("deterministic", adapter);
+  ModelCatalog catalog({{"fake", fake_provider()}}, adapters);
+
+  catalog.refresh();
+  const auto before = catalog.view();
+  adapter->fail = true;
+  const auto statuses = catalog.refresh();
+  const auto after = catalog.view();
+
+  ASSERT_EQ(status_for_fake(statuses).provider_id, "fake");
+  ASSERT_EQ(status_for_fake(statuses).state, ProviderRefreshState::failed);
+  EXPECT_TRUE(catalog.entry({"fake", "good"}).has_value());
+  EXPECT_EQ(after.generation, before.generation + 1);
+  EXPECT_EQ(after.entries, before.entries);
+}
+
+TEST(ModelCatalog, CancellationDoesNotPublishGeneration) {
+  auto adapter = std::make_shared<DeterministicDiscovery>();
+  adapter->report = {.provider_id = "fake",
+                     .models = {discovered_entry("fake", "cancelled", "No")},
+                     .observed_at = std::chrono::system_clock::now()};
+  auto adapters = std::make_shared<ModelDiscoveryAdapterCollection>();
+  adapters->register_adapter("deterministic", adapter);
+  ModelCatalog catalog({{"fake", fake_provider()}}, adapters);
+  const auto before = catalog.view();
+
+  std::stop_source source;
+  source.request_stop();
+  catalog.refresh({}, source.get_token());
+
+  const auto after = catalog.view();
+  EXPECT_EQ(after, before);
+  EXPECT_FALSE(catalog.entry({"fake", "cancelled"}).has_value());
+}
+
+TEST(ModelCatalog, UnknownDiscoveryBindingIsProviderQualified) {
+  auto config = fake_provider();
+  auto adapters = std::make_shared<ModelDiscoveryAdapterCollection>();
+  EXPECT_THROW(ModelCatalog({{"fake", config}}, adapters), std::runtime_error);
+  try {
+    ModelCatalog catalog({{"fake", config}}, adapters);
+  } catch (const std::runtime_error &error) {
+    EXPECT_THAT(error.what(), testing::HasSubstr("provider fake"));
+    EXPECT_THAT(error.what(), testing::HasSubstr("deterministic"));
+  }
+}
+
+TEST(ModelCatalog, ProvidersWithoutDiscoveryRemainUsable) {
+  auto config = fake_provider();
+  config.discovery_adapter.reset();
+  config.models.push_back(
+      {.id = "local", .name = "Local", .api = "fake-inference"});
+  auto adapters = std::make_shared<ModelDiscoveryAdapterCollection>();
+  ModelCatalog catalog({{"fake", config}}, adapters);
+
+  EXPECT_TRUE(catalog.entry({"fake", "local"}).has_value());
+  const auto idle = catalog.refresh();
+  ASSERT_EQ(status_for_fake(idle).provider_id, "fake");
+  EXPECT_EQ(status_for_fake(idle).state, ProviderRefreshState::idle);
+  EXPECT_TRUE(catalog.entry({"fake", "local"}).has_value());
+}
+
+TEST(ModelCatalog, ConcurrentReadersObserveCompleteViews) {
+  auto adapter = std::make_shared<DeterministicDiscovery>();
+  adapter->report = {.provider_id = "fake",
+                     .models = {discovered_entry("fake", "one", "One")},
+                     .observed_at = std::chrono::system_clock::now()};
+  auto adapters = std::make_shared<ModelDiscoveryAdapterCollection>();
+  adapters->register_adapter("deterministic", adapter);
+  ModelCatalog catalog({{"fake", fake_provider()}}, adapters);
+
+  std::atomic<bool> stop{false};
+  std::atomic<bool> valid{true};
+  std::vector<std::thread> readers;
+  for (int index = 0; index < 4; ++index) {
+    readers.emplace_back([&] {
+      while (!stop.load()) {
+        const auto view = catalog.view();
+        std::set<ModelKey> keys;
+        for (const auto &entry : view.entries)
+          if (!keys.insert(entry.key).second)
+            valid = false;
+      }
+    });
+  }
+  for (int index = 0; index < 20; ++index) {
+    adapter->report.models.resize(index % 2 == 0 ? 1U : 2U);
+    if (adapter->report.models.size() == 2U)
+      adapter->report.models[1] = discovered_entry("fake", "two", "Two");
+    catalog.refresh();
+  }
+  stop = true;
+  for (auto &reader : readers)
+    reader.join();
+  EXPECT_TRUE(valid);
+}
+static const ProviderRefreshStatus &
+status_for_fake(const std::vector<ProviderRefreshStatus> &statuses) {
+  const auto it = std::ranges::find(statuses, "fake",
+                                    &ProviderRefreshStatus::provider_id);
+  EXPECT_NE(it, statuses.end());
+  return *it;
 }

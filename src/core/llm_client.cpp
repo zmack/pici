@@ -6,6 +6,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <stop_token>
 #include <string_view>
 #include <utility>
@@ -74,6 +75,32 @@ LLMClientRegistry &LLMClientRegistry::instance() {
 
 std::shared_ptr<LLMClient> LLMClient::create(const Model &model) {
   return LLMClientRegistry::instance().get_client(model);
+}
+
+void InferenceAdapterCollection::register_adapter(
+    std::string adapter_id, LLMClientRegistry::Factory factory) {
+  if (adapter_id.empty() || !factory)
+    throw std::invalid_argument("inference adapter registration is invalid");
+  std::scoped_lock lock(mutex_);
+  factories_[std::move(adapter_id)] = std::move(factory);
+}
+
+bool InferenceAdapterCollection::has_adapter(
+    std::string_view adapter_id) const {
+  std::scoped_lock lock(mutex_);
+  return factories_.contains(std::string(adapter_id)) ||
+         registry_->has_client(adapter_id);
+}
+
+std::shared_ptr<LLMClient>
+InferenceAdapterCollection::get_client(const Model &model) const {
+  {
+    std::scoped_lock lock(mutex_);
+    const auto it = factories_.find(model.api);
+    if (it != factories_.end())
+      return it->second();
+  }
+  return registry_->get_client(model);
 }
 
 } // namespace pi::core

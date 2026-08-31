@@ -1,12 +1,17 @@
 #pragma once
 
+#include "core/auth_types.h"
 #include "core/message_types.h"
 
 #include <chrono>
 #include <compare>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -51,6 +56,34 @@ struct ProviderConfig {
   std::map<std::string, std::string> headers;
   std::vector<ConfiguredModel> models;
   std::map<std::string, ConfiguredModel> model_overrides;
+  // Optional target bindings. The legacy api/auth fields remain accepted as
+  // configuration aliases until the migration is complete.
+  std::optional<std::string> discovery_adapter;
+  std::map<std::string, std::string> discovery_options;
+  std::optional<std::string> inference_adapter;
+  std::optional<std::string> authentication_adapter;
+};
+
+struct DiscoveryBinding {
+  std::string adapter_id;
+  std::map<std::string, std::string> options;
+
+  bool operator==(const DiscoveryBinding &) const = default;
+};
+
+struct InferenceBinding {
+  std::string adapter_id;
+
+  bool operator==(const InferenceBinding &) const = default;
+};
+
+enum class AuthenticationBindingKind { none, api_key, adapter };
+
+struct AuthenticationBinding {
+  AuthenticationBindingKind kind{AuthenticationBindingKind::api_key};
+  std::string adapter_id;
+
+  bool operator==(const AuthenticationBinding &) const = default;
 };
 
 // A stable domain identity for one provider/model pair. Model IDs are opaque
@@ -141,6 +174,35 @@ struct Provider {
   ProviderAuthPolicy auth{ProviderAuthPolicy::required};
   ApiKeyConfig api_key;
   std::map<std::string, std::string> headers;
+  std::optional<DiscoveryBinding> discovery;
+  InferenceBinding inference;
+  AuthenticationBinding authentication;
+};
+
+struct ProviderDiscoveryRequest {
+  Provider provider;
+  std::optional<RequestAuth> auth;
+  std::map<std::string, std::string> options;
+};
+
+class ModelDiscoveryAdapter {
+public:
+  virtual ~ModelDiscoveryAdapter() = default;
+  virtual ProviderModelReport discover(const ProviderDiscoveryRequest &,
+                                       std::stop_token) = 0;
+};
+
+class ModelDiscoveryAdapterCollection {
+public:
+  using Adapter = std::shared_ptr<ModelDiscoveryAdapter>;
+
+  void register_adapter(std::string adapter_id, Adapter adapter);
+  bool has_adapter(std::string_view adapter_id) const;
+  Adapter get_adapter(std::string_view adapter_id) const;
+
+private:
+  mutable std::mutex mutex_;
+  std::map<std::string, Adapter> adapters_;
 };
 
 struct ThinkingLevelResolution {
@@ -170,12 +232,15 @@ struct ModelResolution {
 class ModelCatalog {
 public:
   explicit ModelCatalog(
-      const std::map<std::string, ProviderConfig> &configured = {});
+      const std::map<std::string, ProviderConfig> &configured = {},
+      std::shared_ptr<ModelDiscoveryAdapterCollection> discovery_adapters = {},
+      std::shared_ptr<class InferenceAdapterCollection> inference_adapters =
+          {});
 
   const std::vector<Model> &models() const { return models_; }
   // Returns a complete immutable projection for one catalog generation.
   // Copies are intentional: consumers never borrow catalog-owned Model data.
-  ModelCatalogView view() const { return view_; }
+  ModelCatalogView view() const;
   const Provider *provider(std::string_view id) const;
   const std::map<std::string, Provider> &providers() const {
     return providers_;
@@ -198,6 +263,10 @@ public:
   // for the first effective model whose API ID is not registered.
   void validate_registered_apis() const;
 
+  std::vector<ProviderRefreshStatus>
+  refresh(const std::vector<std::string> &provider_ids = {},
+          std::stop_token stop_token = {});
+
   static std::vector<Provider> builtin_providers();
 
 private:
@@ -205,8 +274,17 @@ private:
   std::map<std::string, Provider> providers_;
   std::map<std::pair<std::string, std::string>, std::size_t> indexes_;
   ModelCatalogView view_;
+  std::vector<Model> base_models_;
+  std::map<std::string, ProviderModelReport> discovered_reports_;
+  std::map<std::string, ProviderRefreshStatus> refresh_status_;
+  std::map<std::pair<std::string, std::string>, bool> configured_keys_;
+  std::shared_ptr<ModelDiscoveryAdapterCollection> discovery_adapters_;
+  std::shared_ptr<class InferenceAdapterCollection> inference_adapters_;
+  mutable std::shared_mutex mutex_;
+  mutable std::mutex refresh_mutex_;
 
   void add_or_replace(Model model);
+  void rebuild_from_reports();
 };
 
 // TODO(taxonomy-phase-10): remove. This alias keeps downstream integrations
@@ -228,5 +306,4 @@ std::optional<Model> find_model(std::string_view spec,
 // Return models whose id or provider contains filter (case-insensitive).
 // Empty filter returns all models.
 std::vector<const Model *> search_models(std::string_view filter);
-
 } // namespace pi::core

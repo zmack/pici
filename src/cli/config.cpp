@@ -346,6 +346,10 @@ void parse_provider(const std::string &provider_id, const toml::table &table,
 
   if (const auto auth = read_string(table, "auth", path, config))
     provider.auth = parse_auth_policy(*auth, path, config);
+  provider.discovery_adapter = read_string(table, "discovery", path, config);
+  provider.inference_adapter = read_string(table, "inference", path, config);
+  provider.authentication_adapter =
+      read_string(table, "authentication", path, config);
   parse_headers(table, path, provider.headers, config);
 
   static constexpr std::array<std::string_view, 11> builtin_provider_ids = {

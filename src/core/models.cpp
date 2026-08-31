@@ -5,10 +5,16 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <ranges>
+#include <shared_mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -397,8 +403,32 @@ ModelCatalogEntry project_model(const Model &model) {
                    .cache_write_per_mtok = model.cost.cache_write_per_mtok}};
 }
 
+void ModelDiscoveryAdapterCollection::register_adapter(std::string adapter_id,
+                                                       Adapter adapter) {
+  if (adapter_id.empty())
+    throw std::invalid_argument("discovery adapter id must not be empty");
+  if (!adapter)
+    throw std::invalid_argument("discovery adapter must not be null");
+  std::scoped_lock lock(mutex_);
+  adapters_[std::move(adapter_id)] = std::move(adapter);
+}
+
+bool ModelDiscoveryAdapterCollection::has_adapter(
+    std::string_view adapter_id) const {
+  std::scoped_lock lock(mutex_);
+  return adapters_.contains(std::string(adapter_id));
+}
+
+ModelDiscoveryAdapterCollection::Adapter
+ModelDiscoveryAdapterCollection::get_adapter(
+    std::string_view adapter_id) const {
+  std::scoped_lock lock(mutex_);
+  const auto it = adapters_.find(std::string(adapter_id));
+  return it == adapters_.end() ? nullptr : it->second;
+}
+
 std::vector<Provider> ModelCatalog::builtin_providers() {
-  return {
+  std::vector<Provider> providers = {
       {"openai", "openai-completions", "https://api.openai.com/v1"},
       {"openai-codex", "openai-codex-responses",
        "https://chatgpt.com/backend-api", ProviderAuthPolicy::oauth},
@@ -414,10 +444,35 @@ std::vector<Provider> ModelCatalog::builtin_providers() {
       {"meta", "muse-messages", "https://api.meta.ai"},
       {"meta-chat", "openai-completions", "https://api.meta.ai/v1"},
   };
+  for (auto &provider : providers) {
+    provider.inference.adapter_id = provider.api;
+    switch (provider.auth) {
+    case ProviderAuthPolicy::none:
+      provider.authentication = {.kind = AuthenticationBindingKind::none};
+      break;
+    case ProviderAuthPolicy::oauth:
+      provider.authentication = {.kind = AuthenticationBindingKind::adapter,
+                                 .adapter_id = provider.id + "-oauth"};
+      break;
+    case ProviderAuthPolicy::required:
+    case ProviderAuthPolicy::optional:
+      provider.authentication = {.kind = AuthenticationBindingKind::api_key};
+      break;
+    }
+  }
+  return providers;
 }
 
-ModelCatalog::ModelCatalog(
-    const std::map<std::string, ProviderConfig> &configured) {
+ModelCatalog::ModelCatalog( // NOLINT(readability-function-cognitive-complexity)
+    const std::map<std::string, ProviderConfig> &configured,
+    std::shared_ptr<ModelDiscoveryAdapterCollection> discovery_adapters,
+    std::shared_ptr<InferenceAdapterCollection> inference_adapters)
+    : discovery_adapters_(std::move(discovery_adapters)),
+      inference_adapters_(std::move(inference_adapters)) {
+  if (!discovery_adapters_)
+    discovery_adapters_ = std::make_shared<ModelDiscoveryAdapterCollection>();
+  if (!inference_adapters_)
+    inference_adapters_ = std::make_shared<InferenceAdapterCollection>();
   for (auto definition : builtin_providers())
     providers_.emplace(lower_ascii(definition.id), std::move(definition));
 
@@ -461,6 +516,32 @@ ModelCatalog::ModelCatalog(
     }
 
     auto &definition = provider_it->second;
+    definition.inference.adapter_id =
+        config.inference_adapter.value_or(definition.api);
+    if (config.discovery_adapter)
+      definition.discovery =
+          DiscoveryBinding{.adapter_id = *config.discovery_adapter,
+                           .options = config.discovery_options};
+    if (config.authentication_adapter) {
+      definition.authentication = {.kind = AuthenticationBindingKind::adapter,
+                                   .adapter_id =
+                                       *config.authentication_adapter};
+    } else {
+      switch (definition.auth) {
+      case ProviderAuthPolicy::none:
+        definition.authentication = {.kind = AuthenticationBindingKind::none};
+        break;
+      case ProviderAuthPolicy::oauth:
+        definition.authentication = {.kind = AuthenticationBindingKind::adapter,
+                                     .adapter_id = definition.id + "-oauth"};
+        break;
+      case ProviderAuthPolicy::required:
+      case ProviderAuthPolicy::optional:
+        definition.authentication = {.kind =
+                                         AuthenticationBindingKind::api_key};
+        break;
+      }
+    }
     for (auto &model : models_) {
       if (lower_ascii(model.provider) != canonical_key)
         continue;
@@ -492,6 +573,7 @@ ModelCatalog::ModelCatalog(
         message += ": unknown built-in model";
         throw std::runtime_error(message);
       }
+      configured_keys_[{lower_ascii(definition->id), model_id}] = true;
       apply_configured_model(*model, override, *definition);
     }
 
@@ -499,7 +581,19 @@ ModelCatalog::ModelCatalog(
       if (custom.id.empty())
         throw std::runtime_error("providers." + key +
                                  ".models: model id must not be empty");
+      configured_keys_[{lower_ascii(definition->id), custom.id}] = true;
       add_or_replace(make_custom_model(custom, *definition));
+    }
+  }
+  base_models_ = models_;
+  for (const auto &[id, definition] : providers_) {
+    (void)id;
+    refresh_status_[definition.id] = {.provider_id = definition.id};
+    if (definition.discovery &&
+        !discovery_adapters_->has_adapter(definition.discovery->adapter_id)) {
+      throw std::runtime_error("provider " + definition.id +
+                               " uses unknown discovery adapter '" +
+                               definition.discovery->adapter_id + "'");
     }
   }
   view_.generation = 1;
@@ -682,12 +776,13 @@ ModelCatalog::search_models(std::string_view filter) const {
 void ModelCatalog::validate_registered_apis() const {
   for (const auto &[id, provider] : providers_) {
     (void)id;
-    if (!LLMClientRegistry::instance().has_client(provider.api))
+    if (!inference_adapters_->has_adapter(provider.inference.adapter_id))
       throw std::runtime_error("provider " + provider.id +
-                               " uses unregistered API '" + provider.api + "'");
+                               " uses unknown inference adapter '" +
+                               provider.inference.adapter_id + "'");
   }
   for (const auto &model : models_) {
-    if (!LLMClientRegistry::instance().has_client(model.api)) {
+    if (!inference_adapters_->has_adapter(model.api)) {
       throw std::runtime_error("model " + model.provider + "/" + model.id +
                                " uses unregistered API '" + model.api + "'");
     }
@@ -852,6 +947,187 @@ std::vector<const Model *> search_models(std::string_view filter) {
       result.push_back(&m);
   }
   return result;
+}
+
+ModelCatalogView ModelCatalog::view() const {
+  std::shared_lock lock(mutex_);
+  return view_;
+}
+
+void ModelCatalog::rebuild_from_reports() {
+  models_.clear();
+  indexes_.clear();
+  for (const auto &model : base_models_)
+    add_or_replace(model);
+
+  for (const auto &[provider_id, report] : discovered_reports_) {
+    const auto *definition = providers_.contains(provider_id)
+                                 ? &providers_.at(provider_id)
+                                 : nullptr;
+    if (definition == nullptr)
+      continue;
+    for (const auto &entry : report.models) {
+      const auto key = std::make_pair(lower_ascii(entry.key.provider_id),
+                                      entry.key.model_id);
+      if (configured_keys_.contains(key))
+        continue;
+      Model model;
+      model.id = entry.key.model_id;
+      model.name = entry.display_name.empty() ? model.id : entry.display_name;
+      model.api = entry.api.empty() ? definition->api : entry.api;
+      model.provider = definition->id;
+      model.base_url = definition->base_url;
+      model.reasoning = entry.reasoning;
+      model.input_capabilities = entry.input_capabilities;
+      model.context_window = entry.context_window;
+      model.max_tokens = entry.max_tokens;
+      model.headers = definition->headers;
+      add_or_replace(std::move(model));
+    }
+  }
+
+  view_.entries.clear();
+  view_.generation = 1;
+  view_.entries.reserve(models_.size());
+  for (const auto &model : models_)
+    view_.entries.push_back(project_model(model));
+  view_.refresh_status.clear();
+  view_.refresh_status.reserve(refresh_status_.size());
+  for (const auto &[id, status] : refresh_status_) {
+    (void)id;
+    view_.refresh_status.push_back(status);
+  }
+}
+
+std::vector<ProviderRefreshStatus>
+ModelCatalog::refresh( // NOLINT(readability-function-cognitive-complexity)
+    const std::vector<std::string> &provider_ids,
+    std::stop_token stop_token) { // NOLINT(performance-unnecessary-value-param)
+  std::scoped_lock refresh_lock(refresh_mutex_);
+  std::map<std::string, Provider> providers;
+  std::uint64_t generation = 0;
+  {
+    std::shared_lock lock(mutex_);
+    providers = providers_;
+    generation = view_.generation;
+  }
+
+  std::vector<std::string> selected;
+  if (provider_ids.empty()) {
+    for (const auto &[id, provider] : providers) {
+      if (provider.discovery)
+        selected.push_back(id);
+    }
+  } else {
+    for (const auto &id : provider_ids) {
+      const auto canonical = lower_ascii(id);
+      if (!providers.contains(canonical))
+        throw std::runtime_error("unknown provider: " + id);
+      selected.push_back(canonical);
+    }
+  }
+
+  std::map<std::string, ProviderModelReport> reports;
+  std::map<std::string, ProviderRefreshStatus> statuses;
+  std::map<std::string, ProviderRefreshStatus> prior_statuses;
+  {
+    std::shared_lock lock(mutex_);
+    reports = discovered_reports_;
+    statuses = refresh_status_;
+    prior_statuses = refresh_status_;
+  }
+
+  {
+    std::unique_lock lock(mutex_);
+    for (const auto &id : selected) {
+      const auto &provider = providers.at(id);
+      refresh_status_[provider.id] = {.provider_id = provider.id,
+                                      .state =
+                                          ProviderRefreshState::refreshing};
+    }
+    view_.refresh_status.clear();
+    for (const auto &[id, status] : refresh_status_) {
+      (void)id;
+      view_.refresh_status.push_back(status);
+    }
+  }
+
+  auto cancel = [&]() {
+    std::unique_lock lock(mutex_);
+    refresh_status_ = prior_statuses;
+    view_.refresh_status.clear();
+    for (const auto &[id, status] : refresh_status_) {
+      (void)id;
+      view_.refresh_status.push_back(status);
+    }
+    return view_.refresh_status;
+  };
+
+  for (const auto &id : selected) {
+    if (stop_token.stop_requested())
+      return cancel();
+    const auto &provider = providers.at(id);
+    if (!provider.discovery) {
+      statuses[provider.id] = {.provider_id = provider.id,
+                               .state = ProviderRefreshState::idle};
+      continue;
+    }
+    const auto adapter =
+        discovery_adapters_->get_adapter(provider.discovery->adapter_id);
+    if (!adapter) {
+      statuses[provider.id] = {.provider_id = provider.id,
+                               .state = ProviderRefreshState::failed,
+                               .diagnostic = "unknown discovery adapter '" +
+                                             provider.discovery->adapter_id +
+                                             "'"};
+      continue;
+    }
+
+    try {
+      ProviderDiscoveryRequest request{.provider = provider,
+                                       .options = provider.discovery->options};
+      auto report = adapter->discover(request, stop_token);
+      if (stop_token.stop_requested())
+        return cancel();
+      if (report.provider_id != provider.id)
+        throw std::runtime_error("report provider id '" + report.provider_id +
+                                 "' does not match '" + provider.id + "'");
+      if (report.models.size() > 10000)
+        throw std::runtime_error("report exceeds the 10000 model limit");
+      std::map<std::string, bool> seen;
+      for (const auto &entry : report.models) {
+        if (entry.key.provider_id != provider.id)
+          throw std::runtime_error("report contains model for provider '" +
+                                   entry.key.provider_id + "'");
+        if (entry.key.model_id.empty() || entry.api.empty())
+          throw std::runtime_error("report contains an incomplete model");
+        if (!seen.emplace(entry.key.model_id, true).second)
+          throw std::runtime_error("report contains duplicate model '" +
+                                   entry.key.model_id + "'");
+      }
+      reports[provider.id] = std::move(report);
+      statuses[provider.id] = {.provider_id = provider.id,
+                               .state = ProviderRefreshState::succeeded};
+    } catch (const std::exception &error) {
+      statuses[provider.id] = {.provider_id = provider.id,
+                               .state = ProviderRefreshState::failed,
+                               .diagnostic = error.what()};
+    }
+  }
+
+  if (stop_token.stop_requested())
+    return cancel();
+
+  {
+    std::unique_lock lock(mutex_);
+    if (view_.generation != generation)
+      return view_.refresh_status;
+    discovered_reports_ = std::move(reports);
+    refresh_status_ = std::move(statuses);
+    rebuild_from_reports();
+    view_.generation = generation + 1;
+  }
+  return view().refresh_status;
 }
 
 } // namespace pi::core
