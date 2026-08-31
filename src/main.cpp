@@ -17,7 +17,7 @@
 
 #include "cli/args.h"
 #include "cli/config.h"
-#include "core/auth/openai_codex_oauth.h"
+#include "core/auth/authentication.h"
 #include "core/lua_tool.h"
 #include "core/models.h"
 #include "core/otel_init.h"
@@ -102,9 +102,16 @@ int cmd_auth(const cli::Args &args, const char *prog) {
   }
 
   try {
-    pi::auth::OpenAICodexOAuth oauth;
+    pi::auth::CredentialStore credential_store;
+    pi::auth::Authentication authentication(
+        std::make_shared<const core::ModelCatalog>(), credential_store);
+    const auto adapter = authentication.adapter("openai-codex-oauth");
+    const auto oauth =
+        std::dynamic_pointer_cast<pi::auth::OpenAICodexOAuth>(adapter);
+    if (!oauth)
+      throw std::runtime_error("openai-codex authentication is unavailable");
     if (args.auth_action == cli::AuthAction::status) {
-      const auto credential = oauth.store().read_oauth("openai-codex");
+      const auto credential = oauth->store().read_oauth("openai-codex");
       if (!credential) {
         std::cout << "openai-codex    oauth   not authenticated\n";
         return 0;
@@ -119,7 +126,7 @@ int cmd_auth(const cli::Args &args, const char *prog) {
       return 0;
     }
     if (args.auth_action == cli::AuthAction::logout) {
-      oauth.store().erase("openai-codex");
+      oauth->store().erase("openai-codex");
       std::cout << "Logged out of openai-codex.\n";
       return 0;
     }
@@ -130,8 +137,8 @@ int cmd_auth(const cli::Args &args, const char *prog) {
     options.notify = [](std::string_view message) {
       std::cout << message << "\n";
     };
-    const auto credential = oauth.login(options);
-    oauth.store().modify_oauth(
+    const auto credential = oauth->login(options);
+    oauth->store().modify_oauth(
         "openai-codex", [&](const std::optional<pi::auth::OAuthCredential> &) {
           return std::optional<pi::auth::OAuthCredential>{credential};
         });

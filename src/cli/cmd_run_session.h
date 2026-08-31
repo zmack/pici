@@ -52,7 +52,7 @@
 #include "core/agent_loop.h"
 #include "core/agent_state.h"
 #include "core/agent_task.h"
-#include "core/auth/auth_resolver.h"
+#include "core/auth/authentication.h"
 #include "core/builtin_tools.h"
 #include "core/compaction.h"
 #include "core/event_types.h"
@@ -999,7 +999,7 @@ public:
       return 1;
     if (!init_diagnostics())
       return 1;
-    init_auth_resolver();
+    init_authentication();
     if (!open_runtime())
       return 1;
 
@@ -1031,7 +1031,7 @@ public:
 
     if (args_.rpc_mode)
       return cli::run_rpc_mode(runtime(), std::cin, std::cout,
-                               runtime().task_manager().get(), auth_resolver_);
+                               runtime().task_manager().get(), authentication_);
 
     setup_interactive_session();
     build_completion_and_control_fns();
@@ -1109,11 +1109,11 @@ private:
     return true;
   }
 
-  void init_auth_resolver() {
-    auth_resolver_ =
-        std::make_shared<pi::auth::AuthResolver>(effective_registry_);
+  void init_authentication() {
+    authentication_ =
+        std::make_shared<pi::auth::Authentication>(effective_registry_);
     if (!args_.api_key.empty())
-      auth_resolver_->set_runtime_api_key(model_.provider, args_.api_key);
+      authentication_->set_runtime_api_key(model_.provider, args_.api_key);
   }
 
   bool open_runtime() {
@@ -1121,7 +1121,7 @@ private:
         .args = args_,
         .model = model_,
         .model_catalog = effective_registry_,
-        .auth_resolver = auth_resolver_,
+        .authentication = authentication_,
         .diagnostics = stream_diagnostics_,
         .on_effective_context =
             [this](const core::AgentContext &context) {
@@ -1572,7 +1572,7 @@ private:
       return false;
     if (!init_diagnostics())
       return false;
-    init_auth_resolver();
+    init_authentication();
     if (!open_runtime())
       return false;
 
@@ -2104,7 +2104,7 @@ private:
           registry_->search_models(""), current_model.provider,
           current_model.id,
           [this](const core::Model &candidate) {
-            switch (auth_resolver_->availability(candidate.provider)) {
+            switch (authentication_->availability(candidate.provider)) {
             case pi::auth::AuthAvailability::configured:
               return std::string("configured");
             case pi::auth::AuthAvailability::not_required:
@@ -2133,7 +2133,7 @@ private:
     // !resolution check above already guarantees model is set here.
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
     const auto &selected_model = resolution.model.value();
-    if (auth_resolver_->availability(selected_model.provider) ==
+    if (authentication_->availability(selected_model.provider) ==
         pi::auth::AuthAvailability::missing) {
       renderer_->on_command_output(
           "model switch failed: missing authentication for provider '" +
@@ -2319,7 +2319,7 @@ private:
   std::shared_ptr<core::ScriptedToolRegistry> scripted_registry_;
   core::Model model_;
   std::shared_ptr<core::StreamDiagnostics> stream_diagnostics_;
-  std::shared_ptr<pi::auth::AuthResolver> auth_resolver_;
+  std::shared_ptr<pi::auth::Authentication> authentication_;
   std::mutex effective_context_mutex_;
   std::optional<core::AgentContext> effective_context_;
   cli::SessionRuntimeBundle bundle_;

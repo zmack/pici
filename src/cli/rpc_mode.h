@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/agent_task.h"
-#include "core/auth/auth_resolver.h"
+#include "core/auth/authentication.h"
 #include "core/compaction.h"
 #include "core/session/agent_session.h"
 
@@ -23,7 +23,7 @@ public:
 
   RpcMode(core::SessionRuntime &session, Output output,
           core::AgentTaskManager *task_manager = nullptr,
-          std::shared_ptr<auth::AuthResolver> auth_resolver = {});
+          std::shared_ptr<auth::Authentication> authentication = {});
   ~RpcMode();
 
   RpcMode(const RpcMode &) = delete;
@@ -62,7 +62,7 @@ private:
 
   core::SessionRuntime &session_;
   core::AgentTaskManager *task_manager_{nullptr};
-  std::shared_ptr<auth::AuthResolver> auth_resolver_;
+  std::shared_ptr<auth::Authentication> authentication_;
   Output output_;
   mutable std::mutex output_mutex_;
   std::atomic<bool> run_active_{false};
@@ -74,6 +74,6 @@ private:
 int run_rpc_mode(core::SessionRuntime &session, std::istream &input,
                  std::ostream &output,
                  core::AgentTaskManager *task_manager = nullptr,
-                 std::shared_ptr<auth::AuthResolver> auth_resolver = {});
+                 std::shared_ptr<auth::Authentication> authentication = {});
 
 } // namespace pi::cli

@@ -194,7 +194,7 @@ SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config) {
       .args = config.args,
       .model = config.model,
       .model_catalog = config.model_catalog,
-      .auth_resolver = config.auth_resolver,
+      .authentication = config.authentication,
       .diagnostics = config.diagnostics,
       .mailbox_active = static_cast<bool>(mailbox),
       .capabilities = config.capabilities,

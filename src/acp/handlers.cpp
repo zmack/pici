@@ -7,7 +7,7 @@
 #include "cli/session_runtime.h"
 #include "core/agent.h"
 #include "core/agent_task.h"
-#include "core/auth/auth_resolver.h"
+#include "core/auth/authentication_adapter.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
 #include "core/models.h"
@@ -640,8 +640,8 @@ bool apply_requested_run_model(const RunCreateRequest &rcr,
   // !resolution check above already guarantees model is set here.
   // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
   const auto &selected_model = resolution.model.value();
-  if (cfg.auth_resolver &&
-      cfg.auth_resolver->availability(selected_model.provider) ==
+  if (cfg.authentication &&
+      cfg.authentication->availability(selected_model.provider) ==
           auth::AuthAvailability::missing) {
     json_response(res, 400,
                   {{"error", "missing authentication for provider '" +

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <compare>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -184,6 +185,8 @@ struct ProviderDiscoveryRequest {
   std::optional<RequestAuth> auth;
   std::map<std::string, std::string> options;
 };
+using RequestAuthResolver = std::function<std::optional<RequestAuth>(
+    std::string_view provider, const std::stop_token &stop_token)>;
 
 class ModelDiscoveryAdapter {
 public:
@@ -266,6 +269,7 @@ public:
   std::vector<ProviderRefreshStatus>
   refresh(const std::vector<std::string> &provider_ids = {},
           std::stop_token stop_token = {});
+  void set_request_auth_resolver(RequestAuthResolver resolver) const;
 
   static std::vector<Provider> builtin_providers();
 
@@ -282,6 +286,7 @@ private:
   std::shared_ptr<class InferenceAdapterCollection> inference_adapters_;
   mutable std::shared_mutex mutex_;
   mutable std::mutex refresh_mutex_;
+  mutable RequestAuthResolver request_auth_resolver_;
 
   void add_or_replace(Model model);
   void rebuild_from_reports();

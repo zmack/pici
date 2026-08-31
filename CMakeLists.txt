@@ -687,6 +687,9 @@ if(PI_CPP_BUILD_TESTS)
     add_test(NAME test-faux_control COMMAND test-faux_control)
 
     add_executable(test-auth_resolver test/test_auth_resolver.cpp)
+    add_executable(test-authentication test/test_authentication.cpp)
+    target_link_libraries(test-authentication PRIVATE pi-http)
+    add_test(NAME test-authentication COMMAND test-authentication)
     target_link_libraries(test-auth_resolver PRIVATE pi-http)
     add_test(NAME test-auth_resolver COMMAND test-auth_resolver)
 
@@ -873,7 +876,7 @@ if(PI_CPP_BUILD_TESTS)
         test-stream test-tool_validation test-builtin_tools test-apply_patch
         test-lua_tool test-markdown test-terminal test-skills test-memory_stats
         test-subagent-activity test-subagent-panel test-region-renderer
-        test-faux_client test-faux_control test-auth_resolver
+        test-faux_client test-faux_control test-auth_resolver test-authentication
         test-model_catalog test-openai_completions test-muse_messages test-config
         test-mailbox-runtime test-mailbox-store test-mailbox-coordinator
         test-mailbox-bindings test-credential_store test-openai_codex_oauth
@@ -889,7 +892,7 @@ endif()
 
 add_library(pi-http
     src/http/http_client.cpp
-    src/core/auth/auth_resolver.cpp
+    src/core/auth/authentication.cpp
     src/core/auth/openai_codex_oauth.cpp
     src/core/providers/openai_completions.cpp
     src/core/providers/openai_codex_responses.cpp

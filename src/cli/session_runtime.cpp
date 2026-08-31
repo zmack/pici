@@ -173,14 +173,20 @@ AgentOptionsResult build_agent_options(const AgentOptionsConfig &config) {
   opts.diagnostics = config.diagnostics;
   opts.verbose = config.args.verbose;
 
-  auto auth_resolver = config.auth_resolver;
+  auto authentication = config.authentication;
+  if (config.model_catalog && authentication)
+    config.model_catalog->set_request_auth_resolver(
+        [authentication](std::string_view provider,
+                         const std::stop_token &stop_token) {
+          return authentication->resolve(provider, {}, stop_token);
+        });
   opts.get_auth =
-      [auth_resolver](std::string_view p) -> std::optional<core::RequestAuth> {
-    return auth_resolver->resolve(p);
+      [authentication](std::string_view p) -> std::optional<core::RequestAuth> {
+    return authentication->resolve(p);
   };
   opts.get_api_key =
-      [auth_resolver](std::string_view p) -> std::optional<std::string> {
-    auto auth = auth_resolver->resolve(p);
+      [authentication](std::string_view p) -> std::optional<std::string> {
+    auto auth = authentication->resolve(p);
     if (!auth || !auth->bearer_token)
       return std::nullopt;
     return auth->bearer_token;

@@ -1,7 +1,8 @@
 #include "cli/rpc_mode.h"
 
 #include "core/agent_task.h"
-#include "core/auth/auth_resolver.h"
+#include "core/auth/authentication.h"
+#include "core/auth/authentication_adapter.h"
 #include "core/compaction.h"
 #include "core/event_json.h"
 #include "core/event_types.h"
@@ -130,7 +131,7 @@ std::optional<core::ThinkingLevel> parse_thinking(std::string_view level) {
 
 nlohmann::json
 model_summary(const core::Model &model, const core::ModelCatalog &registry,
-              const std::shared_ptr<auth::AuthResolver> &resolver) {
+              const std::shared_ptr<auth::Authentication> &resolver) {
   const auto *provider = registry.provider(model.provider);
   std::string auth = "not_required";
   if (resolver) {
@@ -171,9 +172,9 @@ model_summary(const core::Model &model, const core::ModelCatalog &registry,
 
 RpcMode::RpcMode(core::SessionRuntime &session, Output output,
                  core::AgentTaskManager *task_manager,
-                 std::shared_ptr<auth::AuthResolver> auth_resolver)
+                 std::shared_ptr<auth::Authentication> authentication)
     : session_(session), task_manager_(task_manager),
-      auth_resolver_(std::move(auth_resolver)), output_(std::move(output)) {}
+      authentication_(std::move(authentication)), output_(std::move(output)) {}
 
 RpcMode::~RpcMode() { stop(); }
 
@@ -412,7 +413,7 @@ void RpcMode::handle_list_models(const nlohmann::json &command) {
   const auto filter = command.value("filter", std::string{});
   nlohmann::json models = nlohmann::json::array();
   for (const auto *model : registry->search_models(filter))
-    models.push_back(model_summary(*model, *registry, auth_resolver_));
+    models.push_back(model_summary(*model, *registry, authentication_));
   response(command, true, {{"models", std::move(models)}});
 }
 
@@ -438,8 +439,9 @@ void RpcMode::handle_set_model(const nlohmann::json &command) {
   // !resolution check above already guarantees model is set here.
   // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
   const auto &selected_model = resolution.model.value();
-  if (auth_resolver_ && auth_resolver_->availability(selected_model.provider) ==
-                            pi::auth::AuthAvailability::missing) {
+  if (authentication_ &&
+      authentication_->availability(selected_model.provider) ==
+          pi::auth::AuthAvailability::missing) {
     response(command, false, nullptr,
              "missing authentication for provider '" + selected_model.provider +
                  "'");
@@ -643,13 +645,13 @@ void RpcMode::wait_for_idle() {
 
 int run_rpc_mode(core::SessionRuntime &session, std::istream &input,
                  std::ostream &output, core::AgentTaskManager *task_manager,
-                 std::shared_ptr<auth::AuthResolver> auth_resolver) {
+                 std::shared_ptr<auth::Authentication> authentication) {
   RpcMode mode(
       session,
       [&output](const nlohmann::json &event) {
         output << event.dump() << '\n' << std::flush;
       },
-      task_manager, std::move(auth_resolver));
+      task_manager, std::move(authentication));
   std::string line;
   while (std::getline(input, line)) {
     if (line.empty())

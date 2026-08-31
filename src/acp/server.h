@@ -2,7 +2,7 @@
 
 #include "acp/types.h"
 #include "core/agent.h"
-#include "core/auth/auth_resolver.h"
+#include "core/auth/authentication.h"
 #include "core/builtin_tools.h"
 #include "core/models.h"
 #include "core/sandbox.h"
@@ -44,7 +44,7 @@ struct ServerConfig {
   std::string agent_description{"pi-cpp coding agent"};
   core::Agent::Options agent_opts;
   std::shared_ptr<const core::ModelCatalog> model_catalog;
-  std::shared_ptr<auth::AuthResolver> auth_resolver;
+  std::shared_ptr<auth::Authentication> authentication;
   std::vector<std::shared_ptr<const core::ToolDefinition>> tools;
   std::shared_ptr<core::SessionStore> session_store;
   core::SandboxPolicyPtr sandbox_policy;

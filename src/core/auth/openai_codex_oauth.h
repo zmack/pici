@@ -1,10 +1,12 @@
 #pragma once
 
+#include "core/auth/authentication_adapter.h"
 #include "core/auth/credential_store.h"
 #include "core/auth_types.h"
 
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -53,13 +55,15 @@ PkcePair generate_pkce();
 std::string generate_oauth_state();
 std::optional<std::string> extract_chatgpt_account_id(std::string_view jwt);
 
-class OpenAICodexOAuth {
+class OpenAICodexOAuth final : public AuthenticationAdapter {
 public:
-  explicit OpenAICodexOAuth(CredentialStore store = CredentialStore(),
+  explicit OpenAICodexOAuth(CredentialStore &&store = CredentialStore(),
+                            OpenAICodexOAuthEndpoints endpoints = {});
+  explicit OpenAICodexOAuth(CredentialStore &store,
                             OpenAICodexOAuthEndpoints endpoints = {});
 
-  const CredentialStore &store() const { return store_; }
-  CredentialStore &store() { return store_; }
+  const CredentialStore &store() const { return *store_; }
+  CredentialStore &store() { return *store_; }
   const OpenAICodexOAuthEndpoints &endpoints() const { return endpoints_; }
 
   OAuthCredential login(const OpenAICodexLoginOptions &options,
@@ -67,6 +71,11 @@ public:
   OAuthCredential refresh(const OAuthCredential &credential,
                           std::stop_token stop_tok = {}) const;
   std::optional<core::RequestAuth> resolve(std::stop_token stop_tok = {}) const;
+
+  std::optional<core::RequestAuth>
+  resolve(std::string_view provider, std::string_view explicit_api_key,
+          const std::stop_token &stop_tok) const override;
+  AuthAvailability availability(std::string_view provider) const override;
 
 private:
   OAuthCredential exchange_code(std::string_view code,
@@ -79,7 +88,8 @@ private:
   OAuthCredential login_device(const OpenAICodexLoginOptions &options,
                                const std::stop_token &stop_tok) const;
 
-  mutable CredentialStore store_;
+  std::shared_ptr<CredentialStore> owned_store_;
+  CredentialStore *store_{nullptr};
   OpenAICodexOAuthEndpoints endpoints_;
 };
 

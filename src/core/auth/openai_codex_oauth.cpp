@@ -1,5 +1,6 @@
 #include "core/auth/openai_codex_oauth.h"
 
+#include "core/auth/authentication_adapter.h"
 #include "core/auth/credential_store.h"
 #include "core/auth_types.h"
 #include "http/http_client.h"
@@ -20,6 +21,7 @@
 #include <httplib.h>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <openssl/sha.h>
 #include <optional>
@@ -316,9 +318,14 @@ std::optional<std::string> extract_chatgpt_account_id(std::string_view jwt) {
   return account->get<std::string>();
 }
 
-OpenAICodexOAuth::OpenAICodexOAuth(CredentialStore store,
+OpenAICodexOAuth::OpenAICodexOAuth(CredentialStore &&store,
                                    OpenAICodexOAuthEndpoints endpoints)
-    : store_(std::move(store)), endpoints_(std::move(endpoints)) {}
+    : owned_store_(std::make_shared<CredentialStore>(std::move(store))),
+      store_(owned_store_.get()), endpoints_(std::move(endpoints)) {}
+
+OpenAICodexOAuth::OpenAICodexOAuth(CredentialStore &store,
+                                   OpenAICodexOAuthEndpoints endpoints)
+    : store_(&store), endpoints_(std::move(endpoints)) {}
 
 OAuthCredential OpenAICodexOAuth::exchange_code(
     std::string_view code, std::string_view verifier,
@@ -497,14 +504,14 @@ OpenAICodexOAuth::resolve(std::stop_token stop_tok) const {
   const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
-  const auto current = store_.read_oauth("openai-codex");
+  const auto current = store_->read_oauth("openai-codex");
   if (!current)
     return std::nullopt;
 
   const auto refresh_after = now + (5LL * 60LL * 1000LL);
   auto credential = current;
   if (current->expires_at_ms <= refresh_after) {
-    credential = store_.modify_oauth(
+    credential = store_->modify_oauth(
         "openai-codex",
         [&](const std::optional<OAuthCredential> &locked_current)
             -> std::optional<OAuthCredential> {
@@ -523,6 +530,50 @@ OpenAICodexOAuth::resolve(std::stop_token stop_tok) const {
       .bearer_token = credential->access_token,
       .headers = {{"chatgpt-account-id", credential->account_id}},
       .source = "pici auth"};
+}
+
+std::optional<core::RequestAuth>
+OpenAICodexOAuth::resolve(std::string_view provider,
+                          std::string_view explicit_api_key,
+                          const std::stop_token &stop_tok) const {
+  if (provider != "openai-codex")
+    throw std::runtime_error(
+        "OpenAI Codex OAuth is bound to provider 'openai-codex'");
+  if (!explicit_api_key.empty())
+    throw std::runtime_error(
+        "openai-codex accepts OAuth only; --api-key is not allowed");
+  try {
+    if (auto auth = resolve(stop_tok))
+      return auth;
+    throw std::runtime_error(
+        "Not logged in to openai-codex; run pi-cli auth login openai-codex");
+  } catch (const std::runtime_error &error) {
+    if (stop_tok.stop_requested())
+      throw;
+    throw std::runtime_error(
+        "OpenAI login expired or was revoked; run pi-cli auth login "
+        "openai-codex (provider: " +
+        std::string(error.what()) + ")");
+  }
+}
+
+AuthAvailability
+OpenAICodexOAuth::availability(std::string_view provider) const {
+  if (provider != "openai-codex")
+    return AuthAvailability::missing;
+  try {
+    const auto credential = store_->read_oauth("openai-codex");
+    if (!credential)
+      return AuthAvailability::missing;
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    return credential->expires_at_ms > now
+               ? AuthAvailability::configured
+               : AuthAvailability::expired_or_refresh_needed;
+  } catch (...) {
+    return AuthAvailability::missing;
+  }
 }
 
 } // namespace pi::auth

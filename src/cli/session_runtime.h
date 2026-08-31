@@ -30,7 +30,7 @@
 #include "cli/system_prompt.h"
 #include "core/agent.h"
 #include "core/agent_task.h"
-#include "core/auth/auth_resolver.h"
+#include "core/auth/authentication.h"
 #include "core/lua_tool.h"
 #include "core/mailbox/mailbox_coordinator.h"
 #include "core/mailbox/mailbox_types.h"
@@ -94,7 +94,7 @@ struct AgentOptionsConfig {
   Args args;
   core::Model model;
   std::shared_ptr<const core::ModelCatalog> model_catalog;
-  std::shared_ptr<pi::auth::AuthResolver> auth_resolver;
+  std::shared_ptr<pi::auth::Authentication> authentication;
   std::shared_ptr<core::StreamDiagnostics> diagnostics;
   // Whether a mailbox coordinator is active for this run. Only consulted
   // when capabilities.enable_hooks is set: it decides whether the bundled
@@ -115,7 +115,7 @@ struct AgentOptionsResult {
 
 // Builds core::Agent::Options: model, registry, thinking level, verbose,
 // diagnostics, and the get_auth/get_api_key callbacks bound to
-// config.auth_resolver. When capabilities.enable_hooks is set, also loads
+// config.authentication. When capabilities.enable_hooks is set, also loads
 // and composes Lua hooks (per config.args.hooks_files/hooks_dir and the
 // bundled mailbox add-on) and wires the five hook-forwarding opts
 // callbacks through a HookRuntime. When disabled, those five opts
@@ -172,7 +172,7 @@ struct SessionRuntimeConfig {
   Args args;
   core::Model model;
   std::shared_ptr<const core::ModelCatalog> model_catalog;
-  std::shared_ptr<pi::auth::AuthResolver> auth_resolver;
+  std::shared_ptr<pi::auth::Authentication> authentication;
   std::shared_ptr<core::StreamDiagnostics> diagnostics;
   // CLI-only instrumentation hook (e.g. cmd_run()'s "/context" command
   // caches the last effective context here): not part of

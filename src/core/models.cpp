@@ -1086,6 +1086,13 @@ ModelCatalog::refresh( // NOLINT(readability-function-cognitive-complexity)
     try {
       ProviderDiscoveryRequest request{.provider = provider,
                                        .options = provider.discovery->options};
+      RequestAuthResolver auth_resolver;
+      {
+        std::shared_lock lock(mutex_);
+        auth_resolver = request_auth_resolver_;
+      }
+      if (auth_resolver)
+        request.auth = auth_resolver(provider.id, stop_token);
       auto report = adapter->discover(request, stop_token);
       if (stop_token.stop_requested())
         return cancel();
@@ -1128,6 +1135,12 @@ ModelCatalog::refresh( // NOLINT(readability-function-cognitive-complexity)
     view_.generation = generation + 1;
   }
   return view().refresh_status;
+}
+
+void ModelCatalog::set_request_auth_resolver(
+    RequestAuthResolver resolver) const {
+  std::unique_lock lock(mutex_);
+  request_auth_resolver_ = std::move(resolver);
 }
 
 } // namespace pi::core

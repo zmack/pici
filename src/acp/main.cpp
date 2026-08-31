@@ -3,8 +3,7 @@
 #include "cli/config.h"
 #include "cli/session_runtime.h"
 #include "cli/system_prompt.h"
-#include "core/auth/auth_resolver.h"
-#include "core/auth_types.h"
+#include "core/auth/authentication.h"
 #include "core/builtin_tools.h"
 #include "core/lua_tool.h"
 #include "core/message_types.h"
@@ -162,13 +161,13 @@ int main(int argc, char *argv[]) noexcept {
   if (!args.session_dir.empty())
     cfg.session_dir = args.session_dir;
 
-  auto auth_resolver = std::make_shared<pi::auth::AuthResolver>(registry);
-  cfg.auth_resolver = auth_resolver;
+  auto authentication = std::make_shared<pi::auth::Authentication>(registry);
+  cfg.authentication = authentication;
   if (!args.api_key.empty())
-    auth_resolver->set_runtime_api_key(model.provider, args.api_key);
+    authentication->set_runtime_api_key(model.provider, args.api_key);
   if (model.provider == "openai-codex") {
     try {
-      (void)auth_resolver->resolve(model.provider);
+      (void)authentication->resolve(model.provider);
     } catch (const std::exception &error) {
       std::cerr << "error: " << error.what() << "\n";
       return 1;
@@ -192,7 +191,7 @@ int main(int argc, char *argv[]) noexcept {
       .args = args,
       .model = model,
       .model_catalog = registry,
-      .auth_resolver = auth_resolver,
+      .authentication = authentication,
       .capabilities = capabilities,
   };
   auto options_result = pi::cli::build_agent_options(options_config);
