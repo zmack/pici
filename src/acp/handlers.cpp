@@ -353,7 +353,7 @@ std::shared_ptr<core::SessionRuntime> find_or_create_session_runtime(
   // unused cli::Args{} below is only read when that capability is on.
   auto session =
       std::make_shared<core::SessionRuntime>(cli::build_agent_session_config(
-          cfg.agent_opts, cfg.model_registry, cfg.tools, sessions,
+          cfg.agent_opts, cfg.model_catalog, cfg.tools, sessions,
           cfg.sandbox_policy, cli::Args{},
           cli::SessionRuntimeCapabilities{.enable_mailbox = false,
                                           .enable_hooks = false,

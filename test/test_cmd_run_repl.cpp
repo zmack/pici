@@ -49,16 +49,16 @@ public:
   MOCK_METHOD(void, on_command_output, (std::string_view text), (override));
 };
 
-std::shared_ptr<const core::ModelRegistry> empty_registry() {
-  return std::make_shared<const core::ModelRegistry>(
+std::shared_ptr<const core::ModelCatalog> empty_registry() {
+  return std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{});
 }
 
-std::shared_ptr<const core::ModelRegistry> registry_with_openai_key() {
+std::shared_ptr<const core::ModelCatalog> registry_with_openai_key() {
   core::ProviderConfig openai;
   openai.id = "openai";
   openai.api_key.literal = "test-openai-key";
-  return std::make_shared<const core::ModelRegistry>(
+  return std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{{"openai", openai}});
 }
 
@@ -208,7 +208,7 @@ TEST_F(CmdRunSessionTest, MemoryCommandRendersHeader) {
 }
 
 TEST_F(CmdRunSessionTest, ModelsCommandListsTheCatalog) {
-  // core::ModelRegistry bundles a built-in catalog even when constructed
+  // core::ModelCatalog bundles a built-in catalog even when constructed
   // with no configured providers, so this isn't exercising an *empty*
   // catalog -- just that /models reaches format_model_catalog() and prints
   // its header row.

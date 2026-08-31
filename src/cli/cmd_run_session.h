@@ -205,8 +205,8 @@ inline std::string format_tokens(std::uint64_t n) {
 
 inline std::string format_model_catalog(
     std::string_view filter,
-    const std::shared_ptr<const core::ModelRegistry> &registry) {
-  auto hits = registry->search(filter);
+    const std::shared_ptr<const core::ModelCatalog> &registry) {
+  auto hits = registry->search_models(filter);
   if (hits.empty()) {
     if (!filter.empty())
       return "No models matching \"" + std::string(filter) + "\"\n";
@@ -991,7 +991,7 @@ inline void parse_agent_context(const nlohmann::json &value,
 class CmdRunSession {
 public:
   CmdRunSession(cli::Args args,
-                std::shared_ptr<const core::ModelRegistry> registry)
+                std::shared_ptr<const core::ModelCatalog> registry)
       : args_(std::move(args)), registry_(std::move(registry)) {}
 
   int run() {
@@ -1072,7 +1072,7 @@ private:
       configured.id = "faux-control";
       configured.name = "faux-control";
       provider.models.push_back(configured);
-      effective_registry_ = std::make_shared<const core::ModelRegistry>(
+      effective_registry_ = std::make_shared<const core::ModelCatalog>(
           std::map<std::string, core::ProviderConfig>{
               {"faux-control", provider}});
       model_.id = "faux-control";
@@ -1120,7 +1120,7 @@ private:
     cli::SessionRuntimeConfig runtime_config{
         .args = args_,
         .model = model_,
-        .model_registry = effective_registry_,
+        .model_catalog = effective_registry_,
         .auth_resolver = auth_resolver_,
         .diagnostics = stream_diagnostics_,
         .on_effective_context =
@@ -2101,7 +2101,8 @@ private:
         return;
       }
       const auto selected = cli::run_model_selector(
-          registry_->search(""), current_model.provider, current_model.id,
+          registry_->search_models(""), current_model.provider,
+          current_model.id,
           [this](const core::Model &candidate) {
             switch (auth_resolver_->availability(candidate.provider)) {
             case pi::auth::AuthAvailability::configured:
@@ -2312,8 +2313,8 @@ private:
   }
 
   cli::Args args_;
-  std::shared_ptr<const core::ModelRegistry> registry_;
-  std::shared_ptr<const core::ModelRegistry> effective_registry_;
+  std::shared_ptr<const core::ModelCatalog> registry_;
+  std::shared_ptr<const core::ModelCatalog> effective_registry_;
   std::shared_ptr<core::RemoteFauxClient> remote_client_;
   std::shared_ptr<core::ScriptedToolRegistry> scripted_registry_;
   core::Model model_;
@@ -2349,7 +2350,7 @@ private:
 };
 
 inline int cmd_run(const cli::Args &args,
-                   const std::shared_ptr<const core::ModelRegistry> &registry) {
+                   const std::shared_ptr<const core::ModelCatalog> &registry) {
   CmdRunSession session(args, registry);
   return session.run();
 }

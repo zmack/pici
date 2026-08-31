@@ -42,21 +42,20 @@ void apply_sandbox_mode(const std::optional<std::string> &value,
 
 Agent::Options
 with_registry(Agent::Options options,
-              const std::shared_ptr<const ModelRegistry> &registry) {
+              const std::shared_ptr<const ModelCatalog> &registry) {
   if (registry)
-    options.model_registry = registry;
+    options.model_catalog = registry;
   return options;
 }
 
 } // namespace
 
 SessionRuntime::SessionRuntime(Config config)
-    : agent_(with_registry(config.agent_options, config.model_registry)),
+    : agent_(with_registry(config.agent_options, config.model_catalog)),
       session_store_(std::move(config.session_store)),
       sandbox_policy_(std::move(config.sandbox_policy)),
-      model_registry_(config.model_registry
-                          ? std::move(config.model_registry)
-                          : config.agent_options.model_registry),
+      model_catalog_(config.model_catalog ? std::move(config.model_catalog)
+                                          : config.agent_options.model_catalog),
       auto_compaction_(config.auto_compaction),
       mailbox_runtime_(std::move(config.mailbox)) {
   if (!sandbox_policy_)
@@ -113,12 +112,11 @@ void SessionRuntime::activate_session(const SessionRecord &record) {
   }
   auto model = agent_.state().model();
   auto thinking = agent_.state().thinking_level();
-  if (model_registry_ && !restored_provider.empty() &&
-      !restored_model.empty()) {
+  if (model_catalog_ && !restored_provider.empty() && !restored_model.empty()) {
     ModelSelection selection{.provider = restored_provider,
                              .model = restored_model,
                              .source = "session"};
-    auto resolution = model_registry_->resolve(selection);
+    auto resolution = model_catalog_->resolve(selection);
     if (resolution) {
       // resolution's operator bool() is defined as model.has_value(), so the
       // check above already guarantees model is set here.
@@ -146,9 +144,9 @@ SandboxMode SessionRuntime::sandbox_mode() const {
 
 ModelResolution
 SessionRuntime::resolve_model(const ModelSelection &selection) const {
-  if (!model_registry_)
+  if (!model_catalog_)
     return {.error = "model registry is unavailable"};
-  return model_registry_->resolve(selection);
+  return model_catalog_->resolve(selection);
 }
 
 ModelSwitchResult SessionRuntime::set_model(Model model,

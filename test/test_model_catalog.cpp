@@ -123,7 +123,7 @@ TEST(ModelSelectionRequest, ContainsStableKeyAndOnlyValueOverrides) {
   EXPECT_EQ(request.source, "native-picker");
 }
 
-TEST(ModelRegistryCharacterization, ConfiguredPrecedenceAndExactResolution) {
+TEST(ModelCatalogCharacterization, ConfiguredPrecedenceAndExactResolution) {
   ProviderConfig local;
   local.id = "local";
   local.api = "registry-faux";
@@ -150,7 +150,7 @@ TEST(ModelRegistryCharacterization, ConfiguredPrecedenceAndExactResolution) {
       .max_tokens = 4242,
   };
 
-  ModelRegistry registry({{"local", local}, {"openai", openai}});
+  ModelCatalog registry({{"local", local}, {"openai", openai}});
 
   const auto *merged = registry.exact("LOCAL", "same");
   ASSERT_NE(merged, nullptr);
@@ -176,31 +176,58 @@ TEST(ModelRegistryCharacterization, ConfiguredPrecedenceAndExactResolution) {
   EXPECT_EQ(resolved.model->id, "accounts/company/models/coder");
 }
 
-TEST(ModelRegistryCharacterization, SearchPreservesCurrentProviderOrder) {
-  const ModelRegistry registry;
+TEST(ModelCatalogCharacterization, SearchPreservesCurrentProviderOrder) {
+  const ModelCatalog registry;
   const auto matches = registry.search("gpt-4");
 
   ASSERT_GE(matches.size(), 5U);
-  EXPECT_EQ(matches[0]->provider + "/" + matches[0]->id, "openai/gpt-4o");
-  EXPECT_EQ(matches[1]->provider + "/" + matches[1]->id, "openai/gpt-4o-mini");
-  EXPECT_EQ(matches[2]->provider + "/" + matches[2]->id, "openai/gpt-4.1");
-  EXPECT_EQ(matches[3]->provider + "/" + matches[3]->id, "openai/gpt-4.1-mini");
-  EXPECT_EQ(matches[4]->provider + "/" + matches[4]->id, "openai/gpt-4.1-nano");
+  EXPECT_EQ(matches[0].key.provider_id + "/" + matches[0].key.model_id, "openai/gpt-4o");
+  EXPECT_EQ(matches[1].key.provider_id + "/" + matches[1].key.model_id, "openai/gpt-4o-mini");
+  EXPECT_EQ(matches[2].key.provider_id + "/" + matches[2].key.model_id, "openai/gpt-4.1");
+  EXPECT_EQ(matches[3].key.provider_id + "/" + matches[3].key.model_id, "openai/gpt-4.1-mini");
+  EXPECT_EQ(matches[4].key.provider_id + "/" + matches[4].key.model_id, "openai/gpt-4.1-nano");
 }
 
-TEST(ModelRegistryCharacterization, RegisteredApisAreValidated) {
-  for (const auto &provider : ModelRegistry::builtin_providers()) {
+TEST(ModelCatalogCharacterization, RegisteredApisAreValidated) {
+  for (const auto &provider : ModelCatalog::builtin_providers()) {
     LLMClientRegistry::instance().register_client(
         provider.api, [] { return std::shared_ptr<LLMClient>{}; });
   }
 
-  EXPECT_NO_THROW(ModelRegistry{}.validate_registered_apis());
+  EXPECT_NO_THROW(ModelCatalog{}.validate_registered_apis());
 
   ProviderConfig invalid;
   invalid.id = "unregistered";
   invalid.api = "not-registered-for-characterization";
   invalid.base_url = "http://invalid.test/v1";
   invalid.auth = ProviderAuthPolicy::none;
-  const ModelRegistry registry({{"unregistered", invalid}});
+  const ModelCatalog registry({{"unregistered", invalid}});
   EXPECT_THROW(registry.validate_registered_apis(), std::runtime_error);
+}
+
+TEST(ModelCatalog, PublishesImmutableGenerationOneView) {
+  const ModelCatalog catalog;
+  const auto first = catalog.view();
+  const auto second = catalog.view();
+  EXPECT_EQ(first.generation, 1U);
+  EXPECT_EQ(first, second);
+  ASSERT_FALSE(first.entries.empty());
+  EXPECT_EQ(first.entries.front().key.provider_id, "openai");
+  auto copy = first;
+  copy.entries.front().display_name = "changed";
+  EXPECT_NE(copy, first);
+}
+
+TEST(ModelCatalog, StableSearchAndKeyResolutionUseValues) {
+  const ModelCatalog catalog;
+  const auto matches = catalog.search("gpt-4o");
+  ASSERT_FALSE(matches.empty());
+  const auto key = matches.front().key;
+  const auto entry = catalog.entry(key);
+  ASSERT_TRUE(entry.has_value());
+  EXPECT_EQ(*entry, matches.front());
+  const auto resolved = catalog.resolve(key);
+  ASSERT_TRUE(resolved);
+  EXPECT_EQ(resolved.model->provider, key.provider_id);
+  EXPECT_EQ(resolved.model->id, key.model_id);
 }

@@ -120,9 +120,9 @@ int main(int argc, char *argv[]) noexcept {
   static const std::map<std::string, pi::cli::ProviderConfig> empty_config;
   const auto &configured =
       args.config_document ? args.config_document->providers : empty_config;
-  std::shared_ptr<const pi::core::ModelRegistry> registry;
+  std::shared_ptr<const pi::core::ModelCatalog> registry;
   try {
-    registry = std::make_shared<pi::core::ModelRegistry>(configured);
+    registry = std::make_shared<pi::core::ModelCatalog>(configured);
     registry->validate_registered_apis();
   } catch (const std::exception &error) {
     std::cerr << "error: " << error.what() << "\n";
@@ -158,7 +158,7 @@ int main(int argc, char *argv[]) noexcept {
   cfg.agent_description = "pi-cpp coding agent running " + model.id;
   cfg.threads = acp_threads;
   cfg.sandbox_policy = sandbox_policy;
-  cfg.model_registry = registry;
+  cfg.model_catalog = registry;
   if (!args.session_dir.empty())
     cfg.session_dir = args.session_dir;
 
@@ -191,7 +191,7 @@ int main(int argc, char *argv[]) noexcept {
   pi::cli::AgentOptionsConfig options_config{
       .args = args,
       .model = model,
-      .model_registry = registry,
+      .model_catalog = registry,
       .auth_resolver = auth_resolver,
       .capabilities = capabilities,
   };

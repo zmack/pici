@@ -19,7 +19,7 @@ using namespace testing;
 
 namespace {
 
-std::shared_ptr<const core::ModelRegistry>
+std::shared_ptr<const core::ModelCatalog>
 registry_with_auth(core::ProviderAuthPolicy policy,
                    std::optional<std::string> env_var = std::nullopt) {
   core::ProviderConfig provider;
@@ -28,7 +28,7 @@ registry_with_auth(core::ProviderAuthPolicy policy,
   provider.base_url = "http://auth.test/v1";
   provider.auth = policy;
   provider.api_key.env_var = std::move(env_var);
-  return std::make_shared<const core::ModelRegistry>(
+  return std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{{"test-provider", provider}});
 }
 
@@ -57,7 +57,7 @@ TEST(AuthResolver, ProviderScopedCredentialsAndHeaders) {
   provider_b.base_url = "http://b.test/v1";
   provider_b.auth = core::ProviderAuthPolicy::required;
 
-  auto registry = std::make_shared<const core::ModelRegistry>(
+  auto registry = std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{{"provider-a", provider_a},
                                                   {"provider-b", provider_b}});
   auth::AuthResolver resolver(registry);
@@ -142,7 +142,7 @@ TEST(AuthResolver, OAuthAvailabilityIsProviderScoped) {
       });
 
   auth::OpenAICodexOAuth oauth(std::move(store));
-  auth::AuthResolver resolver(std::make_shared<const core::ModelRegistry>(),
+  auth::AuthResolver resolver(std::make_shared<const core::ModelCatalog>(),
                               std::move(oauth));
 
   EXPECT_EQ(resolver.availability("openai-codex"),
@@ -168,7 +168,7 @@ TEST(AuthResolver, OAuthRefreshHonorsCancellation) {
       });
 
   auth::OpenAICodexOAuth oauth(std::move(store));
-  auth::AuthResolver resolver(std::make_shared<const core::ModelRegistry>(),
+  auth::AuthResolver resolver(std::make_shared<const core::ModelCatalog>(),
                               std::move(oauth));
   std::stop_source stop_source;
   stop_source.request_stop();

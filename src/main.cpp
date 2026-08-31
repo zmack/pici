@@ -34,12 +34,12 @@ namespace {
 
 void print_version() { std::cout << "pi-cpp " PI_CPP_VERSION "\n"; }
 
-std::shared_ptr<const core::ModelRegistry>
-build_model_registry(const cli::Args &args) {
+std::shared_ptr<const core::ModelCatalog>
+build_model_catalog(const cli::Args &args) {
   static const std::map<std::string, cli::ProviderConfig> empty;
   const auto &configured =
       args.config_document ? args.config_document->providers : empty;
-  auto registry = std::make_shared<core::ModelRegistry>(configured);
+  auto registry = std::make_shared<core::ModelCatalog>(configured);
   registry->validate_registered_apis();
   return registry;
 }
@@ -67,9 +67,8 @@ int run_lua_test_files(const std::vector<std::string> &files) {
   return total_failed > 0 ? 1 : 0;
 }
 
-int cmd_list_models(
-    const cli::Args &args,
-    const std::shared_ptr<const core::ModelRegistry> &registry) {
+int cmd_list_models(const cli::Args &args,
+                    const std::shared_ptr<const core::ModelCatalog> &registry) {
   std::cout << format_model_catalog(args.list_models_filter, registry);
   return 0;
 }
@@ -195,20 +194,20 @@ int main(int argc, char *argv[]) noexcept {
   if (!args.otel_endpoint.empty())
     pi::core::init_otel(args.otel_endpoint);
 
-  std::shared_ptr<const pi::core::ModelRegistry> model_registry;
+  std::shared_ptr<const pi::core::ModelCatalog> model_catalog;
   try {
-    model_registry = pi::build_model_registry(args);
+    model_catalog = pi::build_model_catalog(args);
   } catch (const std::exception &error) {
     std::cerr << "error: " << error.what() << "\n";
     return 1;
   }
 
   if (args.list_models) {
-    return pi::cmd_list_models(args, model_registry);
+    return pi::cmd_list_models(args, model_catalog);
   }
 
   if (!args.test_files.empty())
     return pi::run_lua_test_files(args.test_files);
 
-  return pi::cmd_run(args, model_registry);
+  return pi::cmd_run(args, model_catalog);
 }

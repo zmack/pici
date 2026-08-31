@@ -337,7 +337,7 @@ void apply_cost(Model::Cost &target, const ConfiguredCost &source) {
 }
 
 void apply_configured_model(Model &target, const ConfiguredModel &source,
-                            const ProviderDefinition &provider) {
+                            const Provider &provider) {
   if (source.name)
     target.name = *source.name;
   if (source.api)
@@ -361,7 +361,7 @@ void apply_configured_model(Model &target, const ConfiguredModel &source,
 }
 
 Model make_custom_model(const ConfiguredModel &source,
-                        const ProviderDefinition &provider) {
+                        const Provider &provider) {
   Model model;
   model.id = source.id;
   model.name = source.name.value_or(source.id);
@@ -383,7 +383,21 @@ Model make_custom_model(const ConfiguredModel &source,
 
 } // namespace
 
-std::vector<ProviderDefinition> ModelRegistry::builtin_providers() {
+ModelCatalogEntry project_model(const Model &model) {
+  return {.key = {.provider_id = model.provider, .model_id = model.id},
+          .display_name = model.name,
+          .api = model.api,
+          .reasoning = model.reasoning,
+          .input_capabilities = model.input_capabilities,
+          .context_window = model.context_window,
+          .max_tokens = model.max_tokens,
+          .cost = {.input_per_mtok = model.cost.input_per_mtok,
+                   .output_per_mtok = model.cost.output_per_mtok,
+                   .cache_read_per_mtok = model.cost.cache_read_per_mtok,
+                   .cache_write_per_mtok = model.cost.cache_write_per_mtok}};
+}
+
+std::vector<Provider> ModelCatalog::builtin_providers() {
   return {
       {"openai", "openai-completions", "https://api.openai.com/v1"},
       {"openai-codex", "openai-codex-responses",
@@ -402,7 +416,7 @@ std::vector<ProviderDefinition> ModelRegistry::builtin_providers() {
   };
 }
 
-ModelRegistry::ModelRegistry(
+ModelCatalog::ModelCatalog(
     const std::map<std::string, ProviderConfig> &configured) {
   for (auto definition : builtin_providers())
     providers_.emplace(lower_ascii(definition.id), std::move(definition));
@@ -418,7 +432,7 @@ ModelRegistry::ModelRegistry(
         throw std::runtime_error("providers." + key +
                                  " requires api and base_url");
       }
-      ProviderDefinition definition;
+      Provider definition;
       definition.id = lower_ascii(config.id.empty() ? key : config.id);
       definition.api = *config.api;
       definition.base_url = *config.base_url;
@@ -488,9 +502,16 @@ ModelRegistry::ModelRegistry(
       add_or_replace(make_custom_model(custom, *definition));
     }
   }
+  view_.generation = 1;
+  view_.entries.reserve(models_.size());
+  for (const auto &model : models_)
+    view_.entries.push_back(project_model(model));
+  view_.refresh_status.reserve(providers_.size());
+  for (const auto &[id, definition] : providers_)
+    view_.refresh_status.push_back({.provider_id = definition.id});
 }
 
-void ModelRegistry::add_or_replace(Model model) {
+void ModelCatalog::add_or_replace(Model model) {
   const auto key = std::make_pair(lower_ascii(model.provider), model.id);
   auto it = indexes_.find(key);
   if (it == indexes_.end()) {
@@ -501,13 +522,13 @@ void ModelRegistry::add_or_replace(Model model) {
   }
 }
 
-const ProviderDefinition *ModelRegistry::provider(std::string_view id) const {
+const Provider *ModelCatalog::provider(std::string_view id) const {
   auto it = providers_.find(lower_ascii(id));
   return it == providers_.end() ? nullptr : &it->second;
 }
 
-const Model *ModelRegistry::exact(std::string_view provider_id,
-                                  std::string_view model_id) const {
+const Model *ModelCatalog::exact(std::string_view provider_id,
+                                 std::string_view model_id) const {
   auto it = indexes_.find(
       std::make_pair(lower_ascii(provider_id), std::string(model_id)));
   if (it == indexes_.end())
@@ -515,12 +536,30 @@ const Model *ModelRegistry::exact(std::string_view provider_id,
   return &models_[it->second];
 }
 
-ModelResolution ModelRegistry::resolve(const ModelSelection &selection) const {
+std::optional<ModelCatalogEntry>
+ModelCatalog::entry(const ModelKey &key) const {
+  const auto *model = exact(key.provider_id, key.model_id);
+  return model == nullptr
+             ? std::nullopt
+             : std::optional<ModelCatalogEntry>(project_model(*model));
+}
+
+ModelResolution ModelCatalog::resolve(const ModelKey &key,
+                                      std::optional<std::string> base_url,
+                                      std::string source) const {
+  return resolve({.provider = key.provider_id,
+                  .model = key.model_id,
+                  .base_url = std::move(base_url),
+                  .source = std::move(source)});
+}
+
+ModelResolution ModelCatalog::resolve(const ModelSelection &selection) const {
   const auto source = selection.source.empty() ? "selection" : selection.source;
   if (selection.model.empty())
     return {.error = std::string(source) + ": model id must not be empty"};
 
   if (selection.provider && !selection.provider->empty()) {
+
     const auto *definition = provider(*selection.provider);
     std::string model_id = selection.model;
     const auto slash = model_id.find('/');
@@ -617,21 +656,30 @@ ModelResolution ModelRegistry::resolve(const ModelSelection &selection) const {
   return {.error = std::string(source) + ": unknown model '" + raw + "'"};
 }
 
-std::vector<const Model *>
-ModelRegistry::search(std::string_view filter) const {
-  std::vector<const Model *> result;
+std::vector<ModelCatalogEntry>
+ModelCatalog::search(std::string_view filter) const {
+  std::vector<ModelCatalogEntry> result;
   const auto needle = lower_ascii(filter);
-  for (const auto &model : models_) {
+  for (const auto &entry : view_.entries) {
     if (needle.empty() ||
-        lower_ascii(model.id + " " + model.provider + " " + model.name)
-            .contains(needle)) {
-      result.push_back(&model);
-    }
+        lower_ascii(entry.key.model_id + " " + entry.key.provider_id + " " +
+                    entry.display_name)
+            .contains(needle))
+      result.push_back(entry);
   }
   return result;
 }
 
-void ModelRegistry::validate_registered_apis() const {
+std::vector<const Model *>
+ModelCatalog::search_models(std::string_view filter) const {
+  std::vector<const Model *> result;
+  for (const auto &entry : search(filter))
+    if (const auto *model = exact(entry.key.provider_id, entry.key.model_id))
+      result.push_back(model);
+  return result;
+}
+
+void ModelCatalog::validate_registered_apis() const {
   for (const auto &[id, provider] : providers_) {
     (void)id;
     if (!LLMClientRegistry::instance().has_client(provider.api))

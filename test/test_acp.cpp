@@ -119,12 +119,12 @@ struct AcpFixture {
     slow_model.id = "slow";
     slow_provider.models.push_back(slow_model);
 
-    cfg.model_registry = std::make_shared<const core::ModelRegistry>(
+    cfg.model_catalog = std::make_shared<const core::ModelCatalog>(
         std::map<std::string, core::ProviderConfig>{
             {"faux", faux_provider},
             {"faux-b", alternate_provider},
             {"faux-slow-provider", slow_provider}});
-    cfg.agent_opts.model_registry = cfg.model_registry;
+    cfg.agent_opts.model_catalog = cfg.model_catalog;
     cfg.agent_opts.get_api_key =
         [](std::string_view) -> std::optional<std::string> {
       return std::nullopt;

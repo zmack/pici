@@ -88,12 +88,12 @@ core::ThinkingLevel to_core_thinking(ThinkingLevel t);
 // more-established behavior.
 core::ModelResolution resolve_model_selection(
     const Args &args,
-    const std::shared_ptr<const core::ModelRegistry> &registry);
+    const std::shared_ptr<const core::ModelCatalog> &registry);
 
 struct AgentOptionsConfig {
   Args args;
   core::Model model;
-  std::shared_ptr<const core::ModelRegistry> model_registry;
+  std::shared_ptr<const core::ModelCatalog> model_catalog;
   std::shared_ptr<pi::auth::AuthResolver> auth_resolver;
   std::shared_ptr<core::StreamDiagnostics> diagnostics;
   // Whether a mailbox coordinator is active for this run. Only consulted
@@ -144,7 +144,7 @@ reload_hooks(const Args &args, bool mailbox_active,
 // SessionRuntimeCapabilities::enable_mailbox).
 core::SessionRuntime::Config build_agent_session_config(
     const core::Agent::Options &agent_options,
-    std::shared_ptr<const core::ModelRegistry> model_registry,
+    std::shared_ptr<const core::ModelCatalog> model_catalog,
     std::vector<std::shared_ptr<const core::ToolDefinition>> tools,
     std::shared_ptr<core::SessionStore> session_store,
     core::SandboxPolicyPtr sandbox_policy, const Args &args,
@@ -171,7 +171,7 @@ core::SessionRuntime::Config build_agent_session_config(
 struct SessionRuntimeConfig {
   Args args;
   core::Model model;
-  std::shared_ptr<const core::ModelRegistry> model_registry;
+  std::shared_ptr<const core::ModelCatalog> model_catalog;
   std::shared_ptr<pi::auth::AuthResolver> auth_resolver;
   std::shared_ptr<core::StreamDiagnostics> diagnostics;
   // CLI-only instrumentation hook (e.g. cmd_run()'s "/context" command

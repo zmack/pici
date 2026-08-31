@@ -546,13 +546,13 @@ std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
 
   if (request.model_spec) {
     std::optional<Model> model;
-    if (options.model_registry) {
+    if (options.model_catalog) {
       ModelSelection selection;
       if (!request.model_spec->contains('/'))
         selection.provider = parent_context.model.provider;
       selection.model = *request.model_spec;
       selection.source = "child";
-      auto resolution = options.model_registry->resolve(selection);
+      auto resolution = options.model_catalog->resolve(selection);
       if (resolution)
         model = std::move(resolution.model);
     } else {

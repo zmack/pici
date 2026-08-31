@@ -66,14 +66,14 @@ TEST(RpcMode, HandlesSessionAndCompactionEvents) {
   core::ConfiguredModel other;
   other.id = "other";
   provider.models.push_back(other);
-  auto registry = std::make_shared<const core::ModelRegistry>(
+  auto registry = std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{{"faux", provider}});
 
   core::Agent::Options options;
   options.model = std::move(model);
-  options.model_registry = registry;
+  options.model_catalog = registry;
   core::SessionRuntime session({.agent_options = std::move(options),
-                                .model_registry = registry,
+                                .model_catalog = registry,
                                 .session_store = store});
   core::SessionHeader header{.id = "rpc-test"};
   const auto session_id = session.create_session(header);

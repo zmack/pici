@@ -193,7 +193,7 @@ SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config) {
   AgentOptionsConfig options_config{
       .args = config.args,
       .model = config.model,
-      .model_registry = config.model_registry,
+      .model_catalog = config.model_catalog,
       .auth_resolver = config.auth_resolver,
       .diagnostics = config.diagnostics,
       .mailbox_active = static_cast<bool>(mailbox),
@@ -204,8 +204,8 @@ SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config) {
     options_result.options.on_effective_context = config.on_effective_context;
 
   auto session_config = build_agent_session_config(
-      options_result.options, config.model_registry, /*tools=*/{},
-      session_store, sandbox_policy, config.args, config.capabilities, mailbox);
+      options_result.options, config.model_catalog, /*tools=*/{}, session_store,
+      sandbox_policy, config.args, config.capabilities, mailbox);
   auto runtime =
       std::make_shared<core::SessionRuntime>(std::move(session_config));
 

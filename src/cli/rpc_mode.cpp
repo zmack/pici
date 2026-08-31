@@ -129,7 +129,7 @@ std::optional<core::ThinkingLevel> parse_thinking(std::string_view level) {
 }
 
 nlohmann::json
-model_summary(const core::Model &model, const core::ModelRegistry &registry,
+model_summary(const core::Model &model, const core::ModelCatalog &registry,
               const std::shared_ptr<auth::AuthResolver> &resolver) {
   const auto *provider = registry.provider(model.provider);
   std::string auth = "not_required";
@@ -404,14 +404,14 @@ void RpcMode::handle_close_agent(const nlohmann::json &command) {
 }
 
 void RpcMode::handle_list_models(const nlohmann::json &command) {
-  const auto registry = session_.model_registry();
+  const auto registry = session_.model_catalog();
   if (!registry) {
     response(command, false, nullptr, "model registry is unavailable");
     return;
   }
   const auto filter = command.value("filter", std::string{});
   nlohmann::json models = nlohmann::json::array();
-  for (const auto *model : registry->search(filter))
+  for (const auto *model : registry->search_models(filter))
     models.push_back(model_summary(*model, *registry, auth_resolver_));
   response(command, true, {{"models", std::move(models)}});
 }

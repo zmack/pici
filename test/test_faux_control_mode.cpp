@@ -37,7 +37,7 @@ using namespace pi;
 
 namespace {
 
-std::shared_ptr<const core::ModelRegistry> make_model_registry() {
+std::shared_ptr<const core::ModelCatalog> make_model_catalog() {
   core::ProviderConfig provider;
   provider.id = "faux-mode";
   provider.api = "faux-mode-test";
@@ -46,19 +46,19 @@ std::shared_ptr<const core::ModelRegistry> make_model_registry() {
   core::ConfiguredModel configured;
   configured.id = "faux-model";
   provider.models.push_back(configured);
-  return std::make_shared<const core::ModelRegistry>(
+  return std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{{"faux-mode", provider}});
 }
 
 core::SessionRuntime::Config make_session_config(
-    const std::shared_ptr<const core::ModelRegistry> &model_registry,
+    const std::shared_ptr<const core::ModelCatalog> &model_catalog,
     const std::shared_ptr<core::SessionStore> &store) {
   core::Agent::Options options;
   options.model = core::Model{
       .id = "faux-model", .api = "faux-mode-test", .provider = "faux-mode"};
-  options.model_registry = model_registry;
+  options.model_catalog = model_catalog;
   return {.agent_options = std::move(options),
-          .model_registry = model_registry,
+          .model_catalog = model_catalog,
           .session_store = store};
 }
 
@@ -67,15 +67,15 @@ struct Fixture {
       std::make_shared<core::RemoteFauxClient>();
   std::shared_ptr<core::ScriptedToolRegistry> tool_registry =
       std::make_shared<core::ScriptedToolRegistry>();
-  std::shared_ptr<const core::ModelRegistry> model_registry =
-      make_model_registry();
+  std::shared_ptr<const core::ModelCatalog> model_catalog =
+      make_model_catalog();
   std::shared_ptr<core::SessionStore> store =
       std::make_shared<core::SessionStore>(
           std::filesystem::temp_directory_path() /
           ("pici-faux-control-mode-" + std::to_string(::getpid())));
   core::SessionRuntime session;
 
-  Fixture() : session(make_session_config(model_registry, store)) {
+  Fixture() : session(make_session_config(model_catalog, store)) {
     core::LLMClientRegistry::instance().register_client(
         "faux-mode-test", [client = client] { return client; });
     session.create_session(core::SessionHeader{.id = "faux-control-mode-test"});

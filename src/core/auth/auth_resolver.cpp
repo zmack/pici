@@ -27,7 +27,7 @@ std::string AuthResolver::canonical_provider(std::string_view provider) {
   return result;
 }
 
-AuthResolver::AuthResolver(std::shared_ptr<const core::ModelRegistry> registry,
+AuthResolver::AuthResolver(std::shared_ptr<const core::ModelCatalog> registry,
                            OpenAICodexOAuth oauth)
     : registry_(std::move(registry)), oauth_(std::move(oauth)) {
   if (!registry_)
@@ -119,7 +119,7 @@ AuthResolver::resolve(std::string_view provider,
     }
   }
 
-  const core::ProviderDefinition *definition =
+  const core::Provider *definition =
       registry_ != nullptr ? registry_->provider(canonical) : nullptr;
   const auto policy = (definition != nullptr)
                           ? definition->auth

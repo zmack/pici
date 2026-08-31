@@ -60,7 +60,7 @@ public:
 
   struct Config {
     Agent::Options agent_options;
-    std::shared_ptr<const ModelRegistry> model_registry;
+    std::shared_ptr<const ModelCatalog> model_catalog;
     std::vector<std::shared_ptr<const ToolDefinition>> tools;
     std::shared_ptr<SessionStore> session_store;
     SandboxPolicyPtr sandbox_policy;
@@ -98,8 +98,8 @@ public:
   SandboxMode sandbox_mode() const;
   void set_sandbox_mode(SandboxMode mode);
 
-  const std::shared_ptr<const ModelRegistry> &model_registry() const {
-    return model_registry_;
+  const std::shared_ptr<const ModelCatalog> &model_catalog() const {
+    return model_catalog_;
   }
   ModelResolution resolve_model(const ModelSelection &selection) const;
   ModelSwitchResult set_model(Model model, ThinkingLevel thinking);
@@ -203,7 +203,7 @@ private:
   Agent agent_;
   std::shared_ptr<SessionStore> session_store_;
   SandboxPolicyPtr sandbox_policy_;
-  std::shared_ptr<const ModelRegistry> model_registry_;
+  std::shared_ptr<const ModelCatalog> model_catalog_;
   std::optional<std::string> active_session_id_;
   std::optional<std::string> last_warning_;
   AutoCompactionConfig auto_compaction_;

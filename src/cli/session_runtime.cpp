@@ -119,7 +119,7 @@ core::ThinkingLevel to_core_thinking(ThinkingLevel t) {
 
 core::ModelResolution resolve_model_selection(
     const Args &args,
-    const std::shared_ptr<const core::ModelRegistry> &registry) {
+    const std::shared_ptr<const core::ModelCatalog> &registry) {
   if (!args.model.empty()) {
     core::ModelSelection selection;
     if (!args.provider.empty())
@@ -167,7 +167,7 @@ AgentOptionsResult build_agent_options(const AgentOptionsConfig &config) {
   AgentOptionsResult result;
   core::Agent::Options &opts = result.options;
   opts.model = config.model;
-  opts.model_registry = config.model_registry;
+  opts.model_catalog = config.model_catalog;
   opts.system_prompt = config.args.system_prompt;
   opts.thinking_level = to_core_thinking(config.args.thinking);
   opts.diagnostics = config.diagnostics;
@@ -267,7 +267,7 @@ AgentOptionsResult build_agent_options(const AgentOptionsConfig &config) {
 
 core::SessionRuntime::Config build_agent_session_config(
     const core::Agent::Options &agent_options,
-    std::shared_ptr<const core::ModelRegistry> model_registry,
+    std::shared_ptr<const core::ModelCatalog> model_catalog,
     std::vector<std::shared_ptr<const core::ToolDefinition>> tools,
     std::shared_ptr<core::SessionStore> session_store,
     core::SandboxPolicyPtr sandbox_policy, const Args &args,
@@ -275,7 +275,7 @@ core::SessionRuntime::Config build_agent_session_config(
     std::shared_ptr<core::MailboxCoordinator> mailbox) {
   core::SessionRuntime::Config config{
       .agent_options = agent_options,
-      .model_registry = std::move(model_registry),
+      .model_catalog = std::move(model_catalog),
       .tools = std::move(tools),
       .session_store = std::move(session_store),
       .sandbox_policy = std::move(sandbox_policy),

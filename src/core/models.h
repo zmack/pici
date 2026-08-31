@@ -134,7 +134,7 @@ struct ModelSelectionRequest {
   std::optional<ThinkingLevel> thinking_level;
   std::string source;
 };
-struct ProviderDefinition {
+struct Provider {
   std::string id;
   std::string api;
   std::string base_url;
@@ -167,34 +167,55 @@ struct ModelResolution {
 
 // The immutable, effective provider/model catalog used by every runtime
 // surface. Models are owned by this object so search results remain stable.
-class ModelRegistry {
+class ModelCatalog {
 public:
-  explicit ModelRegistry(
+  explicit ModelCatalog(
       const std::map<std::string, ProviderConfig> &configured = {});
 
   const std::vector<Model> &models() const { return models_; }
-  const ProviderDefinition *provider(std::string_view id) const;
-  const std::map<std::string, ProviderDefinition> &providers() const {
+  // Returns a complete immutable projection for one catalog generation.
+  // Copies are intentional: consumers never borrow catalog-owned Model data.
+  ModelCatalogView view() const { return view_; }
+  const Provider *provider(std::string_view id) const;
+  const std::map<std::string, Provider> &providers() const {
     return providers_;
   }
   const Model *exact(std::string_view provider,
                      std::string_view model_id) const;
+  std::optional<ModelCatalogEntry> entry(const ModelKey &key) const;
+  ModelResolution resolve(const ModelKey &key,
+                          std::optional<std::string> base_url = {},
+                          std::string source = "selection") const;
   ModelResolution resolve(const ModelSelection &selection) const;
-  std::vector<const Model *> search(std::string_view filter) const;
+  std::vector<ModelCatalogEntry> search(std::string_view filter) const;
+
+  // TODO(taxonomy-phase-10): remove. Pointer-returning search is a
+  // migration seam for the pre-catalog picker and will be replaced in Phase
+  // 9 by a value-based picker boundary.
+  std::vector<const Model *> search_models(std::string_view filter) const;
 
   // Call after all LLM clients have registered. Throws one actionable error
   // for the first effective model whose API ID is not registered.
   void validate_registered_apis() const;
 
-  static std::vector<ProviderDefinition> builtin_providers();
+  static std::vector<Provider> builtin_providers();
 
 private:
   std::vector<Model> models_;
-  std::map<std::string, ProviderDefinition> providers_;
+  std::map<std::string, Provider> providers_;
   std::map<std::pair<std::string, std::string>, std::size_t> indexes_;
+  ModelCatalogView view_;
 
   void add_or_replace(Model model);
 };
+
+// TODO(taxonomy-phase-10): remove. This alias keeps downstream integrations
+// source-compatible while all repository code uses the target aggregate name.
+using ModelRegistry = ModelCatalog;
+
+// TODO(taxonomy-phase-10): remove. ProviderDefinition was the migration-era
+// name for the catalog-owned Provider value.
+using ProviderDefinition = Provider;
 
 // All models in the built-in registry.
 const std::vector<Model> &all_models();

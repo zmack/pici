@@ -481,7 +481,7 @@ TEST(Agent, SessionRuntime_model_switch_persists_and_resumes) {
   b_model.id = "model-b";
   provider_b.models.push_back(b_model);
 
-  auto registry = std::make_shared<const ModelRegistry>(
+  auto registry = std::make_shared<const ModelCatalog>(
       std::map<std::string, ProviderConfig>{{"provider-a", provider_a},
                                             {"provider-b", provider_b}});
   const auto a = registry->resolve(
@@ -499,11 +499,11 @@ TEST(Agent, SessionRuntime_model_switch_persists_and_resumes) {
   auto store = std::make_shared<SessionStore>(session_dir);
   Agent::Options opts;
   opts.model = *a.model;
-  opts.model_registry = registry;
+  opts.model_catalog = registry;
   opts.thinking_level = ThinkingLevel::high;
 
   SessionRuntime runtime({.agent_options = opts,
-                          .model_registry = registry,
+                          .model_catalog = registry,
                           .session_store = store});
   SessionHeader header{
       .id = "switch-session", .model = "model-a", .provider = "provider-a"};
@@ -519,7 +519,7 @@ TEST(Agent, SessionRuntime_model_switch_persists_and_resumes) {
   EXPECT_EQ(saved->header.model, "model-b");
 
   SessionRuntime resumed({.agent_options = opts,
-                          .model_registry = registry,
+                          .model_catalog = registry,
                           .session_store = store});
   resumed.activate_session(*saved);
   EXPECT_EQ(resumed.agent().state().model().provider, "provider-b");

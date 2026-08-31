@@ -282,7 +282,7 @@ TEST(Config, BuiltinProviderConfigurationSnapshot) {
        pi::core::ProviderAuthPolicy::required},
   };
 
-  const auto actual = pi::core::ModelRegistry::builtin_providers();
+  const auto actual = pi::core::ModelCatalog::builtin_providers();
   ASSERT_EQ(actual.size(), std::size(expected));
   for (std::size_t i = 0; i < actual.size(); ++i) {
     EXPECT_EQ(actual[i].id, expected[i].id);

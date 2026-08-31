@@ -566,7 +566,7 @@ TEST(FindModel, UnknownIDProducesGenericWithEmptyBaseUrl) {
   EXPECT_TRUE(m->base_url.empty());
 }
 
-TEST(ModelRegistry, ConfiguredResolutionAndMerge) {
+TEST(ModelCatalog, ConfiguredResolutionAndMerge) {
 
   ProviderConfig local;
   local.id = "local";
@@ -591,7 +591,7 @@ TEST(ModelRegistry, ConfiguredResolutionAndMerge) {
   remote_model.id = "same";
   remote.models.push_back(remote_model);
 
-  ModelRegistry registry({{"local", local}, {"remote", remote}});
+  ModelCatalog registry({{"local", local}, {"remote", remote}});
   const auto *merged = registry.exact("LOCAL", "same");
   ASSERT_THAT(merged, testing::NotNull());
   EXPECT_EQ(merged->base_url, "http://local.test/v1");
@@ -632,7 +632,7 @@ TEST(ModelRegistry, ConfiguredResolutionAndMerge) {
   ConfiguredModel sparse;
   sparse.context_window = 999;
   override.model_overrides.emplace("gpt-4o", sparse);
-  ModelRegistry overridden({{"openai", override}});
+  ModelCatalog overridden({{"openai", override}});
   const auto *gpt = overridden.exact("openai", "gpt-4o");
   ASSERT_THAT(gpt, testing::NotNull());
   EXPECT_EQ(gpt->context_window, 999ULL);

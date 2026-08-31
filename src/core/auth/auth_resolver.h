@@ -27,9 +27,8 @@ enum class AuthAvailability {
 
 class AuthResolver {
 public:
-  explicit AuthResolver(
-      std::shared_ptr<const core::ModelRegistry> registry = {},
-      OpenAICodexOAuth oauth = OpenAICodexOAuth());
+  explicit AuthResolver(std::shared_ptr<const core::ModelCatalog> registry = {},
+                        OpenAICodexOAuth oauth = OpenAICodexOAuth());
 
   std::optional<core::RequestAuth>
   resolve(std::string_view provider, std::string_view explicit_api_key = {},
@@ -44,7 +43,7 @@ public:
 private:
   static std::string canonical_provider(std::string_view provider);
 
-  std::shared_ptr<const core::ModelRegistry> registry_;
+  std::shared_ptr<const core::ModelCatalog> registry_;
   mutable OpenAICodexOAuth oauth_;
   std::map<std::string, std::string> runtime_api_keys_;
   std::map<std::string, std::optional<std::string>> configured_env_keys_;

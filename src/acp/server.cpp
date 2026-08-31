@@ -102,7 +102,7 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
   // unused cli::Args{} below is only read when that capability is on.
   auto scratch_runtime =
       std::make_shared<core::SessionRuntime>(cli::build_agent_session_config(
-          config.agent_opts, config.model_registry, config.tools, sessions,
+          config.agent_opts, config.model_catalog, config.tools, sessions,
           config.sandbox_policy, cli::Args{},
           cli::SessionRuntimeCapabilities{.enable_mailbox = false,
                                           .enable_hooks = false,

@@ -64,7 +64,7 @@ using namespace pi;
 
 namespace {
 
-std::shared_ptr<const core::ModelRegistry> resolution_test_registry() {
+std::shared_ptr<const core::ModelCatalog> resolution_test_registry() {
   core::ProviderConfig provider;
   provider.id = "known-provider";
   provider.api = "openai-completions";
@@ -74,7 +74,7 @@ std::shared_ptr<const core::ModelRegistry> resolution_test_registry() {
   configured.id = "known-model";
   configured.name = "known-model";
   provider.models.push_back(configured);
-  return std::make_shared<const core::ModelRegistry>(
+  return std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{
           {"known-provider", provider}});
 }
@@ -251,10 +251,10 @@ std::string drive_acp_leg() {
   core::ConfiguredModel configured;
   configured.id = "parity-model";
   provider.models.push_back(configured);
-  cfg.model_registry = std::make_shared<const core::ModelRegistry>(
+  cfg.model_catalog = std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{
           {"parity-acp-faux", provider}});
-  cfg.agent_opts.model_registry = cfg.model_registry;
+  cfg.agent_opts.model_catalog = cfg.model_catalog;
   cfg.agent_opts.get_api_key =
       [](std::string_view) -> std::optional<std::string> {
     return std::nullopt;
@@ -332,10 +332,10 @@ void test_acp_concurrent_session_isolation() {
   core::ConfiguredModel configured;
   configured.id = "parity-concurrent-model";
   provider.models.push_back(configured);
-  cfg.model_registry = std::make_shared<const core::ModelRegistry>(
+  cfg.model_catalog = std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{
           {"parity-concurrent-faux", provider}});
-  cfg.agent_opts.model_registry = cfg.model_registry;
+  cfg.agent_opts.model_catalog = cfg.model_catalog;
   cfg.agent_opts.get_api_key =
       [](std::string_view) -> std::optional<std::string> {
     return std::nullopt;

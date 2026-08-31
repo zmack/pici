@@ -25,7 +25,7 @@
 
 namespace pi::core {
 
-class ModelRegistry;
+class ModelCatalog;
 
 struct ModelSwitchResult {
   Model previous;
@@ -39,7 +39,7 @@ public:
   struct Options {
     std::string system_prompt;
     Model model;
-    std::shared_ptr<const ModelRegistry> model_registry;
+    std::shared_ptr<const ModelCatalog> model_catalog;
     ThinkingLevel thinking_level{ThinkingLevel::off};
     ToolExecutionMode tool_execution{ToolExecutionMode::parallel};
     Options() = default;
