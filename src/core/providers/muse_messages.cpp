@@ -779,3 +779,10 @@ void pi::core::register_muse_messages_client() {
     return std::make_shared<pi::core::MuseMessagesClient>();
   });
 }
+
+void pi::core::register_muse_messages_client(
+    InferenceAdapterCollection &adapters) {
+  adapters.register_adapter("muse-messages", [] {
+    return std::make_shared<pi::core::MuseMessagesClient>();
+  });
+}

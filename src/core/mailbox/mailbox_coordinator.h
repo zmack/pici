@@ -336,13 +336,7 @@ private:
   static std::string task_status(AgentTaskStatusKind status);
 };
 
-// TODO(taxonomy-phase-10): remove. These are the migration-era names; all
-// new code must use Mailbox/MailboxOptions/MailboxAttachmentStatus.
-using MailboxCoordinator = Mailbox;
-using MailboxCoordinatorOptions = MailboxOptions;
-using MailboxCoordinatorStatus = MailboxAttachmentStatus;
-
-using AgentTaskEventCallback = AgentTaskManager::EventCallback;
+using AgentTaskEventCallback = TaskTree::EventCallback;
 AgentTaskEventCallback
 fan_out_agent_task_callbacks(std::vector<AgentTaskEventCallback> callbacks);
 

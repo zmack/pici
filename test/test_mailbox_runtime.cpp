@@ -79,7 +79,7 @@ private:
   std::shared_ptr<std::atomic<bool>> release_;
 };
 
-core::AgentTaskSnapshot wait_for_task_status(core::AgentTaskManager &manager,
+core::AgentTaskSnapshot wait_for_task_status(core::TaskTree &manager,
                                              const core::AgentTaskId &id,
                                              core::AgentTaskStatusKind status) {
   const auto deadline =
@@ -96,23 +96,23 @@ core::AgentTaskSnapshot wait_for_task_status(core::AgentTaskManager &manager,
 // Lexicon "Destruction follows inverse dependency order. Child tasks close
 // before mailbox observers disconnect..." — src/core/session/mailbox_runtime.h
 // documents the required local-declaration order (SessionRuntime, then
-// MailboxRuntime, then AgentTaskManager) that produces this at scope exit.
+// MailboxAttachment, then TaskTree) that produces this at scope exit.
 // This test demonstrates *why* the order matters: a child task's
 // AgentTaskStatusChangedEvent only reaches the mailbox store while
-// core::MailboxRuntime's Observer is still attached (task_event_callback() ->
-// Observer::observe() -> MailboxCoordinator::observe_task_event()). Detach
+// core::MailboxAttachment's Observer is still attached (task_event_callback() ->
+// Observer::observe() -> Mailbox::observe_task_event()). Detach
 // the observer before the event fires (the wrong order) and the mid-lifecycle
 // status update is silently dropped — the mailbox record goes stale even
 // though the task itself really did complete. See
 // plans/session-runtime-migration.md Phase 1 item 4.
 //
 // Note: a task's *terminal* close (closed_at_ms) is also recorded through a
-// second, independent path — MailboxCoordinator::unregister_subagent(),
-// reached via AgentTaskManager's endpoint-unregistration callback rather
+// second, independent path — Mailbox::unregister_subagent(),
+// reached via TaskTree's endpoint-unregistration callback rather
 // than the Observer — so closed_at_ms alone would not distinguish correct
 // from incorrect teardown order. The intermediate "completed" status update
 // is Observer-exclusive, which is what this test checks.
-TEST(MailboxRuntime, TeardownOrder) {
+TEST(MailboxAttachment, TeardownOrder) {
   const auto suffix =
       std::chrono::steady_clock::now().time_since_epoch().count();
 
@@ -124,7 +124,7 @@ TEST(MailboxRuntime, TeardownOrder) {
     std::filesystem::create_directories(root);
     std::filesystem::permissions(root, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace);
-    core::MailboxCoordinatorOptions options;
+    core::MailboxOptions options;
     options.store.path = root / "mailbox.sqlite3";
     options.store.workspace_id = "workspace";
     options.store.workspace_path = root.string();
@@ -141,7 +141,7 @@ TEST(MailboxRuntime, TeardownOrder) {
     options.heartbeat_interval = std::chrono::hours(1);
     options.stale_after = std::chrono::hours(2);
     options.cleanup_interval = std::chrono::hours(2);
-    return std::make_shared<core::MailboxCoordinator>(std::move(options));
+    return std::make_shared<core::Mailbox>(std::move(options));
   };
 
   core::Agent::Options agent_opts;
@@ -162,11 +162,11 @@ TEST(MailboxRuntime, TeardownOrder) {
 
     auto coordinator = make_coordinator("a");
     core::SessionRuntime root({.agent_options = agent_opts});
-    core::MailboxRuntime mailbox_runtime(coordinator);
+    core::MailboxAttachment mailbox_runtime(coordinator);
     mailbox_runtime.activate_root("session-a", "teardown-a");
-    auto tasks = std::make_shared<core::AgentTaskManager>(
+    auto tasks = std::make_shared<core::TaskTree>(
         root.agent(), default_child_factory(), agent_opts,
-        core::AgentTaskManager::Limits{},
+        core::TaskTree::Limits{},
         mailbox_runtime.task_event_callback());
     mailbox_runtime.connect(root, tasks, [] {});
 
@@ -204,7 +204,7 @@ TEST(MailboxRuntime, TeardownOrder) {
 
   // Scenario B: wrong order — mailbox_runtime is torn down (its Observer
   // detached) *before* the child task transitions to "completed", the way
-  // it would if AgentTaskManager were declared/destroyed after MailboxRuntime
+  // it would if TaskTree were declared/destroyed after MailboxAttachment
   // instead of before it.
   std::string status_when_disconnected;
   {
@@ -217,11 +217,11 @@ TEST(MailboxRuntime, TeardownOrder) {
 
     auto coordinator = make_coordinator("b");
     core::SessionRuntime root({.agent_options = agent_opts});
-    core::MailboxRuntime mailbox_runtime(coordinator);
+    core::MailboxAttachment mailbox_runtime(coordinator);
     mailbox_runtime.activate_root("session-b", "teardown-b");
-    auto tasks = std::make_shared<core::AgentTaskManager>(
+    auto tasks = std::make_shared<core::TaskTree>(
         root.agent(), default_child_factory(), agent_opts,
-        core::AgentTaskManager::Limits{},
+        core::TaskTree::Limits{},
         mailbox_runtime.task_event_callback());
     mailbox_runtime.connect(root, tasks, [] {});
 
@@ -265,7 +265,7 @@ TEST(MailboxRuntime, TeardownOrder) {
 
 } // namespace
 
-TEST(MailboxRuntime, LaunchAndDisabledRuntime) {
+TEST(MailboxAttachment, LaunchAndDisabledRuntime) {
   using namespace pi;
 
   const auto workspace =
@@ -306,7 +306,7 @@ TEST(MailboxRuntime, LaunchAndDisabledRuntime) {
   EXPECT_TRUE(!launch.coordinator.root_agent_id.empty());
   EXPECT_TRUE(!launch.coordinator.store.workspace_id.empty());
 
-  core::MailboxRuntime disabled;
+  core::MailboxAttachment disabled;
   EXPECT_TRUE(!disabled.enabled());
   EXPECT_TRUE(!disabled.task_event_callback());
   EXPECT_TRUE(disabled.claim_idle_root_turn().empty());

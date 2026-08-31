@@ -87,11 +87,11 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
   // plans/session-runtime-migration.md Phase 6, ACP's /runs handling moved
   // to one SessionRuntime per durable session, looked up/reused by
   // session_id (see handlers.cpp's per-run registry) -- but /runs has never
-  // wired those sessions to AgentTaskManager (ACP's per-run sessions have
+  // wired those sessions to TaskTree (ACP's per-run sessions have
   // never supported subagent delegation; SessionRuntimeCapabilities keeps
   // it off), and the /tasks/* wire API has no session_id concept at all to
   // route by (task ids like "root"/"agent_1" are only unique within one
-  // AgentTaskManager, so a registry-search-by-id across multiple durable
+  // TaskTree, so a registry-search-by-id across multiple durable
   // sessions' task trees would collide). Unifying /tasks/* with per-session
   // task trees is therefore a real wire-protocol question left to a later
   // phase, not something this restructuring silently resolves -- this
@@ -110,8 +110,8 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
                                           .enable_context_files = false,
                                           .enable_auto_compaction = false}));
   auto task_events = std::make_shared<TaskEventHub>();
-  scratch_runtime->activate(config.agent_opts, core::AgentTaskManager::Limits{},
-                            core::AgentTaskManager::ChildWriteTools::none,
+  scratch_runtime->activate(config.agent_opts, core::TaskTree::Limits{},
+                            core::TaskTree::ChildWriteTools::none,
                             [task_events](const core::AgentTaskEvent &event) {
                               task_events->publish(event);
                             });

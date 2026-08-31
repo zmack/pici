@@ -16,13 +16,10 @@ Completed milestones:
 - Phase 6: `04762ac` — `refactor: narrow SessionRuntime and centralize model-switch auth checks`
 - Phase 7: `98fe46e` — `refactor: move TaskTree under Agent`
 - Phase 8: `0d3622e` — `refactor: make Mailbox multi-attachment and process-owned`
-- Phase 9: complete in the commit containing this progress update, planned
-  subject `refactor: stabilize ModelPicker on a catalog-view contract`
+- Phase 9: `eb95fb0` — `refactor: stabilize ModelPicker on a catalog-view contract`
+- Phase 10: complete in the commit containing this progress update
 
-Next milestone: Phase 10 — remove migration scaffolding and audit the
-taxonomy.
-
-Next milestone: Phase 9 — stabilize `ModelPicker` and frontend adapters.
+Migration complete: all 10 phases landed, every compatibility alias removed.
 
 Phase 4 verification: full `make test` passed 44/44 tests; `make format` and
 `git diff --check` passed. Full-repo `make lint` is too slow to complete
@@ -401,24 +398,140 @@ adding a direct `core/models.h` include to the .cpp for `ModelCatalogEntry`/
 `ModelKey`, reachable only transitively through the header before that).
 `make format`/`git diff --check` clean.
 
-Current compatibility seams are `ModelRegistry` -> `ModelCatalog`,
-`ProviderDefinition` -> `Provider`, pointer-returning catalog search, the
-`LLMClientRegistry` singleton/inference collection bridge, and
-`AuthResolver` -> `Authentication` (`auth_resolver.h` now aliases
-`Authentication` directly; `openai_codex_oauth` implements
-`AuthenticationAdapter` and is registered under the `openai-codex-oauth`
-adapter id rather than reached as a free-standing object). Each migration
-alias carries its Phase 10 removal TODO; the singleton remains transitional.
+Phase 10 removed every remaining compatibility alias
+(`ModelRegistry`/`ProviderDefinition`/`AuthResolver`/`AgentTaskManager`/
+`MailboxCoordinator`+`Options`+`Status`/`MailboxRuntime`) and the dead
+pointer-returning `ModelCatalog::search_models()`/free `search_models()`,
+via mechanical `sed` sweeps against explicit filename lists rather than shell
+loops -- the actual login shell here is zsh, which does not word-split an
+unquoted multi-file variable the way bash does, so an earlier attempt to loop
+`for f in $FILES; do sed ... "$f"; done` silently touched nothing and was
+caught only by a follow-up `rg -l` still showing every target file. Two of
+the sed sweeps mangled a same-word "renamed from X to X" comment (`MailboxRuntime`
+-> `MailboxAttachment` on both sides of one sentence in
+`core/session/mailbox_runtime.h`); found by inspection and fixed by hand. A
+follow-up grep for the same `"X to X"` pattern across every file touched by
+all three sweeps found no further instances. `src/core/auth/auth_resolver.h`
+(a bare `using AuthResolver = Authentication;`) was deleted outright rather
+than emptied.
+
+The `TODO(taxonomy-phase-10): remove` marker in `authentication.h` flagged a
+second, real compatibility constructor: `Authentication(catalog,
+OpenAICodexOAuth)`, unused by any production call site. Deleted (header and
+`.cpp`), along with the now-unused `#include "core/auth/openai_codex_oauth.h"`
+in `authentication.h` -- which broke three files (`main.cpp`,
+`test_authentication.cpp`, `test_authentication_resolution.cpp`) that had
+relied on it transitively for `CredentialStore`/`OpenAICodexOAuth`/
+`OAuthCredential`; fixed by adding the direct includes each actually needs,
+plus a forward-declared `class CredentialStore;` in `authentication.h` itself
+(still needed for the `CredentialStore&` constructor parameter and accessor).
+Two tests in `test_authentication_resolution.cpp`
+(`OAuthAvailabilityIsProviderScoped`, `OAuthRefreshHonorsCancellation`) had
+constructed a standalone `OpenAICodexOAuth` just to pass into the now-deleted
+constructor; rewritten to pass their already-populated `CredentialStore`
+directly to `Authentication`'s existing 2-arg `(catalog, credential_store)`
+constructor, which registers the same `openai-codex-oauth` adapter internally
+-- identical behavior, one fewer object.
+
+Removed the singleton inference lookup from ordinary execution paths (the
+plan's other explicit Phase 10 removal item). The real gap was not
+`ModelCatalog`'s already-existing `inference_adapters_` seam (that plumbing
+was correct but unused) -- it was that `Agent::create_config()` and its
+compaction-request counterpart called the free `LLMClient::create(model)`
+directly, which always resolves through `LLMClientRegistry::instance()`,
+completely bypassing the catalog's own collection. Fixed by adding
+`Agent::resolve_llm_client(model)` (prefers `options_.model_catalog->create_client(model)`
+when a catalog is present, falls back to the singleton only when it is not
+-- the fallback matters because plenty of tests construct a bare `Agent`
+without a catalog) and a new public `ModelCatalog::create_client(const Model&)`
+that forwards to its `inference_adapters_`. `PiciProcess::Config` gained an
+`inference_adapters` field (`shared_ptr<InferenceAdapterCollection>`, default
+null); `PiciProcess` threads it straight into `ModelCatalog`'s constructor
+instead of building a collection itself. That "instead of building it itself"
+is load-bearing, not a style choice: `pici_process.cpp` lives in `pi-core`,
+but the three real provider clients (`OpenAICompatibleClient`,
+`OpenAICodexResponsesClient`, `MuseMessagesClient`) live in `pi-http`, which
+links `pi-core` -- not the other way around -- so `PiciProcess` calling their
+registration functions directly is a link error, caught by an actual failed
+build (`undefined reference to register_openai_completions_client(InferenceAdapterCollection&)`)
+before it was reverted to this shape. The three provider registration
+functions each gained a second overload taking an explicit
+`InferenceAdapterCollection&` (alongside the pre-existing singleton-registering
+no-arg overload, kept for tests); `src/main.cpp` and `src/acp/main.cpp` --
+which link both libraries -- build the explicit collection, register the
+three real providers into it, and pass it through `PiciProcess::Config`,
+replacing their old direct `register_*_client()` singleton calls (and the
+now-unused provider-header includes those calls needed). `docs/architecture-lexicon.md`'s
+"pi-core is a link boundary" note (already present) documents exactly this
+constraint; verified by grep that no other `pi-core` file reaches across it.
+`cli/cmd_run_session.h`'s `--faux-control-socket` dev/test path still
+registers its synthetic `"faux-control"` client into the singleton against a
+freshly-built, catalog-less `ModelCatalog` -- deliberately left alone: it is
+a distinct dev-testing mode, not the ordinary execution path the plan names,
+and its single-provider catalog has no other adapters to wire explicitly.
+
+`docs/architecture-lexicon.md`'s "Review findings against the target" section
+(explicitly named in the plan's Phase 10 update list) was rewritten: every
+previously-listed deviation is resolved (confirmed by reading the actual
+current code, not assumed), except the pi-core/pi-http link-boundary item,
+called out as deliberately out of this migration's scope. `README.md`'s
+architecture-inventory table was updated: the `session/agent_session.h/.cpp`
+row (stale since Phase 6's file rename) now reads `session/session_runtime.h/.cpp`,
+`AgentTaskManager` mentions became `TaskTree`, and a new
+`process/pici_process.h/.cpp` row documents `PiciProcess` (previously
+undocumented in this table). `docs/native-vs-lua-boundary.md`,
+`docs/region-renderer.md`, `docs/faux-control.md`, and `docs/codebase_orientation.html`
+each had one present-tense reference to a removed name
+(`AgentTaskManager`/`MailboxCoordinator::reply()`/`AgentSession`) describing
+current pici behavior, not history -- fixed to the current name.
+`docs/pi-gap-analysis.md` and `docs/pici-object-archetypes.html` were left
+untouched: both are dated, explicitly-framed point-in-time
+review/comparison documents (the former compares against the separate
+`vendor/pi` TypeScript codebase's own `AgentSession`, not pici's), which is
+the "historical migration document" carve-out the plan's required grep audit
+allows, not a living reference describing current architecture.
+
+Final required grep audit
+(`rg -n 'ModelRegistry|ProviderDefinition|AuthResolver|AgentTaskManager|MailboxCoordinator|MailboxRuntime|AgentSession' src test docs README.md`
+and `rg -n '\b(manager|service|helper|handler)\b' src/core`) re-run after all
+the above: every remaining match is either a qualified unrelated symbol
+(`RequestAuthResolver`, an unrelated function-pointer typedef predating this
+migration), an explained historical/rename comment (`docs/architecture-lexicon.md`'s
+own rename table and usage-rule note, `mailbox_runtime.h`'s rename-history
+comment, `cli/session_runtime.h`'s two "used to be built ad hoc as
+`AgentSession runtime(...)`" comments explaining why `RuntimeBuildConfig`
+exists), the two intentionally-preserved review/comparison documents above,
+or a genuine framework/synchronization term (`SIGWINCH handler`, "task
+manager mutex" in error strings and comments, a utility "helper" comment) --
+none are a live public-domain object still going by an old name.
+
+Phase 10 verification: full `cmake --build build --parallel` clean; full
+`ctest --test-dir build` 46/46 passed (re-run twice: once immediately after
+the alias-rename sweeps, once after the singleton-removal wiring and doc
+edits). `make format`/`git diff --check` clean. Manual smoke checks run
+directly against the built binaries (no mocked catalog): `pi-cli --list-models`
+and `pi-cli --mode rpc` with a `{"type":"list_models"}` request both list
+every configured model correctly, including `openai-codex-responses` and
+`muse-messages` entries -- concrete proof the new explicit
+`InferenceAdapterCollection` wiring resolves real providers end-to-end, not
+just that `validate_registered_apis()` doesn't throw. Interactive CLI REPL
+model-picker, ACP session/run streaming, live mailbox delivery across two
+processes, and a real OAuth login/refresh round-trip were not exercised
+(no live TTY or real provider credentials in this environment) -- flagged
+here rather than silently claimed as verified, consistent with every prior
+phase's practice in this file. Targeted `clang-tidy` (not a full `make lint`,
+per this file's standing note on why) was run against every file with actual
+logic changes this phase (`agent.{h,cpp}`, `models.{h,cpp}`,
+`authentication.{h,cpp}`, `pici_process.{h,cpp}`, the three provider
+`.cpp`/`.h` pairs, `main.cpp`, `acp/main.cpp`); see the commit this checkpoint
+lands in for the result, since the run was still in flight when this
+paragraph was written.
 
 Preserve these unrelated untracked files: `.claude/`, `Testing/`,
 `googletest_productivity_presentation.html`, `lint-final.txt`,
 `lint-output.txt`, `scripts/failed_tool_calls.py`, `scripts/tool_error_rates.py`,
 and `tidy-fix-output.txt`.
 
-To resume, run `git status`, inspect `git log`, read `AGENTS.md`,
-`docs/object-taxonomy.md`, `docs/architecture-lexicon.md`, and the
-authoritative plan through the next phase, then run the baseline tests before
-continuing. Given how long a full `make lint` run takes on this machine
-(observed >10 minutes without finishing across the whole tree), prefer
-targeted `clang-tidy` invocations on just the phase's changed files, compared
-against the pre-phase commit the same way, over waiting on a full-repo run.
+The migration is complete. Any future work on these subsystems should start
+from `docs/object-taxonomy.md` and `docs/architecture-lexicon.md` directly --
+both now describe the actual code, not a target still being migrated toward.

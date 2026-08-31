@@ -764,15 +764,6 @@ ModelCatalog::search(std::string_view filter) const {
   return result;
 }
 
-std::vector<const Model *>
-ModelCatalog::search_models(std::string_view filter) const {
-  std::vector<const Model *> result;
-  for (const auto &entry : search(filter))
-    if (const auto *model = exact(entry.key.provider_id, entry.key.model_id))
-      result.push_back(model);
-  return result;
-}
-
 void ModelCatalog::validate_registered_apis() const {
   for (const auto &[id, provider] : providers_) {
     (void)id;
@@ -787,6 +778,11 @@ void ModelCatalog::validate_registered_apis() const {
                                " uses unregistered API '" + model.api + "'");
     }
   }
+}
+
+std::shared_ptr<LLMClient>
+ModelCatalog::create_client(const Model &model) const {
+  return inference_adapters_->get_client(model);
 }
 
 const std::vector<Model> &all_models() { return kModels; }
@@ -927,26 +923,6 @@ std::optional<Model> find_model(std::string_view spec,
     try_infer(effective_provider);
 
   return generic;
-}
-
-std::vector<const Model *> search_models(std::string_view filter) {
-  std::vector<const Model *> result;
-  auto to_lower = [](std::string s) {
-    for (char &c : s)
-      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return s;
-  };
-  std::string needle = to_lower(std::string(filter));
-  for (const auto &m : kModels) {
-    if (needle.empty()) {
-      result.push_back(&m);
-      continue;
-    }
-    std::string hay = to_lower(m.id + " " + m.provider + " " + m.name);
-    if (hay.contains(needle))
-      result.push_back(&m);
-  }
-  return result;
 }
 
 ModelCatalogView ModelCatalog::view() const {

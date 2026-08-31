@@ -1,7 +1,6 @@
 #pragma once
 
 #include "core/auth/authentication_adapter.h"
-#include "core/auth/openai_codex_oauth.h"
 #include "core/models.h"
 
 #include <map>
@@ -12,6 +11,8 @@
 #include <string_view>
 
 namespace pi::auth {
+
+class CredentialStore;
 
 class AuthError : public std::runtime_error {
 public:
@@ -29,11 +30,6 @@ public:
       std::shared_ptr<const core::ModelCatalog> catalog,
       CredentialStore &credential_store,
       std::shared_ptr<AuthenticationAdapterCollection> adapters = {});
-
-  // TODO(taxonomy-phase-10): remove. This constructor preserves the
-  // migration-era injection seam for callers that supplied an OAuth adapter.
-  Authentication(std::shared_ptr<const core::ModelCatalog> catalog,
-                 OpenAICodexOAuth oauth);
 
   std::optional<core::RequestAuth>
   resolve(std::string_view provider, std::string_view explicit_api_key = {},

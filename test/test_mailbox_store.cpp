@@ -127,7 +127,7 @@ TEST_F(MailboxStoreTest, ClaimsAcksAndResolvesSessionTargets) {
     // "Delivery converts a claimed actionable entry into agent input") --
     // the raw agents_claim Lua path calls claim() without ever building
     // agent input, so delivered_at_ms must stay unset until a caller
-    // (MailboxCoordinator's two delivery sites) explicitly calls
+    // (Mailbox's two delivery sites) explicitly calls
     // mark_delivered().
     EXPECT_TRUE(!claimed.messages.front().delivered_at_ms.has_value());
     store.mark_delivered(exact.entry_id, "workspace-a", now);

@@ -1,5 +1,7 @@
-#include "core/auth/auth_resolver.h"
+#include "core/auth/authentication.h"
 
+#include "core/auth/credential_store.h"
+#include "core/auth/openai_codex_oauth.h"
 #include "core/models.h"
 #include "support/gtest_helpers.h"
 
@@ -40,7 +42,7 @@ std::int64_t now_ms() {
 
 } // namespace
 
-TEST(AuthResolver, ProviderScopedCredentialsAndHeaders) {
+TEST(Authentication, ProviderScopedCredentialsAndHeaders) {
   pi::test::ScopedEnvironmentVariable auth_key("PICI_AUTH_TEST_A",
                                                "provider-a-key");
 
@@ -60,7 +62,7 @@ TEST(AuthResolver, ProviderScopedCredentialsAndHeaders) {
   auto registry = std::make_shared<const core::ModelCatalog>(
       std::map<std::string, core::ProviderConfig>{{"provider-a", provider_a},
                                                   {"provider-b", provider_b}});
-  auth::AuthResolver resolver(registry);
+  auth::Authentication resolver(registry);
   const auto a = resolver.resolve("provider-a");
   ASSERT_THAT(a, Optional(Field(&core::RequestAuth::bearer_token,
                                 Optional(StrEq("provider-a-key")))));
@@ -87,39 +89,39 @@ TEST(AuthResolver, ProviderScopedCredentialsAndHeaders) {
                                    Pair("x-test", "new")));
 }
 
-TEST(AuthResolver, NoAuthPolicyReturnsNoRequestCredential) {
+TEST(Authentication, NoAuthPolicyReturnsNoRequestCredential) {
   auto registry = registry_with_auth(core::ProviderAuthPolicy::none);
-  auth::AuthResolver resolver(registry);
+  auth::Authentication resolver(registry);
 
   EXPECT_FALSE(resolver.resolve("test-provider").has_value());
   EXPECT_EQ(resolver.availability("test-provider"),
             auth::AuthAvailability::not_required);
 }
 
-TEST(AuthResolver, OptionalAuthWithoutCredentialIsNotRequired) {
+TEST(Authentication, OptionalAuthWithoutCredentialIsNotRequired) {
   auto registry = registry_with_auth(core::ProviderAuthPolicy::optional);
-  auth::AuthResolver resolver(registry);
+  auth::Authentication resolver(registry);
 
   EXPECT_FALSE(resolver.resolve("test-provider").has_value());
   EXPECT_EQ(resolver.availability("test-provider"),
             auth::AuthAvailability::not_required);
 }
 
-TEST(AuthResolver, RequiredAuthWithoutCredentialIsMissing) {
+TEST(Authentication, RequiredAuthWithoutCredentialIsMissing) {
   auto registry = registry_with_auth(core::ProviderAuthPolicy::required);
-  auth::AuthResolver resolver(registry);
+  auth::Authentication resolver(registry);
 
   EXPECT_EQ(resolver.availability("test-provider"),
             auth::AuthAvailability::missing);
   EXPECT_THROW(resolver.resolve("test-provider"), auth::AuthError);
 }
 
-TEST(AuthResolver, EnvironmentCredentialIsSnapshottedAtConstruction) {
+TEST(Authentication, EnvironmentCredentialIsSnapshottedAtConstruction) {
   pi::test::ScopedEnvironmentVariable environment("PICI_AUTH_SNAPSHOT",
                                                   "captured-value");
   auto registry = registry_with_auth(core::ProviderAuthPolicy::required,
                                      "PICI_AUTH_SNAPSHOT");
-  auth::AuthResolver resolver(registry);
+  auth::Authentication resolver(registry);
   ::unsetenv("PICI_AUTH_SNAPSHOT");
 
   const auto resolved = resolver.resolve("test-provider");
@@ -129,7 +131,7 @@ TEST(AuthResolver, EnvironmentCredentialIsSnapshottedAtConstruction) {
   EXPECT_EQ(resolved->source, "config-environment");
 }
 
-TEST(AuthResolver, OAuthAvailabilityIsProviderScoped) {
+TEST(Authentication, OAuthAvailabilityIsProviderScoped) {
   pi::test::TemporaryDirectory directory{"pici-auth-resolver"};
   auth::CredentialStore store(directory.path() / "auth.json");
   store.modify_oauth(
@@ -141,9 +143,8 @@ TEST(AuthResolver, OAuthAvailabilityIsProviderScoped) {
                                   .account_id = "account"}};
       });
 
-  auth::OpenAICodexOAuth oauth(std::move(store));
-  auth::AuthResolver resolver(std::make_shared<const core::ModelCatalog>(),
-                              std::move(oauth));
+  auth::Authentication resolver(std::make_shared<const core::ModelCatalog>(),
+                              store);
 
   EXPECT_EQ(resolver.availability("openai-codex"),
             auth::AuthAvailability::configured);
@@ -155,7 +156,7 @@ TEST(AuthResolver, OAuthAvailabilityIsProviderScoped) {
   EXPECT_EQ(resolved->bearer_token, std::optional<std::string>{"access"});
 }
 
-TEST(AuthResolver, OAuthRefreshHonorsCancellation) {
+TEST(Authentication, OAuthRefreshHonorsCancellation) {
   pi::test::TemporaryDirectory directory{"pici-auth-resolver-cancel"};
   auth::CredentialStore store(directory.path() / "auth.json");
   store.modify_oauth(
@@ -167,9 +168,8 @@ TEST(AuthResolver, OAuthRefreshHonorsCancellation) {
                                   .account_id = "account"}};
       });
 
-  auth::OpenAICodexOAuth oauth(std::move(store));
-  auth::AuthResolver resolver(std::make_shared<const core::ModelCatalog>(),
-                              std::move(oauth));
+  auth::Authentication resolver(std::make_shared<const core::ModelCatalog>(),
+                              store);
   std::stop_source stop_source;
   stop_source.request_stop();
 

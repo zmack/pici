@@ -207,7 +207,7 @@ inline std::string format_tokens(std::uint64_t n) {
 inline std::string format_model_catalog(
     std::string_view filter,
     const std::shared_ptr<const core::ModelCatalog> &registry) {
-  auto hits = registry->search_models(filter);
+  auto hits = registry->search(filter);
   if (hits.empty()) {
     if (!filter.empty())
       return "No models matching \"" + std::string(filter) + "\"\n";
@@ -218,11 +218,11 @@ inline std::string format_model_catalog(
   std::size_t wid = 5;
   std::size_t wctx = 7;
   std::size_t wmax = 7;
-  for (const auto *m : hits) {
-    wprov = std::max(wprov, m->provider.size());
-    wid = std::max(wid, m->id.size());
-    wctx = std::max(wctx, format_tokens(m->context_window).size());
-    wmax = std::max(wmax, format_tokens(m->max_tokens).size());
+  for (const auto &entry : hits) {
+    wprov = std::max(wprov, entry.key.provider_id.size());
+    wid = std::max(wid, entry.key.model_id.size());
+    wctx = std::max(wctx, format_tokens(entry.context_window).size());
+    wmax = std::max(wmax, format_tokens(entry.max_tokens).size());
   }
 
   std::ostringstream out;
@@ -236,12 +236,13 @@ inline std::string format_model_catalog(
         << reason << img << "\n";
   };
   row("provider", "model", "context", "max-out", "thinking", "images");
-  for (const auto *m : hits) {
-    const bool has_image = std::ranges::find(m->input_capabilities, "image") !=
-                           m->input_capabilities.end();
-    row(m->provider, m->id, format_tokens(m->context_window),
-        format_tokens(m->max_tokens), m->reasoning ? "yes" : "no",
-        has_image ? "yes" : "no");
+  for (const auto &entry : hits) {
+    const bool has_image =
+        std::ranges::find(entry.input_capabilities, "image") !=
+        entry.input_capabilities.end();
+    row(entry.key.provider_id, entry.key.model_id,
+        format_tokens(entry.context_window), format_tokens(entry.max_tokens),
+        entry.reasoning ? "yes" : "no", has_image ? "yes" : "no");
   }
   return out.str();
 }
@@ -791,7 +792,7 @@ format_ascii_table(const std::vector<std::string> &headers,
 // content-block kind, for the root session plus every live child task.
 inline std::string
 format_memory_composition(const core::SessionRuntime &session,
-                          const core::AgentTaskManager &tasks) {
+                          const core::TaskTree &tasks) {
   struct Row {
     std::string label;
     core::SessionCompositionReport report;
@@ -828,7 +829,7 @@ format_memory_composition(const core::SessionRuntime &session,
 // unattributed "shared" remainder and process-level totals. Requires
 // jemalloc as the active global allocator; callers check
 // memory_stats_available() first.
-inline std::string format_memory_heap(const core::AgentTaskManager &tasks) {
+inline std::string format_memory_heap(const core::TaskTree &tasks) {
   const auto heaps = tasks.heap_reports();
   if (heaps.empty())
     return {};
@@ -871,7 +872,7 @@ inline std::string format_memory_heap(const core::AgentTaskManager &tasks) {
 }
 
 inline std::string format_memory(const core::SessionRuntime &session,
-                                 const core::AgentTaskManager &tasks) {
+                                 const core::TaskTree &tasks) {
   std::string out = "Memory\n======\n";
   if (core::memory_stats_available())
     out += format_memory_heap(tasks);
@@ -1249,9 +1250,8 @@ private:
   // field; split out of configure_hooks() purely to shrink that function's
   // branch count, with no behavior change.
 
-  void
-  bind_run_agent(core::LuaHooks::AgentInfo &info,
-                 const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+  void bind_run_agent(core::LuaHooks::AgentInfo &info,
+                      const std::shared_ptr<core::TaskTree> &task_manager) {
     info.run_agent = [task_manager,
                       this](const core::LuaHooks::AgentRunConfig &cfg)
         -> core::LuaHooks::AgentRunResult {
@@ -1309,9 +1309,9 @@ private:
     };
   }
 
-  static void bind_agent_spawn(
-      core::LuaHooks::AgentInfo &info,
-      const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+  static void
+  bind_agent_spawn(core::LuaHooks::AgentInfo &info,
+                   const std::shared_ptr<core::TaskTree> &task_manager) {
     info.agents.spawn = [task_manager](const nlohmann::json &v) {
       try {
         core::SpawnAgentRequest request;
@@ -1340,7 +1340,7 @@ private:
 
   static void
   bind_agent_get(core::LuaHooks::AgentInfo &info,
-                 const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+                 const std::shared_ptr<core::TaskTree> &task_manager) {
     info.agents.get = [task_manager](const nlohmann::json &v) {
       try {
         const auto target = v.value("target", v.value("id", std::string{}));
@@ -1359,7 +1359,7 @@ private:
 
   static void
   bind_agent_list(core::LuaHooks::AgentInfo &info,
-                  const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+                  const std::shared_ptr<core::TaskTree> &task_manager) {
     info.agents.list = [task_manager](const nlohmann::json &v) {
       nlohmann::json values = nlohmann::json::array();
       const auto prefix = v.value("path_prefix", std::string{});
@@ -1371,9 +1371,9 @@ private:
     };
   }
 
-  static void bind_agent_queue(
-      core::LuaHooks::AgentInfo &info,
-      const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+  static void
+  bind_agent_queue(core::LuaHooks::AgentInfo &info,
+                   const std::shared_ptr<core::TaskTree> &task_manager) {
     auto queue_binding = [task_manager](const nlohmann::json &v,
                                         bool follow_up) {
       try {
@@ -1396,9 +1396,9 @@ private:
     };
   }
 
-  static void bind_agent_interrupt(
-      core::LuaHooks::AgentInfo &info,
-      const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+  static void
+  bind_agent_interrupt(core::LuaHooks::AgentInfo &info,
+                       const std::shared_ptr<core::TaskTree> &task_manager) {
     info.agents.interrupt = [task_manager](const nlohmann::json &v) {
       try {
         const auto reason = v.value("reason", std::string("parent"));
@@ -1421,7 +1421,7 @@ private:
 
   static void
   bind_agent_wait(core::LuaHooks::AgentInfo &info,
-                  const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+                  const std::shared_ptr<core::TaskTree> &task_manager) {
     info.agents.wait = [task_manager](const nlohmann::json &v) {
       try {
         core::AgentWaitRequest request;
@@ -1446,9 +1446,9 @@ private:
     };
   }
 
-  static void bind_agent_close(
-      core::LuaHooks::AgentInfo &info,
-      const std::shared_ptr<core::AgentTaskManager> &task_manager) {
+  static void
+  bind_agent_close(core::LuaHooks::AgentInfo &info,
+                   const std::shared_ptr<core::TaskTree> &task_manager) {
     info.agents.close = [task_manager](const nlohmann::json &v) {
       try {
         return snapshot_json(

@@ -257,14 +257,14 @@ public:
   ModelResolution resolve(const ModelSelection &selection) const;
   std::vector<ModelCatalogEntry> search(std::string_view filter) const;
 
-  // TODO(taxonomy-phase-10): remove. Pointer-returning search is a
-  // migration seam for the pre-catalog picker and will be replaced in Phase
-  // 9 by a value-based picker boundary.
-  std::vector<const Model *> search_models(std::string_view filter) const;
-
   // Call after all LLM clients have registered. Throws one actionable error
   // for the first effective model whose API ID is not registered.
   void validate_registered_apis() const;
+
+  // Resolves a model's API ID against this catalog's own inference-adapter
+  // collection, so callers holding a ModelCatalog never need to reach
+  // LLMClientRegistry::instance() directly.
+  std::shared_ptr<class LLMClient> create_client(const Model &model) const;
 
   std::vector<ProviderRefreshStatus>
   refresh(const std::vector<std::string> &provider_ids = {},
@@ -292,14 +292,6 @@ private:
   void rebuild_from_reports();
 };
 
-// TODO(taxonomy-phase-10): remove. This alias keeps downstream integrations
-// source-compatible while all repository code uses the target aggregate name.
-using ModelRegistry = ModelCatalog;
-
-// TODO(taxonomy-phase-10): remove. ProviderDefinition was the migration-era
-// name for the catalog-owned Provider value.
-using ProviderDefinition = Provider;
-
 // All models in the built-in registry.
 const std::vector<Model> &all_models();
 
@@ -307,8 +299,4 @@ const std::vector<Model> &all_models();
 // provider_hint is used when the spec has no "/" prefix.
 std::optional<Model> find_model(std::string_view spec,
                                 std::string_view provider_hint = "");
-
-// Return models whose id or provider contains filter (case-insensitive).
-// Empty filter returns all models.
-std::vector<const Model *> search_models(std::string_view filter);
 } // namespace pi::core

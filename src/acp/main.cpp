@@ -4,6 +4,7 @@
 #include "cli/session_runtime.h"
 #include "cli/system_prompt.h"
 #include "core/builtin_tools.h"
+#include "core/llm_client.h"
 #include "core/lua_tool.h"
 #include "core/message_types.h"
 #include "core/models.h"
@@ -31,6 +32,19 @@
 
 namespace {
 
+// pi-core cannot link pi-http's provider implementations, so the executable
+// (which links both) builds PiciProcess's explicit inference-adapter
+// collection here instead of letting ModelCatalog fall back to the
+// LLMClientRegistry singleton (plans/object-taxonomy-migration.md Phase 10).
+std::shared_ptr<pi::core::InferenceAdapterCollection>
+build_inference_adapters() {
+  auto adapters = std::make_shared<pi::core::InferenceAdapterCollection>();
+  pi::core::register_openai_completions_client(*adapters);
+  pi::core::register_openai_codex_responses_client(*adapters);
+  pi::core::register_muse_messages_client(*adapters);
+  return adapters;
+}
+
 void print_usage(const char *prog) {
   std::cout << "Usage: " << prog
             << " [--port <n>] [--model <id>] [--provider <name>]"
@@ -49,10 +63,6 @@ int main(int argc, char *argv[]) noexcept {
               [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
   std::signal(SIGTERM,
               [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
-
-  pi::core::register_openai_completions_client();
-  pi::core::register_openai_codex_responses_client();
-  pi::core::register_muse_messages_client();
 
   // Parse shared CLI flags
   auto args = pi::cli::load_and_merge(argc, argv);
@@ -124,6 +134,7 @@ int main(int argc, char *argv[]) noexcept {
     process.emplace(pi::core::PiciProcess::Config{
         .providers = configured,
         .session_dir = args.session_dir,
+        .inference_adapters = build_inference_adapters(),
     });
   } catch (const std::exception &error) {
     std::cerr << "error: " << error.what() << "\n";

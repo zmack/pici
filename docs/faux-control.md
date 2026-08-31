@@ -146,7 +146,7 @@ without a real mailbox database:
 tool's scripted execution actually finishes and only when `result.is_error`
 is `false` or omitted — a failed or cancelled tool call never emits it,
 mirroring the real `pici.mailbox.reply` binding, which only calls the
-presentation callback after `MailboxCoordinator::reply()` returns a queued
+presentation callback after `Mailbox::reply()` returns a queued
 receipt. The notice reaches the renderer as a `tool_presentation` event (see
 [Implementation map](#implementation-map)) and, under `--render region`,
 paints a persistent `REPLY -> <recipient> queued` block rather than being
@@ -201,7 +201,7 @@ A mailbox example is:
 ```
 
 Malformed prompt objects or source metadata receive a protocol error response.
-A supplied prompt runs through `AgentSession::run_messages`; the legacy form
+A supplied prompt runs through `SessionRuntime::run_messages`; the legacy form
 continues to use the empty synthetic prompt for compatibility. A second `turn`
 while one is active is rejected.
 

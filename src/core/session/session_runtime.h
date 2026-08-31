@@ -42,7 +42,7 @@ namespace pi::core {
 // child SessionRuntime::Config) and a child-agent Agent::Options whose
 // system_prompt typically isn't finalized until the frontend has registered
 // tools on the live agent. The constructor builds the Agent and the
-// (unconnected, possibly disabled) MailboxRuntime -- neither needs finalized
+// (unconnected, possibly disabled) MailboxAttachment -- neither needs finalized
 // options -- and activate() builds the TaskTree, attaches it to agent_, and
 // connects the mailbox runtime to it once the caller is ready. A
 // SessionRuntime that never calls activate() simply has no task tree
@@ -71,9 +71,9 @@ public:
     SandboxPolicyPtr sandbox_policy;
     AutoCompactionConfig auto_compaction;
     // Optional: constructs the owned (unconnected until activate())
-    // MailboxRuntime. Null for every capability-gated caller (ACP always
+    // MailboxAttachment. Null for every capability-gated caller (ACP always
     // passes null here; see SessionRuntimeCapabilities::enable_mailbox).
-    std::shared_ptr<MailboxCoordinator> mailbox;
+    std::shared_ptr<Mailbox> mailbox;
     // Optional: lets set_model() reject a switch to a provider with missing
     // authentication itself, instead of every frontend duplicating that
     // check before calling in. A callback rather than a
@@ -180,15 +180,14 @@ public:
   // SessionRuntime::Config. Finishes wiring mailbox_runtime() in place. Must
   // be called at most once; calling it twice on the same SessionRuntime is a
   // caller bug (throws std::logic_error).
-  void activate(Agent::Options child_options,
-                AgentTaskManager::Limits limits = {},
-                AgentTaskManager::ChildWriteTools child_write_tools =
-                    AgentTaskManager::ChildWriteTools::none,
+  void activate(Agent::Options child_options, TaskTree::Limits limits = {},
+                TaskTree::ChildWriteTools child_write_tools =
+                    TaskTree::ChildWriteTools::none,
                 AgentTaskEventCallback extra_task_event_callback = {},
                 std::function<void()> wake_root = {});
 
-  MailboxRuntime &mailbox_runtime() { return mailbox_runtime_; }
-  const MailboxRuntime &mailbox_runtime() const { return mailbox_runtime_; }
+  MailboxAttachment &mailbox_runtime() { return mailbox_runtime_; }
+  const MailboxAttachment &mailbox_runtime() const { return mailbox_runtime_; }
 
 private:
   void activate_session_state(std::string session_id,
@@ -236,7 +235,7 @@ private:
   // agent_'s own teardown reaches its owned TaskTree, or mailbox delivery
   // could reach a closing task tree mid-teardown -- see
   // core/session/mailbox_runtime.h's "declare it after SessionRuntime and
-  // before AgentTaskManager" comment and the "Destruction follows inverse
+  // before TaskTree" comment and the "Destruction follows inverse
   // dependency order" note in docs/architecture-lexicon.md. Since Phase 7
   // moved the task tree inside agent_ (declared first, so ordinarily
   // destroyed LAST among these members -- after mailbox_runtime_, not
@@ -246,7 +245,7 @@ private:
   // preserve that ordering. Do not remove that explicit call without
   // re-checking this constraint: getting it wrong fails silently at
   // teardown, not at compile time.
-  MailboxRuntime mailbox_runtime_;
+  MailboxAttachment mailbox_runtime_;
 };
 
 } // namespace pi::core

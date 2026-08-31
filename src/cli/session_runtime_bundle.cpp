@@ -4,12 +4,12 @@
 // build_agent_session_config), because they're the only functions here
 // that call cli::resolve_mailbox_launch_options() (the thin Args-dependent
 // adapter left behind in cli/mailbox_runtime.h/.cpp after Phase 3
-// relocated the Args-independent core::MailboxRuntime type itself into
+// relocated the Args-independent core::MailboxAttachment type itself into
 // core/session/mailbox_runtime.h). Keeping them apart means pi-acp (which
 // only needs the frontend-shared pieces; see cli/session_runtime.h's file
 // comment on the capability-scope decision) doesn't have to link
 // src/cli/mailbox_runtime.cpp just to satisfy the linker for code it
-// never calls -- it still gets core::MailboxRuntime for free via pi-core.
+// never calls -- it still gets core::MailboxAttachment for free via pi-core.
 
 #include "cli/session_runtime.h"
 
@@ -137,18 +137,18 @@ RuntimeBundle open_runtime_bundle(const RuntimeBuildConfig &config) {
   }
   auto sandbox_policy = std::make_shared<core::SandboxPolicy>(sandbox_mode);
 
-  auto child_write_tools = core::AgentTaskManager::ChildWriteTools::none;
+  auto child_write_tools = core::TaskTree::ChildWriteTools::none;
   if (config.args.agent_write_tools == "core")
-    child_write_tools = core::AgentTaskManager::ChildWriteTools::core;
+    child_write_tools = core::TaskTree::ChildWriteTools::core;
   else if (config.args.agent_write_tools == "all")
-    child_write_tools = core::AgentTaskManager::ChildWriteTools::all;
+    child_write_tools = core::TaskTree::ChildWriteTools::all;
   else if (!config.args.agent_write_tools.empty() &&
            config.args.agent_write_tools != "none")
     return fail("invalid agents.write_tools value \"" +
                 config.args.agent_write_tools + "\"; valid: none, core, all");
 
   std::optional<std::string> warning;
-  if (child_write_tools == core::AgentTaskManager::ChildWriteTools::all &&
+  if (child_write_tools == core::TaskTree::ChildWriteTools::all &&
       sandbox_mode == core::SandboxMode::disabled)
     warning = "agents.write_tools=all with sandboxing disabled; child "
               "agents get unrestricted bash access";
@@ -181,7 +181,7 @@ RuntimeBundle open_runtime_bundle(const RuntimeBuildConfig &config) {
     }
   }
 
-  std::shared_ptr<core::MailboxCoordinator> mailbox;
+  std::shared_ptr<core::Mailbox> mailbox;
   if (config.capabilities.enable_mailbox && config.args.mailbox_enabled) {
     try {
       const auto launch = resolve_mailbox_launch_options(
@@ -249,9 +249,8 @@ void activate_runtime_bundle(
     core::AgentTaskEventCallback extra_task_event_callback,
     std::function<void()> wake_root) {
   bundle.runtime->activate(
-      bundle.agent_options, core::AgentTaskManager::Limits{},
-      bundle.child_write_tools, std::move(extra_task_event_callback),
-      std::move(wake_root));
+      bundle.agent_options, core::TaskTree::Limits{}, bundle.child_write_tools,
+      std::move(extra_task_event_callback), std::move(wake_root));
 }
 
 } // namespace pi::cli

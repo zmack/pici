@@ -137,7 +137,7 @@ point where delivery is actually confirmed:
 
 ```text
 pici.mailbox.reply native binding
-  -> only after MailboxCoordinator::reply() returns its receipt
+  -> only after Mailbox::reply() returns its receipt
   -> ToolExecutionContext::on_presentation callback
   -> ToolPresentationEvent (AgentEvent) on the thread-safe event queue
   -> dispatch_event()
@@ -161,7 +161,7 @@ existing actor and stop-token guards, so Lua-defined mailbox tools (the
 `agents_reply` bundled in `addons/mailbox.lua`) can reach it through
 `pici.mailbox.reply(...)` without any Lua code choosing when the notice
 fires — that decision stays entirely on the C++ side, next to the actual
-`MailboxCoordinator::reply()` call.
+`Mailbox::reply()` call.
 
 ## Core owns structure; Lua owns tool presentation
 
@@ -242,7 +242,7 @@ whether the user cancelled or made a selection.
   reclassification, tool call-order preservation, the reply block, and
   narrow/tiny terminal sizing.
 - `test/test_faux_control_mode.cpp` drives the real event path
-  (`AgentSession` → `dispatch_event()`) deterministically, including the
+  (`SessionRuntime` → `dispatch_event()`) deterministically, including the
   ordinary out-of-order-tools scenario and the mailbox queued-reply scenario
   described in [faux control renderer testing](faux-control.md).
 - Terminal-level verification (tmux snapshots at fixed sizes, ANSI cells,

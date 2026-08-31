@@ -101,7 +101,7 @@ AgentTaskEventCallback MailboxAttachment::task_event_callback() const {
 }
 
 void MailboxAttachment::connect(SessionRuntime &root,
-                                const std::shared_ptr<AgentTaskManager> &tasks,
+                                const std::shared_ptr<TaskTree> &tasks,
                                 std::function<void()> wake_root) {
   if (!coordinator_ || connected_)
     return;
@@ -124,7 +124,7 @@ void MailboxAttachment::connect(SessionRuntime &root,
           coordinator->unregister_subagent(key, task_id);
       });
 
-  const std::weak_ptr<AgentTaskManager> weak_tasks = tasks;
+  const std::weak_ptr<TaskTree> weak_tasks = tasks;
   delivery_ = std::make_shared<MailboxDeliveryTargets>();
   delivery_->root = [&root](std::vector<AgentInput> messages) {
     root.agent().steer_envelopes(std::move(messages));

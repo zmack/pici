@@ -879,6 +879,13 @@ void pi::core::register_openai_completions_client() {
       [] { return std::make_shared<pi::core::OpenAICompatibleClient>(); });
 }
 
+void pi::core::register_openai_completions_client(
+    InferenceAdapterCollection &adapters) {
+  adapters.register_adapter("openai-completions", [] {
+    return std::make_shared<pi::core::OpenAICompatibleClient>();
+  });
+}
+
 namespace {
 // NOLINTNEXTLINE(bugprone-throwing-static-initialization)
 const bool registered = [] {

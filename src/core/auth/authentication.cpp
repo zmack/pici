@@ -97,13 +97,6 @@ Authentication::Authentication(
   }
 }
 
-Authentication::Authentication(
-    std::shared_ptr<const core::ModelCatalog> catalog, OpenAICodexOAuth oauth)
-    : Authentication(std::move(catalog)) {
-  register_adapter("openai-codex-oauth",
-                   std::make_shared<OpenAICodexOAuth>(std::move(oauth)));
-}
-
 void Authentication::register_adapter(
     std::string adapter_id, AuthenticationAdapterCollection::Adapter adapter) {
   adapters_->register_adapter(std::move(adapter_id), std::move(adapter));

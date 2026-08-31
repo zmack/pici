@@ -687,12 +687,12 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-faux_control PRIVATE pi-core)
     add_test(NAME test-faux_control COMMAND test-faux_control)
 
-    add_executable(test-auth_resolver test/test_auth_resolver.cpp)
+    add_executable(test-authentication_resolution test/test_authentication_resolution.cpp)
     add_executable(test-authentication test/test_authentication.cpp)
     target_link_libraries(test-authentication PRIVATE pi-http)
     add_test(NAME test-authentication COMMAND test-authentication)
-    target_link_libraries(test-auth_resolver PRIVATE pi-http)
-    add_test(NAME test-auth_resolver COMMAND test-auth_resolver)
+    target_link_libraries(test-authentication_resolution PRIVATE pi-http)
+    add_test(NAME test-authentication_resolution COMMAND test-authentication_resolution)
 
     add_executable(test-model_catalog test/test_model_catalog.cpp)
     target_link_libraries(test-model_catalog PRIVATE pi-core)
@@ -886,7 +886,7 @@ if(PI_CPP_BUILD_TESTS)
         test-stream test-tool_validation test-builtin_tools test-apply_patch
         test-lua_tool test-markdown test-terminal test-skills test-memory_stats
         test-subagent-activity test-subagent-panel test-region-renderer
-        test-faux_client test-faux_control test-auth_resolver test-authentication
+        test-faux_client test-faux_control test-authentication_resolution test-authentication
         test-model_catalog test-pici_process test-openai_completions test-muse_messages test-config
         test-mailbox-runtime test-mailbox-store test-mailbox-coordinator
         test-mailbox-bindings test-credential_store test-openai_codex_oauth

@@ -162,7 +162,7 @@ private:
   int calls_{0}; // per-instance; share one instance to count across turns
 };
 
-AgentTaskSnapshot wait_terminal(AgentTaskManager &manager,
+AgentTaskSnapshot wait_terminal(TaskTree &manager,
                                 AgentTaskSnapshot current) {
   for (int attempts = 0; attempts < 5; ++attempts) {
     if (current.status == AgentTaskStatusKind::completed ||
@@ -199,16 +199,16 @@ void register_scripted_client(std::string provider,
                                                 [client] { return client; });
 }
 
-class AgentTaskManagerShutdown {
+class TaskTreeShutdown {
 public:
-  explicit AgentTaskManagerShutdown(AgentTaskManager &manager)
+  explicit TaskTreeShutdown(TaskTree &manager)
       : manager_(&manager) {}
 
-  AgentTaskManagerShutdown(const AgentTaskManagerShutdown &) = delete;
-  AgentTaskManagerShutdown &
-  operator=(const AgentTaskManagerShutdown &) = delete;
+  TaskTreeShutdown(const TaskTreeShutdown &) = delete;
+  TaskTreeShutdown &
+  operator=(const TaskTreeShutdown &) = delete;
 
-  ~AgentTaskManagerShutdown() {
+  ~TaskTreeShutdown() {
     if (manager_ != nullptr)
       manager_->shutdown();
   }
@@ -223,7 +223,7 @@ public:
   void release() noexcept { manager_ = nullptr; }
 
 private:
-  AgentTaskManager *manager_;
+  TaskTree *manager_;
 };
 } // namespace
 
@@ -284,9 +284,9 @@ return {}
                         addon_hooks->registered_tools.end());
   SessionRuntime identity_root(
       {.agent_options = identity_options, .tools = std::move(identity_tools)});
-  AgentTaskManager identity_manager(identity_root.agent(), default_child_factory(),
+  TaskTree identity_manager(identity_root.agent(), default_child_factory(),
                                     identity_options);
-  AgentTaskManagerShutdown identity_shutdown(identity_manager);
+  TaskTreeShutdown identity_shutdown(identity_manager);
   std::vector<AgentRuntimeIdentity> registered;
   identity_manager.set_endpoint_registration(
       [&](const AgentTaskId &task_id, const std::string &task_path,
@@ -330,10 +330,10 @@ return {}
 
   SessionRuntime write_root(
       {.agent_options = identity_options, .tools = create_coding_tools()});
-  AgentTaskManager write_manager(write_root.agent(), default_child_factory(),
-                                 identity_options, AgentTaskManager::Limits{},
-                                 {}, AgentTaskManager::ChildWriteTools::core);
-  AgentTaskManagerShutdown write_shutdown(write_manager);
+  TaskTree write_manager(write_root.agent(), default_child_factory(),
+                                 identity_options, TaskTree::Limits{},
+                                 {}, TaskTree::ChildWriteTools::core);
+  TaskTreeShutdown write_shutdown(write_manager);
   const auto write_child = write_manager.spawn({.task_name = "writer",
                                                 .prompt = "write",
                                                 .requested_tools = {"edit"},
@@ -344,9 +344,9 @@ return {}
   EXPECT_TRUE(!has_tool("write"));
   write_shutdown.shutdown();
 
-  AgentTaskManager rollback_manager(identity_root.agent(), default_child_factory(),
+  TaskTree rollback_manager(identity_root.agent(), default_child_factory(),
                                     identity_options);
-  AgentTaskManagerShutdown rollback_shutdown(rollback_manager);
+  TaskTreeShutdown rollback_shutdown(rollback_manager);
   bool unregister_called = false;
   rollback_manager.set_endpoint_registration(
       [](const AgentTaskId &, const std::string &,
@@ -367,10 +367,10 @@ return {}
   EXPECT_TRUE(rollback_manager.active_executions() == 0);
   rollback_shutdown.shutdown();
 
-  AgentTaskManager construction_manager(identity_root.agent(),
+  TaskTree construction_manager(identity_root.agent(),
                                         default_child_factory(),
                                         identity_options);
-  AgentTaskManagerShutdown construction_shutdown(construction_manager);
+  TaskTreeShutdown construction_shutdown(construction_manager);
   bool construction_unregistered = false;
   construction_manager.set_endpoint_registration(
       [](const AgentTaskId &task_id, const std::string &task_path,
@@ -412,10 +412,10 @@ TEST(AgentTasks, RejectsDuplicatePendingTaskDuringShutdown) {
         std::make_shared<std::optional<AgentRuntimeIdentity>>());
   });
   SessionRuntime concurrency_root({.agent_options = identity_options});
-  AgentTaskManager concurrency_manager(concurrency_root.agent(),
+  TaskTree concurrency_manager(concurrency_root.agent(),
                                        default_child_factory(),
                                        identity_options);
-  AgentTaskManagerShutdown concurrency_shutdown(concurrency_manager);
+  TaskTreeShutdown concurrency_shutdown(concurrency_manager);
   std::mutex registration_mutex;
   std::condition_variable registration_changed;
   bool registration_entered = false;
@@ -492,12 +492,12 @@ TEST(AgentTasks, EnforcesDirectChildCapacity) {
         std::make_shared<std::optional<AgentRuntimeIdentity>>());
   });
   SessionRuntime capacity_root({.agent_options = identity_options});
-  AgentTaskManager::Limits capacity_limits;
+  TaskTree::Limits capacity_limits;
   capacity_limits.max_direct_children = 2;
-  AgentTaskManager capacity_manager(capacity_root.agent(),
+  TaskTree capacity_manager(capacity_root.agent(),
                                     default_child_factory(), identity_options,
                                     capacity_limits);
-  AgentTaskManagerShutdown capacity_shutdown(capacity_manager);
+  TaskTreeShutdown capacity_shutdown(capacity_manager);
   std::mutex capacity_mutex;
   std::condition_variable capacity_changed;
   std::size_t capacity_entered = 0;
@@ -565,9 +565,9 @@ TEST(AgentTasks, RejectsNestedSpawnAfterParentClose) {
         std::make_shared<std::optional<AgentRuntimeIdentity>>());
   });
   SessionRuntime parent_root({.agent_options = identity_options});
-  AgentTaskManager parent_manager(parent_root.agent(), default_child_factory(),
+  TaskTree parent_manager(parent_root.agent(), default_child_factory(),
                                   identity_options);
-  AgentTaskManagerShutdown parent_shutdown(parent_manager);
+  TaskTreeShutdown parent_shutdown(parent_manager);
   std::mutex parent_mutex;
   std::condition_variable parent_changed;
   bool nested_entered = false;
@@ -638,7 +638,7 @@ TEST(AgentTasks, WaitsForUnregisterBeforeShutdown) {
         std::make_shared<std::optional<AgentRuntimeIdentity>>());
   });
   SessionRuntime unregister_root({.agent_options = identity_options});
-  AgentTaskManager unregister_manager(unregister_root.agent(),
+  TaskTree unregister_manager(unregister_root.agent(),
                                       default_child_factory(), identity_options);
   std::mutex unregister_mutex;
   std::condition_variable unregister_changed;
@@ -755,8 +755,8 @@ TEST(AgentTasks, RunsLifecycleFollowUpsAndMailboxInput) {
   Agent::Options options;
   options.model = model;
   SessionRuntime root({.agent_options = options});
-  AgentTaskManager manager(root.agent(), default_child_factory(), options);
-  AgentTaskManagerShutdown manager_shutdown(manager);
+  TaskTree manager(root.agent(), default_child_factory(), options);
+  TaskTreeShutdown manager_shutdown(manager);
   auto child = manager.spawn({.task_name = "review", .prompt = "Review"});
   EXPECT_TRUE(!child.id.empty());
   EXPECT_TRUE(child.task_path == "/root/review");
@@ -840,9 +840,9 @@ TEST(AgentTasks, InterruptsAndReusesTask) {
   Agent::Options interrupt_options;
   interrupt_options.model = interrupt_model;
   SessionRuntime interrupt_root({.agent_options = interrupt_options});
-  AgentTaskManager interrupt_manager(interrupt_root.agent(),
+  TaskTree interrupt_manager(interrupt_root.agent(),
                                      default_child_factory(), interrupt_options);
-  AgentTaskManagerShutdown interrupt_shutdown(interrupt_manager);
+  TaskTreeShutdown interrupt_shutdown(interrupt_manager);
   auto interrupted =
       interrupt_manager.spawn({.task_name = "slow", .prompt = "wait"});
   ASSERT_TRUE(pi::test::wait_until(
@@ -889,9 +889,9 @@ TEST(AgentTasks, ReportsMidTurnUsage) {
   Agent::Options usage_options;
   usage_options.model = usage_model;
   SessionRuntime usage_root({.agent_options = usage_options});
-  AgentTaskManager usage_manager(usage_root.agent(), default_child_factory(),
+  TaskTree usage_manager(usage_root.agent(), default_child_factory(),
                                  usage_options);
-  AgentTaskManagerShutdown usage_shutdown(usage_manager);
+  TaskTreeShutdown usage_shutdown(usage_manager);
   auto observed_child =
       usage_manager.spawn({.task_name = "observed", .prompt = "observe"});
 
@@ -942,7 +942,7 @@ TEST(AgentTasks, DoesNotSpliceChildResultIntoParent) {
   // Lexicon delegated-task flow step 6: "Results use task APIs or explicit
   // mailbox entries; they never silently splice into the parent transcript."
   // A child's completed result must be visible only through
-  // AgentTaskManager's own snapshot/result API, never appended to the
+  // TaskTree's own snapshot/result API, never appended to the
   // parent SessionRuntime's own message history.
   auto splice_client = std::make_shared<FauxClient>(
       std::vector{response("splice-check distinctive child output")});
@@ -955,9 +955,9 @@ TEST(AgentTasks, DoesNotSpliceChildResultIntoParent) {
   Agent::Options splice_options;
   splice_options.model = splice_model;
   SessionRuntime splice_root({.agent_options = splice_options});
-  AgentTaskManager splice_manager(splice_root.agent(), default_child_factory(),
+  TaskTree splice_manager(splice_root.agent(), default_child_factory(),
                                   splice_options);
-  AgentTaskManagerShutdown splice_shutdown(splice_manager);
+  TaskTreeShutdown splice_shutdown(splice_manager);
   EXPECT_TRUE(splice_root.agent().state().messages().size() == std::size_t{0});
   const auto splice_child = splice_manager.spawn(
       {.task_name = "splice-child", .prompt = "produce distinctive output"});

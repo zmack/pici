@@ -1,4 +1,4 @@
-// Deliberately does not construct cli::MailboxRuntime -- see
+// Deliberately does not construct cli::MailboxAttachment -- see
 // session_runtime_bundle.cpp's file comment for why that lives in a
 // separate translation unit.
 
@@ -279,7 +279,7 @@ core::SessionRuntime::Config build_agent_session_config(
     std::shared_ptr<core::SessionStore> session_store,
     core::SandboxPolicyPtr sandbox_policy, const Args &args,
     const SessionRuntimeCapabilities &capabilities,
-    std::shared_ptr<core::MailboxCoordinator> mailbox,
+    std::shared_ptr<core::Mailbox> mailbox,
     std::shared_ptr<pi::auth::Authentication> authentication) {
   core::SessionRuntime::Config config{
       .agent_options = agent_options,

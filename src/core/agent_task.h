@@ -54,7 +54,7 @@ struct SessionHeapReport {
 };
 
 // Single-pass JSON-wire-size composition of a transcript. Shared by
-// AgentTaskManager::composition_report[s]() and the root session's report
+// TaskTree::composition_report[s]() and the root session's report
 // built in main.cpp.
 SessionCompositionReport
 composition_report_for_messages(const std::vector<Message> &messages);
@@ -122,7 +122,7 @@ struct AgentTaskResult {
 };
 
 // Live context-size observability for a child task. Populated by
-// AgentTaskManager::snapshot() so a parent can watch a child's context grow
+// TaskTree::snapshot() so a parent can watch a child's context grow
 // (message bytes, last assistant-turn token usage, declared model window)
 // and decide when the child should be closed/discarded.
 struct AgentTaskContextInfo {
@@ -441,9 +441,5 @@ private:
   // the inline version it replaced.
   SpawnReservation reserve_spawn(const SpawnAgentRequest &request);
 };
-
-// TODO(taxonomy-phase-10): remove. AgentTaskManager is the migration-era
-// name; all new code must use TaskTree.
-using AgentTaskManager = TaskTree;
 
 } // namespace pi::core

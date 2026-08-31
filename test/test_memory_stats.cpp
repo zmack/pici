@@ -170,7 +170,7 @@ TEST(MemoryStats, ArenaRoundTrip) {
   // inherit_arena carries the binding onto a fresh thread. The wrap must
   // happen on the parent thread (§Design 2: "reads current_arena() at spawn
   // time, on the parent thread") — exactly how the Agent/EventStream/
-  // AgentTaskManager spawn sites use it.
+  // TaskTree spawn sites use it.
   std::optional<SessionArena> observed_on_thread;
   std::optional<SessionArena> observed_after_restore;
   auto wrapped = inherit_arena([&] { observed_on_thread = current_arena(); });
@@ -207,7 +207,7 @@ TEST(MemoryStats, HeapReportsSafety) {
   Agent::Options options;
   options.model = model;
   SessionRuntime root({.agent_options = options});
-  AgentTaskManager manager(root.agent(), default_child_factory(), options);
+  TaskTree manager(root.agent(), default_child_factory(), options);
   manager.bind_root_arena();
   manager.bind_root_arena(); // idempotent
   const auto heaps = manager.heap_reports();
@@ -266,7 +266,7 @@ TEST(MemoryStats, ChildTaskArenaAttribution) {
   Agent::Options options;
   options.model = model;
   SessionRuntime root({.agent_options = options});
-  AgentTaskManager manager(root.agent(), default_child_factory(), options);
+  TaskTree manager(root.agent(), default_child_factory(), options);
   manager.bind_root_arena(); // same call main.cpp makes before the REPL loop
 
   const auto before = manager.heap_reports();

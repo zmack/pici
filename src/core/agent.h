@@ -259,6 +259,11 @@ private:
   AgentContext create_context_snapshot() const;
   AgentLoopConfig create_loop_config();
   void process_event(const AgentEvent &event);
+  // Resolves through options_.model_catalog's own inference-adapter
+  // collection when one is supplied; falls back to the LLMClientRegistry
+  // singleton for callers (mostly tests) that construct an Agent without a
+  // catalog.
+  std::shared_ptr<class LLMClient> resolve_llm_client(const Model &model) const;
 
   // Runs `transition` while holding worker_mutex_, after verifying the
   // agent is idle: not streaming, no pending tool calls, and both

@@ -518,6 +518,12 @@ AgentContext Agent::context_snapshot() const {
   return ctx;
 }
 
+std::shared_ptr<LLMClient> Agent::resolve_llm_client(const Model &model) const {
+  if (options_.model_catalog)
+    return options_.model_catalog->create_client(model);
+  return LLMClient::create(model);
+}
+
 AgentLoopConfig Agent::create_loop_config() {
   AgentLoopConfig config;
   config.model = state_.model();
@@ -570,7 +576,7 @@ AgentLoopConfig Agent::create_loop_config() {
   config.after_tool_call = options_.after_tool_call;
 
   // Default LLM client
-  config.llm_client = LLMClient::create(config.model);
+  config.llm_client = resolve_llm_client(config.model);
 
   return config;
 }
@@ -671,7 +677,7 @@ Agent::compact(CompactionTrigger trigger) {
       state_.stop_source().request_stop();
     request.context = create_context_snapshot();
     request.snapshot_epoch = state_.transcript_epoch();
-    request.llm_client = LLMClient::create(state_.model());
+    request.llm_client = resolve_llm_client(state_.model());
     request.options = create_compaction_options();
   });
 

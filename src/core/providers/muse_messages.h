@@ -90,5 +90,9 @@ private:
 };
 
 void register_muse_messages_client();
+// Registers into an explicit collection instead of the LLMClientRegistry
+// singleton -- the seam PiciProcess uses so ordinary execution paths never
+// depend on the global registry (plans/object-taxonomy-migration.md Phase 10).
+void register_muse_messages_client(InferenceAdapterCollection &adapters);
 
 } // namespace pi::core

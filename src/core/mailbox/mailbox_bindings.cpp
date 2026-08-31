@@ -239,7 +239,7 @@ nlohmann::json message_json(const MailboxEntry &message) {
 } // namespace
 
 LuaHooks::MailboxBindings
-make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
+make_mailbox_bindings(std::weak_ptr<Mailbox> coordinator) {
   auto mailbox_weak = std::move(coordinator);
   auto mailbox_call =
       [mailbox_weak](const nlohmann::json &value,
@@ -267,11 +267,11 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
       [mailbox_call](
           const nlohmann::json &value,
           const LuaHooks::MailboxBindings::InvocationContext &context) {
-        return mailbox_call(value, context.actor,
-                            [](MailboxCoordinator &coordinator,
-                               const AgentRuntimeIdentity &actor) {
-                              return agent_json(coordinator.self(actor));
-                            });
+        return mailbox_call(
+            value, context.actor,
+            [](Mailbox &coordinator, const AgentRuntimeIdentity &actor) {
+              return agent_json(coordinator.self(actor));
+            });
       };
   result.list =
       [mailbox_call](
@@ -279,8 +279,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
           const LuaHooks::MailboxBindings::InvocationContext &context) {
         return mailbox_call(
             value, context.actor,
-            [&](MailboxCoordinator &coordinator,
-                const AgentRuntimeIdentity &actor) {
+            [&](Mailbox &coordinator, const AgentRuntimeIdentity &actor) {
               const bool include_self = get_bool(value, "include_self", false);
               const bool include_stale =
                   get_bool(value, "include_stale", false);
@@ -310,8 +309,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
           const LuaHooks::MailboxBindings::InvocationContext &context) {
         return mailbox_call(
             value, context.actor,
-            [&](MailboxCoordinator &coordinator,
-                const AgentRuntimeIdentity &actor) {
+            [&](Mailbox &coordinator, const AgentRuntimeIdentity &actor) {
               auto request = EnqueueMailboxEntryRequest{
                   .target = parse_target(value),
                   .kind = parse_kind(value, "kind", "note"),
@@ -340,8 +338,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
           const LuaHooks::MailboxBindings::InvocationContext &context) {
         return mailbox_call(
             value, context.actor,
-            [&](MailboxCoordinator &coordinator,
-                const AgentRuntimeIdentity &actor) {
+            [&](Mailbox &coordinator, const AgentRuntimeIdentity &actor) {
               const auto target = parse_target(value);
               const auto text = parse_text(value);
               const auto timeout = get_timeout(value, "timeout_ms", 30'000);
@@ -395,8 +392,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
           const LuaHooks::MailboxBindings::InvocationContext &context) {
         return mailbox_call(
             value, context.actor,
-            [&](MailboxCoordinator &coordinator,
-                const AgentRuntimeIdentity &actor) {
+            [&](Mailbox &coordinator, const AgentRuntimeIdentity &actor) {
               const auto message_id = required_string(value, "message_id");
               const auto text = parse_text(value);
               const auto receipt = coordinator.reply(
@@ -425,8 +421,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
           const LuaHooks::MailboxBindings::InvocationContext &context) {
         return mailbox_call(
             value, context.actor,
-            [&](MailboxCoordinator &coordinator,
-                const AgentRuntimeIdentity &actor) {
+            [&](Mailbox &coordinator, const AgentRuntimeIdentity &actor) {
               const auto limit = get_limit(value, "limit", 50, 50);
               const auto kinds = parse_kinds(value);
               const bool claim = get_bool(value, "claim", false);
@@ -452,8 +447,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
           const LuaHooks::MailboxBindings::InvocationContext &context) {
         return mailbox_call(
             value, context.actor,
-            [&](MailboxCoordinator &coordinator,
-                const AgentRuntimeIdentity &actor) {
+            [&](Mailbox &coordinator, const AgentRuntimeIdentity &actor) {
               const auto message_id = required_string(value, "message_id");
               const auto claim_token = required_string(value, "claim_token");
               coordinator.acknowledge(
@@ -469,7 +463,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
           const LuaHooks::MailboxBindings::InvocationContext &context) {
         return mailbox_call(
             value, context.actor,
-            [&](MailboxCoordinator &coordinator, const AgentRuntimeIdentity &) {
+            [&](Mailbox &coordinator, const AgentRuntimeIdentity &) {
               const auto timeout = get_timeout(value, "timeout_ms", 30'000);
               const auto generation = get_generation(value);
               const auto result =
@@ -490,7 +484,7 @@ make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator) {
           const LuaHooks::MailboxBindings::InvocationContext &context) {
         return mailbox_call(
             value, context.actor,
-            [](MailboxCoordinator &coordinator, const AgentRuntimeIdentity &) {
+            [](Mailbox &coordinator, const AgentRuntimeIdentity &) {
               const auto status = coordinator.status();
               return nlohmann::json{
                   {"process_id", status.process_id},

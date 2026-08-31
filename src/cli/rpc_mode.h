@@ -22,7 +22,7 @@ public:
   using Output = std::function<void(const nlohmann::json &)>;
 
   RpcMode(core::SessionRuntime &session, Output output,
-          core::AgentTaskManager *task_manager = nullptr,
+          core::TaskTree *task_manager = nullptr,
           std::shared_ptr<auth::Authentication> authentication = {});
   ~RpcMode();
 
@@ -61,7 +61,7 @@ private:
                               const std::string &type);
 
   core::SessionRuntime &session_;
-  core::AgentTaskManager *task_manager_{nullptr};
+  core::TaskTree *task_manager_{nullptr};
   std::shared_ptr<auth::Authentication> authentication_;
   Output output_;
   mutable std::mutex output_mutex_;
@@ -72,8 +72,7 @@ private:
 };
 
 int run_rpc_mode(core::SessionRuntime &session, std::istream &input,
-                 std::ostream &output,
-                 core::AgentTaskManager *task_manager = nullptr,
+                 std::ostream &output, core::TaskTree *task_manager = nullptr,
                  std::shared_ptr<auth::Authentication> authentication = {});
 
 } // namespace pi::cli

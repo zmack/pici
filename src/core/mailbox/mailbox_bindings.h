@@ -10,6 +10,6 @@
 namespace pi::core {
 
 LuaHooks::MailboxBindings
-make_mailbox_bindings(std::weak_ptr<MailboxCoordinator> coordinator);
+make_mailbox_bindings(std::weak_ptr<Mailbox> coordinator);
 
 } // namespace pi::core

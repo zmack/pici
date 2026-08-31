@@ -76,11 +76,11 @@ SessionRuntime::~SessionRuntime() {
     tree->shutdown();
 }
 
-void SessionRuntime::activate(
-    Agent::Options child_options, AgentTaskManager::Limits limits,
-    AgentTaskManager::ChildWriteTools child_write_tools,
-    AgentTaskEventCallback extra_task_event_callback,
-    std::function<void()> wake_root) {
+void SessionRuntime::activate(Agent::Options child_options,
+                              TaskTree::Limits limits,
+                              TaskTree::ChildWriteTools child_write_tools,
+                              AgentTaskEventCallback extra_task_event_callback,
+                              std::function<void()> wake_root) {
   if (agent_.task_tree())
     throw std::logic_error("SessionRuntime::activate called more than once");
 
@@ -102,7 +102,7 @@ void SessionRuntime::activate(
     });
   };
 
-  auto tree = std::make_shared<AgentTaskManager>(
+  auto tree = std::make_shared<TaskTree>(
       agent_, std::move(child_factory), std::move(child_options), limits,
       fan_out_agent_task_callbacks(std::move(task_callbacks)),
       child_write_tools);

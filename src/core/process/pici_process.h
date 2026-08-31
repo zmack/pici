@@ -1,16 +1,9 @@
 #pragma once
 
 // PiciProcess is the process composition root (docs/object-taxonomy.md): it
-// owns the process-lifetime ModelCatalog, Authentication, and SessionStore
-// instances that CLI and ACP would otherwise assemble independently. See
-// plans/object-taxonomy-migration.md Phase 5.
-//
-// Mailbox/MailboxCoordinator ownership is deliberately not here yet:
-// MailboxCoordinatorOptions requires root_agent_id and initial_session_id,
-// values only known once a specific session is opened, and moving
-// construction here first would require the multi-attachment redesign that
-// is Phase 8's job. Mailbox construction stays inside
-// cli::open_runtime_bundle() until then.
+// owns the process-lifetime ModelCatalog, Authentication, SessionStore, and
+// Mailbox instances that CLI and ACP would otherwise assemble independently.
+// See plans/object-taxonomy-migration.md Phases 5 and 8.
 
 #include "core/auth/authentication.h"
 #include "core/auth/credential_store.h"
@@ -31,6 +24,14 @@ public:
     std::map<std::string, ProviderConfig> providers;
     // Empty means "use SessionStore::default_sessions_dir()".
     std::string session_dir;
+    // Optional explicit inference-adapter bindings. pi-core cannot link
+    // pi-http's provider implementations (that would invert the library
+    // dependency), so the executable that links both -- main()/acp::main()
+    // -- builds this collection and registers the real providers into it.
+    // Null falls back to ModelCatalog's own default collection, which wraps
+    // the LLMClientRegistry singleton (kept for callers, mostly tests, that
+    // construct a PiciProcess without wiring one explicitly).
+    std::shared_ptr<InferenceAdapterCollection> inference_adapters;
   };
 
   // Throws std::runtime_error (propagated from ModelCatalog construction /

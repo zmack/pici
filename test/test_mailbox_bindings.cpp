@@ -17,12 +17,12 @@
 
 using namespace pi::core;
 
-static std::shared_ptr<MailboxCoordinator>
+static std::shared_ptr<Mailbox>
 make_coordinator(const std::filesystem::path &path, std::string process_id,
                  std::string root_agent_id, std::string session_id,
                  TimestampMs &now) {
   auto counter = std::make_shared<std::size_t>(0);
-  MailboxCoordinatorOptions options;
+  MailboxOptions options;
   options.store.path = path;
   options.store.workspace_id = "workspace";
   options.store.workspace_path = path.parent_path().string();
@@ -39,7 +39,7 @@ make_coordinator(const std::filesystem::path &path, std::string process_id,
   options.heartbeat_interval = std::chrono::hours(1);
   options.stale_after = std::chrono::hours(2);
   options.cleanup_interval = std::chrono::hours(2);
-  return std::make_shared<MailboxCoordinator>(std::move(options));
+  return std::make_shared<Mailbox>(std::move(options));
 }
 
 static bool has_error(const nlohmann::json &value, std::string_view code) {

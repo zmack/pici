@@ -1,5 +1,7 @@
 #include "core/auth/authentication.h"
 
+#include "core/auth/credential_store.h"
+#include "core/auth/openai_codex_oauth.h"
 #include "core/models.h"
 #include "support/gtest_helpers.h"
 

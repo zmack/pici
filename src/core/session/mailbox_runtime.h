@@ -4,11 +4,11 @@
 // root session, task tree, and wake callback. Per
 // docs/architecture-lexicon.md's ownership table, Mailbox is a
 // process-owned aggregate; this class is the per-session binding to it, not
-// a peer owner -- plans/object-taxonomy-migration.md Phase 8 renamed it from
-// MailboxRuntime to MailboxAttachment and fixed shutdown() to detach only
-// this session's attachment (Mailbox::detach()) instead of stopping the
-// whole shared Mailbox (Mailbox::stop()), which used to make sharing one
-// Mailbox across sessions unsafe.
+// a peer owner -- plans/object-taxonomy-migration.md Phase 8 renamed this
+// class from MailboxRuntime to MailboxAttachment and fixed shutdown() to
+// detach only this session's attachment (Mailbox::detach()) instead of
+// stopping the whole shared Mailbox (Mailbox::stop()), which used to make
+// sharing one Mailbox across sessions unsafe.
 //
 // What stays in cli::mailbox_runtime.h: resolve_mailbox_launch_options(),
 // which translates cli::Args/config into a MailboxLaunchOptions below --
@@ -74,8 +74,7 @@ public:
   std::shared_ptr<Mailbox> coordinator() const;
   AgentTaskEventCallback task_event_callback() const;
 
-  void connect(SessionRuntime &root,
-               const std::shared_ptr<AgentTaskManager> &tasks,
+  void connect(SessionRuntime &root, const std::shared_ptr<TaskTree> &tasks,
                std::function<void()> wake_root);
   void shutdown() noexcept;
 
@@ -102,9 +101,5 @@ private:
   std::shared_ptr<MailboxDeliveryTargets> delivery_;
   bool connected_{false};
 };
-
-// TODO(taxonomy-phase-10): remove. MailboxRuntime is the migration-era name;
-// all new code must use MailboxAttachment.
-using MailboxRuntime = MailboxAttachment;
 
 } // namespace pi::core

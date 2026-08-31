@@ -64,16 +64,18 @@ renderers, and other supporting files live under the same directories.
 | `agent_loop.h/.cpp` | ~1550 | Core loop: LLM call → tools → repeat; `AgentInput`/`InputProvenance` |
 | `agent.h/.cpp` | ~1020 | High-level `Agent` API: prompt, continue, steer, compact, abort |
 
-**Product runtime** (`src/core/session/`, `src/core/mailbox/`) — task and
-mailbox delivery, consolidated under `SessionRuntime` ownership by this
-migration per the lexicon's ownership table:
+**Product runtime** (`src/core/process/`, `src/core/session/`,
+`src/core/mailbox/`) — the composition root plus task and mailbox delivery,
+consolidated under `SessionRuntime` ownership per the lexicon's ownership
+table:
 
 | File(s) | Lines | Purpose |
 |---------|-------|---------|
-| `session/agent_session.h/.cpp` | ~700 | `SessionRuntime`: owns the root `Agent`, `AgentTaskManager`, and `MailboxRuntime` attachment |
-| `session/mailbox_runtime.h/.cpp` | ~300 | Attaches a `MailboxCoordinator` to a root session, task manager, and wake callback |
-| `agent_task.h/.cpp` | ~1940 | `AgentTaskManager`: subagent spawn/steer/interrupt/close, task-tree ownership |
-| `mailbox/*.h/.cpp` | ~3500 | `MailboxCoordinator`/`MailboxStore`: claim/deliver/acknowledge, SQLite-backed |
+| `process/pici_process.h/.cpp` | ~90 | `PiciProcess`: composition root owning process-lifetime `ModelCatalog`, `Authentication`, `SessionStore`, and `Mailbox` |
+| `session/session_runtime.h/.cpp` | ~700 | `SessionRuntime`: owns the root `Agent` (which owns its `TaskTree`) and a `MailboxAttachment` |
+| `session/mailbox_runtime.h/.cpp` | ~300 | Attaches a `Mailbox` to a root session, task tree, and wake callback as `MailboxAttachment` |
+| `agent_task.h/.cpp` | ~1940 | `TaskTree`: subagent spawn/steer/interrupt/close, task-tree ownership, owned by `Agent` |
+| `mailbox/*.h/.cpp` | ~3500 | `Mailbox`/`MailboxStore`: claim/deliver/acknowledge, SQLite-backed |
 
 **Frontends** — CLI, JSONL RPC, and ACP, each a thin adapter over the shared
 runtime above:

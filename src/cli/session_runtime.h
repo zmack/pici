@@ -15,7 +15,7 @@
 // construction code -- see Phase 2's capability-scope decision (option (a))
 // in the plan doc.
 //
-// core::MailboxRuntime itself relocated out of cli:: in Phase 3 (it never
+// core::MailboxAttachment itself relocated out of cli:: in Phase 3 (it never
 // depended on cli::Args). This file stays in pi::cli rather than moving to
 // core:: alongside it: RuntimeBuildConfig/AgentOptionsConfig embed
 // cli::Args by value throughout (not just in passing), and Args is a
@@ -139,7 +139,7 @@ reload_hooks(const Args &args, bool mailbox_active,
 // set; otherwise it's left at SessionRuntime::AutoCompactionConfig{}'s
 // disabled default, matching ACP's pre-existing behavior of never setting
 // it explicitly. `mailbox` constructs the runtime's owned (unconnected
-// until SessionRuntime::activate()) MailboxRuntime; leave it null for any
+// until SessionRuntime::activate()) MailboxAttachment; leave it null for any
 // capability-gated caller (ACP always does, per
 // SessionRuntimeCapabilities::enable_mailbox). `authentication`, when set,
 // lets the runtime's set_model() reject a missing-auth provider switch
@@ -151,13 +151,13 @@ core::SessionRuntime::Config build_agent_session_config(
     std::shared_ptr<core::SessionStore> session_store,
     core::SandboxPolicyPtr sandbox_policy, const Args &args,
     const SessionRuntimeCapabilities &capabilities,
-    std::shared_ptr<core::MailboxCoordinator> mailbox = {},
+    std::shared_ptr<core::Mailbox> mailbox = {},
     std::shared_ptr<pi::auth::Authentication> authentication = {});
 
 // The full CLI-shaped runtime bundle: durable session store, resolved
 // sandbox policy, an optionally-loaded/resumed session record, context
 // files, a skill catalog, and the constructed core::SessionRuntime itself
-// (which as of Phase 6 owns the Agent, AgentTaskManager, and mailbox
+// (which as of Phase 6 owns the Agent, TaskTree, and mailbox
 // attachment that used to be three separate bundle fields). Built by
 // open_runtime_bundle(); activate_runtime_bundle() finishes it once the
 // caller has registered tools and finalized the system prompt on the live
@@ -221,8 +221,8 @@ struct RuntimeBundle {
   std::shared_ptr<core::SessionStore> session_store;
   core::SandboxPolicyPtr sandbox_policy;
   std::optional<core::SessionRecord> loaded_session;
-  core::AgentTaskManager::ChildWriteTools child_write_tools{
-      core::AgentTaskManager::ChildWriteTools::none};
+  core::TaskTree::ChildWriteTools child_write_tools{
+      core::TaskTree::ChildWriteTools::none};
   std::vector<ContextFile> context_files;
   std::shared_ptr<const core::SkillCatalog> skill_catalog;
   const core::SkillCatalog *skill_catalog_ptr{nullptr};
@@ -234,15 +234,15 @@ struct RuntimeBundle {
   // cmd_run()'s pre-extraction behavior exactly: the live root Agent's
   // initial system prompt is set explicitly via
   // agent().state().set_system_prompt(...) (unaffected by this field),
-  // while this field only feeds AgentTaskManager's child-agent options.
+  // while this field only feeds TaskTree's child-agent options.
   core::Agent::Options agent_options;
   std::shared_ptr<HookRuntime> hook_runtime;
   std::shared_ptr<core::LuaHooks> hooks;
   std::vector<std::shared_ptr<core::LuaHooks>> hooks_list_saved;
 
-  // Owns the Agent, AgentTaskManager, and mailbox attachment (Phase 6
+  // Owns the Agent, TaskTree, and mailbox attachment (Phase 6
   // folded what used to be three separate bundle fields --
-  // unique_ptr<AgentSession>, MailboxRuntime, shared_ptr<AgentTaskManager>
+  // unique_ptr<AgentSession>, MailboxAttachment, shared_ptr<TaskTree>
   // -- into core::SessionRuntime itself; see that class's own
   // declaration-order comment for the construction/destruction ordering
   // constraint, which now lives inside it rather than here). Null only

@@ -4,7 +4,7 @@
 >
 > Scope: names, ownership, lifetimes, state boundaries, and subsystem interactions
 >
-> Last reviewed: 2026-08-30
+> Last reviewed: 2026-08-31
 
 > **Object-structure authority:** `docs/object-taxonomy.md` is normative for
 > object archetypes, names, ownership, state authority, and dependency
@@ -382,7 +382,7 @@ so delivery is at least once; entry IDs are deduplication keys.
 
 `delivered_at_ms`'s write-side commit point (plans/session-runtime-migration.md
 Phase 6) is `MailboxStore::mark_delivered`, called from
-`MailboxCoordinator::claim_idle_root_turn()`/`poll_inbox()` at the exact
+`Mailbox::claim_idle_root_turn()`/`poll_inbox()` at the exact
 "delivery" transition above (claimed entry -> agent input), not from `claim()`
 itself. It is overwritten on redelivery, so it reflects the most recent
 delivery attempt, not the first. `reply_to_message_id` is entry correlation,
@@ -498,26 +498,45 @@ wire compatibility where required.
 
 ## Review findings against the target
 
-The code is directionally aligned through typed messages/events, distinct
-`Agent` and `AgentState`, an extracted `SessionRuntime`, append-only
-sessions, mailbox leases/acks, task identities, provider-neutral clients, and
-the native/Lua mechanism-policy split. Main remaining deviations are:
+The code matches this document's target through plans/object-taxonomy-migration.md
+Phase 10: typed messages/events, distinct `Agent` and `AgentState`, an
+extracted `SessionRuntime`, append-only sessions, mailbox leases/acks, task
+identities, provider-neutral clients, the native/Lua mechanism-policy split,
+and every compatibility alias in the current-names table above removed.
+Concretely:
 
-- `ModelRegistry` has no provider-report refresh lifecycle or immutable
-  generation projection.
-- `ProviderDefinition` does not yet carry explicit discovery, inference, and
-  authentication bindings.
-- `AuthResolver` and Codex OAuth have not yet become the provider-bound
-  `Authentication` aggregate.
-- There is no `PiciProcess` composition root shared by frontends.
-- `SessionRuntime` still owns `AgentTaskManager`; the target `Agent` owns its
-  `TaskTree`.
-- `MailboxCoordinator` still has singular-root assumptions; the target process
-  mailbox supports multiple per-session attachments.
-- The native model selector exchanges catalog pointers and concrete models
-  instead of `ModelCatalogView` and `ModelKey` values.
-- `pi-core` is a link boundary, not a strict domain boundary. Split it only
-  after ownership is explicit.
+- `ModelCatalog` owns provider-report refresh (`refresh()`) and publishes an
+  immutable, generation-numbered projection (`ModelCatalogView`).
+- `Provider` carries explicit discovery, inference, and authentication
+  bindings (`DiscoveryBinding`/`InferenceBinding`/`AuthenticationBinding`).
+- `Authentication` is the provider-bound process aggregate; Codex OAuth is
+  registered as one of its adapters (`register_adapter("openai-codex-oauth", ...)`),
+  not an independent peer.
+- `PiciProcess` is the composition root shared by CLI and ACP; it owns
+  `ModelCatalog`, `Authentication`, `SessionStore`, and lazily one `Mailbox`.
+- `Agent` owns its `TaskTree` directly (`Agent::task_tree()`); `SessionRuntime`
+  no longer holds it.
+- `Mailbox` supports multiple per-session `MailboxAttachment`s
+  (`attach()`/`detach()`), replacing the old coordinator's singular-root
+  assumptions.
+- The native `ModelPicker` exchanges `ModelCatalogView` and `ModelKey` values,
+  not catalog pointers or concrete models.
+- `ModelCatalog` owns its own `InferenceAdapterCollection`; ordinary
+  execution paths (`main.cpp`, `src/acp/main.cpp`, threaded through
+  `PiciProcess`) register the real providers into that explicit collection
+  instead of reaching `LLMClientRegistry::instance()`. The singleton remains
+  only as a constructor default for callers -- mostly tests -- that build an
+  `Agent`/`ModelCatalog` without wiring a catalog through.
+
+One deliberately out-of-scope deviation remains:
+
+- `pi-core` is still a link boundary, not a strict domain boundary: it cannot
+  link `pi-http`'s provider implementations (`OpenAICompatibleClient`,
+  `OpenAICodexResponsesClient`, `MuseMessagesClient`), which is why the
+  executable entry points build the explicit inference-adapter collection
+  above rather than `PiciProcess` doing it internally. Split `pi-core` only
+  after this ownership is made explicit elsewhere; taxonomy migration does
+  not depend on it.
 
 ## Migration sequence
 

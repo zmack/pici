@@ -104,7 +104,7 @@ private:
 // to be — it first binds that thread to the arena captured from the calling
 // thread at wrap time, runs the callable, then restores the previous
 // binding. This is what carries a session's arena across the jthread spawn
-// chain in Agent/EventStream/AgentTaskManager. Zero-overhead passthrough
+// chain in Agent/EventStream/TaskTree. Zero-overhead passthrough
 // when memory stats are unavailable at compile time.
 template <typename F> auto inherit_arena(F &&f) {
 #if !PI_MEMSTATS_HAVE_MALLCTL

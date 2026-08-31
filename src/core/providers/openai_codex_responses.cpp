@@ -1076,4 +1076,11 @@ void register_openai_codex_responses_client() {
   });
 }
 
+void register_openai_codex_responses_client(
+    InferenceAdapterCollection &adapters) {
+  adapters.register_adapter("openai-codex-responses", [] {
+    return std::make_shared<OpenAICodexResponsesClient>();
+  });
+}
+
 } // namespace pi::core

@@ -45,7 +45,7 @@ namespace {
 //   - core::SessionStore already has its own internal mutex_ (see
 //     core/session/session_store.h) -- concurrent access across sessions
 //     was already safe without the coarse lock.
-//   - core::AgentTaskManager already self-locks internally throughout
+//   - core::TaskTree already self-locks internally throughout
 //     agent_task.cpp -- also independent of the coarse lock.
 //   - core::Agent (inside SessionRuntime) already rejects a second
 //     concurrent run against *the same instance* by throwing
@@ -408,7 +408,7 @@ make_agent_get_handler(const ServerConfig &cfg,
 }
 
 httplib::Server::Handler
-make_tasks_list_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
+make_tasks_list_handler(const std::shared_ptr<core::TaskTree> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       std::optional<std::string_view> prefix;
@@ -483,7 +483,7 @@ make_tasks_events_handler(const std::shared_ptr<TaskEventHub> &task_events) {
 }
 
 httplib::Server::Handler
-make_task_get_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
+make_task_get_handler(const std::shared_ptr<core::TaskTree> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     const auto snapshot = tasks->get(req.path_params.at("id"));
     if (!snapshot) {
@@ -497,7 +497,7 @@ make_task_get_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
 }
 
 httplib::Server::Handler
-make_task_create_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
+make_task_create_handler(const std::shared_ptr<core::TaskTree> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto snapshot = tasks->spawn(parse_spawn_request(parse_body(req)));
@@ -511,7 +511,7 @@ make_task_create_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
 }
 
 httplib::Server::Handler
-make_task_wait_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
+make_task_wait_handler(const std::shared_ptr<core::TaskTree> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto body = parse_body(req);
@@ -538,7 +538,7 @@ make_task_wait_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
 }
 
 httplib::Server::Handler
-make_task_message_handler(const std::shared_ptr<core::AgentTaskManager> &tasks,
+make_task_message_handler(const std::shared_ptr<core::TaskTree> &tasks,
                           bool follow_up) {
   return
       [tasks, follow_up](const httplib::Request &req, httplib::Response &res) {
@@ -561,8 +561,8 @@ make_task_message_handler(const std::shared_ptr<core::AgentTaskManager> &tasks,
       };
 }
 
-httplib::Server::Handler make_task_interrupt_handler(
-    const std::shared_ptr<core::AgentTaskManager> &tasks) {
+httplib::Server::Handler
+make_task_interrupt_handler(const std::shared_ptr<core::TaskTree> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto body =
@@ -580,7 +580,7 @@ httplib::Server::Handler make_task_interrupt_handler(
 }
 
 httplib::Server::Handler
-make_task_close_handler(const std::shared_ptr<core::AgentTaskManager> &tasks) {
+make_task_close_handler(const std::shared_ptr<core::TaskTree> &tasks) {
   return [tasks](const httplib::Request &req, httplib::Response &res) {
     try {
       const auto snapshot = tasks->close(req.path_params.at("id"));
@@ -818,7 +818,7 @@ void run_not_found_handler(const httplib::Request &req,
 
 void register_routes(httplib::Server &svr, const ServerConfig &cfg,
                      const std::shared_ptr<core::SessionStore> &sessions,
-                     const std::shared_ptr<core::AgentTaskManager> &tasks,
+                     const std::shared_ptr<core::TaskTree> &tasks,
                      const std::shared_ptr<TaskEventHub> &task_events) {
   const auto manifest_json = nlohmann::json(build_manifest(cfg));
 

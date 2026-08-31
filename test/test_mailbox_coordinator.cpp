@@ -50,11 +50,11 @@ MailboxErrorCode error_code(auto &&call) {
 // This file exercises enqueue/claim/route/accept/acknowledge and the
 // lease-expiry redelivery path below (search "accept_delivery = false" and
 // "idle-redelivery"). It does not exercise the retain -> cleanup tail
-// (retention-window expiry / MailboxCoordinator's cleanup_interval); that
+// (retention-window expiry / Mailbox's cleanup_interval); that
 // remains an open Phase 1 gap — see plans/session-runtime-migration.md
 // Phase 1 item 3.
 
-class MailboxCoordinatorTest : public testing::Test {
+class MailboxTest : public testing::Test {
 protected:
   pi::test::TemporaryDirectory directory{"pici-coordinator"};
   TimestampMs now{1'000};
@@ -65,9 +65,9 @@ protected:
                                  std::filesystem::perm_options::replace);
   }
 
-  MailboxCoordinatorOptions options(std::string process_id = "process-1",
+  MailboxOptions options(std::string process_id = "process-1",
                                     std::string root_agent_id = "root-agent") {
-    MailboxCoordinatorOptions result;
+    MailboxOptions result;
     result.store.path = directory.path() / "mailbox.sqlite3";
     result.store.workspace_id = "workspace";
     result.store.workspace_path = directory.path().string();
@@ -85,8 +85,8 @@ protected:
   }
 };
 
-TEST_F(MailboxCoordinatorTest, TracksRootAndSubagentLifecycle) {
-  MailboxCoordinator coordinator(options());
+TEST_F(MailboxTest, TracksRootAndSubagentLifecycle) {
+  Mailbox coordinator(options());
   bool observed = false;
   auto callbacks = fan_out_agent_task_callbacks({
       [](const AgentTaskEvent &) { throw std::runtime_error("observer"); },
@@ -157,8 +157,8 @@ TEST_F(MailboxCoordinatorTest, TracksRootAndSubagentLifecycle) {
   EXPECT_TRUE(!current_agents.front().closed_at_ms.has_value());
 }
 
-TEST_F(MailboxCoordinatorTest, DeliversAndAcknowledgesRootMessages) {
-  MailboxCoordinator coordinator(options());
+TEST_F(MailboxTest, DeliversAndAcknowledgesRootMessages) {
+  Mailbox coordinator(options());
   const auto root_b = coordinator.activate_root("session-b", "second");
   std::vector<AgentInput> delivered;
   std::vector<AgentInput> root_queue;
@@ -269,8 +269,8 @@ TEST_F(MailboxCoordinatorTest, DeliversAndAcknowledgesRootMessages) {
   delivered.back().on_accepted();
 }
 
-TEST_F(MailboxCoordinatorTest, RoutesMessagesByExactEndpoint) {
-  MailboxCoordinator coordinator(options());
+TEST_F(MailboxTest, RoutesMessagesByExactEndpoint) {
+  Mailbox coordinator(options());
   coordinator.activate_root("session-a", "first");
   coordinator.register_subagent("agent_1", "/root/child", "root");
   coordinator.register_subagent("agent_2", "/root/child/nested", "agent_1");
@@ -518,8 +518,8 @@ TEST_F(MailboxCoordinatorTest, RoutesMessagesByExactEndpoint) {
                   .status == "closed");
 }
 
-TEST_F(MailboxCoordinatorTest, ClosesTaskEndpointsOnShutdown) {
-  MailboxCoordinator coordinator(options());
+TEST_F(MailboxTest, ClosesTaskEndpointsOnShutdown) {
+  Mailbox coordinator(options());
   const auto root_b = coordinator.activate_root("session-b", "second");
   Model task_model;
   task_model.id = "task-model";
@@ -531,8 +531,8 @@ TEST_F(MailboxCoordinatorTest, ClosesTaskEndpointsOnShutdown) {
   Agent::Options task_options;
   task_options.model = task_model;
   SessionRuntime task_root({.agent_options = task_options});
-  AgentTaskManager task_manager(task_root.agent(), default_child_factory(),
-                                task_options, AgentTaskManager::Limits{},
+  TaskTree task_manager(task_root.agent(), default_child_factory(),
+                                task_options, TaskTree::Limits{},
                                 [&](const AgentTaskEvent &event) {
                                   coordinator.observe_task_event(event);
                                 });
@@ -564,7 +564,7 @@ TEST_F(MailboxCoordinatorTest, ClosesTaskEndpointsOnShutdown) {
   auto second_options = options();
   second_options.process_id = "process-2";
   second_options.root_agent_id = "root-agent-2";
-  MailboxCoordinator second_coordinator(std::move(second_options));
+  Mailbox second_coordinator(std::move(second_options));
   second_coordinator.activate_root("session-c", "third");
   coordinator.register_subagent("agent_same", "/root/same", "root");
   second_coordinator.register_subagent("agent_same", "/root/same", "root");
@@ -582,8 +582,8 @@ TEST_F(MailboxCoordinatorTest, ClosesTaskEndpointsOnShutdown) {
   second_coordinator.stop();
 }
 
-TEST_F(MailboxCoordinatorTest, MaintainsIdleRootWorkAndRedelivery) {
-  MailboxCoordinator coordinator(options());
+TEST_F(MailboxTest, MaintainsIdleRootWorkAndRedelivery) {
+  Mailbox coordinator(options());
   const auto root_b = coordinator.activate_root("session-b", "second");
   std::vector<AgentInput> delivered;
   std::vector<AgentInput> root_queue;
@@ -797,8 +797,8 @@ TEST_F(MailboxCoordinatorTest, MaintainsIdleRootWorkAndRedelivery) {
   delivered.back().on_accepted();
 }
 
-TEST_F(MailboxCoordinatorTest, RejectsStaleRootAcceptance) {
-  MailboxCoordinator coordinator(options());
+TEST_F(MailboxTest, RejectsStaleRootAcceptance) {
+  Mailbox coordinator(options());
   const auto root_b = coordinator.activate_root("session-b", "second");
   std::vector<AgentInput> delivered;
   auto delivery = std::make_shared<MailboxDeliveryTargets>();
@@ -844,8 +844,8 @@ TEST_F(MailboxCoordinatorTest, RejectsStaleRootAcceptance) {
 // directly, beyond what the single-attachment tests above already cover via
 // the default attachment.
 
-TEST_F(MailboxCoordinatorTest, MultiAttachmentRoutingIsolation) {
-  MailboxCoordinator coordinator(options());
+TEST_F(MailboxTest, MultiAttachmentRoutingIsolation) {
+  Mailbox coordinator(options());
   const auto key_a = coordinator.default_attachment();
   const auto key_b = coordinator.attach();
 
@@ -902,8 +902,8 @@ TEST_F(MailboxCoordinatorTest, MultiAttachmentRoutingIsolation) {
             std::string("session-b"));
 }
 
-TEST_F(MailboxCoordinatorTest, DetachingOneAttachmentLeavesOthersActive) {
-  MailboxCoordinator coordinator(options());
+TEST_F(MailboxTest, DetachingOneAttachmentLeavesOthersActive) {
+  Mailbox coordinator(options());
   const auto key_a = coordinator.default_attachment();
   const auto key_b = coordinator.attach();
   const auto root_a = coordinator.activate_root(key_a, "session-a", "a");
@@ -925,8 +925,8 @@ TEST_F(MailboxCoordinatorTest, DetachingOneAttachmentLeavesOthersActive) {
   coordinator.detach(key_b);
 }
 
-TEST_F(MailboxCoordinatorTest, StopDetachesEveryAttachment) {
-  auto coordinator = std::make_unique<MailboxCoordinator>(options());
+TEST_F(MailboxTest, StopDetachesEveryAttachment) {
+  auto coordinator = std::make_unique<Mailbox>(options());
   const auto key_a = coordinator->default_attachment();
   const auto key_b = coordinator->attach();
   coordinator->activate_root(key_a, "session-a", "a");

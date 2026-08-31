@@ -176,7 +176,7 @@ model_summary(const core::ModelCatalogEntry &entry,
 } // namespace
 
 RpcMode::RpcMode(core::SessionRuntime &session, Output output,
-                 core::AgentTaskManager *task_manager,
+                 core::TaskTree *task_manager,
                  std::shared_ptr<auth::Authentication> authentication)
     : session_(session), task_manager_(task_manager),
       authentication_(std::move(authentication)), output_(std::move(output)) {}
@@ -645,7 +645,7 @@ void RpcMode::wait_for_idle() {
 }
 
 int run_rpc_mode(core::SessionRuntime &session, std::istream &input,
-                 std::ostream &output, core::AgentTaskManager *task_manager,
+                 std::ostream &output, core::TaskTree *task_manager,
                  std::shared_ptr<auth::Authentication> authentication) {
   RpcMode mode(
       session,

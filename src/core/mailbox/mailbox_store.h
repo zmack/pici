@@ -37,7 +37,7 @@ public:
   std::vector<MailboxEntry> inspect(const InboxQuery &query);
   ClaimResult claim(const ClaimRequest &request);
   // Sets delivered_at_ms to `now_ms` on a claimed entry. Callers are the
-  // two MailboxCoordinator sites that convert a claimed entry into an
+  // two Mailbox sites that convert a claimed entry into an
   // AgentInput (claim_idle_root_turn(), poll_inbox()) -- per
   // docs/architecture-lexicon.md's "Delivery converts a claimed actionable
   // entry into agent input," that conversion is delivery, not claim()
