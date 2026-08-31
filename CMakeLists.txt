@@ -690,6 +690,10 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-auth_resolver PRIVATE pi-http)
     add_test(NAME test-auth_resolver COMMAND test-auth_resolver)
 
+    add_executable(test-model_catalog test/test_model_catalog.cpp)
+    target_link_libraries(test-model_catalog PRIVATE pi-core)
+    add_test(NAME test-model_catalog COMMAND test-model_catalog)
+
     add_executable(test-openai_completions test/test_openai_completions.cpp)
     target_link_libraries(test-openai_completions PRIVATE pi-http)
     add_test(NAME test-openai_completions COMMAND test-openai_completions)
@@ -700,7 +704,7 @@ if(PI_CPP_BUILD_TESTS)
 
     add_executable(test-config test/test_config.cpp src/cli/config.cpp src/cli/args.cpp)
     target_include_directories(test-config PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test-config PRIVATE tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json)
+    target_link_libraries(test-config PRIVATE pi-core tomlplusplus::tomlplusplus nlohmann_json::nlohmann_json)
     add_test(NAME test-config COMMAND test-config)
 
     add_executable(test-mailbox-runtime
@@ -870,7 +874,7 @@ if(PI_CPP_BUILD_TESTS)
         test-lua_tool test-markdown test-terminal test-skills test-memory_stats
         test-subagent-activity test-subagent-panel test-region-renderer
         test-faux_client test-faux_control test-auth_resolver
-        test-openai_completions test-muse_messages test-config
+        test-model_catalog test-openai_completions test-muse_messages test-config
         test-mailbox-runtime test-mailbox-store test-mailbox-coordinator
         test-mailbox-bindings test-credential_store test-openai_codex_oauth
         test-openai_codex_responses test-sandbox test-system_prompt test-rpc_mode

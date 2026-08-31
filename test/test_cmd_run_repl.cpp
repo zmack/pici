@@ -34,6 +34,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 using namespace pi;
@@ -51,6 +52,14 @@ public:
 std::shared_ptr<const core::ModelRegistry> empty_registry() {
   return std::make_shared<const core::ModelRegistry>(
       std::map<std::string, core::ProviderConfig>{});
+}
+
+std::shared_ptr<const core::ModelRegistry> registry_with_openai_key() {
+  core::ProviderConfig openai;
+  openai.id = "openai";
+  openai.api_key.literal = "test-openai-key";
+  return std::make_shared<const core::ModelRegistry>(
+      std::map<std::string, core::ProviderConfig>{{"openai", openai}});
 }
 
 void write_file(const std::filesystem::path &path, std::string_view content) {
@@ -102,6 +111,14 @@ protected:
   }
   static bool dispatch(CmdRunSession &session, const std::string &line) {
     return session.dispatch_line(line);
+  }
+
+  static core::Model current_model(CmdRunSession &session) {
+    return session.agent().state().model();
+  }
+  static std::optional<core::SessionRecord>
+  persisted_session(CmdRunSession &session) {
+    return session.bundle_.session_store->load(session.current_session_id_);
   }
 };
 
@@ -268,3 +285,20 @@ return {
 // /tree and /model with an empty spec (see file comment): it needs a
 // fake/scripted LLM client, a different collaborator than the Renderer
 // this file mocks, and would otherwise attempt a real network connection.
+
+TEST_F(CmdRunSessionTest, ModelCommandCommitsExplicitSelection) {
+  CmdRunSession session(make_args(), registry_with_openai_key());
+  MockRenderer *renderer = nullptr;
+  ASSERT_TRUE(bootstrap(session, &renderer));
+
+  EXPECT_CALL(*renderer, on_command_output(HasSubstr("model: openai/gpt-4o")));
+  EXPECT_FALSE(dispatch(session, "/model openai/gpt-4o"));
+  const auto &live = current_model(session);
+  EXPECT_EQ(live.provider, "openai");
+  EXPECT_EQ(live.id, "gpt-4o");
+
+  const auto persisted = persisted_session(session);
+  ASSERT_TRUE(persisted.has_value());
+  EXPECT_EQ(persisted->header.provider, "openai");
+  EXPECT_EQ(persisted->header.model, "gpt-4o");
+}

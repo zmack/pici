@@ -1,6 +1,7 @@
 #include "cli/args.h"
 
 #include "cli/config.h"
+#include "core/models.h"
 #include "support/gtest_helpers.h"
 #include <gtest/gtest.h>
 
@@ -244,6 +245,50 @@ api_key_env = "PICI_CODEX_KEY"
 )toml");
     auto config = load_config_document(p);
     EXPECT_TRUE(has_diagnostic(config, "providers.openai-codex"));
+  }
+}
+
+TEST(Config, BuiltinProviderConfigurationSnapshot) {
+  struct Snapshot {
+    const char *id;
+    const char *api;
+    const char *base_url;
+    pi::core::ProviderAuthPolicy auth;
+  };
+  const Snapshot expected[] = {
+      {"openai", "openai-completions", "https://api.openai.com/v1",
+       pi::core::ProviderAuthPolicy::required},
+      {"openai-codex", "openai-codex-responses",
+       "https://chatgpt.com/backend-api", pi::core::ProviderAuthPolicy::oauth},
+      {"deepseek", "openai-completions", "https://api.deepseek.com/v1",
+       pi::core::ProviderAuthPolicy::required},
+      {"groq", "openai-completions", "https://api.groq.com/openai/v1",
+       pi::core::ProviderAuthPolicy::required},
+      {"xai", "openai-completions", "https://api.x.ai/v1",
+       pi::core::ProviderAuthPolicy::required},
+      {"cerebras", "openai-completions", "https://api.cerebras.ai/v1",
+       pi::core::ProviderAuthPolicy::required},
+      {"openrouter", "openai-completions", "https://openrouter.ai/api/v1",
+       pi::core::ProviderAuthPolicy::required},
+      {"fireworks", "openai-completions",
+       "https://api.fireworks.ai/inference/v1",
+       pi::core::ProviderAuthPolicy::required},
+      {"google", "openai-completions",
+       "https://generativelanguage.googleapis.com/v1beta/openai",
+       pi::core::ProviderAuthPolicy::required},
+      {"meta", "muse-messages", "https://api.meta.ai",
+       pi::core::ProviderAuthPolicy::required},
+      {"meta-chat", "openai-completions", "https://api.meta.ai/v1",
+       pi::core::ProviderAuthPolicy::required},
+  };
+
+  const auto actual = pi::core::ModelRegistry::builtin_providers();
+  ASSERT_EQ(actual.size(), std::size(expected));
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    EXPECT_EQ(actual[i].id, expected[i].id);
+    EXPECT_EQ(actual[i].api, expected[i].api);
+    EXPECT_EQ(actual[i].base_url, expected[i].base_url);
+    EXPECT_EQ(actual[i].auth, expected[i].auth);
   }
 }
 

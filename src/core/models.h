@@ -2,6 +2,8 @@
 
 #include "core/message_types.h"
 
+#include <chrono>
+#include <compare>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -51,6 +53,87 @@ struct ProviderConfig {
   std::map<std::string, ConfiguredModel> model_overrides;
 };
 
+// A stable domain identity for one provider/model pair. Model IDs are opaque
+// strings: they may contain slashes (for example, OpenRouter model IDs), so
+// callers must never reconstruct this value by splitting a display string.
+struct ModelKey {
+  std::string provider_id;
+  std::string model_id;
+
+  bool operator==(const ModelKey &) const = default;
+  auto operator<=>(const ModelKey &) const = default;
+};
+
+// The immutable, provider-neutral model data that a catalog can publish to
+// UI and protocol adapters. It deliberately contains no Model pointer,
+// terminal state, JSON, or Lua value.
+struct ModelCatalogEntry {
+  ModelKey key;
+  std::string display_name;
+  std::string api;
+  bool reasoning{false};
+  std::vector<std::string> input_capabilities;
+  std::uint64_t context_window{0};
+  std::uint64_t max_tokens{0};
+
+  struct Cost {
+    double input_per_mtok{0};
+    double output_per_mtok{0};
+    double cache_read_per_mtok{0};
+    double cache_write_per_mtok{0};
+
+    bool operator==(const Cost &) const = default;
+  } cost{};
+
+  bool operator==(const ModelCatalogEntry &) const = default;
+};
+
+enum class ProviderRefreshState {
+  idle,
+  refreshing,
+  succeeded,
+  failed,
+};
+
+// Provider-scoped refresh state. A failed refresh retains the prior catalog
+// view; diagnostic is intended to tell an operator how to recover.
+struct ProviderRefreshStatus {
+  std::string provider_id;
+  ProviderRefreshState state{ProviderRefreshState::idle};
+  std::string diagnostic;
+
+  bool operator==(const ProviderRefreshStatus &) const = default;
+};
+
+// A discovery adapter reports values, never mutable catalog objects. The
+// timestamp and source revision let the catalog expose freshness without
+// leaking a provider wire DTO into the domain.
+struct ProviderModelReport {
+  std::string provider_id;
+  std::vector<ModelCatalogEntry> models;
+  std::chrono::system_clock::time_point observed_at;
+  std::string source_revision;
+
+  bool operator==(const ProviderModelReport &) const = default;
+};
+
+struct ModelCatalogView {
+  std::uint64_t generation{0};
+  std::vector<ModelCatalogEntry> entries;
+  std::vector<ProviderRefreshStatus> refresh_status;
+
+  bool operator==(const ModelCatalogView &) const = default;
+};
+
+// A request crossing the model-selection boundary. Overrides are deliberately
+// request values rather than a mutable Model, so native and future Lua
+// pickers can share this contract.
+struct ModelSelectionRequest {
+  ModelKey key;
+  std::optional<std::string> base_url;
+  std::optional<ThinkingLevel> thinking_level;
+  std::string source;
+};
 struct ProviderDefinition {
   std::string id;
   std::string api;
