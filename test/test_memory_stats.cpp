@@ -29,6 +29,19 @@
 using namespace pi::core;
 
 namespace {
+// Mirrors SessionRuntime::activate()'s production factory exactly.
+ChildSessionFactory default_child_factory() {
+  return [](ChildSessionSpec spec) {
+    return std::make_unique<SessionRuntime>(SessionRuntime::Config{
+        .agent_options = std::move(spec.agent_options),
+        .tools = std::move(spec.tools),
+        .session_store = std::move(spec.session_store),
+    });
+  };
+}
+} // namespace
+
+namespace {
 Message user_message(std::string text) {
   UserMessage message;
   message.content.emplace_back(TextContent{.text = std::move(text)});
@@ -194,7 +207,7 @@ TEST(MemoryStats, HeapReportsSafety) {
   Agent::Options options;
   options.model = model;
   SessionRuntime root({.agent_options = options});
-  AgentTaskManager manager(root, options);
+  AgentTaskManager manager(root.agent(), default_child_factory(), options);
   manager.bind_root_arena();
   manager.bind_root_arena(); // idempotent
   const auto heaps = manager.heap_reports();
@@ -253,7 +266,7 @@ TEST(MemoryStats, ChildTaskArenaAttribution) {
   Agent::Options options;
   options.model = model;
   SessionRuntime root({.agent_options = options});
-  AgentTaskManager manager(root, options);
+  AgentTaskManager manager(root.agent(), default_child_factory(), options);
   manager.bind_root_arena(); // same call main.cpp makes before the REPL loop
 
   const auto before = manager.heap_reports();

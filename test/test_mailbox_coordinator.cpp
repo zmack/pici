@@ -10,6 +10,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <source_location>
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,17 @@
 #include <unistd.h>
 
 using namespace pi::core;
+
+// Mirrors SessionRuntime::activate()'s production factory exactly.
+ChildSessionFactory default_child_factory() {
+  return [](ChildSessionSpec spec) {
+    return std::make_unique<SessionRuntime>(SessionRuntime::Config{
+        .agent_options = std::move(spec.agent_options),
+        .tools = std::move(spec.tools),
+        .session_store = std::move(spec.session_store),
+    });
+  };
+}
 
 MailboxErrorCode error_code(auto &&call) {
   try {
@@ -519,8 +531,8 @@ TEST_F(MailboxCoordinatorTest, ClosesTaskEndpointsOnShutdown) {
   Agent::Options task_options;
   task_options.model = task_model;
   SessionRuntime task_root({.agent_options = task_options});
-  AgentTaskManager task_manager(task_root, task_options,
-                                AgentTaskManager::Limits{},
+  AgentTaskManager task_manager(task_root.agent(), default_child_factory(),
+                                task_options, AgentTaskManager::Limits{},
                                 [&](const AgentTaskEvent &event) {
                                   coordinator.observe_task_event(event);
                                 });

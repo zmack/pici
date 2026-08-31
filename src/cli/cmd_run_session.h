@@ -1036,7 +1036,8 @@ public:
 
     if (args_.rpc_mode)
       return cli::run_rpc_mode(runtime(), std::cin, std::cout,
-                               runtime().task_manager().get(), authentication_);
+                               runtime().agent().task_tree().get(),
+                               authentication_);
 
     setup_interactive_session();
     build_completion_and_control_fns();
@@ -1459,7 +1460,7 @@ private:
     if (!bundle_.hooks || !bundle_.hooks->configure)
       return;
 
-    auto task_manager = runtime().task_manager();
+    auto task_manager = runtime().agent().task_tree();
     auto mailbox = runtime().mailbox_runtime().coordinator();
 
     std::vector<std::string> tool_names;
@@ -1633,7 +1634,7 @@ private:
     // §Design 2: bind the root session's arena on this (main) thread before
     // the interactive loop; everything the root session allocates from here
     // on lands in "root" rather than "shared". No-op without jemalloc.
-    runtime().task_manager()->bind_root_arena();
+    runtime().agent().task_tree()->bind_root_arena();
 
     if (sandbox_mode_ == core::SandboxMode::disabled)
       std::cerr << "[sandbox: disabled; bash runs without bubblewrap]\n";
@@ -2187,7 +2188,7 @@ private:
 
   void handle_memory_command() {
     renderer_->on_command_output(
-        format_memory(runtime(), *runtime().task_manager()));
+        format_memory(runtime(), *runtime().agent().task_tree()));
   }
 
   void handle_name_command(const std::string &line) {

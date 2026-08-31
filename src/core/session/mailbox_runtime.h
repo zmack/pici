@@ -39,12 +39,12 @@ std::shared_ptr<MailboxCoordinator>
 start_mailbox(const MailboxLaunchOptions &options);
 
 // Application-facing adapter for the native mailbox. It owns all wiring
-// between the coordinator, root session, child task manager, and REPL
-// wakeup. Declare it after SessionRuntime and before AgentTaskManager so
-// teardown closes child tasks while the mailbox observer is still
-// attached (see RuntimeBundle's field-order comment in
-// cli/session_runtime.h, which preserves this same constraint for its own
-// declaration order).
+// between the coordinator, root session, child task tree, and REPL wakeup.
+// SessionRuntime's destructor explicitly shuts its Agent's TaskTree down
+// before any of its members (this one included) destruct, so teardown
+// closes child tasks while the mailbox observer is still attached -- see
+// core/session/session_runtime.h's ~SessionRuntime() and its
+// mailbox_runtime_ declaration-order comment.
 class MailboxRuntime {
 public:
   class RootTurn {

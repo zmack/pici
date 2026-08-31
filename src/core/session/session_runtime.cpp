@@ -65,14 +65,23 @@ SessionRuntime::SessionRuntime(Config config)
   agent_.set_tools(std::move(config.tools));
 }
 
-SessionRuntime::~SessionRuntime() = default;
+SessionRuntime::~SessionRuntime() {
+  // Explicit, not implicit member order: agent_ is declared before
+  // mailbox_runtime_ (so it would ordinarily destruct AFTER it), but its
+  // owned TaskTree must close and join every child before mailbox_runtime_
+  // tears down -- see the declaration-order comment on mailbox_runtime_.
+  // TaskTree::shutdown() is idempotent, so agent_'s own destruction later
+  // redundantly (and safely) shutting it down again is harmless.
+  if (const auto &tree = agent_.task_tree())
+    tree->shutdown();
+}
 
 void SessionRuntime::activate(
     Agent::Options child_options, AgentTaskManager::Limits limits,
     AgentTaskManager::ChildWriteTools child_write_tools,
     AgentTaskEventCallback extra_task_event_callback,
     std::function<void()> wake_root) {
-  if (task_manager_)
+  if (agent_.task_tree())
     throw std::logic_error("SessionRuntime::activate called more than once");
 
   std::vector<AgentTaskEventCallback> task_callbacks;
@@ -81,12 +90,25 @@ void SessionRuntime::activate(
   if (auto callback = mailbox_runtime_.task_event_callback())
     task_callbacks.emplace_back(std::move(callback));
 
-  task_manager_ = std::make_shared<AgentTaskManager>(
-      *this, std::move(child_options), limits,
+  // Only this class knows how to complete a child's SessionRuntime::Config
+  // (TaskTree never assembles one itself). Mirrors make_task()'s pre-Phase-7
+  // Config exactly: children get agent_options/tools only, never this
+  // session's model_catalog/sandbox_policy/mailbox/auto_compaction.
+  ChildSessionFactory child_factory = [](ChildSessionSpec spec) {
+    return std::make_unique<SessionRuntime>(SessionRuntime::Config{
+        .agent_options = std::move(spec.agent_options),
+        .tools = std::move(spec.tools),
+        .session_store = std::move(spec.session_store),
+    });
+  };
+
+  auto tree = std::make_shared<AgentTaskManager>(
+      agent_, std::move(child_factory), std::move(child_options), limits,
       fan_out_agent_task_callbacks(std::move(task_callbacks)),
       child_write_tools);
+  agent_.set_task_tree(tree);
 
-  mailbox_runtime_.connect(*this, task_manager_, std::move(wake_root));
+  mailbox_runtime_.connect(*this, tree, std::move(wake_root));
 }
 
 std::optional<SessionRecord>

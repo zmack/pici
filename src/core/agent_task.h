@@ -27,6 +27,8 @@
 namespace pi::core {
 
 class SessionRuntime;
+class SessionStore;
+class ToolDefinition;
 
 // Per-content-block-kind JSON wire-size split of a session transcript
 // (plan: session-memory-stats.md §Design 3). These are escaped-JSON wire
@@ -231,7 +233,24 @@ using AgentTaskEvent =
                  AgentTaskMessageQueuedEvent, AgentTaskInterruptedEvent,
                  AgentTaskClosedEvent, ChildAgentEvent>;
 
-class AgentTaskManager {
+// Everything a child factory needs to construct one child SessionRuntime,
+// so TaskTree itself never assembles a (necessarily partial)
+// SessionRuntime::Config -- it only knows about child delegation, not
+// process/session composition (model catalog, sandbox policy, durable
+// storage) that only the owning session can resolve.
+struct ChildSessionSpec {
+  Agent::Options agent_options;
+  std::vector<std::shared_ptr<const ToolDefinition>> tools;
+  // Always null today: child sessions are in-memory only, matching every
+  // existing make_task() call. Explicit here (rather than assumed) so a
+  // future durability policy change is a factory-side decision, not a
+  // TaskTree one.
+  std::shared_ptr<SessionStore> session_store;
+};
+using ChildSessionFactory =
+    std::function<std::unique_ptr<SessionRuntime>(ChildSessionSpec)>;
+
+class TaskTree {
 public:
   enum class ChildWriteTools { none, core, all };
 
@@ -253,14 +272,19 @@ public:
       const std::optional<AgentTaskId> &)>;
   using UnregisterEndpointCallback = std::function<void(const AgentTaskId &)>;
 
-  AgentTaskManager(SessionRuntime &root, Agent::Options child_options);
-  AgentTaskManager(SessionRuntime &root, Agent::Options child_options,
-                   Limits limits, EventCallback on_event = {},
-                   ChildWriteTools child_write_tools = ChildWriteTools::none);
-  ~AgentTaskManager() noexcept;
+  // `owner` is the Agent this tree is attached to (root status/steering);
+  // `child_factory` builds each child's SessionRuntime from a
+  // ChildSessionSpec this tree assembles -- see make_task().
+  TaskTree(Agent &owner, ChildSessionFactory child_factory,
+           Agent::Options child_options);
+  TaskTree(Agent &owner, ChildSessionFactory child_factory,
+           Agent::Options child_options, Limits limits,
+           EventCallback on_event = {},
+           ChildWriteTools child_write_tools = ChildWriteTools::none);
+  ~TaskTree() noexcept;
 
-  AgentTaskManager(const AgentTaskManager &) = delete;
-  AgentTaskManager &operator=(const AgentTaskManager &) = delete;
+  TaskTree(const TaskTree &) = delete;
+  TaskTree &operator=(const TaskTree &) = delete;
 
   AgentTaskSnapshot spawn(const SpawnAgentRequest &request);
 
@@ -343,7 +367,8 @@ private:
     std::optional<AgentTaskResult> previous_result;
   };
 
-  SessionRuntime &root_;
+  Agent &owner_;
+  ChildSessionFactory child_factory_;
   Agent::Options child_options_;
   Limits limits_;
   EventCallback on_event_;
@@ -371,7 +396,11 @@ private:
   mutable std::optional<SessionArena> root_arena_;
 
   std::shared_ptr<Task> find_task_locked(const AgentTaskId &target) const;
-  static AgentTaskSnapshot snapshot(const std::shared_ptr<Task> &task);
+  // The Agent this task reads/writes through: owner_ for the root pseudo-task
+  // (task.session is null for it -- TaskTree has no SessionRuntime of its
+  // own to hand out), or task.session->agent() for every real child.
+  Agent &task_agent(const Task &task) const;
+  AgentTaskSnapshot snapshot(const std::shared_ptr<Task> &task) const;
   void touch_locked(const std::shared_ptr<Task> &task);
   void emit(const AgentTaskEvent &event) const;
   void run_task(const std::shared_ptr<Task> &task,
@@ -412,5 +441,9 @@ private:
   // the inline version it replaced.
   SpawnReservation reserve_spawn(const SpawnAgentRequest &request);
 };
+
+// TODO(taxonomy-phase-10): remove. AgentTaskManager is the migration-era
+// name; all new code must use TaskTree.
+using AgentTaskManager = TaskTree;
 
 } // namespace pi::core

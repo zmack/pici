@@ -26,6 +26,7 @@
 namespace pi::core {
 
 class ModelCatalog;
+class TaskTree;
 
 struct ModelSwitchResult {
   Model previous;
@@ -219,6 +220,17 @@ public:
   // Check if agent is currently processing
   bool is_streaming() const { return state_.is_streaming(); }
 
+  // Null until a caller (SessionRuntime::activate()) attaches one. TaskTree
+  // is constructed elsewhere -- it needs a ChildSessionFactory that only
+  // process/session composition can build (core/agent_task.h would have to
+  // be included here to construct it directly, which would circularly
+  // include this header back) -- so Agent only owns and exposes it.
+  const std::shared_ptr<TaskTree> &task_tree() const { return task_tree_; }
+
+  // Attaches this agent's delegation hierarchy. Must be called at most once;
+  // calling it twice is a caller bug (throws std::logic_error).
+  void set_task_tree(std::shared_ptr<TaskTree> tree);
+
 private:
   AgentState state_;
   Options options_;
@@ -259,6 +271,15 @@ private:
                             const std::function<void()> &transition);
 
   CompactionOptions create_compaction_options();
+
+  // Declared last so it destructs FIRST (reverse declaration order): TaskTree
+  // must close and join every child task -- each running its own worker
+  // threads against its own child Agent -- before this agent's own state_ and
+  // workers_ are torn down, since a child's completion path can still reach
+  // back into this agent (e.g. steering the root) while it is being closed.
+  // See core/session/session_runtime.h's analogous ordering comment, which
+  // this mirrors one level down.
+  std::shared_ptr<TaskTree> task_tree_;
 };
 
 } // namespace pi::core

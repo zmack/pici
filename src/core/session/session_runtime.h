@@ -30,24 +30,26 @@
 
 namespace pi::core {
 
-// Owns the active session identity, one Agent activation, its
-// AgentTaskManager, and its mailbox attachment -- the bundle Phase 2's
-// factory used to construct and hand back as three-plus separate pieces
-// (see cli/session_runtime.h's RuntimeBundle, which now holds a
-// single shared_ptr<SessionRuntime> instead) is, as of Phase 6, one class.
+// Owns the active session identity, one Agent activation, and its mailbox
+// attachment -- the bundle Phase 2's factory used to construct and hand back
+// as three-plus separate pieces (see cli/session_runtime.h's RuntimeBundle,
+// which now holds a single shared_ptr<SessionRuntime> instead) is, as of
+// Phase 6, one class. As of Phase 7, the Agent it owns owns the TaskTree in
+// turn (agent().task_tree()); this class no longer holds it directly.
 //
-// Construction is still two-phase, matching AgentTaskManager's own
-// constraint: it takes `SessionRuntime &root` by reference and a
-// child-agent Agent::Options whose system_prompt typically isn't finalized
-// until the frontend has registered tools on the live agent. The
-// constructor builds the Agent and the (unconnected, possibly disabled)
-// MailboxRuntime -- neither needs finalized options -- and activate()
-// builds AgentTaskManager and connects the mailbox runtime to it once the
-// caller is ready. A SessionRuntime that never calls activate() simply has
-// no task manager (task_manager() returns null) and an unconnected mailbox
-// runtime -- that's the correct, unchanged shape for e.g. ACP's per-run
-// sessions, which have never supported subagent delegation or mailbox
-// delivery (SessionRuntimeCapabilities keeps those off for ACP).
+// Construction is still two-phase, matching TaskTree's own constraint: it
+// needs a ChildSessionFactory (only this class knows how to build a full
+// child SessionRuntime::Config) and a child-agent Agent::Options whose
+// system_prompt typically isn't finalized until the frontend has registered
+// tools on the live agent. The constructor builds the Agent and the
+// (unconnected, possibly disabled) MailboxRuntime -- neither needs finalized
+// options -- and activate() builds the TaskTree, attaches it to agent_, and
+// connects the mailbox runtime to it once the caller is ready. A
+// SessionRuntime that never calls activate() simply has no task tree
+// (agent().task_tree() returns null) and an unconnected mailbox runtime --
+// that's the correct, unchanged shape for e.g. ACP's per-run sessions, which
+// have never supported subagent delegation or mailbox delivery
+// (SessionRuntimeCapabilities keeps those off for ACP).
 class SessionRuntime {
 public:
   // Phase 5 automatic compaction policy (plan §7 of
@@ -168,13 +170,16 @@ public:
                          const EventCallback &callback = {});
 
   // Phase B of construction (plans/session-runtime-migration.md Phase 6):
-  // builds AgentTaskManager (fanning out extra_task_event_callback alongside
-  // the owned mailbox runtime's own task-event callback -- both must be
-  // known before AgentTaskManager's single construction-time callback
-  // parameter is set) and connects the mailbox runtime to it, forwarding
-  // wake_root. Populates task_manager() and finishes wiring
-  // mailbox_runtime() in place. Must be called at most once; calling it
-  // twice on the same SessionRuntime is a caller bug (asserted).
+  // builds a TaskTree (fanning out extra_task_event_callback alongside the
+  // owned mailbox runtime's own task-event callback -- both must be known
+  // before TaskTree's single construction-time callback parameter is set),
+  // attaches it to agent_ (plans/object-taxonomy-migration.md Phase 7), and
+  // connects the mailbox runtime to it, forwarding wake_root. The
+  // ChildSessionFactory handed to the tree is built here, not by the tree
+  // itself: only this class knows how to complete a child's
+  // SessionRuntime::Config. Finishes wiring mailbox_runtime() in place. Must
+  // be called at most once; calling it twice on the same SessionRuntime is a
+  // caller bug (throws std::logic_error).
   void activate(Agent::Options child_options,
                 AgentTaskManager::Limits limits = {},
                 AgentTaskManager::ChildWriteTools child_write_tools =
@@ -184,11 +189,6 @@ public:
 
   MailboxRuntime &mailbox_runtime() { return mailbox_runtime_; }
   const MailboxRuntime &mailbox_runtime() const { return mailbox_runtime_; }
-
-  // Null until activate() is called.
-  const std::shared_ptr<AgentTaskManager> &task_manager() const {
-    return task_manager_;
-  }
 
 private:
   void activate_session_state(std::string session_id,
@@ -232,17 +232,21 @@ private:
   std::optional<std::string> last_warning_;
   AutoCompactionConfig auto_compaction_;
 
-  // Declaration order below is load-bearing: members destruct in reverse
-  // declaration order, so task_manager_ (child tasks) is torn down first,
-  // then mailbox_runtime_ (detaching its observer) second, then agent_/the
-  // rest of this session's own state last -- see
+  // mailbox_runtime_ must be destroyed (detaching its observer) before
+  // agent_'s own teardown reaches its owned TaskTree, or mailbox delivery
+  // could reach a closing task tree mid-teardown -- see
   // core/session/mailbox_runtime.h's "declare it after SessionRuntime and
   // before AgentTaskManager" comment and the "Destruction follows inverse
-  // dependency order" note in docs/architecture-lexicon.md. Do not reorder
-  // these two fields without re-checking that constraint: getting it wrong
-  // fails silently at teardown, not at compile time.
+  // dependency order" note in docs/architecture-lexicon.md. Since Phase 7
+  // moved the task tree inside agent_ (declared first, so ordinarily
+  // destroyed LAST among these members -- after mailbox_runtime_, not
+  // before), plain declaration order can no longer express "task tree
+  // before mailbox_runtime_" by itself: see ~SessionRuntime(), which shuts
+  // the task tree down explicitly, before any member destructor runs, to
+  // preserve that ordering. Do not remove that explicit call without
+  // re-checking this constraint: getting it wrong fails silently at
+  // teardown, not at compile time.
   MailboxRuntime mailbox_runtime_;
-  std::shared_ptr<AgentTaskManager> task_manager_;
 };
 
 } // namespace pi::core

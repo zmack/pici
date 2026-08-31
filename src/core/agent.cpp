@@ -99,6 +99,12 @@ Agent::~Agent() {
   join_workers();
 }
 
+void Agent::set_task_tree(std::shared_ptr<TaskTree> tree) {
+  if (task_tree_)
+    throw std::logic_error("Agent::set_task_tree called more than once");
+  task_tree_ = std::move(tree);
+}
+
 void Agent::add_tool(std::shared_ptr<const ToolDefinition> tool) {
   state_.add_tool(std::move(tool));
 }

@@ -116,7 +116,7 @@ void run_server(std::atomic<int> &port, ServerConfig config) {
                               task_events->publish(event);
                             });
 
-  register_routes(svr, config, sessions, scratch_runtime->task_manager(),
+  register_routes(svr, config, sessions, scratch_runtime->agent().task_tree(),
                   task_events);
 
   // Determine listen address

@@ -32,6 +32,17 @@ namespace {
 
 using namespace pi;
 
+// Mirrors SessionRuntime::activate()'s production factory exactly.
+core::ChildSessionFactory default_child_factory() {
+  return [](core::ChildSessionSpec spec) {
+    return std::make_unique<core::SessionRuntime>(core::SessionRuntime::Config{
+        .agent_options = std::move(spec.agent_options),
+        .tools = std::move(spec.tools),
+        .session_store = std::move(spec.session_store),
+    });
+  };
+}
+
 // Blocks a spawned child task's single turn until release() is set, so a
 // test can deterministically control exactly when the task's
 // AgentTaskStatusChangedEvent(running -> completed) fires relative to
@@ -154,7 +165,8 @@ TEST(MailboxRuntime, TeardownOrder) {
     core::SessionRuntime root({.agent_options = agent_opts});
     core::MailboxRuntime mailbox_runtime(coordinator);
     auto tasks = std::make_shared<core::AgentTaskManager>(
-        root, agent_opts, core::AgentTaskManager::Limits{},
+        root.agent(), default_child_factory(), agent_opts,
+        core::AgentTaskManager::Limits{},
         mailbox_runtime.task_event_callback());
     mailbox_runtime.connect(root, tasks, [] {});
 
@@ -208,7 +220,8 @@ TEST(MailboxRuntime, TeardownOrder) {
     core::SessionRuntime root({.agent_options = agent_opts});
     core::MailboxRuntime mailbox_runtime(coordinator);
     auto tasks = std::make_shared<core::AgentTaskManager>(
-        root, agent_opts, core::AgentTaskManager::Limits{},
+        root.agent(), default_child_factory(), agent_opts,
+        core::AgentTaskManager::Limits{},
         mailbox_runtime.task_event_callback());
     mailbox_runtime.connect(root, tasks, [] {});
 

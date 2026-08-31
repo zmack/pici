@@ -280,7 +280,7 @@ std::string_view agent_task_error_code(AgentTaskErrorKind kind) {
   return "internal";
 }
 
-struct AgentTaskManager::Task {
+struct TaskTree::Task {
   AgentTaskId id;
   std::string task_path;
   std::optional<AgentTaskId> parent_id;
@@ -295,7 +295,7 @@ struct AgentTaskManager::Task {
   AgentTaskStatusKind status{AgentTaskStatusKind::pending_init};
   std::optional<AgentTaskResult> result;
   std::optional<AgentRuntimeIdentity> runtime_identity;
-  std::deque<AgentTaskManager::WorkItem> work;
+  std::deque<TaskTree::WorkItem> work;
   std::deque<Message> mailbox;
   std::optional<AgentInterruptReason> pending_interrupt;
   // Usage of the most recent assistant turn, refreshed on each
@@ -312,16 +312,16 @@ struct AgentTaskManager::Task {
   std::jthread runner;
 };
 
-AgentTaskManager::AgentTaskManager(SessionRuntime &root,
-                                   Agent::Options child_options)
-    : AgentTaskManager(root, std::move(child_options), Limits{}, {},
-                       ChildWriteTools::none) {}
+TaskTree::TaskTree(Agent &owner, ChildSessionFactory child_factory,
+                   Agent::Options child_options)
+    : TaskTree(owner, std::move(child_factory), std::move(child_options),
+               Limits{}, {}, ChildWriteTools::none) {}
 
-AgentTaskManager::AgentTaskManager(SessionRuntime &root,
-                                   Agent::Options child_options, Limits limits,
-                                   EventCallback on_event,
-                                   ChildWriteTools child_write_tools)
-    : root_(root), child_options_(std::move(child_options)), limits_(limits),
+TaskTree::TaskTree(Agent &owner, ChildSessionFactory child_factory,
+                   Agent::Options child_options, Limits limits,
+                   EventCallback on_event, ChildWriteTools child_write_tools)
+    : owner_(owner), child_factory_(std::move(child_factory)),
+      child_options_(std::move(child_options)), limits_(limits),
       on_event_(std::move(on_event)), child_write_tools_(child_write_tools) {
   if (limits_.max_active_executions == 0 || limits_.max_resident_tasks == 0)
     throw AgentTaskError(AgentTaskErrorKind::internal,
@@ -331,14 +331,15 @@ AgentTaskManager::AgentTaskManager(SessionRuntime &root,
   root_task->id = "root";
   root_task->task_path = "/root";
   root_task->task_name = "root";
-  root_task->session = &root_;
-  root_task->status = root_.agent().is_streaming()
-                          ? AgentTaskStatusKind::running
-                          : AgentTaskStatusKind::idle;
+  // No `session`: the root pseudo-task has no SessionRuntime of its own to
+  // hand out (TaskTree only knows its owning Agent). task_agent() resolves
+  // this task's Agent& to owner_ specifically because session is null here.
+  root_task->status = owner_.is_streaming() ? AgentTaskStatusKind::running
+                                            : AgentTaskStatusKind::idle;
   tasks_.emplace(root_task->id, std::move(root_task));
 }
 
-AgentTaskManager::~AgentTaskManager() noexcept {
+TaskTree::~TaskTree() noexcept {
   try {
     shutdown();
   } catch (...) {
@@ -346,7 +347,7 @@ AgentTaskManager::~AgentTaskManager() noexcept {
   }
 }
 
-void AgentTaskManager::set_endpoint_registration(
+void TaskTree::set_endpoint_registration(
     RegisterEndpointCallback register_endpoint,
     UnregisterEndpointCallback unregister_endpoint) {
   std::scoped_lock lock(mutex_);
@@ -358,8 +359,8 @@ void AgentTaskManager::set_endpoint_registration(
   unregister_endpoint_ = std::move(unregister_endpoint);
 }
 
-std::shared_ptr<AgentTaskManager::Task>
-AgentTaskManager::find_task_locked(const AgentTaskId &target) const {
+std::shared_ptr<TaskTree::Task>
+TaskTree::find_task_locked(const AgentTaskId &target) const {
   if (auto it = tasks_.find(target); it != tasks_.end())
     return it->second;
   for (const auto &[id, task] : tasks_) {
@@ -369,8 +370,11 @@ AgentTaskManager::find_task_locked(const AgentTaskId &target) const {
   return nullptr;
 }
 
-AgentTaskSnapshot
-AgentTaskManager::snapshot(const std::shared_ptr<Task> &task) {
+Agent &TaskTree::task_agent(const Task &task) const {
+  return task.session != nullptr ? task.session->agent() : owner_;
+}
+
+AgentTaskSnapshot TaskTree::snapshot(const std::shared_ptr<Task> &task) const {
   AgentTaskSnapshot result;
   {
     std::scoped_lock lock(task->mutex);
@@ -395,34 +399,33 @@ AgentTaskManager::snapshot(const std::shared_ptr<Task> &task) {
     result.context_info = info;
   }
   // Read agent state without holding task->mutex so the manager/task/state
-  // lock order is never nested here.
-  if (task->session != nullptr) {
-    try {
-      const auto &model = task->session->agent().state().model();
-      result.model_provider = model.provider;
-      result.model_id = model.id;
-      const auto transcript =
-          task->session->agent().state().snapshot_transcript();
-      auto &info = *result.context_info;
-      info.message_count = transcript.messages.size();
-      for (const auto &message : transcript.messages)
-        info.context_bytes += message_bytes(message);
-      if (model.context_window != 0)
-        info.context_window = model.context_window;
-      // State momentarily unavailable: keep zeros rather than fail get/list.
-    } catch (...) { // NOLINT(bugprone-empty-catch)
-    }
+  // lock order is never nested here. task_agent() is valid for every task,
+  // root included (it resolves to owner_ when task->session is null).
+  try {
+    auto &agent = task_agent(*task);
+    const auto &model = agent.state().model();
+    result.model_provider = model.provider;
+    result.model_id = model.id;
+    const auto transcript = agent.state().snapshot_transcript();
+    auto &info = *result.context_info;
+    info.message_count = transcript.messages.size();
+    for (const auto &message : transcript.messages)
+      info.context_bytes += message_bytes(message);
+    if (model.context_window != 0)
+      info.context_window = model.context_window;
+    // State momentarily unavailable: keep zeros rather than fail get/list.
+  } catch (...) { // NOLINT(bugprone-empty-catch)
   }
   return result;
 }
 
-void AgentTaskManager::touch_locked(const std::shared_ptr<Task> &task) {
+void TaskTree::touch_locked(const std::shared_ptr<Task> &task) {
   task->generation = ++generation_;
   task->changed.notify_all();
   changed_.notify_all();
 }
 
-void AgentTaskManager::emit(const AgentTaskEvent &event) const {
+void TaskTree::emit(const AgentTaskEvent &event) const {
   if (!on_event_)
     return;
   try {
@@ -433,7 +436,7 @@ void AgentTaskManager::emit(const AgentTaskEvent &event) const {
   }
 }
 
-bool AgentTaskManager::valid_task_name(std::string_view name) {
+bool TaskTree::valid_task_name(std::string_view name) {
   if (name.empty() || name.size() > 64)
     return false;
   if (std::isalnum(static_cast<unsigned char>(name.front())) == 0 &&
@@ -446,9 +449,9 @@ bool AgentTaskManager::valid_task_name(std::string_view name) {
 }
 
 std::vector<std::shared_ptr<const ToolDefinition>>
-AgentTaskManager::inherit_tools(const AgentContext &parent,
-                                const std::vector<std::string> &requested,
-                                bool allow_write_tools) const {
+TaskTree::inherit_tools(const AgentContext &parent,
+                        const std::vector<std::string> &requested,
+                        bool allow_write_tools) const {
   const auto can_grant =
       [this,
        allow_write_tools](const std::shared_ptr<const ToolDefinition> &tool) {
@@ -503,8 +506,8 @@ AgentTaskManager::inherit_tools(const AgentContext &parent,
 }
 
 std::vector<Message>
-AgentTaskManager::inherit_context(const AgentContext &parent,
-                                  const ContextInheritance &request) const {
+TaskTree::inherit_context(const AgentContext &parent,
+                          const ContextInheritance &request) const {
   std::vector<Message> messages;
   switch (request.mode) {
   case ContextInheritanceMode::none:
@@ -534,11 +537,11 @@ AgentTaskManager::inherit_context(const AgentContext &parent,
   return normalize_context(std::move(messages), limits_.max_context_bytes);
 }
 
-std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
+std::shared_ptr<TaskTree::Task> TaskTree::make_task(
     const SpawnAgentRequest &request, const std::shared_ptr<Task> &parent,
     std::vector<Message> context, AgentTaskId task_id, std::string task_path,
     std::optional<AgentRuntimeIdentity> identity) {
-  const auto parent_context = parent->session->agent().context_snapshot();
+  const auto parent_context = task_agent(*parent).context_snapshot();
   auto options = child_options_;
   options.system_prompt =
       request.system_prompt.value_or(parent_context.system_prompt);
@@ -606,7 +609,7 @@ std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
     bind_current_thread(*task_arena);
     task->arena = *task_arena;
   }
-  task->owned_session = std::make_unique<SessionRuntime>(SessionRuntime::Config{
+  task->owned_session = child_factory_(ChildSessionSpec{
       .agent_options = std::move(options),
       .tools = inherit_tools(parent_context, request.requested_tools,
                              request.allow_write_tools),
@@ -624,8 +627,8 @@ std::shared_ptr<AgentTaskManager::Task> AgentTaskManager::make_task(
   return task;
 }
 
-AgentTaskManager::SpawnReservation
-AgentTaskManager::reserve_spawn(const SpawnAgentRequest &request) {
+TaskTree::SpawnReservation
+TaskTree::reserve_spawn(const SpawnAgentRequest &request) {
   SpawnReservation reservation;
   std::scoped_lock lock(mutex_);
   if (shutting_down_)
@@ -683,7 +686,7 @@ AgentTaskManager::reserve_spawn(const SpawnAgentRequest &request) {
       }))
     throw AgentTaskError(AgentTaskErrorKind::duplicate_name,
                          "task identity already exists");
-  auto parent_context = parent->session->agent().context_snapshot();
+  auto parent_context = task_agent(*parent).context_snapshot();
   reservation.context = inherit_context(parent_context, request.context);
   reservation.register_endpoint = register_endpoint_;
   reservation.unregister_endpoint = unregister_endpoint_;
@@ -694,7 +697,7 @@ AgentTaskManager::reserve_spawn(const SpawnAgentRequest &request) {
   return reservation;
 }
 
-AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
+AgentTaskSnapshot TaskTree::spawn(const SpawnAgentRequest &request) {
   if (!valid_task_name(request.task_name))
     throw AgentTaskError(
         AgentTaskErrorKind::invalid_context,
@@ -843,9 +846,9 @@ AgentTaskSnapshot AgentTaskManager::spawn(const SpawnAgentRequest &request) {
   return result;
 }
 
-void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
-                                    std::vector<AgentInput> messages,
-                                    AgentTaskResult &result, bool &aborted) {
+void TaskTree::execute_work(const std::shared_ptr<Task> &task,
+                            std::vector<AgentInput> messages,
+                            AgentTaskResult &result, bool &aborted) {
   std::size_t output_bytes = 0;
   bool saw_text_delta = false;
   std::optional<AssistantMessage> final_message;
@@ -900,8 +903,8 @@ void AgentTaskManager::execute_work(const std::shared_ptr<Task> &task,
     result.stop_reason = StopReason::aborted;
 }
 
-void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
-                                const std::stop_token &stop_token) {
+void TaskTree::run_task(const std::shared_ptr<Task> &task,
+                        const std::stop_token &stop_token) {
   std::stop_callback cancel_callback(stop_token, [task] {
     if (task->session != nullptr)
       task->session->agent().interrupt(TurnAbortReason::shutdown);
@@ -1011,7 +1014,7 @@ void AgentTaskManager::run_task(const std::shared_ptr<Task> &task,
 }
 
 std::optional<AgentTaskSnapshot>
-AgentTaskManager::get(const AgentTaskId &target) const {
+TaskTree::get(const AgentTaskId &target) const {
   std::scoped_lock lock(mutex_);
   auto task = find_task_locked(target);
   if (!task)
@@ -1020,7 +1023,7 @@ AgentTaskManager::get(const AgentTaskId &target) const {
 }
 
 std::vector<AgentTaskSnapshot>
-AgentTaskManager::list(std::optional<std::string_view> task_path_prefix) const {
+TaskTree::list(std::optional<std::string_view> task_path_prefix) const {
   std::vector<AgentTaskSnapshot> result;
   std::scoped_lock lock(mutex_);
   for (const auto &[id, task] : tasks_) {
@@ -1034,7 +1037,7 @@ AgentTaskManager::list(std::optional<std::string_view> task_path_prefix) const {
 }
 
 SessionCompositionReport
-AgentTaskManager::composition_report(const AgentTaskId &target) const {
+TaskTree::composition_report(const AgentTaskId &target) const {
   // Same shape as snapshot(): resolve under the manager mutex, then read the
   // agent transcript without nesting the task/state locks.
   std::shared_ptr<Task> task;
@@ -1045,19 +1048,16 @@ AgentTaskManager::composition_report(const AgentTaskId &target) const {
       throw AgentTaskError(AgentTaskErrorKind::not_found, "task not found");
   }
   SessionCompositionReport report;
-  if (task->session != nullptr) {
-    try {
-      const auto transcript =
-          task->session->agent().state().snapshot_transcript();
-      report = composition_report_for_messages(transcript.messages);
-    } catch (...) { // NOLINT(bugprone-empty-catch)
-    }
+  try {
+    const auto transcript = task_agent(*task).state().snapshot_transcript();
+    report = composition_report_for_messages(transcript.messages);
+  } catch (...) { // NOLINT(bugprone-empty-catch)
   }
   return report;
 }
 
 std::vector<std::pair<std::string, SessionCompositionReport>>
-AgentTaskManager::composition_reports() const {
+TaskTree::composition_reports() const {
   std::vector<std::pair<std::string, SessionCompositionReport>> result;
   std::vector<std::shared_ptr<Task>> tasks;
   {
@@ -1069,13 +1069,10 @@ AgentTaskManager::composition_reports() const {
   result.reserve(tasks.size());
   for (const auto &task : tasks) {
     SessionCompositionReport report;
-    if (task->session != nullptr) {
-      try {
-        const auto transcript =
-            task->session->agent().state().snapshot_transcript();
-        report = composition_report_for_messages(transcript.messages);
-      } catch (...) { // NOLINT(bugprone-empty-catch)
-      }
+    try {
+      const auto transcript = task_agent(*task).state().snapshot_transcript();
+      report = composition_report_for_messages(transcript.messages);
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
     result.emplace_back(task->task_path, report);
   }
@@ -1084,8 +1081,8 @@ AgentTaskManager::composition_reports() const {
   return result;
 }
 
-AgentTaskSnapshot AgentTaskManager::send_message(const AgentTaskId &target,
-                                                 Message message) {
+AgentTaskSnapshot TaskTree::send_message(const AgentTaskId &target,
+                                         Message message) {
   if (message_bytes(message) > limits_.max_message_bytes)
     throw AgentTaskError(AgentTaskErrorKind::residency_limit,
                          "task message exceeds size limit");
@@ -1110,9 +1107,8 @@ AgentTaskSnapshot AgentTaskManager::send_message(const AgentTaskId &target,
   return snapshot(task);
 }
 
-AgentTaskSnapshot
-AgentTaskManager::steer_envelopes(const AgentTaskId &target,
-                                  std::vector<AgentInput> messages) {
+AgentTaskSnapshot TaskTree::steer_envelopes(const AgentTaskId &target,
+                                            std::vector<AgentInput> messages) {
   if (messages.empty())
     throw AgentTaskError(AgentTaskErrorKind::invalid_context,
                          "steering envelope list must not be empty");
@@ -1176,7 +1172,7 @@ AgentTaskManager::steer_envelopes(const AgentTaskId &target,
   }
 
   if (task->id == "root") {
-    root_.agent().steer_envelopes(std::move(root_messages));
+    owner_.steer_envelopes(std::move(root_messages));
     return snapshot(task);
   }
   if (steer_running) {
@@ -1193,7 +1189,7 @@ AgentTaskManager::steer_envelopes(const AgentTaskId &target,
   return snapshot(task);
 }
 
-void AgentTaskManager::drop_mailbox_envelopes() {
+void TaskTree::drop_mailbox_envelopes() {
   std::vector<std::shared_ptr<Task>> tasks;
   {
     std::scoped_lock lock(mutex_);
@@ -1227,7 +1223,7 @@ void AgentTaskManager::drop_mailbox_envelopes() {
         changed_tasks.push_back(task);
       }
     }
-    task->session->agent().clear_mailbox_steering_queue();
+    task_agent(*task).clear_mailbox_steering_queue();
   }
   for (const auto &task : changed_tasks)
     task->changed.notify_all();
@@ -1235,8 +1231,8 @@ void AgentTaskManager::drop_mailbox_envelopes() {
     changed_.notify_all();
 }
 
-AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
-                                              const Message &message) {
+AgentTaskSnapshot TaskTree::follow_up(const AgentTaskId &target,
+                                      const Message &message) {
   const auto text = message_text(message);
   if (text.empty())
     throw AgentTaskError(AgentTaskErrorKind::invalid_context,
@@ -1299,8 +1295,8 @@ AgentTaskSnapshot AgentTaskManager::follow_up(const AgentTaskId &target,
   return snapshot(task);
 }
 
-AgentTaskSnapshot AgentTaskManager::interrupt(const AgentTaskId &target,
-                                              AgentInterruptReason reason) {
+AgentTaskSnapshot TaskTree::interrupt(const AgentTaskId &target,
+                                      AgentInterruptReason reason) {
   std::shared_ptr<Task> task;
   AgentTaskStatusKind previous{AgentTaskStatusKind::pending_init};
   {
@@ -1316,14 +1312,14 @@ AgentTaskSnapshot AgentTaskManager::interrupt(const AgentTaskId &target,
     }
   }
   if (previous == AgentTaskStatusKind::running) {
-    task->session->agent().interrupt(turn_abort_reason(reason));
+    task_agent(*task).interrupt(turn_abort_reason(reason));
     emit(AgentTaskInterruptedEvent{.id = task->id, .reason = reason});
   }
   return snapshot(task);
 }
 
 AgentTaskSnapshot
-AgentTaskManager::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
+TaskTree::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
   if (tasks.empty())
     throw AgentTaskError(AgentTaskErrorKind::not_found, "task not found");
 
@@ -1402,7 +1398,7 @@ AgentTaskManager::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
     emit(event);
   return target_snapshot;
 }
-void AgentTaskManager::release_task_arena(Task &task) {
+void TaskTree::release_task_arena(Task &task) {
   // No-op unless this module handed out an arena for the task (§Design 2:
   // release unbinds nothing on other threads — runners are already joined by
   // every caller — purges free pages, and returns the index to the recycle
@@ -1412,7 +1408,7 @@ void AgentTaskManager::release_task_arena(Task &task) {
   task.arena.reset();
 }
 
-void AgentTaskManager::bind_root_arena() {
+void TaskTree::bind_root_arena() {
   std::scoped_lock lock(mutex_);
   if (!root_arena_.has_value())
     root_arena_ = acquire_session_arena();
@@ -1420,7 +1416,7 @@ void AgentTaskManager::bind_root_arena() {
     bind_current_thread(*root_arena_);
 }
 
-std::vector<SessionHeapReport> AgentTaskManager::heap_reports() const {
+std::vector<SessionHeapReport> TaskTree::heap_reports() const {
   std::vector<std::shared_ptr<Task>> tasks;
   {
     // First caller wins lazy root-arena acquisition: exactly one
@@ -1451,7 +1447,7 @@ std::vector<SessionHeapReport> AgentTaskManager::heap_reports() const {
   return result;
 }
 
-AgentTaskSnapshot AgentTaskManager::close(const AgentTaskId &target) {
+AgentTaskSnapshot TaskTree::close(const AgentTaskId &target) {
   std::vector<std::shared_ptr<Task>> closing;
   {
     std::scoped_lock lock(mutex_);
@@ -1473,8 +1469,8 @@ AgentTaskSnapshot AgentTaskManager::close(const AgentTaskId &target) {
   return close_tasks(std::move(closing));
 }
 
-AgentWaitResult AgentTaskManager::wait(const AgentWaitRequest &request,
-                                       std::stop_token stop_token) const {
+AgentWaitResult TaskTree::wait(const AgentWaitRequest &request,
+                               std::stop_token stop_token) const {
   const auto timeout = std::clamp(request.timeout, std::chrono::milliseconds(0),
                                   limits_.max_wait);
   std::unique_lock lock(mutex_);
@@ -1514,7 +1510,7 @@ AgentWaitResult AgentTaskManager::wait(const AgentWaitRequest &request,
   return result;
 }
 
-void AgentTaskManager::shutdown() {
+void TaskTree::shutdown() {
   std::vector<std::shared_ptr<Task>> children;
   {
     std::unique_lock lock(mutex_);
@@ -1534,17 +1530,17 @@ void AgentTaskManager::shutdown() {
   changed_.notify_all();
 }
 
-bool AgentTaskManager::is_shutting_down() const {
+bool TaskTree::is_shutting_down() const {
   std::scoped_lock lock(mutex_);
   return shutting_down_;
 }
 
-std::size_t AgentTaskManager::active_executions() const {
+std::size_t TaskTree::active_executions() const {
   std::scoped_lock lock(mutex_);
   return active_executions_;
 }
 
-std::size_t AgentTaskManager::resident_tasks() const {
+std::size_t TaskTree::resident_tasks() const {
   std::scoped_lock lock(mutex_);
   return !tasks_.empty() ? tasks_.size() - 1 : 0;
 }

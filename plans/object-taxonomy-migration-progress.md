@@ -13,10 +13,12 @@ Completed milestones:
 - Phase 3: `669df17` — `feat: add provider model discovery bindings`
 - Phase 4: `1de80bb` — `feat: make Authentication the process aggregate`
 - Phase 5: `cfa2872` — `feat: introduce PiciProcess as the composition root`
-- Phase 6: complete in the commit containing this progress update, planned
-  subject `refactor: narrow SessionRuntime and centralize model-switch auth checks`
+- Phase 6: `04762ac` — `refactor: narrow SessionRuntime and centralize model-switch auth checks`
+- Phase 7: complete in the commit containing this progress update, planned
+  subject `refactor: move TaskTree under Agent`
 
-Next milestone: Phase 7 — move `TaskTree` under `Agent`.
+Next milestone: Phase 8 — make `Mailbox` process-owned and sessions attach to
+it.
 
 Phase 4 verification: full `make test` passed 44/44 tests; `make format` and
 `git diff --check` passed. Full-repo `make lint` is too slow to complete
@@ -139,6 +141,84 @@ earlier, unrelated migration (`plans/session-runtime-migration.md` Phase 7,
 commit `c041218`); confirmed zero remaining references. `task_manager()`/
 `mailbox_runtime()` accessors and `TaskTree`/`Mailbox` ownership are
 untouched, per the plan (Phases 7/8).
+
+Phase 7 implemented directly by the orchestrating session rather than
+delegated (the destruction-order and root-vs-child dual-code-path analysis
+required reading nearly all of `agent_task.cpp` first; the risk of a subagent
+getting thread/lifetime ordering subtly wrong outweighed the delegation
+savings). `AgentTaskManager` is renamed to `TaskTree` (compat alias kept,
+Phase-10-tagged) in `core/agent_task.{h,cpp}` -- the file itself keeps its
+name, only the class moved. It now takes `Agent &owner` instead of
+`SessionRuntime &root`, since only two of its `root_` uses needed anything
+beyond `Agent` (`is_streaming()`, `steer_envelopes()`); child construction no
+longer builds a `SessionRuntime::Config` itself -- it calls an injected
+`ChildSessionFactory` (`std::function<unique_ptr<SessionRuntime>(ChildSessionSpec)>`)
+that `SessionRuntime::activate()` supplies, mirroring exactly the
+`agent_options`/`tools`/`session_store=null` shape `make_task()` built inline
+before. `Agent` gained `task_tree()`/`set_task_tree()` (a `shared_ptr<TaskTree>`,
+forward-declared in `agent.h` -- shared_ptr, not unique_ptr, both because it
+tolerates an incomplete type in the header without `agent.h` including
+`agent_task.h` back, avoiding a circular include, and because it preserves
+`MailboxRuntime::connect()`'s existing `weak_ptr<AgentTaskManager>` safety
+mechanism for delivery callbacks firing after teardown starts, unchanged);
+`task_tree_` is declared last in `Agent` so it destructs first, before
+`state_`/`workers_`, matching `SessionRuntime::mailbox_runtime_`'s existing
+declaration-order pattern one level up.
+
+The root pseudo-task inside `TaskTree` has no `SessionRuntime` to point
+`Task::session` at any more (`Agent` doesn't hold a back-reference to its
+owning `SessionRuntime`), so `task->session` is null for "root" and non-null
+(`== owned_session.get()`) for every real child; a new private
+`task_agent(const Task&)` helper resolves either case to the right `Agent&`
+and replaced every `task->session->agent()...` callsite that is genuinely
+reachable for "root" -- `snapshot()` (now a non-static member instead of
+static, since it needs `owner_`), `composition_report[s]()`,
+`drop_mailbox_envelopes()`, `interrupt()`, and `make_task()`/`reserve_spawn()`'s
+parent-context reads. Sites confirmed reachable only for real children
+(`execute_work`, `run_task`, `close_tasks`, the post-root-check branch of
+`steer_envelopes`) were left calling `task->session->` directly, unchanged.
+Both `composition_report()` and `composition_reports()` were silently
+returning zeroed reports for the root task before this fix would have made
+that regression externally visible -- worth flagging: the pre-existing
+`if (task->session != nullptr)` guards in those two functions and in
+`drop_mailbox_envelopes()` were dead code protecting against a condition that
+could never actually happen before this phase (root's `session` was always
+`&root_`), which is exactly why nothing caught it as a latent bug until this
+refactor would have turned it into a real, silent one.
+
+A found-and-fixed hazard worth flagging for future phases: `SessionRuntime`'s
+old member-order-only destructor (`= default`) relied on `task_manager_`
+being declared after `mailbox_runtime_` to guarantee child tasks closed
+before the mailbox observer detached. Moving the task tree inside `agent_`
+(declared *before* `mailbox_runtime_`) silently inverts that guarantee if
+nothing else changes, since `agent_`'s entire destructor -- task tree
+included -- now runs *after* `mailbox_runtime_`'s. Fixed by giving
+`~SessionRuntime()` an explicit body that calls `agent_.task_tree()->shutdown()`
+(idempotent, so `agent_`'s own later teardown redundantly re-shutting it down
+is harmless) before any member destructor runs at all. `test-mailbox-runtime`'s
+`TeardownOrder` test exercises exactly this property and was run 5x
+standalone post-change with no flakes, alongside 5x shuffled runs of the full
+`test-agent_tasks` suite.
+
+14 direct `TaskTree`/`AgentTaskManager` constructor call sites across
+`test_agent_tasks.cpp`, `test_mailbox_coordinator.cpp`, `test_mailbox_runtime.cpp`,
+and `test_memory_stats.cpp` needed a `ChildSessionFactory` argument added;
+each file got its own small `default_child_factory()` test helper that
+mirrors production's factory exactly, so test behavior is unchanged.
+
+Phase 7 verification: full `make test` 45/45 (no new test binary); 5x
+shuffled `test-agent_tasks` and 5x `test-mailbox-runtime` runs, no flakes;
+`make format`/`git diff --check` clean. Targeted-`clang-tidy`-vs-pre-phase-commit
+(`04762ac`) diff across all 13 touched files, normalized to ignore line-number
+shifts: one genuinely new diagnostic (`test_mailbox_coordinator.cpp` missing a
+direct `<memory>` include for its new `default_child_factory()`'s
+`std::make_unique`), fixed. Three pre-existing diagnostics disappeared as an
+incidental improvement (`agent_task.h`'s and `session_runtime.h`'s
+`ToolDefinition`-not-directly-included warnings, resolved by the new
+`class ToolDefinition;` forward declaration `ChildSessionSpec` needed;
+`test_memory_stats.cpp`'s unused-`<memory>`-include warning, resolved by the
+new helper actually using it). No other diagnostic list changed in content,
+only in line number.
 
 Current compatibility seams are `ModelRegistry` -> `ModelCatalog`,
 `ProviderDefinition` -> `Provider`, pointer-returning catalog search, the
