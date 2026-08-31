@@ -42,7 +42,7 @@
 
 #include "cli/args.h"
 #include "cli/faux_control_mode.h"
-#include "cli/model_selector.h"
+#include "cli/model_picker.h"
 #include "cli/readline.h"
 #include "cli/rpc_mode.h"
 #include "cli/session_runtime.h"
@@ -2121,27 +2121,31 @@ private:
                                      "\nusage: /model <provider/model>");
         return;
       }
-      const auto selected = cli::run_model_selector(
-          registry_->search_models(""), current_model.provider,
-          current_model.id,
-          [this](const core::Model &candidate) {
-            switch (authentication_->availability(candidate.provider)) {
-            case pi::auth::AuthAvailability::configured:
-              return std::string("configured");
-            case pi::auth::AuthAvailability::not_required:
-              return std::string("not_required");
-            case pi::auth::AuthAvailability::missing:
-              return std::string("missing");
-            case pi::auth::AuthAvailability::expired_or_refresh_needed:
-              return std::string("expired_or_refresh_needed");
-            }
-            return std::string("unknown");
-          },
-          renderer_->owns_status_line());
+      const cli::ModelPickerInput picker_input{
+          .catalog_view = registry_->view(),
+          .current = {.provider_id = current_model.provider,
+                      .model_id = current_model.id},
+          .availability =
+              [this](const core::ModelKey &candidate) {
+                switch (authentication_->availability(candidate.provider_id)) {
+                case pi::auth::AuthAvailability::configured:
+                  return std::string("configured");
+                case pi::auth::AuthAvailability::not_required:
+                  return std::string("not_required");
+                case pi::auth::AuthAvailability::missing:
+                  return std::string("missing");
+                case pi::auth::AuthAvailability::expired_or_refresh_needed:
+                  return std::string("expired_or_refresh_needed");
+                }
+                return std::string("unknown");
+              },
+      };
+      const auto selected =
+          cli::run_model_picker(picker_input, renderer_->owns_status_line());
       renderer_->force_full_repaint();
-      if (selected.cancelled || !selected.model)
+      if (selected.cancelled || !selected.selected)
         return;
-      spec = selected.model->provider + "/" + selected.model->id;
+      spec = selected.selected->provider_id + "/" + selected.selected->model_id;
     }
 
     core::ModelSelection selection{.model = spec, .source = "cli"};

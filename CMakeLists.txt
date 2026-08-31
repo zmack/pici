@@ -590,7 +590,7 @@ add_executable(pi-cli
     src/cli/readline.cpp
     src/cli/wrap.cpp
     src/cli/vim_mode.cpp
-    src/cli/model_selector.cpp
+    src/cli/model_picker.cpp
     src/cli/rpc_mode.cpp
     src/cli/faux_control_mode.cpp
     src/cli/system_prompt.cpp
@@ -782,6 +782,11 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-vim-mode PRIVATE pi-core)
     add_test(NAME test-vim-mode COMMAND test-vim-mode)
 
+    add_executable(test-model_picker test/test_model_picker.cpp src/cli/model_picker.cpp)
+    target_include_directories(test-model_picker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test-model_picker PRIVATE pi-core)
+    add_test(NAME test-model_picker COMMAND test-model_picker)
+
     add_test(
         NAME test-addons
         COMMAND $<TARGET_FILE:pi-cli>
@@ -861,7 +866,7 @@ if(PI_CPP_BUILD_TESTS)
         src/cli/readline.cpp
         src/cli/wrap.cpp
         src/cli/vim_mode.cpp
-        src/cli/model_selector.cpp
+        src/cli/model_picker.cpp
         src/cli/rpc_mode.cpp
         src/cli/faux_control_mode.cpp
         src/cli/system_prompt.cpp
@@ -886,7 +891,7 @@ if(PI_CPP_BUILD_TESTS)
         test-mailbox-runtime test-mailbox-store test-mailbox-coordinator
         test-mailbox-bindings test-credential_store test-openai_codex_oauth
         test-openai_codex_responses test-sandbox test-system_prompt test-rpc_mode
-        test-faux_control_mode test-readline test-wrap test-vim-mode test-acp
+        test-faux_control_mode test-readline test-wrap test-vim-mode test-model_picker test-acp
         test-frontend-parity test-cmd_run test-cmd_run_repl
     )
     foreach(test_target IN LISTS PI_CPP_GTEST_TEST_TARGETS)

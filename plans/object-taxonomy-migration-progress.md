@@ -15,8 +15,12 @@ Completed milestones:
 - Phase 5: `cfa2872` — `feat: introduce PiciProcess as the composition root`
 - Phase 6: `04762ac` — `refactor: narrow SessionRuntime and centralize model-switch auth checks`
 - Phase 7: `98fe46e` — `refactor: move TaskTree under Agent`
-- Phase 8: complete in the commit containing this progress update, planned
-  subject `refactor: make Mailbox multi-attachment and process-owned`
+- Phase 8: `0d3622e` — `refactor: make Mailbox multi-attachment and process-owned`
+- Phase 9: complete in the commit containing this progress update, planned
+  subject `refactor: stabilize ModelPicker on a catalog-view contract`
+
+Next milestone: Phase 10 — remove migration scaffolding and audit the
+taxonomy.
 
 Next milestone: Phase 9 — stabilize `ModelPicker` and frontend adapters.
 
@@ -336,6 +340,66 @@ that remain match this test file's own long-established convention (it
 already had `TestBody` functions up to complexity 150 and unchecked `.value()`
 calls throughout) and were left as-is rather than restructured against that
 grain.
+
+Phase 9 renamed `cli::model_selector.{h,cpp}` to `cli::model_picker.{h,cpp}`
+(file rename, not just the class -- this file has no naming-collision
+concern like `agent_session.h` did in Phase 6, so there was no reason to
+defer it) and replaced `run_model_selector(vector<const Model*>, provider,
+model, availability-per-Model)` / `ModelSelectorResult{cancelled,
+optional<Model>}` with `run_model_picker(ModelPickerInput{catalog_view,
+current: ModelKey, availability: fn(ModelKey)})` / `ModelPickerResult{
+cancelled, selected: optional<ModelKey>}`, matching the plan's named shape
+exactly. The picker no longer touches `core::Model` or a catalog pointer at
+all -- `ModelCatalog::search()` (already existing, value-returning, and
+behaviorally identical to the pointer-returning `search_models()` it's
+built on top of, confirmed by reading both implementations) supplies
+`vector<ModelCatalogEntry>` directly. The one call site
+(`cmd_run_session.h`'s `/model` REPL command) turns the returned `ModelKey`
+back into a `"provider/model"` spec string and still resolves/commits it
+through `SessionRuntime::resolve_model()`/`set_model()` exactly as it did
+before -- the picker itself never resolves or commits anything, only
+returns a key.
+
+Also converted per Phase 9 item 7 ("CLI, RPC, and ACP model-list/select
+surfaces derive from the same catalog view"): RPC's `handle_list_models`/
+`model_summary` moved from `registry->search_models(filter)` (pointer) to
+`registry->search(filter)` (`ModelCatalogEntry` values) -- the same
+underlying catalog projection the picker now uses, just serialized to JSON
+instead of rendered to a terminal. One real behavior-preservation catch:
+`ModelCatalogEntry::display_name` can be empty (no name reported/configured),
+while `Model::name` never is (`ModelCatalog::rebuild_from_reports()` falls
+back to the model id) -- naively using `entry.display_name` for the wire
+`"name"` field would have silently started returning empty strings; fixed by
+replicating that exact fallback at the call site. ACP has no model-listing
+HTTP surface at all, so nothing to convert there -- confirmed by grep before
+concluding this.
+
+Added the "testable picker navigation reducer" the plan calls for:
+`reduce_model_picker_cursor(cursor, key, count)` is a pure function (no
+terminal I/O, no globals) that `run_model_picker()`'s interactive loop now
+calls instead of inlining the up/down/clamp logic, and a new
+`test-model_picker` target exercises it directly (move within bounds, clamp
+at both ends, enter/escape/other are no-ops, empty-list is a no-op) --
+`run_model_picker()` itself still can't be unit-tested (it needs a real TTY;
+`RawMode::enter()` already safely no-ops to a cancelled result otherwise,
+which is what let this land without a live-terminal smoke test -- flagged
+here rather than silently claimed as verified). The Lua picker adapter
+boundary the plan says to define-but-not-implement is exactly
+`ModelPickerInput`/`ModelPickerResult` themselves: a future Lua adapter
+converts Lua values to/from these same two structs without either side
+reaching into `ModelCatalog` or `SessionRuntime` directly, so nothing further
+was added for it this phase.
+
+Phase 9 verification: full `make test` 46/46 (1 new test binary,
+`test-model_picker`, 4 cases). Targeted-`clang-tidy`-vs-pre-phase-commit
+(`0d3622e`) diff for both touched files (`cmd_run_session.h`, `rpc_mode.cpp`):
+byte-identical diagnostic content, zero new issues. The two new files
+(`model_picker.h/.cpp`) and the new test file are fully clean (zero
+warnings) after fixing two missing/unused-include findings from the first
+pass (dropping now-unused `<string_view>`/`<vector>` from the header;
+adding a direct `core/models.h` include to the .cpp for `ModelCatalogEntry`/
+`ModelKey`, reachable only transitively through the header before that).
+`make format`/`git diff --check` clean.
 
 Current compatibility seams are `ModelRegistry` -> `ModelCatalog`,
 `ProviderDefinition` -> `Provider`, pointer-returning catalog search, the

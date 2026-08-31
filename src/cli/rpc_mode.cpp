@@ -130,12 +130,13 @@ std::optional<core::ThinkingLevel> parse_thinking(std::string_view level) {
 }
 
 nlohmann::json
-model_summary(const core::Model &model, const core::ModelCatalog &registry,
+model_summary(const core::ModelCatalogEntry &entry,
+              const core::ModelCatalog &registry,
               const std::shared_ptr<auth::Authentication> &resolver) {
-  const auto *provider = registry.provider(model.provider);
+  const auto *provider = registry.provider(entry.key.provider_id);
   std::string auth = "not_required";
   if (resolver) {
-    switch (resolver->availability(model.provider)) {
+    switch (resolver->availability(entry.key.provider_id)) {
     case pi::auth::AuthAvailability::configured:
       auth = "configured";
       break;
@@ -157,14 +158,18 @@ model_summary(const core::Model &model, const core::ModelCatalog &registry,
     else if (provider->auth == core::ProviderAuthPolicy::oauth)
       auth = "expired_or_refresh_needed";
   }
-  return {{"provider", model.provider},
-          {"model", model.id},
-          {"name", model.name},
-          {"api", model.api},
-          {"context_window", model.context_window},
-          {"max_tokens", model.max_tokens},
-          {"reasoning", model.reasoning},
-          {"input_capabilities", model.input_capabilities},
+  return {{"provider", entry.key.provider_id},
+          {"model", entry.key.model_id},
+          // Mirrors ModelCatalog::rebuild_from_reports()'s Model::name
+          // fallback: an entry's display_name can be empty (no name
+          // reported/configured), but this field must not be.
+          {"name", entry.display_name.empty() ? entry.key.model_id
+                                              : entry.display_name},
+          {"api", entry.api},
+          {"context_window", entry.context_window},
+          {"max_tokens", entry.max_tokens},
+          {"reasoning", entry.reasoning},
+          {"input_capabilities", entry.input_capabilities},
           {"auth_availability", auth}};
 }
 
@@ -412,8 +417,8 @@ void RpcMode::handle_list_models(const nlohmann::json &command) {
   }
   const auto filter = command.value("filter", std::string{});
   nlohmann::json models = nlohmann::json::array();
-  for (const auto *model : registry->search_models(filter))
-    models.push_back(model_summary(*model, *registry, authentication_));
+  for (const auto &entry : registry->search(filter))
+    models.push_back(model_summary(entry, *registry, authentication_));
   response(command, true, {{"models", std::move(models)}});
 }
 
