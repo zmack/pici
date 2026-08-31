@@ -42,7 +42,7 @@ start_mailbox(const MailboxLaunchOptions &options);
 // between the coordinator, root session, child task manager, and REPL
 // wakeup. Declare it after SessionRuntime and before AgentTaskManager so
 // teardown closes child tasks while the mailbox observer is still
-// attached (see SessionRuntimeBundle's field-order comment in
+// attached (see RuntimeBundle's field-order comment in
 // cli/session_runtime.h, which preserves this same constraint for its own
 // declaration order).
 class MailboxRuntime {

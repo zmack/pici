@@ -21,6 +21,7 @@
 #include "core/lua_tool.h"
 #include "core/models.h"
 #include "core/otel_init.h"
+#include "core/process/pici_process.h"
 #include "core/providers/muse_messages.h"
 #include "core/providers/openai_codex_responses.h"
 #include "core/providers/openai_completions.h"
@@ -33,16 +34,6 @@ namespace pi {
 namespace {
 
 void print_version() { std::cout << "pi-cpp " PI_CPP_VERSION "\n"; }
-
-std::shared_ptr<const core::ModelCatalog>
-build_model_catalog(const cli::Args &args) {
-  static const std::map<std::string, cli::ProviderConfig> empty;
-  const auto &configured =
-      args.config_document ? args.config_document->providers : empty;
-  auto registry = std::make_shared<core::ModelCatalog>(configured);
-  registry->validate_registered_apis();
-  return registry;
-}
 
 int run_lua_test_files(const std::vector<std::string> &files) {
   int total_failed = 0;
@@ -201,20 +192,28 @@ int main(int argc, char *argv[]) noexcept {
   if (!args.otel_endpoint.empty())
     pi::core::init_otel(args.otel_endpoint);
 
-  std::shared_ptr<const pi::core::ModelCatalog> model_catalog;
+  static const std::map<std::string, pi::cli::ProviderConfig> empty_providers;
+  const auto &configured_providers =
+      args.config_document ? args.config_document->providers : empty_providers;
+
+  std::optional<pi::core::PiciProcess> process;
   try {
-    model_catalog = pi::build_model_catalog(args);
+    process.emplace(pi::core::PiciProcess::Config{
+        .providers = configured_providers,
+        .session_dir = args.session_dir,
+    });
   } catch (const std::exception &error) {
     std::cerr << "error: " << error.what() << "\n";
     return 1;
   }
 
   if (args.list_models) {
-    return pi::cmd_list_models(args, model_catalog);
+    return pi::cmd_list_models(args, process->model_catalog());
   }
 
   if (!args.test_files.empty())
     return pi::run_lua_test_files(args.test_files);
 
-  return pi::cmd_run(args, model_catalog);
+  return pi::cmd_run(args, process->model_catalog(), process->authentication(),
+                     process->session_store());
 }

@@ -1,4 +1,4 @@
-// open_session_runtime()/activate_session_runtime() live in their own
+// open_runtime_bundle()/activate_runtime_bundle() live in their own
 // translation unit, separate from session_runtime.cpp's frontend-shared
 // pieces (resolve_model_selection/build_agent_options/
 // build_agent_session_config), because they're the only functions here
@@ -69,18 +69,25 @@ std::vector<ContextFile> load_context_files() {
   return result;
 }
 
-} // namespace
-
-SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config) {
-  // Built into locals first, then assembled into one SessionRuntimeBundle
-  // aggregate-initialization at the end.
-  auto session_store = std::make_shared<core::SessionStore>(
+std::shared_ptr<core::SessionStore>
+resolve_session_store(const RuntimeBuildConfig &config) {
+  if (config.session_store)
+    return config.session_store;
+  return std::make_shared<core::SessionStore>(
       config.args.session_dir.empty()
           ? core::SessionStore::default_sessions_dir()
           : std::filesystem::path(config.args.session_dir));
+}
+
+} // namespace
+
+RuntimeBundle open_runtime_bundle(const RuntimeBuildConfig &config) {
+  // Built into locals first, then assembled into one RuntimeBundle
+  // aggregate-initialization at the end.
+  auto session_store = resolve_session_store(config);
 
   auto fail = [](std::string message) {
-    return SessionRuntimeBundle{.error = std::move(message)};
+    return RuntimeBundle{.error = std::move(message)};
   };
 
   std::optional<core::SessionRecord> loaded_session;
@@ -209,7 +216,7 @@ SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config) {
   auto runtime =
       std::make_shared<core::SessionRuntime>(std::move(session_config));
 
-  return SessionRuntimeBundle{
+  return RuntimeBundle{
       .warning = std::move(warning),
       .session_store = std::move(session_store),
       .sandbox_policy = std::move(sandbox_policy),
@@ -226,8 +233,8 @@ SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config) {
   };
 }
 
-void activate_session_runtime(
-    SessionRuntimeBundle &bundle,
+void activate_runtime_bundle(
+    RuntimeBundle &bundle,
     core::AgentTaskEventCallback extra_task_event_callback,
     std::function<void()> wake_root) {
   bundle.runtime->activate(

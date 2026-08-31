@@ -3,12 +3,12 @@
 #include "cli/config.h"
 #include "cli/session_runtime.h"
 #include "cli/system_prompt.h"
-#include "core/auth/authentication.h"
 #include "core/builtin_tools.h"
 #include "core/lua_tool.h"
 #include "core/message_types.h"
 #include "core/models.h"
 #include "core/otel_init.h"
+#include "core/process/pici_process.h"
 #include "core/providers/muse_messages.h"
 #include "core/providers/openai_codex_responses.h"
 #include "core/providers/openai_completions.h"
@@ -119,14 +119,17 @@ int main(int argc, char *argv[]) noexcept {
   static const std::map<std::string, pi::cli::ProviderConfig> empty_config;
   const auto &configured =
       args.config_document ? args.config_document->providers : empty_config;
-  std::shared_ptr<const pi::core::ModelCatalog> registry;
+  std::optional<pi::core::PiciProcess> process;
   try {
-    registry = std::make_shared<pi::core::ModelCatalog>(configured);
-    registry->validate_registered_apis();
+    process.emplace(pi::core::PiciProcess::Config{
+        .providers = configured,
+        .session_dir = args.session_dir,
+    });
   } catch (const std::exception &error) {
     std::cerr << "error: " << error.what() << "\n";
     return 1;
   }
+  const auto &registry = process->model_catalog();
 
   // Shared with cmd_run()'s (pi-cli's) resolution logic -- see
   // cli/session_runtime.h. Previously duplicated here with two real
@@ -158,10 +161,18 @@ int main(int argc, char *argv[]) noexcept {
   cfg.threads = acp_threads;
   cfg.sandbox_policy = sandbox_policy;
   cfg.model_catalog = registry;
-  if (!args.session_dir.empty())
+  // Only reuse the process's session store when the caller explicitly named
+  // a directory. With no --session-dir, ACP's own ephemeral-temp-directory
+  // default (see run_server()) must stay in effect -- PiciProcess otherwise
+  // resolves its own session store against the CLI's persistent default
+  // sessions directory, which would silently make ACP sessions durable and
+  // shared with the CLI by default instead of scratch-and-discard per run.
+  if (!args.session_dir.empty()) {
     cfg.session_dir = args.session_dir;
+    cfg.session_store = process->session_store();
+  }
 
-  auto authentication = std::make_shared<pi::auth::Authentication>(registry);
+  auto authentication = process->authentication();
   cfg.authentication = authentication;
   if (!args.api_key.empty())
     authentication->set_runtime_api_key(model.provider, args.api_key);

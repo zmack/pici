@@ -499,6 +499,7 @@ add_library(pi-core
     src/core/auth/credential_store.cpp
     src/core/env_api_keys.cpp
     src/core/models.cpp
+    src/core/process/pici_process.cpp
     src/core/providers/faux.cpp
     src/core/providers/faux_control.cpp
     src/core/providers/transform_messages.cpp
@@ -697,6 +698,10 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-model_catalog PRIVATE pi-core)
     add_test(NAME test-model_catalog COMMAND test-model_catalog)
 
+    add_executable(test-pici_process test/test_pici_process.cpp)
+    target_link_libraries(test-pici_process PRIVATE pi-http)
+    add_test(NAME test-pici_process COMMAND test-pici_process)
+
     add_executable(test-openai_completions test/test_openai_completions.cpp)
     target_link_libraries(test-openai_completions PRIVATE pi-http)
     add_test(NAME test-openai_completions COMMAND test-openai_completions)
@@ -877,7 +882,7 @@ if(PI_CPP_BUILD_TESTS)
         test-lua_tool test-markdown test-terminal test-skills test-memory_stats
         test-subagent-activity test-subagent-panel test-region-renderer
         test-faux_client test-faux_control test-auth_resolver test-authentication
-        test-model_catalog test-openai_completions test-muse_messages test-config
+        test-model_catalog test-pici_process test-openai_completions test-muse_messages test-config
         test-mailbox-runtime test-mailbox-store test-mailbox-coordinator
         test-mailbox-bindings test-credential_store test-openai_codex_oauth
         test-openai_codex_responses test-sandbox test-system_prompt test-rpc_mode

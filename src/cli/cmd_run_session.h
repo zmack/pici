@@ -67,6 +67,7 @@
 #include "core/session/agent_session.h"
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
+#include "core/session/session_store.h"
 #include "core/session/session_tree.h"
 #include "core/skills.h"
 #include "core/stream_diagnostics.h"
@@ -976,7 +977,7 @@ inline void parse_agent_context(const nlohmann::json &value,
 // renderer selection, REPL command dispatch, and the terminal I/O loop.
 // Construction of the runtime itself (model/auth resolution, session
 // store, sandbox policy, hooks, mailbox, task manager) is shared with
-// pi-acp via cli::open_session_runtime()/activate_session_runtime(); see
+// pi-acp via cli::open_runtime_bundle()/activate_runtime_bundle(); see
 // cli/session_runtime.h and plans/session-runtime-migration.md Phase 2.
 //
 // Orchestrates cmd_run(): model/session/tool/hook bootstrap, then dispatch
@@ -991,8 +992,12 @@ inline void parse_agent_context(const nlohmann::json &value,
 class CmdRunSession {
 public:
   CmdRunSession(cli::Args args,
-                std::shared_ptr<const core::ModelCatalog> registry)
-      : args_(std::move(args)), registry_(std::move(registry)) {}
+                std::shared_ptr<const core::ModelCatalog> registry,
+                std::shared_ptr<pi::auth::Authentication> authentication = {},
+                std::shared_ptr<core::SessionStore> session_store = {})
+      : args_(std::move(args)), registry_(std::move(registry)),
+        injected_authentication_(std::move(authentication)),
+        injected_session_store_(std::move(session_store)) {}
 
   int run() {
     if (!resolve_model())
@@ -1110,14 +1115,23 @@ private:
   }
 
   void init_authentication() {
-    authentication_ =
-        std::make_shared<pi::auth::Authentication>(effective_registry_);
+    // injected_authentication_ (when supplied, e.g. by PiciProcess) is only
+    // valid for effective_registry_ == registry_: the faux-control-socket
+    // branch of resolve_model() replaces effective_registry_ with a
+    // one-off scripted catalog the injected Authentication was never built
+    // against, so that path keeps building its own exactly as before.
+    if (injected_authentication_ && effective_registry_ == registry_) {
+      authentication_ = injected_authentication_;
+    } else {
+      authentication_ =
+          std::make_shared<pi::auth::Authentication>(effective_registry_);
+    }
     if (!args_.api_key.empty())
       authentication_->set_runtime_api_key(model_.provider, args_.api_key);
   }
 
   bool open_runtime() {
-    cli::SessionRuntimeConfig runtime_config{
+    cli::RuntimeBuildConfig runtime_config{
         .args = args_,
         .model = model_,
         .model_catalog = effective_registry_,
@@ -1128,8 +1142,9 @@ private:
               std::scoped_lock lock(effective_context_mutex_);
               effective_context_ = context;
             },
+        .session_store = injected_session_store_,
     };
-    bundle_ = cli::open_session_runtime(runtime_config);
+    bundle_ = cli::open_runtime_bundle(runtime_config);
     if (bundle_.error) {
       std::cerr << "error: " << *bundle_.error << "\n";
       return false;
@@ -1212,7 +1227,7 @@ private:
     repl_wake_ = std::make_shared<cli::ReadlineWake>();
     activity_ = std::make_shared<core::SubagentActivityBridge>(
         [wake = repl_wake_] { static_cast<void>(wake->notify()); });
-    cli::activate_session_runtime(
+    cli::activate_runtime_bundle(
         bundle_,
         [activity = activity_](const core::AgentTaskEvent &event) {
           activity->observe(event);
@@ -2320,9 +2335,11 @@ private:
   core::Model model_;
   std::shared_ptr<core::StreamDiagnostics> stream_diagnostics_;
   std::shared_ptr<pi::auth::Authentication> authentication_;
+  std::shared_ptr<pi::auth::Authentication> injected_authentication_;
+  std::shared_ptr<core::SessionStore> injected_session_store_;
   std::mutex effective_context_mutex_;
   std::optional<core::AgentContext> effective_context_;
-  cli::SessionRuntimeBundle bundle_;
+  cli::RuntimeBundle bundle_;
   core::SandboxMode sandbox_mode_{core::SandboxMode::auto_mode};
   std::function<void(const std::string &)> faux_tool_registrar_;
   std::vector<std::shared_ptr<const core::ToolDefinition>> base_tools_;
@@ -2349,9 +2366,13 @@ private:
   std::size_t readline_cursor_{0};
 };
 
-inline int cmd_run(const cli::Args &args,
-                   const std::shared_ptr<const core::ModelCatalog> &registry) {
-  CmdRunSession session(args, registry);
+inline int
+cmd_run(const cli::Args &args,
+        const std::shared_ptr<const core::ModelCatalog> &registry,
+        std::shared_ptr<pi::auth::Authentication> authentication = {},
+        std::shared_ptr<core::SessionStore> session_store = {}) {
+  CmdRunSession session(args, registry, std::move(authentication),
+                        std::move(session_store));
   return session.run();
 }
 

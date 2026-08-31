@@ -4,7 +4,7 @@
 // it declares was renamed to SessionRuntime by
 // plans/session-runtime-migration.md Phase 6 -- avoids colliding on
 // "session_runtime.h" with the unrelated, CLI-facing
-// cli::SessionRuntimeConfig/Bundle/Capabilities factory types declared in
+// cli::RuntimeBuildConfig/Bundle/Capabilities factory types declared in
 // cli/session_runtime.h (that file builds the Config below; this file is
 // what it builds it for).
 
@@ -30,7 +30,7 @@ namespace pi::core {
 // Owns the active session identity, one Agent activation, its
 // AgentTaskManager, and its mailbox attachment -- the bundle Phase 2's
 // factory used to construct and hand back as three-plus separate pieces
-// (see cli/session_runtime.h's SessionRuntimeBundle, which now holds a
+// (see cli/session_runtime.h's RuntimeBundle, which now holds a
 // single shared_ptr<SessionRuntime> instead) is, as of Phase 6, one class.
 //
 // Construction is still two-phase, matching AgentTaskManager's own

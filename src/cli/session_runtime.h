@@ -17,7 +17,7 @@
 //
 // core::MailboxRuntime itself relocated out of cli:: in Phase 3 (it never
 // depended on cli::Args). This file stays in pi::cli rather than moving to
-// core:: alongside it: SessionRuntimeConfig/AgentOptionsConfig embed
+// core:: alongside it: RuntimeBuildConfig/AgentOptionsConfig embed
 // cli::Args by value throughout (not just in passing), and Args is a
 // CLI-specific config type -- moving this header into core:: would make
 // core:: depend on a frontend type, inverting the intended dependency
@@ -156,7 +156,7 @@ core::SessionRuntime::Config build_agent_session_config(
 // files, a skill catalog, and the constructed core::SessionRuntime itself
 // (which as of Phase 6 owns the Agent, AgentTaskManager, and mailbox
 // attachment that used to be three separate bundle fields). Built by
-// open_session_runtime(); activate_session_runtime() finishes it once the
+// open_runtime_bundle(); activate_runtime_bundle() finishes it once the
 // caller has registered tools and finalized the system prompt on the live
 // agent (see that function's comment for why this is two calls, not one).
 //
@@ -168,7 +168,7 @@ core::SessionRuntime::Config build_agent_session_config(
 // CLI-shaped bundle (which also resolves CLI-only concerns like
 // --resume/--continue and context-file/skill discovery that ACP doesn't
 // have).
-struct SessionRuntimeConfig {
+struct RuntimeBuildConfig {
   Args args;
   core::Model model;
   std::shared_ptr<const core::ModelCatalog> model_catalog;
@@ -182,9 +182,14 @@ struct SessionRuntimeConfig {
   // post-construction setter for it on the live Agent.
   std::function<void(const core::AgentContext &)> on_effective_context;
   SessionRuntimeCapabilities capabilities;
+  // Set by a caller (e.g. PiciProcess-backed frontends) that already owns a
+  // process-lifetime core::SessionStore; open_runtime_bundle() then reuses
+  // it instead of constructing its own from args.session_dir. Null preserves
+  // the pre-existing fallback construction exactly.
+  std::shared_ptr<core::SessionStore> session_store;
 };
 
-struct SessionRuntimeBundle {
+struct RuntimeBundle {
   // Set on a validation failure (bad --sandbox string -- including one
   // stored in a resumed session's header, an unresolvable --resume
   // prefix, --continue with no previous session, or an invalid
@@ -213,7 +218,7 @@ struct SessionRuntimeBundle {
   const core::SkillCatalog *skill_catalog_ptr{nullptr};
   // Mutable: the caller (cmd_run()) updates agent_options.system_prompt
   // after tool registration determines the final tool list, then passes
-  // this bundle to activate_session_runtime(), which uses the
+  // this bundle to activate_runtime_bundle(), which uses the
   // now-finalized value when calling core::SessionRuntime::activate() (so
   // child agents inherit the final system prompt). This mirrors
   // cmd_run()'s pre-extraction behavior exactly: the live root Agent's
@@ -242,22 +247,22 @@ struct SessionRuntimeBundle {
 // runtime built but not yet connected). Does not call
 // SessionRuntime::activate() -- that needs the finalized system prompt,
 // which the caller only knows after registering tools; see
-// activate_session_runtime().
+// activate_runtime_bundle().
 //
 // On a validation failure (bad --continue/--resume/--sandbox/
 // agents.write_tools input), returns a bundle with only `error` set --
 // check it before touching any other field. Success may still set
 // `warning` (currently: agents.write_tools=all with a resolved disabled
 // sandbox).
-SessionRuntimeBundle open_session_runtime(const SessionRuntimeConfig &config);
+RuntimeBundle open_runtime_bundle(const RuntimeBuildConfig &config);
 
 // Phase B: called after the caller has registered tools on
 // bundle.runtime->agent() and updated bundle.agent_options.system_prompt
 // to its final value. Calls bundle.runtime->activate(), forwarding
 // extra_task_event_callback (e.g. a REPL activity/wake bridge) and
 // wake_root (e.g. the REPL's readline-wake notifier) through to it.
-void activate_session_runtime(
-    SessionRuntimeBundle &bundle,
+void activate_runtime_bundle(
+    RuntimeBundle &bundle,
     core::AgentTaskEventCallback extra_task_event_callback = {},
     std::function<void()> wake_root = {});
 
