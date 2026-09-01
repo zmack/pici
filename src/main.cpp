@@ -9,8 +9,10 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <filesystem>
@@ -227,9 +229,15 @@ int main(int argc, char *argv[]) noexcept {
   if (!args.test_files.empty())
     return pi::run_lua_test_files(args.test_files);
 
-  return pi::cmd_run(args, process->model_catalog(), process->authentication(),
-                     process->session_store(),
-                     [&process](const pi::core::MailboxOptions &options) {
-                       return process->ensure_mailbox(options);
-                     });
+  return pi::cmd_run(
+      args, process->model_catalog(), process->authentication(),
+      process->session_store(),
+      [&process](const pi::core::MailboxOptions &options) {
+        return process->ensure_mailbox(options);
+      },
+      [&process](const std::vector<std::string> &provider_ids,
+                 std::stop_token stop_token) {
+        return process->refresh_model_catalog(provider_ids,
+                                              std::move(stop_token));
+      });
 }

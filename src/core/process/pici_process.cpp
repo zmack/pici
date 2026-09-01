@@ -17,7 +17,7 @@ namespace pi::core {
 
 namespace {
 
-std::shared_ptr<const ModelCatalog> build_model_catalog(
+std::shared_ptr<ModelCatalog> build_model_catalog(
     const std::map<std::string, ProviderConfig> &providers,
     std::shared_ptr<InferenceAdapterCollection> inference_adapters) {
   auto catalog = std::make_shared<ModelCatalog>(providers, nullptr,

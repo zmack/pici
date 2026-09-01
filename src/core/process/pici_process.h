@@ -14,7 +14,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <string>
+#include <vector>
 
 namespace pi::core {
 
@@ -38,7 +40,7 @@ public:
   // validate_registered_apis()) on bad provider configuration.
   explicit PiciProcess(const Config &config);
 
-  const std::shared_ptr<const ModelCatalog> &model_catalog() const {
+  std::shared_ptr<const ModelCatalog> model_catalog() const {
     return model_catalog_;
   }
   const std::shared_ptr<auth::Authentication> &authentication() const {
@@ -46,6 +48,17 @@ public:
   }
   const std::shared_ptr<SessionStore> &session_store() const {
     return session_store_;
+  }
+
+  // Forwards to the process-owned ModelCatalog's own refresh(), which is
+  // already internally synchronized against concurrent view()/search()
+  // readers -- this is a thin pass-through, not a new synchronization point.
+  // model_catalog() keeps returning shared_ptr<const ModelCatalog> to every
+  // other caller; this is the one entry point allowed to mutate it.
+  std::vector<ProviderRefreshStatus>
+  refresh_model_catalog(const std::vector<std::string> &provider_ids = {},
+                        std::stop_token stop_token = {}) const {
+    return model_catalog_->refresh(provider_ids, std::move(stop_token));
   }
 
   // Lazily constructs the process's one Mailbox on first call (using
@@ -61,7 +74,7 @@ public:
   std::shared_ptr<Mailbox> ensure_mailbox(const MailboxOptions &options) const;
 
 private:
-  std::shared_ptr<const ModelCatalog> model_catalog_;
+  std::shared_ptr<ModelCatalog> model_catalog_;
   auth::CredentialStore credential_store_;
   std::shared_ptr<auth::Authentication> authentication_;
   std::shared_ptr<SessionStore> session_store_;

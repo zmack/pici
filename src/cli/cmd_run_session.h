@@ -43,6 +43,7 @@
 #include "cli/args.h"
 #include "cli/faux_control_mode.h"
 #include "cli/model_picker.h"
+#include "cli/model_picker_settings.h"
 #include "cli/readline.h"
 #include "cli/rpc_mode.h"
 #include "cli/session_runtime.h"
@@ -998,11 +999,15 @@ public:
                 std::shared_ptr<core::SessionStore> session_store = {},
                 std::function<std::shared_ptr<core::Mailbox>(
                     const core::MailboxOptions &)>
-                    ensure_mailbox = {})
+                    ensure_mailbox = {},
+                std::function<std::vector<core::ProviderRefreshStatus>(
+                    const std::vector<std::string> &, std::stop_token)>
+                    refresh_model_catalog = {})
       : args_(std::move(args)), registry_(std::move(registry)),
         injected_authentication_(std::move(authentication)),
         injected_session_store_(std::move(session_store)),
-        injected_ensure_mailbox_(std::move(ensure_mailbox)) {}
+        injected_ensure_mailbox_(std::move(ensure_mailbox)),
+        injected_refresh_model_catalog_(std::move(refresh_model_catalog)) {}
 
   int run() {
     if (!resolve_model())
@@ -2139,6 +2144,17 @@ private:
                 }
                 return std::string("unknown");
               },
+          .default_model = cli::load_default_model(),
+          .refresh_catalog =
+              injected_refresh_model_catalog_
+                  ? std::function<core::ModelCatalogView(std::stop_token)>(
+                        [this](std::stop_token tok) {
+                          injected_refresh_model_catalog_({}, std::move(tok));
+                          return registry_->view();
+                        })
+                  : nullptr,
+          .save_as_default =
+              [](const core::ModelKey &key) { cli::save_default_model(key); },
       };
       const auto selected =
           cli::run_model_picker(picker_input, renderer_->owns_status_line());
@@ -2346,6 +2362,9 @@ private:
   std::shared_ptr<core::SessionStore> injected_session_store_;
   std::function<std::shared_ptr<core::Mailbox>(const core::MailboxOptions &)>
       injected_ensure_mailbox_;
+  std::function<std::vector<core::ProviderRefreshStatus>(
+      const std::vector<std::string> &, std::stop_token)>
+      injected_refresh_model_catalog_;
   std::mutex effective_context_mutex_;
   std::optional<core::AgentContext> effective_context_;
   cli::RuntimeBundle bundle_;
@@ -2381,9 +2400,13 @@ inline int cmd_run(
     std::shared_ptr<pi::auth::Authentication> authentication = {},
     std::shared_ptr<core::SessionStore> session_store = {},
     std::function<std::shared_ptr<core::Mailbox>(const core::MailboxOptions &)>
-        ensure_mailbox = {}) {
+        ensure_mailbox = {},
+    std::function<std::vector<core::ProviderRefreshStatus>(
+        const std::vector<std::string> &, std::stop_token)>
+        refresh_model_catalog = {}) {
   CmdRunSession session(args, registry, std::move(authentication),
-                        std::move(session_store), std::move(ensure_mailbox));
+                        std::move(session_store), std::move(ensure_mailbox),
+                        std::move(refresh_model_catalog));
   return session.run();
 }
 
