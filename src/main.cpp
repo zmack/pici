@@ -56,11 +56,14 @@ build_inference_adapters() {
 // Same rationale as build_inference_adapters() above, for live model-list
 // discovery: ModelCatalog::builtin_providers() points every
 // "openai-completions" provider at adapter id "openai-compatible-models",
-// which only resolves to something real once this collection is wired in.
+// openai-codex at "openai-codex-models", and meta at "muse-models" -- each
+// only resolves to something real once this collection is wired in.
 std::shared_ptr<pi::core::ModelDiscoveryAdapterCollection>
 build_discovery_adapters() {
   auto adapters = std::make_shared<pi::core::ModelDiscoveryAdapterCollection>();
   pi::core::register_openai_compatible_discovery(*adapters);
+  pi::core::register_openai_codex_discovery(*adapters);
+  pi::core::register_muse_model_discovery(*adapters);
   return adapters;
 }
 

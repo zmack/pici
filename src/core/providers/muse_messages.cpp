@@ -5,6 +5,8 @@
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
+#include "core/models.h"
+#include "core/providers/openai_completions.h"
 #include "core/providers/transform_messages.h"
 #include "core/terminal.h"
 #include "http/http_client.h"
@@ -772,6 +774,48 @@ MuseMessagesClient::stream(const Model &model, const AgentContext &context,
   return result;
 }
 
+ProviderModelReport
+MuseModelDiscoveryAdapter::discover(const ProviderDiscoveryRequest &request,
+                                    std::stop_token stop_token) {
+  // meta's own base_url ("https://api.meta.ai") is deliberately version-less
+  // -- MuseMessagesClient::stream() appends /v1/messages itself the same
+  // way; mirror that exact normalization here for /v1/models instead.
+  std::string url = request.provider.base_url;
+  while (!url.empty() && url.back() == '/')
+    url.pop_back();
+  if (!url.ends_with("/v1"))
+    url += "/v1";
+  url += "/models";
+
+  const auto response = HttpClient::get_authenticated(
+      url, {{"Accept", "application/json"}}, request.auth, 10'000,
+      std::move(stop_token));
+  if (!response)
+    throw std::runtime_error("request to " + url + " failed");
+  if (response->status_code < 200 || response->status_code >= 300)
+    throw std::runtime_error("request to " + url + " returned status " +
+                             std::to_string(response->status_code) + ": " +
+                             response->body);
+
+  nlohmann::json body;
+  try {
+    body = nlohmann::json::parse(response->body);
+  } catch (const nlohmann::json::exception &error) {
+    throw std::runtime_error("could not parse response from " + url + ": " +
+                             error.what());
+  }
+
+  ProviderModelReport report;
+  report.provider_id = request.provider.id;
+  // Reuses the OpenAI-compatible parser -- meta-chat's /v1/models is that
+  // same shape -- re-tagging entries under muse-messages's own
+  // provider/api instead of meta-chat's.
+  report.models =
+      parse_models_response(body, request.provider.id, request.provider.api);
+  report.observed_at = std::chrono::system_clock::now();
+  return report;
+}
+
 } // namespace pi::core
 
 void pi::core::register_muse_messages_client() {
@@ -785,4 +829,10 @@ void pi::core::register_muse_messages_client(
   adapters.register_adapter("muse-messages", [] {
     return std::make_shared<pi::core::MuseMessagesClient>();
   });
+}
+
+void pi::core::register_muse_model_discovery(
+    ModelDiscoveryAdapterCollection &adapters) {
+  adapters.register_adapter(
+      "muse-models", std::make_shared<pi::core::MuseModelDiscoveryAdapter>());
 }

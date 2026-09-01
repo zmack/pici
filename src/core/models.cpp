@@ -473,22 +473,26 @@ ModelCatalog::ModelCatalog( // NOLINT(readability-function-cognitive-complexity)
     discovery_adapters_ = std::make_shared<ModelDiscoveryAdapterCollection>();
   if (!inference_adapters_)
     inference_adapters_ = std::make_shared<InferenceAdapterCollection>();
-  // Every "openai-completions" builtin provider gets a default discovery
-  // binding, but only when the caller actually registered a real
-  // implementation under this id (pi-http's
-  // OpenAICompatibleModelDiscoveryAdapter, registered by PiciProcess's
-  // production construction path) -- never unconditionally, since an unmet
-  // discovery binding fails construction below (see the "unknown discovery
-  // adapter" check). This keeps every caller that doesn't wire live
-  // discovery (most tests, faux-control) working exactly as before, while
-  // giving real discovery for free once it's actually available.
-  const bool have_default_discovery_adapter =
-      discovery_adapters_->has_adapter("openai-compatible-models");
+  // Every builtin provider with a known live discovery adapter gets that
+  // binding by default, but only when the caller actually registered a real
+  // implementation under the matching id (pi-http's
+  // OpenAICompatibleModelDiscoveryAdapter/OpenAICodexModelDiscoveryAdapter/
+  // MuseModelDiscoveryAdapter, registered by PiciProcess's production
+  // construction path) -- never unconditionally, since an unmet discovery
+  // binding fails construction below (see the "unknown discovery adapter"
+  // check). This keeps every caller that doesn't wire live discovery (most
+  // tests, faux-control) working exactly as before, while giving real
+  // discovery for free once it's actually available.
   for (auto definition : builtin_providers()) {
-    if (have_default_discovery_adapter &&
-        definition.api == "openai-completions")
-      definition.discovery =
-          DiscoveryBinding{.adapter_id = "openai-compatible-models"};
+    std::optional<std::string> adapter_id;
+    if (definition.api == "openai-completions")
+      adapter_id = "openai-compatible-models";
+    else if (definition.id == "openai-codex")
+      adapter_id = "openai-codex-models";
+    else if (definition.id == "meta")
+      adapter_id = "muse-models";
+    if (adapter_id && discovery_adapters_->has_adapter(*adapter_id))
+      definition.discovery = DiscoveryBinding{.adapter_id = *adapter_id};
     providers_.emplace(lower_ascii(definition.id), std::move(definition));
   }
 

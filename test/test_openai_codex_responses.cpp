@@ -1,6 +1,8 @@
 #include "core/providers/openai_codex_responses.h"
 
 #include "core/agent.h"
+#include "core/auth_types.h"
+#include "core/models.h"
 #include "core/providers/faux.h"
 #include "core/session/session_runtime.h"
 #include "core/session/session_store.h"
@@ -13,6 +15,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -613,4 +616,153 @@ TEST(OpenAICodexResponses, RequestParsingCompactionAndDiagnostics) {
       listener.join();
     }
   }
+}
+
+// --- OpenAICodexModelDiscoveryAdapter: URL normalization, response parsing,
+// and a real HTTP round trip, mirroring test_openai_completions.cpp's
+// OpenAICompatibleModelDiscoveryAdapter tests for the same reasons. ---
+
+TEST(CodexModelsEndpointUrl, AppendsCodexModelsToBareBackendUrl) {
+  EXPECT_EQ(pi::core::OpenAICodexModelDiscoveryAdapter::models_endpoint_url(
+                "https://chatgpt.com/backend-api"),
+            "https://chatgpt.com/backend-api/codex/models");
+}
+
+TEST(CodexModelsEndpointUrl, AppendsModelsToCodexSuffixedUrl) {
+  EXPECT_EQ(pi::core::OpenAICodexModelDiscoveryAdapter::models_endpoint_url(
+                "https://chatgpt.com/backend-api/codex"),
+            "https://chatgpt.com/backend-api/codex/models");
+}
+
+TEST(CodexModelsEndpointUrl, LeavesAlreadyFullUrlUnchanged) {
+  EXPECT_EQ(pi::core::OpenAICodexModelDiscoveryAdapter::models_endpoint_url(
+                "https://chatgpt.com/backend-api/codex/models"),
+            "https://chatgpt.com/backend-api/codex/models");
+}
+
+TEST(CodexModelsEndpointUrl, EmptyBaseUrlFallsBackToDefaultHost) {
+  EXPECT_EQ(pi::core::OpenAICodexModelDiscoveryAdapter::models_endpoint_url(""),
+            "https://chatgpt.com/backend-api/codex/models");
+}
+
+TEST(ParseCodexModelsResponse, ValidModelsArrayProducesEntries) {
+  const auto body = nlohmann::json::parse(
+      R"({"models":[{"slug":"gpt-5.4","display_name":"GPT-5.4"},)"
+      R"({"slug":"gpt-5.5"}]})");
+  const auto entries = pi::core::parse_codex_models_response(
+      body, "openai-codex", "openai-codex-responses");
+  ASSERT_EQ(entries.size(), std::size_t{2});
+  EXPECT_EQ(entries[0].key.provider_id, "openai-codex");
+  EXPECT_EQ(entries[0].key.model_id, "gpt-5.4");
+  EXPECT_EQ(entries[0].api, "openai-codex-responses");
+  EXPECT_EQ(entries[0].display_name, "GPT-5.4");
+  EXPECT_EQ(entries[1].key.model_id, "gpt-5.5");
+  EXPECT_EQ(entries[1].display_name, "");
+}
+
+TEST(ParseCodexModelsResponse, MissingModelsFieldThrows) {
+  const auto body = nlohmann::json::parse(R"({"other":[]})");
+  EXPECT_THROW(pi::core::parse_codex_models_response(body, "openai-codex",
+                                                     "openai-codex-responses"),
+              std::runtime_error);
+}
+
+TEST(ParseCodexModelsResponse, EntryMissingSlugThrows) {
+  const auto body = nlohmann::json::parse(R"({"models":[{"display_name":"x"}]})");
+  EXPECT_THROW(pi::core::parse_codex_models_response(body, "openai-codex",
+                                                     "openai-codex-responses"),
+              std::runtime_error);
+}
+
+namespace {
+
+// RAII wrapper around the bind/listen/stop/join boilerplate, mirroring
+// test_openai_completions.cpp's LoopbackServer -- keeps that (and the
+// response handler, a named functor rather than an inline lambda) out of
+// each TEST body's own cognitive complexity.
+struct LoopbackServer {
+  httplib::Server server;
+  int port{0};
+  std::thread listener;
+
+  LoopbackServer(std::string_view path, httplib::Server::Handler handler) {
+    server.Get(std::string(path), std::move(handler));
+    port = server.bind_to_any_port("127.0.0.1");
+    listener = std::thread([this] { server.listen_after_bind(); });
+  }
+  ~LoopbackServer() {
+    server.stop();
+    listener.join();
+  }
+  LoopbackServer(const LoopbackServer &) = delete;
+  LoopbackServer &operator=(const LoopbackServer &) = delete;
+
+  std::string base_url() const {
+    return "http://127.0.0.1:" + std::to_string(port) + "/backend-api";
+  }
+};
+
+struct CodexModelsHandler {
+  std::string seen_path;
+  std::string seen_auth_header;
+  std::string seen_query;
+
+  void operator()(const httplib::Request &request, httplib::Response &response) {
+    seen_path = request.path;
+    seen_auth_header = request.get_header_value("Authorization");
+    seen_query = request.get_param_value("client_version");
+    response.set_content(
+        R"({"models":[{"slug":"gpt-5.4","display_name":"GPT-5.4"}]})",
+        "application/json");
+  }
+};
+
+void respond_unauthorized_codex(const httplib::Request &,
+                                httplib::Response &response) {
+  response.status = 401;
+  response.set_content(R"({"detail":"Unauthorized"})", "application/json");
+}
+
+} // namespace
+
+TEST(OpenAICodexModelDiscoveryAdapterTest, SuccessRoundTrip) {
+  CodexModelsHandler handler;
+  LoopbackServer server("/backend-api/codex/models", std::ref(handler));
+  ASSERT_GT(server.port, 0);
+
+  pi::core::Provider provider;
+  provider.id = "openai-codex";
+  provider.api = "openai-codex-responses";
+  provider.base_url = server.base_url();
+
+  pi::core::ProviderDiscoveryRequest request;
+  request.provider = provider;
+  request.auth = pi::core::RequestAuth{.kind = pi::core::AuthKind::oauth,
+                                      .bearer_token = std::string("codex-token")};
+
+  pi::core::OpenAICodexModelDiscoveryAdapter adapter;
+  const auto report = adapter.discover(request, {});
+
+  EXPECT_EQ(handler.seen_path, "/backend-api/codex/models");
+  EXPECT_EQ(handler.seen_auth_header, "Bearer codex-token");
+  EXPECT_EQ(handler.seen_query, "pici-cpp");
+  EXPECT_EQ(report.provider_id, "openai-codex");
+  ASSERT_EQ(report.models.size(), std::size_t{1});
+  EXPECT_EQ(report.models[0].key.model_id, "gpt-5.4");
+  EXPECT_EQ(report.models[0].display_name, "GPT-5.4");
+}
+
+TEST(OpenAICodexModelDiscoveryAdapterTest, UnauthorizedStatusThrows) {
+  LoopbackServer server("/backend-api/codex/models", respond_unauthorized_codex);
+  ASSERT_GT(server.port, 0);
+
+  pi::core::Provider provider;
+  provider.id = "openai-codex";
+  provider.api = "openai-codex-responses";
+  provider.base_url = server.base_url();
+  pi::core::ProviderDiscoveryRequest request;
+  request.provider = provider;
+
+  pi::core::OpenAICodexModelDiscoveryAdapter adapter;
+  EXPECT_THROW(adapter.discover(request, {}), std::runtime_error);
 }

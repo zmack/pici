@@ -2,13 +2,16 @@
 
 #include "core/agent_state.h"
 #include "core/llm_client.h"
+#include "core/models.h"
 
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pi::core {
 
@@ -110,5 +113,29 @@ void register_openai_codex_responses_client();
 // depend on the global registry (plans/object-taxonomy-migration.md Phase 10).
 void register_openai_codex_responses_client(
     InferenceAdapterCollection &adapters);
+
+// Parses the ChatGPT backend's `GET .../codex/models` response
+// (`{"models":[{"slug":"...", "display_name":"...", ...}]}`) -- a different,
+// richer, undocumented shape from the public OpenAI `/v1/models` contract
+// (see OpenAICompatibleModelDiscoveryAdapter). Pure/testable: throws
+// std::runtime_error on any other shape rather than silently skipping.
+std::vector<ModelCatalogEntry>
+parse_codex_models_response(const nlohmann::json &body,
+                            std::string_view provider_id, std::string_view api);
+
+// Discovers openai-codex's live model list via the same ChatGPT backend
+// endpoint the real Codex CLI uses (found by reading its open-source
+// implementation, not guessed) -- normalizes the base_url the same way
+// endpoint_url() does for /responses. Identifies itself honestly as pici in
+// its client_version query parameter; does not present itself as the
+// official Codex client.
+class OpenAICodexModelDiscoveryAdapter : public ModelDiscoveryAdapter {
+public:
+  ProviderModelReport discover(const ProviderDiscoveryRequest &request,
+                               std::stop_token stop_token) override;
+  static std::string models_endpoint_url(std::string base_url);
+};
+
+void register_openai_codex_discovery(ModelDiscoveryAdapterCollection &adapters);
 
 } // namespace pi::core

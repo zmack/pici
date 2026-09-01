@@ -1,19 +1,24 @@
+#include "core/models.h"
 #include "core/providers/muse_messages.h"
 #include "support/gtest_helpers.h"
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <httplib.h>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <source_location>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using namespace pi::core;
@@ -545,4 +550,116 @@ TEST_F(MuseMessagesTest, MapStopReasons) {
     EXPECT_EQ(MuseMessagesClient::map_stop_reason("unknown"),
               StopReason::error);
   }
+}
+
+// --- MuseModelDiscoveryAdapter: borrows meta-chat's OpenAI-compatible
+// /v1/models endpoint on the same host and re-tags results under
+// muse-messages's own provider/api. Mirrors
+// OpenAICompatibleModelDiscoveryAdapterTest in test_openai_completions.cpp
+// for the same reasons (real HTTP round trip, not just parsing). ---
+
+namespace {
+
+// RAII wrapper around the bind/listen/stop/join boilerplate, mirroring
+// test_openai_completions.cpp's LoopbackServer -- keeps that (and the
+// response handler, a named functor rather than an inline lambda) out of
+// each TEST body's own cognitive complexity.
+struct LoopbackServer {
+  httplib::Server server;
+  int port{0};
+  std::thread listener;
+
+  LoopbackServer(std::string_view path, httplib::Server::Handler handler) {
+    server.Get(std::string(path), std::move(handler));
+    port = server.bind_to_any_port("127.0.0.1");
+    listener = std::thread([this] { server.listen_after_bind(); });
+  }
+  ~LoopbackServer() {
+    server.stop();
+    listener.join();
+  }
+  LoopbackServer(const LoopbackServer &) = delete;
+  LoopbackServer &operator=(const LoopbackServer &) = delete;
+
+  std::string base_url() const {
+    return "http://127.0.0.1:" + std::to_string(port);
+  }
+};
+
+struct MuseModelsHandler {
+  std::string seen_path;
+  void operator()(const httplib::Request &request, httplib::Response &response) {
+    seen_path = request.path;
+    response.set_content(
+        R"({"object":"list","data":[{"id":"muse-spark-1.1","object":"model"}]})",
+        "application/json");
+  }
+};
+
+void respond_unauthorized_muse(const httplib::Request &,
+                               httplib::Response &response) {
+  response.status = 401;
+  response.set_content(R"({"error":{"code":"invalid_api_key"}})",
+                       "application/json");
+}
+
+} // namespace
+
+TEST(MuseModelDiscoveryAdapterTest, RoundTripAppendsV1ModelsToBareHost) {
+  MuseModelsHandler handler;
+  LoopbackServer server("/v1/models", std::ref(handler));
+  ASSERT_GT(server.port, 0);
+
+  Provider provider;
+  provider.id = "meta";
+  provider.api = "muse-messages";
+  provider.base_url = server.base_url(); // no /v1
+
+  ProviderDiscoveryRequest request;
+  request.provider = provider;
+
+  MuseModelDiscoveryAdapter adapter;
+  const auto report = adapter.discover(request, {});
+
+  EXPECT_EQ(handler.seen_path, "/v1/models");
+  EXPECT_EQ(report.provider_id, "meta");
+  ASSERT_EQ(report.models.size(), std::size_t{1});
+  EXPECT_EQ(report.models[0].key.provider_id, "meta");
+  EXPECT_EQ(report.models[0].key.model_id, "muse-spark-1.1");
+  EXPECT_EQ(report.models[0].api, "muse-messages");
+}
+
+TEST(MuseModelDiscoveryAdapterTest, DoesNotDoubleAppendV1) {
+  MuseModelsHandler handler;
+  LoopbackServer server("/v1/models", std::ref(handler));
+  ASSERT_GT(server.port, 0);
+
+  Provider provider;
+  provider.id = "meta";
+  provider.api = "muse-messages";
+  provider.base_url = server.base_url() + "/v1";
+
+  ProviderDiscoveryRequest request;
+  request.provider = provider;
+
+  MuseModelDiscoveryAdapter adapter;
+  const auto report = adapter.discover(request, {});
+
+  EXPECT_EQ(handler.seen_path, "/v1/models");
+  ASSERT_EQ(report.models.size(), std::size_t{1});
+}
+
+TEST(MuseModelDiscoveryAdapterTest, NonSuccessStatusThrows) {
+  LoopbackServer server("/v1/models", respond_unauthorized_muse);
+  ASSERT_GT(server.port, 0);
+
+  Provider provider;
+  provider.id = "meta";
+  provider.api = "muse-messages";
+  provider.base_url = server.base_url();
+  ProviderDiscoveryRequest request;
+  request.provider = provider;
+
+  MuseModelDiscoveryAdapter adapter;
+  EXPECT_THROW(adapter.discover(request, {}), std::runtime_error);
 }

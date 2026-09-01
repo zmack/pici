@@ -3,6 +3,7 @@
 #include "core/agent_state.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
+#include "core/models.h"
 
 #include <cstddef>
 #include <map>
@@ -11,6 +12,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pi::core {
 
@@ -94,5 +96,22 @@ void register_muse_messages_client();
 // singleton -- the seam PiciProcess uses so ordinary execution paths never
 // depend on the global registry (plans/object-taxonomy-migration.md Phase 10).
 void register_muse_messages_client(InferenceAdapterCollection &adapters);
+
+// muse-messages (the Anthropic Messages-shaped wire surface) has no
+// documented models-list endpoint of its own. "meta" and "meta-chat" are the
+// identical underlying model catalog on the same host
+// (api.meta.ai/api.meta.ai/v1) exposed through two different wire protocols
+// -- confirmed live: meta-chat's OpenAI-compatible /v1/models returns a real
+// (currently unauthenticated) response. So this borrows that same endpoint
+// and reuses core::parse_models_response (openai_completions.h) to parse
+// it, just re-tagging entries under muse-messages's own provider/api rather
+// than duplicating the parser.
+class MuseModelDiscoveryAdapter : public ModelDiscoveryAdapter {
+public:
+  ProviderModelReport discover(const ProviderDiscoveryRequest &request,
+                               std::stop_token stop_token) override;
+};
+
+void register_muse_model_discovery(ModelDiscoveryAdapterCollection &adapters);
 
 } // namespace pi::core

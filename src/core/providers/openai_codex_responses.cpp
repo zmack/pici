@@ -5,6 +5,7 @@
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
+#include "core/models.h"
 #include "core/providers/transform_messages.h"
 #include "http/http_client.h"
 #include "nlohmann/json_fwd.hpp"
@@ -1070,6 +1071,81 @@ CompactionResult OpenAICodexResponsesClient::compact(
   return result;
 }
 
+std::vector<ModelCatalogEntry>
+parse_codex_models_response(const nlohmann::json &body,
+                            std::string_view provider_id,
+                            std::string_view api) {
+  if (!body.is_object() || !body.contains("models") ||
+      !body["models"].is_array())
+    throw std::runtime_error(
+        "codex models response is missing a \"models\" array");
+  std::vector<ModelCatalogEntry> entries;
+  for (const auto &item : body["models"]) {
+    if (!item.is_object() || !item.contains("slug") ||
+        !item["slug"].is_string())
+      throw std::runtime_error("codex models response contains an entry with a "
+                               "missing/non-string slug");
+    ModelCatalogEntry entry;
+    entry.key = {.provider_id = std::string(provider_id),
+                 .model_id = item["slug"].get<std::string>()};
+    entry.api = std::string(api);
+    if (item.contains("display_name") && item["display_name"].is_string())
+      entry.display_name = item["display_name"].get<std::string>();
+    entries.push_back(std::move(entry));
+  }
+  return entries;
+}
+
+std::string
+OpenAICodexModelDiscoveryAdapter::models_endpoint_url(std::string base_url) {
+  while (!base_url.empty() && base_url.back() == '/')
+    base_url.pop_back();
+  if (base_url.ends_with("/codex/models"))
+    return base_url;
+  if (base_url.ends_with("/codex"))
+    return base_url + "/models";
+  if (base_url.empty())
+    base_url = "https://chatgpt.com/backend-api";
+  return base_url + "/codex/models";
+}
+
+ProviderModelReport OpenAICodexModelDiscoveryAdapter::discover(
+    const ProviderDiscoveryRequest &request, std::stop_token stop_token) {
+  // Identifies pici honestly in client_version rather than presenting
+  // itself as the official Codex CLI -- this endpoint is undocumented and
+  // internal to ChatGPT's backend, found by reading Codex's own open-source
+  // client, not guessed; spoofing its client identity to get past any
+  // client recognition it does would be circumventing an access control on
+  // a service pici doesn't own.
+  std::string url = models_endpoint_url(request.provider.base_url);
+  url += "?client_version=pici-cpp";
+
+  const auto response = HttpClient::get_authenticated(
+      url, {{"Accept", "application/json"}}, request.auth, 10'000,
+      std::move(stop_token));
+  if (!response)
+    throw std::runtime_error("request to " + url + " failed");
+  if (response->status_code < 200 || response->status_code >= 300)
+    throw std::runtime_error("request to " + url + " returned status " +
+                             std::to_string(response->status_code) + ": " +
+                             response->body);
+
+  nlohmann::json body;
+  try {
+    body = nlohmann::json::parse(response->body);
+  } catch (const nlohmann::json::exception &error) {
+    throw std::runtime_error("could not parse response from " + url + ": " +
+                             error.what());
+  }
+
+  ProviderModelReport report;
+  report.provider_id = request.provider.id;
+  report.models = parse_codex_models_response(body, request.provider.id,
+                                              request.provider.api);
+  report.observed_at = std::chrono::system_clock::now();
+  return report;
+}
+
 void register_openai_codex_responses_client() {
   LLMClientRegistry::instance().register_client("openai-codex-responses", [] {
     return std::make_shared<OpenAICodexResponsesClient>();
@@ -1081,6 +1157,13 @@ void register_openai_codex_responses_client(
   adapters.register_adapter("openai-codex-responses", [] {
     return std::make_shared<OpenAICodexResponsesClient>();
   });
+}
+
+void register_openai_codex_discovery(
+    ModelDiscoveryAdapterCollection &adapters) {
+  adapters.register_adapter(
+      "openai-codex-models",
+      std::make_shared<OpenAICodexModelDiscoveryAdapter>());
 }
 
 } // namespace pi::core

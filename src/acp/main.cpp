@@ -51,6 +51,8 @@ std::shared_ptr<pi::core::ModelDiscoveryAdapterCollection>
 build_discovery_adapters() {
   auto adapters = std::make_shared<pi::core::ModelDiscoveryAdapterCollection>();
   pi::core::register_openai_compatible_discovery(*adapters);
+  pi::core::register_openai_codex_discovery(*adapters);
+  pi::core::register_muse_model_discovery(*adapters);
   return adapters;
 }
 
