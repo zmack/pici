@@ -45,6 +45,11 @@ struct RawMode {
       return false;
     auto raw = saved;
     raw.c_lflag &= ~static_cast<tcflag_t>(ECHO | ICANON);
+    // Without disabling IXON, the tty driver intercepts Ctrl+S/Ctrl+Q as
+    // XOFF/XON software flow control -- pausing output and swallowing the
+    // bytes -- instead of delivering them to read() as ordinary data, which
+    // silently breaks the Ctrl+S save-as-default binding below.
+    raw.c_iflag &= ~static_cast<tcflag_t>(IXON);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
     if (tcsetattr(fdesc, TCSAFLUSH, &raw) != 0)
