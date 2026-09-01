@@ -473,8 +473,24 @@ ModelCatalog::ModelCatalog( // NOLINT(readability-function-cognitive-complexity)
     discovery_adapters_ = std::make_shared<ModelDiscoveryAdapterCollection>();
   if (!inference_adapters_)
     inference_adapters_ = std::make_shared<InferenceAdapterCollection>();
-  for (auto definition : builtin_providers())
+  // Every "openai-completions" builtin provider gets a default discovery
+  // binding, but only when the caller actually registered a real
+  // implementation under this id (pi-http's
+  // OpenAICompatibleModelDiscoveryAdapter, registered by PiciProcess's
+  // production construction path) -- never unconditionally, since an unmet
+  // discovery binding fails construction below (see the "unknown discovery
+  // adapter" check). This keeps every caller that doesn't wire live
+  // discovery (most tests, faux-control) working exactly as before, while
+  // giving real discovery for free once it's actually available.
+  const bool have_default_discovery_adapter =
+      discovery_adapters_->has_adapter("openai-compatible-models");
+  for (auto definition : builtin_providers()) {
+    if (have_default_discovery_adapter &&
+        definition.api == "openai-completions")
+      definition.discovery =
+          DiscoveryBinding{.adapter_id = "openai-compatible-models"};
     providers_.emplace(lower_ascii(definition.id), std::move(definition));
+  }
 
   for (const auto &model : all_models())
     add_or_replace(model);

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
+#include <stop_token>
 #include <thread>
 #include <cstdint>
 #include <map>
@@ -210,6 +211,52 @@ TEST(ModelCatalogCharacterization, RegisteredApisAreValidated) {
   invalid.auth = ProviderAuthPolicy::none;
   const ModelCatalog registry({{"unregistered", invalid}});
   EXPECT_THROW(registry.validate_registered_apis(), std::runtime_error);
+}
+
+// builtin_providers() itself never sets a discovery binding for
+// "openai-completions" providers -- ModelCatalog's constructor only sets it
+// conditionally, once it knows a real adapter was actually registered under
+// "openai-compatible-models" (see models.cpp's constructor comment on why:
+// an unmet discovery binding fails construction). See
+// test_openai_completions.cpp for the adapter itself.
+TEST(ModelCatalogCharacterization, BuiltinProvidersHaveNoDiscoveryByDefault) {
+  for (const auto &provider : ModelCatalog::builtin_providers())
+    EXPECT_FALSE(provider.discovery.has_value()) << provider.id;
+}
+
+namespace {
+class FakeDiscoveryAdapter : public ModelDiscoveryAdapter {
+public:
+  ProviderModelReport discover(const ProviderDiscoveryRequest &request,
+                              std::stop_token) override {
+    return {.provider_id = request.provider.id};
+  }
+};
+
+// Split out of the TEST body (rather than an inline if/else per provider)
+// to keep that function's own cognitive complexity under this project's
+// threshold.
+void expect_discovery_binding_matches_api(const Provider &provider) {
+  if (provider.api != "openai-completions") {
+    EXPECT_FALSE(provider.discovery.has_value()) << provider.id;
+    return;
+  }
+  ASSERT_TRUE(provider.discovery.has_value()) << provider.id;
+  EXPECT_EQ(provider.discovery->adapter_id, "openai-compatible-models");
+}
+} // namespace
+
+TEST(ModelCatalogCharacterization,
+    OpenAICompatibleProvidersGetDiscoveryWhenAdapterIsRegistered) {
+  auto adapters = std::make_shared<ModelDiscoveryAdapterCollection>();
+  adapters->register_adapter("openai-compatible-models",
+                             std::make_shared<FakeDiscoveryAdapter>());
+  const ModelCatalog catalog({}, adapters);
+
+  for (const auto &[id, provider] : catalog.providers()) {
+    (void)id;
+    expect_discovery_binding_matches_api(provider);
+  }
 }
 
 TEST(ModelCatalog, PublishesImmutableGenerationOneView) {

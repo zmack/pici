@@ -37,6 +37,13 @@ public:
                      std::optional<std::uint32_t> timeout_ms = std::nullopt,
                      std::stop_token stop_tok = std::stop_token{});
 
+  static std::optional<Response>
+  get_authenticated(const std::string &url,
+                    const std::map<std::string, std::string> &extra_headers,
+                    const std::optional<RequestAuth> &auth,
+                    std::optional<std::uint32_t> timeout_ms = std::nullopt,
+                    std::stop_token stop_tok = std::stop_token{});
+
   static bool
   post_streaming(const std::string &url, const std::string &body,
                  std::function<void(const std::string &line)> on_line,

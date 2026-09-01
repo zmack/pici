@@ -4,6 +4,7 @@
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
+#include "core/models.h"
 #include "core/providers/transform_messages.h"
 #include "core/terminal.h"
 #include "http/http_client.h"
@@ -17,12 +18,14 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <string_view>
 #include <unistd.h>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace pi::core {
 
@@ -871,6 +874,58 @@ OpenAICompatibleClient::stream(const Model &model, const AgentContext &context,
                                    stop_tok, result, on_event);
 }
 
+std::vector<ModelCatalogEntry>
+parse_models_response(const nlohmann::json &body, std::string_view provider_id,
+                      std::string_view api) {
+  if (!body.is_object() || !body.contains("data") || !body["data"].is_array())
+    throw std::runtime_error("models response is missing a \"data\" array");
+  std::vector<ModelCatalogEntry> entries;
+  for (const auto &item : body["data"]) {
+    if (!item.is_object() || !item.contains("id") || !item["id"].is_string())
+      throw std::runtime_error(
+          "models response contains an entry with a missing/non-string id");
+    ModelCatalogEntry entry;
+    entry.key = {.provider_id = std::string(provider_id),
+                 .model_id = item["id"].get<std::string>()};
+    entry.api = std::string(api);
+    entries.push_back(std::move(entry));
+  }
+  return entries;
+}
+
+ProviderModelReport OpenAICompatibleModelDiscoveryAdapter::discover(
+    const ProviderDiscoveryRequest &request, std::stop_token stop_token) {
+  std::string url = request.provider.base_url;
+  if (!url.empty() && url.back() == '/')
+    url.pop_back();
+  url += "/models";
+
+  const auto response = HttpClient::get_authenticated(
+      url, {{"Accept", "application/json"}}, request.auth, 10'000,
+      std::move(stop_token));
+  if (!response)
+    throw std::runtime_error("request to " + url + " failed");
+  if (response->status_code < 200 || response->status_code >= 300)
+    throw std::runtime_error("request to " + url + " returned status " +
+                             std::to_string(response->status_code) + ": " +
+                             response->body);
+
+  nlohmann::json body;
+  try {
+    body = nlohmann::json::parse(response->body);
+  } catch (const nlohmann::json::exception &error) {
+    throw std::runtime_error("could not parse response from " + url + ": " +
+                             error.what());
+  }
+
+  ProviderModelReport report;
+  report.provider_id = request.provider.id;
+  report.models =
+      parse_models_response(body, request.provider.id, request.provider.api);
+  report.observed_at = std::chrono::system_clock::now();
+  return report;
+}
+
 } // namespace pi::core
 
 void pi::core::register_openai_completions_client() {
@@ -884,6 +939,13 @@ void pi::core::register_openai_completions_client(
   adapters.register_adapter("openai-completions", [] {
     return std::make_shared<pi::core::OpenAICompatibleClient>();
   });
+}
+
+void pi::core::register_openai_compatible_discovery(
+    ModelDiscoveryAdapterCollection &adapters) {
+  adapters.register_adapter(
+      std::string(kOpenAICompatibleDiscoveryAdapterId),
+      std::make_shared<pi::core::OpenAICompatibleModelDiscoveryAdapter>());
 }
 
 namespace {

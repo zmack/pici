@@ -53,6 +53,17 @@ build_inference_adapters() {
   return adapters;
 }
 
+// Same rationale as build_inference_adapters() above, for live model-list
+// discovery: ModelCatalog::builtin_providers() points every
+// "openai-completions" provider at adapter id "openai-compatible-models",
+// which only resolves to something real once this collection is wired in.
+std::shared_ptr<pi::core::ModelDiscoveryAdapterCollection>
+build_discovery_adapters() {
+  auto adapters = std::make_shared<pi::core::ModelDiscoveryAdapterCollection>();
+  pi::core::register_openai_compatible_discovery(*adapters);
+  return adapters;
+}
+
 int run_lua_test_files(const std::vector<std::string> &files) {
   int total_failed = 0;
   for (const auto &f : files) {
@@ -76,9 +87,15 @@ int run_lua_test_files(const std::vector<std::string> &files) {
   return total_failed > 0 ? 1 : 0;
 }
 
-int cmd_list_models(const cli::Args &args,
-                    const std::shared_ptr<const core::ModelCatalog> &registry) {
-  std::cout << format_model_catalog(args.list_models_filter, registry);
+int cmd_list_models(const cli::Args &args, const core::PiciProcess &process) {
+  // Best-effort: a provider with no discovery binding, or one whose
+  // discovery call fails, just leaves that provider's models as whatever
+  // the static catalog already had -- refresh_model_catalog()'s per-provider
+  // isolation (ModelCatalog::refresh()) means one bad provider never blocks
+  // this listing.
+  process.refresh_model_catalog();
+  std::cout << format_model_catalog(args.list_models_filter,
+                                    process.model_catalog());
   return 0;
 }
 
@@ -216,6 +233,7 @@ int main(int argc, char *argv[]) noexcept {
         .providers = configured_providers,
         .session_dir = args.session_dir,
         .inference_adapters = pi::build_inference_adapters(),
+        .discovery_adapters = pi::build_discovery_adapters(),
     });
   } catch (const std::exception &error) {
     std::cerr << "error: " << error.what() << "\n";
@@ -223,7 +241,7 @@ int main(int argc, char *argv[]) noexcept {
   }
 
   if (args.list_models) {
-    return pi::cmd_list_models(args, process->model_catalog());
+    return pi::cmd_list_models(args, *process);
   }
 
   if (!args.test_files.empty())

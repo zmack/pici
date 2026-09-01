@@ -364,6 +364,47 @@ std::optional<HttpClient::Response> HttpClient::post_authenticated(
   return result;
 }
 
+std::optional<HttpClient::Response> HttpClient::get_authenticated(
+    const std::string &url,
+    const std::map<std::string, std::string> &extra_headers,
+    const std::optional<RequestAuth> &auth,
+    std::optional<std::uint32_t> timeout_ms, std::stop_token stop_tok) {
+  CurlHandle curl;
+  if (curl.handle == nullptr)
+    return std::nullopt;
+
+  Response result;
+  CurlHeaders headers;
+  append_authenticated_headers(headers, extra_headers, auth,
+                               "application/json");
+
+  curl_easy_setopt(curl.handle, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl.handle, CURLOPT_HTTPHEADER, headers.list);
+  curl_easy_setopt(curl.handle, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
+  curl_easy_setopt(curl.handle, CURLOPT_TIMEOUT_MS,
+                   static_cast<long>(timeout_ms.value_or(600000)));
+  curl_easy_setopt(curl.handle, CURLOPT_NOPROGRESS, 0L);
+  curl_easy_setopt(curl.handle, CURLOPT_XFERINFOFUNCTION, stop_token_progress);
+  curl_easy_setopt(curl.handle, CURLOPT_XFERINFODATA,
+                   const_cast<std::stop_token *>(&stop_tok));
+  curl_easy_setopt(
+      curl.handle, CURLOPT_WRITEFUNCTION,
+      +[](char *ptr, size_t size, size_t nmemb, void *data) -> size_t {
+        auto *resp = static_cast<HttpClient::Response *>(data);
+        resp->body.append(ptr, size * nmemb);
+        return size * nmemb;
+      });
+  curl_easy_setopt(curl.handle, CURLOPT_WRITEDATA, &result);
+
+  if (curl_easy_perform(curl.handle) != CURLE_OK)
+    return std::nullopt;
+
+  long status = 0;
+  curl_easy_getinfo(curl.handle, CURLINFO_RESPONSE_CODE, &status);
+  result.status_code = static_cast<int>(status);
+  return result;
+}
+
 bool HttpClient::post_streaming_authenticated(
     const std::string &url, const std::string &body,
     std::function<void(const std::string &line)> on_line,

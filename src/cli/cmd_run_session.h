@@ -2203,6 +2203,13 @@ private:
   void handle_models_command(const std::string &line) {
     std::string filter = line.size() > 7 ? line.substr(7) : "";
     filter.erase(0, filter.find_first_not_of(" \t"));
+    // Best-effort, same as pi-cli --list-models: a provider with no
+    // discovery binding, or a failed discovery call, just leaves that
+    // provider's models as whatever the static catalog already had --
+    // ModelCatalog::refresh()'s per-provider isolation means one bad
+    // provider never blocks this listing.
+    if (injected_refresh_model_catalog_)
+      injected_refresh_model_catalog_({}, {});
     renderer_->on_command_output(format_model_catalog(filter, registry_));
   }
 

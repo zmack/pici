@@ -34,6 +34,11 @@ public:
     // the LLMClientRegistry singleton (kept for callers, mostly tests, that
     // construct a PiciProcess without wiring one explicitly).
     std::shared_ptr<InferenceAdapterCollection> inference_adapters;
+    // Same rationale as inference_adapters above, for live model-list
+    // discovery. Null falls back to ModelCatalog's own empty default (every
+    // provider's discovery binding, if any, simply has no adapter to
+    // resolve -- refresh() reports that per-provider rather than throwing).
+    std::shared_ptr<ModelDiscoveryAdapterCollection> discovery_adapters;
   };
 
   // Throws std::runtime_error (propagated from ModelCatalog construction /

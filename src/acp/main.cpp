@@ -45,6 +45,15 @@ build_inference_adapters() {
   return adapters;
 }
 
+// Same rationale as build_inference_adapters() above, for live model-list
+// discovery.
+std::shared_ptr<pi::core::ModelDiscoveryAdapterCollection>
+build_discovery_adapters() {
+  auto adapters = std::make_shared<pi::core::ModelDiscoveryAdapterCollection>();
+  pi::core::register_openai_compatible_discovery(*adapters);
+  return adapters;
+}
+
 void print_usage(const char *prog) {
   std::cout << "Usage: " << prog
             << " [--port <n>] [--model <id>] [--provider <name>]"
@@ -135,6 +144,7 @@ int main(int argc, char *argv[]) noexcept {
         .providers = configured,
         .session_dir = args.session_dir,
         .inference_adapters = build_inference_adapters(),
+        .discovery_adapters = build_discovery_adapters(),
     });
   } catch (const std::exception &error) {
     std::cerr << "error: " << error.what() << "\n";

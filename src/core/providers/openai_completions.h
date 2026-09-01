@@ -2,10 +2,13 @@
 #include "core/agent_state.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
+#include "core/models.h"
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <stop_token>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace pi::core {
 
@@ -59,5 +62,31 @@ void register_openai_completions_client();
 // singleton -- the seam PiciProcess uses so ordinary execution paths never
 // depend on the global registry (plans/object-taxonomy-migration.md Phase 10).
 void register_openai_completions_client(InferenceAdapterCollection &adapters);
+
+// Parses the standard OpenAI `GET /models` response shape
+// (`{"data":[{"id":"..."}]}`) into catalog entries. Pure/testable: throws
+// std::runtime_error on any other shape (missing `data`, a non-object
+// element, a missing/non-string `id`) rather than silently skipping --
+// callers see a real diagnostic instead of a quietly-incomplete list.
+std::vector<ModelCatalogEntry>
+parse_models_response(const nlohmann::json &body, std::string_view provider_id,
+                      std::string_view api);
+
+// Discovers a provider's live model list via its OpenAI-compatible
+// `GET {base_url}/models` endpoint. Only meaningful for providers that
+// actually implement that endpoint -- registered by default only for
+// built-in providers whose api is "openai-completions"
+// (ModelCatalog::builtin_providers()).
+class OpenAICompatibleModelDiscoveryAdapter : public ModelDiscoveryAdapter {
+public:
+  ProviderModelReport discover(const ProviderDiscoveryRequest &request,
+                               std::stop_token stop_token) override;
+};
+
+inline constexpr std::string_view kOpenAICompatibleDiscoveryAdapterId =
+    "openai-compatible-models";
+
+void register_openai_compatible_discovery(
+    ModelDiscoveryAdapterCollection &adapters);
 
 } // namespace pi::core

@@ -19,9 +19,10 @@ namespace {
 
 std::shared_ptr<ModelCatalog> build_model_catalog(
     const std::map<std::string, ProviderConfig> &providers,
+    std::shared_ptr<ModelDiscoveryAdapterCollection> discovery_adapters,
     std::shared_ptr<InferenceAdapterCollection> inference_adapters) {
-  auto catalog = std::make_shared<ModelCatalog>(providers, nullptr,
-                                                std::move(inference_adapters));
+  auto catalog = std::make_shared<ModelCatalog>(
+      providers, std::move(discovery_adapters), std::move(inference_adapters));
   catalog->validate_registered_apis();
   return catalog;
 }
@@ -29,8 +30,9 @@ std::shared_ptr<ModelCatalog> build_model_catalog(
 } // namespace
 
 PiciProcess::PiciProcess(const Config &config)
-    : model_catalog_(
-          build_model_catalog(config.providers, config.inference_adapters)),
+    : model_catalog_(build_model_catalog(config.providers,
+                                         config.discovery_adapters,
+                                         config.inference_adapters)),
       authentication_(std::make_shared<auth::Authentication>(
           model_catalog_, credential_store_)),
       session_store_(std::make_shared<SessionStore>(

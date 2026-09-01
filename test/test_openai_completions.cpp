@@ -4,9 +4,17 @@
 #include "core/agent_state.h"
 #include "core/message_types.h"
 
+#include "core/auth_types.h"
+#include "core/models.h"
 #include "core/providers/openai_completions.h"
+#include "nlohmann/json_fwd.hpp"
+#include <functional>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+#include <stdexcept>
+#include <thread>
 
 using namespace pi::core;
 
@@ -222,4 +230,143 @@ TEST(OpenAICompletions, MapFinishReasonUnknown) {
 
   EXPECT_EQ(OpenAICompatibleClient::map_finish_reason("xyz"),
             StopReason::error);
+}
+
+// --- parse_models_response(): pure parsing of the standard OpenAI
+// GET /models response shape, no network involved. ---
+
+TEST(ParseModelsResponse, ValidDataArrayProducesEntries) {
+  const auto body = nlohmann::json::parse(
+      R"({"object":"list","data":[{"id":"gpt-4o","object":"model"},)"
+      R"({"id":"gpt-4o-mini","object":"model"}]})");
+  const auto entries = parse_models_response(body, "openai", "openai-completions");
+  ASSERT_EQ(entries.size(), std::size_t{2});
+  EXPECT_EQ(entries[0].key.provider_id, "openai");
+  EXPECT_EQ(entries[0].key.model_id, "gpt-4o");
+  EXPECT_EQ(entries[0].api, "openai-completions");
+  EXPECT_EQ(entries[1].key.model_id, "gpt-4o-mini");
+}
+
+TEST(ParseModelsResponse, EmptyDataArrayIsNotAnError) {
+  const auto body = nlohmann::json::parse(R"({"object":"list","data":[]})");
+  EXPECT_TRUE(parse_models_response(body, "openai", "openai-completions").empty());
+}
+
+TEST(ParseModelsResponse, MissingDataFieldThrows) {
+  const auto body = nlohmann::json::parse(R"({"object":"list"})");
+  EXPECT_THROW(parse_models_response(body, "openai", "openai-completions"),
+              std::runtime_error);
+}
+
+TEST(ParseModelsResponse, NonArrayDataFieldThrows) {
+  const auto body = nlohmann::json::parse(R"({"data":"not-an-array"})");
+  EXPECT_THROW(parse_models_response(body, "openai", "openai-completions"),
+              std::runtime_error);
+}
+
+TEST(ParseModelsResponse, EntryMissingIdThrows) {
+  const auto body =
+      nlohmann::json::parse(R"({"data":[{"object":"model"}]})");
+  EXPECT_THROW(parse_models_response(body, "openai", "openai-completions"),
+              std::runtime_error);
+}
+
+TEST(ParseModelsResponse, EntryWithNonStringIdThrows) {
+  const auto body = nlohmann::json::parse(R"({"data":[{"id":123}]})");
+  EXPECT_THROW(parse_models_response(body, "openai", "openai-completions"),
+              std::runtime_error);
+}
+
+// --- OpenAICompatibleModelDiscoveryAdapter::discover(): real HTTP round
+// trip over a loopback httplib::Server, mirroring
+// test_openai_codex_responses.cpp's pattern for the same reason: every test
+// above exercises parsing directly and never the real network path. Response
+// handlers are named functors (not lambdas inline in the TEST body) so their
+// branching doesn't count against the test's own cognitive complexity. ---
+
+namespace {
+
+// RAII wrapper around the bind/listen/stop/join boilerplate every httplib
+// test below repeats -- keeps that out of each TEST body too.
+struct LoopbackServer {
+  httplib::Server server;
+  int port{0};
+  std::thread listener;
+
+  explicit LoopbackServer(httplib::Server::Handler handler) {
+    server.Get("/v1/models", std::move(handler));
+    port = server.bind_to_any_port("127.0.0.1");
+    listener = std::thread([this] { server.listen_after_bind(); });
+  }
+  ~LoopbackServer() {
+    server.stop();
+    listener.join();
+  }
+  LoopbackServer(const LoopbackServer &) = delete;
+  LoopbackServer &operator=(const LoopbackServer &) = delete;
+
+  std::string base_url() const {
+    return "http://127.0.0.1:" + std::to_string(port) + "/v1";
+  }
+};
+
+struct RecordingModelsHandler {
+  std::string seen_path;
+  std::string seen_auth_header;
+
+  void operator()(const httplib::Request &request, httplib::Response &response) {
+    seen_path = request.path;
+    seen_auth_header = request.get_header_value("Authorization");
+    response.set_content(
+        R"({"object":"list","data":[{"id":"grok-3","object":"model"}]})",
+        "application/json");
+  }
+};
+
+void respond_unauthorized(const httplib::Request &, httplib::Response &response) {
+  response.status = 401;
+  response.set_content(R"({"error":"unauthorized"})", "application/json");
+}
+
+} // namespace
+
+TEST(OpenAICompatibleModelDiscoveryAdapterTest, SuccessRoundTrip) {
+  RecordingModelsHandler handler;
+  LoopbackServer server(std::ref(handler));
+  ASSERT_GT(server.port, 0);
+
+  Provider provider;
+  provider.id = "xai";
+  provider.api = "openai-completions";
+  provider.base_url = server.base_url();
+
+  ProviderDiscoveryRequest request;
+  request.provider = provider;
+  request.auth = RequestAuth{.kind = AuthKind::api_key,
+                            .bearer_token = std::string("test-key")};
+
+  OpenAICompatibleModelDiscoveryAdapter adapter;
+  const auto report = adapter.discover(request, {});
+
+  EXPECT_EQ(handler.seen_path, "/v1/models");
+  EXPECT_EQ(handler.seen_auth_header, "Bearer test-key");
+  EXPECT_EQ(report.provider_id, "xai");
+  ASSERT_EQ(report.models.size(), std::size_t{1});
+  EXPECT_EQ(report.models[0].key.model_id, "grok-3");
+  EXPECT_EQ(report.models[0].api, "openai-completions");
+}
+
+TEST(OpenAICompatibleModelDiscoveryAdapterTest, NonSuccessStatusThrows) {
+  LoopbackServer server(respond_unauthorized);
+  ASSERT_GT(server.port, 0);
+
+  Provider provider;
+  provider.id = "openai";
+  provider.api = "openai-completions";
+  provider.base_url = server.base_url();
+  ProviderDiscoveryRequest request;
+  request.provider = provider;
+
+  OpenAICompatibleModelDiscoveryAdapter adapter;
+  EXPECT_THROW(adapter.discover(request, {}), std::runtime_error);
 }
