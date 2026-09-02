@@ -1,122 +1,151 @@
-# pi-cpp — C++23 Agent Loop
+```
+██████╗  ██╗ ██████╗ ██╗
+██╔══██╗ ██║██╔════╝ ██║
+██████╔╝ ██║██║      ██║
+██╔═══╝  ██║██║      ██║
+██║      ██║╚██████╗ ██║
+╚═╝      ╚═╝ ╚═════╝ ╚═╝
+```
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  R E L E A S E   I N F O                                          │
+├──────────────────────────────────────────────────────────────────┤
+│  NAME .......: pi-cpp                                             │
+│  TYPE .......: source :: C++23 agent loop runtime                 │
+│  RIPPED FROM .: badlogic/pi-mono (TypeScript) -- ported by hand   │
+│  BUILD SYS ..: CMake 3.28+                                        │
+│  COMPILER ...: g++ 13+ / clang 17+                                │
+│  STATUS .....: ACTIVE. UNPACK AND ENJOY.                          │
+└──────────────────────────────────────────────────────────────────┘
+```
 
-A C++23 implementation of the [pi-mono](https://github.com/badlogic/pi-mono) core agent loop runtime, built with CMake.
+no keygens, no cracks -- just a from-scratch C++23 reimplementation of
+the [pi-mono](https://github.com/badlogic/pi-mono) core agent loop
+runtime. everything below is 100% legit source, built with CMake.
+r-t-f-m before you `make dev`.
 
-## Architecture
+## ░▒▓ ARCHITECTURE ▓▒░
 
 The normative vocabulary, ownership model, and intended subsystem interactions
 are defined in [`docs/architecture-lexicon.md`](docs/architecture-lexicon.md).
 The self-contained [`pici-architecture.html`](pici-architecture.html) is the
 current descriptive architecture review. The compact sketch below is historical
-and covers only the original agent-loop kernel.
+and covers only the original agent-loop kernel -- keep it around as a wall of
+ANSI art, not as up-to-date spec.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                     pi-cpp                          │
-├─────────────────────────────────────────────────────┤
-│                                                     │
-│  ┌──────────┐  ┌────────────┐  ┌──────────────┐    │
-│  │  Agent   │  │AgentLoop   │  │ AgentState   │    │
-│  │          │──▶│            │──▶│             │    │
-│  │ - prompt │  │ - run_loop │  │ - messages  │    │
-│  │ - continue│ │ - tool_exec│  │ - tools     │    │
-│  │ - steer  │  │ - steering │  │ - model     │    │
-│  │ - follow │  │ - follow_up│  │ - pending   │    │
-│  │          │  └────────────┘  └──────────────┘    │
-│  │          │                                        │
-│  │          │  ┌────────────────────────────────┐    │
-│  │          │  │       EventStream              │    │
-│  │          │  │  push ──▶ next ──▶ wait ──▶ R │    │
-│  │          │  └────────────────────────────────┘    │
-│  │          │                                        │
-│  │          │  ┌──────────┐  ┌──────────┐           │
-│  │          │  │ Messages │  │  LLM     │           │
-│  │          │  │ User/Ass │  │ Client   │           │
-│  │          │  │ ToolRes  │  │ (stub)   │           │
-│  │          │  └──────────┘  └──────────┘           │
-│  │          │                                        │
-│  │          │  ┌──────────┐  ┌──────────┐           │
-│  │          │  │  Events  │  │  Tools   │           │
-│  │          │  │ start/end│  │ execute  │           │
-│  │          │  │ turn/msg │  │          │           │
-│  │          │  │ tool_*   │  │          │           │
-│  │          │  └──────────┘  └──────────┘           │
-│  └──────────┘                                        │
-└─────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────┐
+│                      pi-cpp                       │
+│                                                   │
+│ ┌────────────┐   ┌─────────────┐   ┌────────────┐ │
+│ │ Agent      │──▶│ AgentLoop   │──▶│ AgentState │ │
+│ │            │   │             │   │            │ │
+│ │ - prompt   │   │ - run_loop  │   │ - messages │ │
+│ │ - continue │   │ - tool_exec │   │ - tools    │ │
+│ │ - steer    │   │ - steering  │   │ - model    │ │
+│ │ - follow   │   │ - follow_up │   │ - pending  │ │
+│ └────────────┘   └─────────────┘   └────────────┘ │
+│                                                   │
+│ ┌───────────────────────────────────────┐         │
+│ │          AgentLoop internals          │         │
+│ │                                       │         │
+│ │ ┌───────────────────────────────────┐ │         │
+│ │ │ EventStream                       │ │         │
+│ │ │                                   │ │         │
+│ │ │ push ──▶ next ──▶ wait ──▶ result │ │         │
+│ │ └───────────────────────────────────┘ │         │
+│ │                                       │         │
+│ │ ┌────────────────┐   ┌────────────┐   │         │
+│ │ │ Messages       │   │ LLM Client │   │         │
+│ │ │                │   │            │   │         │
+│ │ │ User/Assistant │   │ (stub)     │   │         │
+│ │ │ ToolResult     │   │            │   │         │
+│ │ └────────────────┘   └────────────┘   │         │
+│ │                                       │         │
+│ │ ┌───────────┐   ┌─────────┐           │         │
+│ │ │ Events    │   │ Tools   │           │         │
+│ │ │           │   │         │           │         │
+│ │ │ start/end │   │ execute │           │         │
+│ │ │ turn/msg  │   │         │           │         │
+│ │ │ tool_*    │   │         │           │         │
+│ │ └───────────┘   └─────────┘           │         │
+│ └───────────────────────────────────────┘         │
+└───────────────────────────────────────────────────┘
 ```
 
-## Project Structure
+## ░▒▓ PROJECT STRUCTURE ▓▒░
 
 Selected files, grouped per `docs/architecture-lexicon.md`'s three layers: a
 transport-agnostic kernel, the product runtime built on it, and the
-frontends that drive it. Not an exhaustive inventory — providers, tools,
+frontends that drive it. Not an exhaustive inventory -- providers, tools,
 renderers, and other supporting files live under the same directories.
 
-**Kernel** (`src/core/`) — the diagram above, unchanged by the
+**Kernel** (`src/core/`) -- the diagram above, unchanged by the
 `SessionRuntime` migration below:
 
 | File(s) | Lines | Purpose |
 |---------|-------|---------|
 | `message_types.h/.cpp` | ~770 | `TranscriptMessage` variant (aliased `Message`), content blocks, `Model`, tool types |
 | `event_types.h/.cpp` | ~550 | `AgentEvent` variant: turn/message/tool events |
-| `stream.h` | 360 | Thread-safe `EventStream` — blocking iterator, callbacks, drain |
+| `stream.h` | 360 | Thread-safe `EventStream` -- blocking iterator, callbacks, drain |
 | `agent_state.h` | 299 | Thread-safe agent state: transcript, tools, model, stop token |
 | `agent_loop.h/.cpp` | ~1550 | Core loop: LLM call → tools → repeat; `AgentInput`/`InputProvenance` |
 | `agent.h/.cpp` | ~1020 | High-level `Agent` API: prompt, continue, steer, compact, abort |
 
 **Product runtime** (`src/core/process/`, `src/core/session/`,
-`src/core/mailbox/`) — the composition root plus task and mailbox delivery,
+`src/core/mailbox/`) -- the composition root plus task and mailbox delivery,
 consolidated under `SessionRuntime` ownership per the lexicon's ownership
 table:
 
 | File(s) | Lines | Purpose |
 |---------|-------|---------|
-| `process/pici_process.h/.cpp` | ~90 | `PiciProcess`: composition root owning process-lifetime `ModelCatalog`, `Authentication`, `SessionStore`, and `Mailbox` |
-| `session/session_runtime.h/.cpp` | ~700 | `SessionRuntime`: owns the root `Agent` (which owns its `TaskTree`) and a `MailboxAttachment` |
-| `session/mailbox_runtime.h/.cpp` | ~300 | Attaches a `Mailbox` to a root session, task tree, and wake callback as `MailboxAttachment` |
-| `agent_task.h/.cpp` | ~1940 | `TaskTree`: subagent spawn/steer/interrupt/close, task-tree ownership, owned by `Agent` |
-| `mailbox/*.h/.cpp` | ~3500 | `Mailbox`/`MailboxStore`: claim/deliver/acknowledge, SQLite-backed |
+| `process/pici_process.h/.cpp` | ~140 | `PiciProcess`: composition root owning process-lifetime `ModelCatalog`, `Authentication`, `SessionStore`, and `Mailbox` |
+| `session/session_runtime.h/.cpp` | ~755 | `SessionRuntime`: owns the root `Agent` (which owns its `TaskTree`) and a `MailboxAttachment` |
+| `session/mailbox_runtime.h/.cpp` | ~320 | Attaches a `Mailbox` to a root session, task tree, and wake callback as `MailboxAttachment` |
+| `agent_task.h/.cpp` | ~1990 | `TaskTree`: subagent spawn/steer/interrupt/close, task-tree ownership, owned by `Agent` |
+| `mailbox/*.h/.cpp` | ~3900 | `Mailbox`/`MailboxStore`: claim/deliver/acknowledge, SQLite-backed |
 
-**Frontends** — CLI, JSONL RPC, and ACP, each a thin adapter over the shared
+**Frontends** -- CLI, JSONL RPC, and ACP, each a thin adapter over the shared
 runtime above:
 
 | File(s) | Lines | Purpose |
 |---------|-------|---------|
-| `cli/session_runtime*.h/.cpp` | ~800 | Shared model/auth/sandbox resolution and `SessionRuntime` construction, used by both `main.cpp` and `acp/` |
-| `main.cpp` | ~2250 | CLI entry: arg parsing, `cmd_run()`, REPL/renderer wiring |
-| `cli/*` (rest) | ~5850 | REPL, renderers, JSONL RPC mode, mailbox launch config, hooks |
-| `acp/*.h/.cpp` | ~1520 | ACP HTTP server: `/agents`, `/runs`, `/tasks/*` |
-| `test/` | ~24000 | Self-hosted test harness (no Catch2) |
+| `cli/session_runtime*.h/.cpp` | ~850 | Shared model/auth/sandbox resolution and `SessionRuntime` construction, used by both `main.cpp` and `acp/` |
+| `cli/cmd_run_session.h` | ~2420 | `cmd_run()`: REPL loop, slash commands, renderer wiring, session lifecycle |
+| `main.cpp` | ~260 | CLI entry point: parses argv, delegates straight into `cmd_run()` |
+| `cli/*` (rest) | ~6470 | Args parsing, config, JSONL RPC mode, mailbox launch config, readline, hooks |
+| `acp/*.h/.cpp` | ~1700 | ACP HTTP server: `/agents`, `/runs`, `/tasks/*` |
+| `test/` | ~25200 | GoogleTest-based harness, 40+ binaries (no Catch2) |
 
-**Total: ~42,600 lines of C++ in `src/`, ~24,000 in `test/`** (~66,700
+**Total: ~45,900 lines of C++ in `src/`, ~25,200 in `test/`** (~71,000
 combined; the tables above are highlights, not a sum of these totals)
 
-## Core Types
+## ░▒▓ CORE TYPES ▓▒░
 
 ### Messages (LLM-compatible)
-- **UserMessage** — user input with text + optional images
-- **AssistantMessage** — LLM response with text, thinking, tool calls, usage stats
-- **ToolResultMessage** — tool execution results
+- **UserMessage** -- user input with text + optional images
+- **AssistantMessage** -- LLM response with text, thinking, tool calls, usage stats
+- **ToolResultMessage** -- tool execution results
 
 ### Content Blocks
-- **TextContent** — text response
-- **ThinkingContent** — reasoning/thinking blocks  
-- **ImageContent** — base64 images
-- **ToolCall** — tool invocation with id, name, arguments
+- **TextContent** -- text response
+- **ThinkingContent** -- reasoning/thinking blocks
+- **ImageContent** -- base64 images
+- **ToolCall** -- tool invocation with id, name, arguments
 
 ### Events
-- **AgentStart/End** — agent lifecycle
-- **TurnStart/End** — one LLM call + tool executions
-- **MessageStart/Update/End** — streaming message updates
-- **ToolExecutionStart/Update/End** — tool call lifecycle
+- **AgentStart/End** -- agent lifecycle
+- **TurnStart/End** -- one LLM call + tool executions
+- **MessageStart/Update/End** -- streaming message updates
+- **ToolExecutionStart/Update/End** -- tool call lifecycle
 
 ### Tool System
-- **ToolDefinition** — abstract tool interface (`name()`, `schema()`, `execute()`)
-- **ToolSchema** — abstract schema for tool parameter definitions
-- **ToolResult** — abstract result from tool execution
+- **ToolDefinition** -- abstract tool interface (`name()`, `schema()`, `execute()`)
+- **ToolSchema** -- abstract schema for tool parameter definitions
+- **ToolResult** -- abstract result from tool execution
 - Support for sequential and parallel tool execution modes
 
-## Providers and live model switching
+## ░▒▓ PROVIDERS & LIVE MODEL SWITCHING ▓▒░
 
 The effective catalog combines the built-in models with provider and custom
 model tables from `config.toml`. Provider credentials and headers are scoped by
@@ -147,11 +176,11 @@ The interactive `/compact` command manually triggers server-side conversation
 compaction for the active session (only providers that advertise a remote
 compaction endpoint support it today; unsupported providers report
 `compaction is not supported by the active provider/model` rather than
-mutating the transcript). It requires an interactive TTY session — it is not
+mutating the transcript). It requires an interactive TTY session -- it is not
 available with piped stdin or `-p` one-shot invocations. Like `/model`, it
 requires an idle agent and can be interrupted with Ctrl-C; on failure or
 cancellation the transcript is left exactly as it was. See
-`plans/server-side-compaction.md` for the full design, and the JSONL RPC mode
+`plans/implemented/server-side-compaction.md` for the full design, and the JSONL RPC mode
 section below for the `compact` RPC command.
 
 Automatic pre-turn compaction is off by default; enable it with
@@ -164,7 +193,7 @@ request fails with a provider context-window error. A single oversized
 first turn with no prior assistant/tool history to discard fails with a
 distinct, actionable error instead of a no-op compaction attempt.
 
-## Bash sandbox
+## ░▒▓ BASH SANDBOX ▓▒░
 
 The `bash` tool supports per-session process isolation on Linux through
 [bubblewrap](https://github.com/containers/bubblewrap). Select the behavior with
@@ -183,11 +212,11 @@ timeouts and cancellation still apply. `--no-sandbox` is an alias for
 The Lua `before_tool_call` hook remains a policy layer; it can block calls but
 cannot weaken the C++ sandbox boundary.
 
-## Renderer
+## ░▒▓ RENDERER ▓▒░
 
 The `Renderer` interface is a pure presentation observer decoupled from the
-agent loop.  The agent produces `AgentEvent` variants; `dispatch_event`
-translates them into typed `Renderer` calls.  The two are orthogonal — swap
+agent loop. The agent produces `AgentEvent` variants; `dispatch_event`
+translates them into typed `Renderer` calls. The two are orthogonal -- swap
 either without touching the other.
 
 ### Interface (`src/core/stream_renderer.h`)
@@ -252,19 +281,19 @@ for (const auto &ev : agent.prompt(text))
 
 ### Viewport renderer notes
 
-The viewport renderer is a full-screen compositor.  It owns the assistant output
-area and status row, but the final row is reserved for readline input.  That
+The viewport renderer is a full-screen compositor. It owns the assistant output
+area and status row, but the final row is reserved for readline input. That
 separation matters:
 
-- Assistant output does **not** draw a fake cursor.  The output area can repaint
+- Assistant output does **not** draw a fake cursor. The output area can repaint
   frequently while a response streams.
 - Readline draws the visible user insertion cursor on the prompt row, so the
   cursor marks where typed text will appear even if viewport repainting moves the
   terminal's hardware cursor.
-- `Renderer::on_scroll(RendererScrollCommand)` is a no-op by default.  The CLI
+- `Renderer::on_scroll(RendererScrollCommand)` is a no-op by default. The CLI
   maps `PageUp`/`PageDown`, `Up`/`Down`, and `Home`/`End` to that hook; only the
   viewport renderer currently consumes it.
-- Scroll state is tracked in wrapped terminal rows, not raw markdown bytes.  The
+- Scroll state is tracked in wrapped terminal rows, not raw markdown bytes. The
   row accounting shares the same ANSI/UTF-8 width helpers used by markdown
   rendering.
 
@@ -274,13 +303,13 @@ each tool call at its start position, owns the status row, and supports line,
 page, top, and bottom scrolling. While readline is active, status and scroll
 updates use save/restore-cursor painting so they do not disturb the input row.
 It also structures each turn into `REQUEST` / `WORK` / `ANSWER` / `REPLY`
-sections — see [region renderer architecture](docs/region-renderer.md) for the
+sections -- see [region renderer architecture](docs/region-renderer.md) for the
 semantic turn model, provisional-text classification, and mailbox reply
 truthfulness guarantees.
 
 Use [faux control renderer testing](docs/faux-control.md) to drive the real
 agent loop and renderer with deterministic text, thinking, concurrent tool
-updates, and results over a local JSONL socket—without a model, network call,
+updates, and results over a local JSONL socket -- without a model, network call,
 API key, or real tool execution.
 
 ### Custom renderers
@@ -301,16 +330,30 @@ Select via `--render my-renderer` on the CLI.
 enum class RendererErrorKind { llm, transport, tool, abort, unknown };
 ```
 
-## Dependencies
+## ░▒▓ DEPENDENCIES ▓▒░
 
-- **CMake 3.28+** (for C++23 support)
-- **g++ 13+** or **clang 17+**
-- **libstdc++** with C++23 support (threads, stop_token, concepts, ranges)
-- **nlohmann/json** v3.11.3 (fetched automatically via FetchContent)
-- **pboettch/json-schema-validator** v2.3.0 (fetched automatically via FetchContent)
-- **GoogleTest** v1.18.0 (fetched automatically via FetchContent for C++ tests only)
+```
+[ REQUIRED TOOLCHAIN ]------------------------------------------------
+  CMake 3.28+                     for C++23 support
+  g++ 13+  or  clang 17+
+  libstdc++ w/ C++23 support       threads, stop_token, concepts, ranges
 
-## Building
+[ FETCHED AUTOMATICALLY VIA FetchContent ]-----------------------------
+  nlohmann/json                    v3.11.3   JSON parsing/serialization
+  pboettch/json-schema-validator   v2.3.0    tool schema validation
+  cmark                                      Markdown parsing (region renderer)
+  tomlplusplus                               config.toml parsing
+  cpp-httplib                                pi-acp's embedded HTTP server
+  tree-sitter + 12 grammars                  syntax highlighting (C/C++/
+                                              Python/Bash/JSON/TS/Rust/Go/
+                                              Markdown/Ruby/Lua/JS)
+  GoogleTest                       v1.18.0   C++ tests only
+
+[ OPTIONAL, OFF BY DEFAULT ]--------------------------------------------
+  opentelemetry-cpp + curl                   -DPI_CPP_OTEL_API=ON / _SDK=ON
+```
+
+## ░▒▓ BUILDING ▓▒░
 
 The root `Makefile` wraps the common CMake flows:
 
@@ -338,17 +381,16 @@ cmake --build build --parallel
 # clang-tidy warnings but exits successfully unless clang-tidy itself fails.
 cmake --build build --target tidy
 
-# Run demo
-./build/pi-cli demo
+# Run it
+./build/pi-cli --version
+./build/pi-cli -p "Summarize main.cpp"
 
-# Run version
-./build/pi-cli version
+# Run tests -- 40+ GoogleTest binaries, one CTest entry each
+ctest --test-dir build --output-on-failure
 
-# Run tests
+# ...or run a single binary directly
 ./build/test-core
-./build/test-agent-loop
-./build/test-agent
-./build/test-stream
+./build/test-agent-loop --gtest_filter=Suite.Case
 ```
 
 For a faster edit-compile loop, build the target you are working on instead of
@@ -397,8 +439,8 @@ thinking, tool-call, and tool-execution updates. A run ends with either
 
 `compact` triggers manual server-side compaction of the active session's
 transcript (only supported providers/models honor it; see
-`plans/server-side-compaction.md`). It shares the same idle-agent
-requirement as `prompt` — it is rejected while a prompt is running. Progress
+`plans/implemented/server-side-compaction.md`). It shares the same idle-agent
+requirement as `prompt` -- it is rejected while a prompt is running. Progress
 streams as `{"type":"event","event":"compaction",...}` with
 `data.kind` of `start`, `complete`, or `error` (never the replacement
 transcript itself), and the run ends with either
@@ -422,7 +464,7 @@ currently certified read-only built-in tools.
 
 The default configuration keeps tests enabled, but OpenTelemetry API
 instrumentation is off by default because it pulls in a large vendored target
-graph.  Enable it explicitly when working on tracing:
+graph. Enable it explicitly when working on tracing:
 
 ```bash
 cmake -B build-otel -DPI_CPP_OTEL_API=ON
@@ -443,8 +485,6 @@ and request `edit` or `write` in its tool list. `write_tools = "all"` also
 permits `bash`, but requires an enabled sandbox. Child agents do not run the
 root agent's Lua permission hooks; use the config gate and sandbox policy as
 the trust boundary.
-
-
 
 Lua `on_command` hooks receive a fourth argument in addition to the legacy
 `cmd`, `args`, and flattened `transcript` values:
@@ -488,7 +528,7 @@ and session metadata; ANSI color sequences are supported in the status line.
 Terminal title defaults to the startup project label (Git root basename, or
 working-directory basename, falling back to `pici`). During a primary
 `run_prompt` turn the title is prefixed with a Braille spinner (`⠋` … `⠏`,
-100 ms) — for example `⠋ my-project` — and remains active through streamed
+100 ms) -- for example `⠋ my-project` -- and remains active through streamed
 responses, tool execution, and follow-up model requests without flickering
 between internal turn iterations. When the turn completes, errors, or is
 interrupted with Ctrl-C, the idle title is restored. A `tab_title` hook return
@@ -508,7 +548,7 @@ cmake -B build-dev -DPI_CPP_BUILD_TESTS=OFF -DPI_CPP_OTEL_API=OFF
 cmake --build build-dev --target pi-cli --parallel
 ```
 
-CMake will use `ccache` automatically when it is installed.  Ninja also tends to
+CMake will use `ccache` automatically when it is installed. Ninja also tends to
 give better incremental scheduling than Make:
 
 ```bash
@@ -516,7 +556,7 @@ cmake -S . -B build-ninja -G Ninja -DPI_CPP_OTEL_API=OFF
 cmake --build build-ninja --parallel
 ```
 
-## OpenAI authentication
+## ░▒▓ OPENAI AUTHENTICATION ▓▒░
 
 The `openai` provider uses the normal OpenAI Platform API key (`OPENAI_API_KEY`
 or `--api-key`) and is billed through the Platform account. ChatGPT/Codex
@@ -535,23 +575,24 @@ cannot be used. Credentials are stored as a versioned, mode-0600 file under
 `PICI_AUTH_FILE` to override the location. `OPENAI_API_KEY` is intentionally
 not used for `openai-codex`, and `--api-key` is rejected for that provider.
 
-## Local OpenAI-Compatible API
+## ░▒▓ LOCAL OPENAI-COMPATIBLE API ▓▒░
 
-The CLI defaults to the local API at `http://127.0.0.1:8080/v1` and the
-model currently exposed by that server:
-`Qwen3.6-35B-A3B-UD-IQ4_NL.gguf`.
-
-```bash
-./build/pi-cli chat
-```
-
-Override either value when needed:
+With no `--provider`/`--base-url`/`--model` flags, the CLI talks to
+`http://127.0.0.1:8080/v1` (e.g. a local llama.cpp server) using a
+placeholder `"default"` model id -- fine for servers that ignore the
+field and just serve whatever model they loaded:
 
 ```bash
-./build/pi-cli chat --base-url http://127.0.0.1:8080/v1 --model Qwen3.6-35B-A3B-UD-IQ4_NL.gguf
+./build/pi-cli
 ```
 
-## Usage Example
+Override either value when the server expects a real model id:
+
+```bash
+./build/pi-cli --base-url http://127.0.0.1:8080/v1 --model <model-id>
+```
+
+## ░▒▓ USAGE EXAMPLE ▓▒░
 
 ```cpp
 #include "core/agent.h"
@@ -578,7 +619,7 @@ private:
             return {{"type", "object"}};
         }
     } schema_;
-    
+
     struct Result : ToolResult {
         bool is_error() const override { return false; }
         std::string content() const override { return "Done"; }
@@ -614,7 +655,7 @@ int main() {
 }
 ```
 
-## Agent mailbox
+## ░▒▓ AGENT MAILBOX ▓▒░
 
 Mailbox coordination is opt-in. Enable it in the selected TOML file or with
 `--mailbox PATH` (which also enables it):
@@ -674,7 +715,7 @@ control are intentionally out of scope for v1. The coordinator's pending-work
 API is the host boundary for future ACP and GUI adapters; the current
 self-pipe/readline integration is CLI-specific and is not a remote transport.
 
-## Skills
+## ░▒▓ SKILLS ▓▒░
 
 Skills are on-demand instruction packages the model can load when a task
 matches. A skill is a directory containing a `SKILL.md` file with a small
@@ -692,7 +733,7 @@ description: Steps to cut a release: version bump, changelog, tag, smoke test.
 2. Tag the commit.
 ```
 
-At startup pici scans (in ascending precedence — later wins on name
+At startup pici scans (in ascending precedence -- later wins on name
 collision):
 
 1. `.claude/skills/` and `.codex/skills/` in workspace ancestors (compat
@@ -708,38 +749,38 @@ read-only `skill` tool with the exact name; the full body is loaded into the
 current turn, and sibling files (scripts, templates) can be read relative to
 the skill's directory with the normal read tool.
 
-Frontmatter rules: `description` is required (1–1024 chars — it is the
+Frontmatter rules: `description` is required (1-1024 chars -- it is the
 retrieval signal, so write "what it does + when to use it"); `name` is
-optional (defaults to the directory name; 1–64 chars, lowercase letters,
+optional (defaults to the directory name; 1-64 chars, lowercase letters,
 digits, `-`, `_`). Bodies are capped at 128 KiB; malformed skills produce
 startup diagnostics and are skipped, never fatal. Skill bodies are untrusted
-workspace content with the same trust level as AGENTS.md — the sandbox and
+workspace content with the same trust level as AGENTS.md -- the sandbox and
 permission layers gate what loaded instructions can actually do.
 
 Use `/skills` to list the discovered catalog with diagnostics, or
 `--no-skills` / `[skills] disabled = true` to turn the feature off.
 
-## Memory observability (`/memory`)
+## ░▒▓ MEMORY OBSERVABILITY (`/memory`) ▓▒░
 
 `/memory` answers "how much memory is in use, per session, and what is it
 spent on" from inside a running pici process. A single process can host the
-root session plus up to 8 child agent-task sessions, all sharing one heap —
+root session plus up to 8 child agent-task sessions, all sharing one heap --
 `ps`/`smaps` cannot tell them apart, but per-session jemalloc arenas can.
 
 The command prints two independent panels:
 
-- **heap** — real allocator bytes attributed per session arena, plus a
+- **heap** -- real allocator bytes attributed per session arena, plus a
   `shared (unattributed)` remainder (background threads, SQLite's single
   shared connection, anything allocated before binding), allocator resident,
   and process RSS.
-- **context composition** — escaped-JSON wire sizes of each transcript split
+- **context composition** -- escaped-JSON wire sizes of each transcript split
   by content-block kind (text / tool_result / tool_use / other). This is what
   tokens are charged for, not a heap measurement.
 
 The panels are deliberately **not nested**: they are different quantities in
- different units that diverge in both directions. Base64 inflates image JSON
-to ~1.33× the decoded bytes on the heap, while per-turn context snapshots
-deep-copy the whole transcript — real heap for a transcript is plausibly 3–5×
+different units that diverge in both directions. Base64 inflates image JSON
+to ~1.33x the decoded bytes on the heap, while per-turn context snapshots
+deep-copy the whole transcript -- real heap for a transcript is plausibly 3-5x
 the wire estimate at peak. Neither number contains the other.
 
 ### Enabling the heap panel
@@ -758,7 +799,7 @@ cmake -B build -DPI_CPP_MEMSTATS=ON -DPI_CPP_MEMSTATS_LINK_JEMALLOC=ON
 
 Without an active jemalloc, availability is detected at startup (a canary
 verifies allocations actually move `stats.allocated`) and every accounting
-call degrades to a safe no-op — the heap panel prints a hint instead of wrong
+call degrades to a safe no-op -- the heap panel prints a hint instead of wrong
 numbers. The option refuses to configure together with sanitizers (jemalloc's
 malloc override and TSan's interceptors conflict).
 
@@ -766,36 +807,36 @@ malloc override and TSan's interceptors conflict).
 
 Numbers are good attribution, not audited totals:
 
-- **tcache lag** — freed blocks sitting in a thread's cache still count as
+- **tcache lag** -- freed blocks sitting in a thread's cache still count as
   allocated until flushed; cross-thread frees are common (main thread freeing
   loop-worker strings), so a session can read transiently high. Bounded and
   self-correcting at thread exit; `MALLOC_CONF=tcache:false` trades speed for
   exactness if needed.
-- **recycled arenas** — task arenas are never destroyed (jemalloc's destroy
+- **recycled arenas** -- task arenas are never destroyed (jemalloc's destroy
   contract can't be met here since parents read child results after close);
   they are purged and recycled, so a reused arena may briefly report its
   previous occupant's stale tail.
-- **shared-resource smear** — whichever session first grows SQLite's page
+- **shared-resource smear** -- whichever session first grows SQLite's page
   cache or provider TLS buffers gets charged for it.
 
-## Key Design Decisions
+## ░▒▓ KEY DESIGN DECISIONS ▓▒░
 
-1. **nlohmann/json** — all JSON parsing/serialization via nlohmann/json; JSON Schema validation via pboettch/json-schema-validator
-2. **Explicit error surfaces** — expected runtime errors generally flow through `std::optional`, result objects, or renderer error callbacks; boundary code still catches and translates exceptions where third-party libraries throw
-3. **Thread safety** — `AgentState` uses `std::mutex` for all shared state
-4. **Async streaming** — `EventStream` supports blocking iterator, `for_each`, and `wait()`
-5. **Provider abstraction** — `LLMClient` interface allows swapping providers without touching the loop
-6. **C++23 features** — `std::stop_token`/`std::stop_source` for cancellation, concepts, `if constexpr`, `std::scoped_lock`, structured bindings
-7. **Self-contained tests** — GoogleTest is fetched only for C++ tests; Lua addon tests retain their native runner
+1. **nlohmann/json** -- all JSON parsing/serialization via nlohmann/json; JSON Schema validation via pboettch/json-schema-validator
+2. **Explicit error surfaces** -- expected runtime errors generally flow through `std::optional`, result objects, or renderer error callbacks; boundary code still catches and translates exceptions where third-party libraries throw
+3. **Thread safety** -- `AgentState` uses `std::mutex` for all shared state
+4. **Async streaming** -- `EventStream` supports blocking iterator, `for_each`, and `wait()`
+5. **Provider abstraction** -- `LLMClient` interface allows swapping providers without touching the loop
+6. **C++23 features** -- `std::stop_token`/`std::stop_source` for cancellation, concepts, `if constexpr`, `std::scoped_lock`, structured bindings
+7. **Self-contained tests** -- GoogleTest is fetched only for C++ tests; Lua addon tests retain their native runner
 
-## Implementation Lessons
+## ░▒▓ IMPLEMENTATION LESSONS (READ THIS OR REPEAT OUR BUGS) ▓▒░
 
-- Prefer public umbrella headers for vendored C libraries.  For libcurl, include
+- Prefer public umbrella headers for vendored C libraries. For libcurl, include
   `<curl/curl.h>` rather than internal headers such as `curl/easy.h`; the latter
   assumes setup macros from the public header.
 - When using toml++, define configuration macros before including toml++ headers.
   This project uses header-only toml++ in `src/cli/config.cpp`.
-- C++23 ranges calls do not take placeholder commas.  Use
+- C++23 ranges calls do not take placeholder commas. Use
   `std::ranges::sort(items, pred)`, `std::ranges::reverse(items)`, and remember
   `std::ranges::remove_if` returns a subrange, so erase with
   `removed.begin(), removed.end()`.
@@ -804,46 +845,16 @@ Numbers are good attribution, not audited totals:
 - RAII types that own terminal or renderer state should explicitly delete copy
   and move operations when duplicating the handle would be invalid.
 - The tidy target is useful as a regression net, but many current warnings are
-  policy/advisory findings in established code paths.  Fix targeted warnings
+  policy/advisory findings in established code paths. Fix targeted warnings
   near edited code instead of churning the whole tree opportunistically.
-- Keep optional instrumentation truly optional.  OpenTelemetry includes and
+- Keep optional instrumentation truly optional. OpenTelemetry includes and
   link dependencies should stay behind `PI_CPP_OTEL_ENABLED`; otherwise a fast
   local build still needs the vendored telemetry headers.
-- Avoid letting vendored helper tools leak into the default `all` target.  Use
+- Avoid letting vendored helper tools leak into the default `all` target. Use
   `EXCLUDE_FROM_ALL` for dependency FetchContent declarations when the project
   only needs their libraries.
 
-## File Index
-
-```
-src/
-├── core/
-│   ├── message_types.h    # Message, ContentBlock, Model, Tool interfaces
-│   ├── message_types.cpp  # JSON serialization (built-in parser)
-│   ├── event_types.h      # AgentEvent variant and event classes
-│   ├── event_types.cpp    # Event debug output
-│   ├── stream.h           # EventStream template + AsyncEventStream
-│   ├── stream.cpp         # Header-only stub
-│   ├── agent_state.h      # Thread-safe state container
-│   ├── agent_state.cpp    # Header-only stub
-│   ├── agent_loop.h       # RunAgentLoop config and entry points
-│   ├── agent_loop.cpp     # Main loop: LLM call → tools → repeat
-│   ├── agent.h            # High-level Agent class
-│   ├── agent.cpp          # Agent implementation
-│   └── llm_client.h       # LLM provider interface
-│   └── llm_client.cpp     # Stub client + registry
-├── http/
-│   ├── http_client.h      # HTTP client (optional, disabled)
-│   └── http_client.cpp    # Curl-based client (optional, disabled)
-├── main.cpp               # CLI entry point
-test/
-├── test_core.cpp          # Message, Event, Stream tests
-├── test_agent_loop.cpp    # Agent loop integration tests
-├── test_agent.cpp         # Agent API tests
-└── test_stream.cpp        # EventStream tests
-```
-
-## Comparison with pi-mono (TypeScript)
+## ░▒▓ COMPARISON WITH PI-MONO (TYPESCRIPT) ▓▒░
 
 | pi-mono (TS) | pi-cpp | Notes |
 |-------------|--------|-------|
@@ -854,4 +865,13 @@ test/
 | `packages/coding-agent/src/core/session.ts` | `agent_state.h` | Transcript + state |
 | (providers) | `llm_client.h` | Provider abstraction |
 | nlohmann/json | `message_types.cpp` | Built-in JSON parser |
-| Catch2 | `test/*.cpp` | Custom test harness |
+| vitest | `test/*.cpp` (GoogleTest) | Automated C++ suites, one CTest entry per binary |
+
+```
+────────────────────────────────────────────────────────────────────────
+  courier: docs/architecture-lexicon.md :: docs/region-renderer.md
+  greetz : bubblewrap, jemalloc, nlohmann/json, everyone still shipping
+           C++ in 2026
+  nfo by : this file. read the whole thing, ship the loop.
+────────────────────────────────────────────────────────────────────────
+```
