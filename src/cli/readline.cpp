@@ -863,6 +863,26 @@ private:
   std::size_t rendered_column_{0};
   std::size_t cursor_row_{1};
   bool first_draw_{true};
+
+public:
+  // Tab completion's ambiguous-match candidate list is printed as plain
+  // scrollback (see apply_completions), not tracked by rendered_rows_, so a
+  // repeated Tab press for the exact same buffer would otherwise reprint an
+  // identical copy of the list below the previous one every time, pushing
+  // the prompt further down each press. Remembering which buffer the
+  // currently-visible list belongs to lets apply_completions recognize that
+  // case and skip the redundant reprint.
+  bool completion_menu_matches(const std::string &buf) const {
+    return have_completion_menu_ && completion_menu_buf_ == buf;
+  }
+  void mark_completion_menu_shown(const std::string &buf) {
+    have_completion_menu_ = true;
+    completion_menu_buf_ = buf;
+  }
+
+private:
+  bool have_completion_menu_{false};
+  std::string completion_menu_buf_;
 };
 
 } // namespace
@@ -1022,14 +1042,25 @@ void apply_completions(InputRenderer &renderer, std::string &buf,
     return;
   }
 
-  // Already at common prefix: print candidates below, then redraw prompt.
-  // Clear the synthetic input cursor before moving down so it does not remain
-  // painted at the old insertion point.
+  // Already at common prefix and the candidate list currently on screen
+  // already matches this exact buffer (i.e. this is a repeated Tab press
+  // with nothing having changed): reprinting would just stack a duplicate
+  // copy of the list below the one already shown, pushing everything down
+  // again. Bell instead, same as the no-completions case.
+  if (renderer.completion_menu_matches(buf)) {
+    std::cout << '\a' << std::flush;
+    return;
+  }
+
+  // Print candidates below, then redraw prompt. Clear the synthetic input
+  // cursor before moving down so it does not remain painted at the old
+  // insertion point.
   renderer.redraw(buf, buf.size(), false);
   std::cout << "\r\n";
   for (const auto &c : completions)
     std::cout << "  " << c << '\n';
   renderer.invalidate();
+  renderer.mark_completion_menu_shown(buf);
   renderer.redraw(buf, buf.size());
 }
 
