@@ -152,10 +152,9 @@ std::optional<SessionArena> acquire_session_arena() {
     rt.live_arenas.insert(index);
     return SessionArena{index};
   }
-  unsigned index = 0;
-  size_t size = sizeof(index);
   // arenas.create: creates a non-default arena and returns its index.
-  if (rt.mallctl("arenas.create", &index, &size, nullptr, 0) != 0)
+  unsigned index = 0;
+  if (!mallctl_unsigned("arenas.create", &index))
     return std::nullopt;
   rt.live_arenas.insert(index);
   return SessionArena{index};
