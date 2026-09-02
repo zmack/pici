@@ -7,22 +7,31 @@
 ╚═╝      ╚═╝ ╚═════╝ ╚═╝
 ```
 ```
-┌──────────────────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────────────────┐
 │  R E L E A S E   I N F O                                          │
-├──────────────────────────────────────────────────────────────────┤
-│  NAME .......: pi-cpp                                             │
-│  TYPE .......: source :: C++23 agent loop runtime                 │
-│  RIPPED FROM .: badlogic/pi-mono (TypeScript) -- ported by hand   │
-│  BUILD SYS ..: CMake 3.28+                                        │
-│  COMPILER ...: g++ 13+ / clang 17+                                │
-│  STATUS .....: ACTIVE. UNPACK AND ENJOY.                          │
-└──────────────────────────────────────────────────────────────────┘
+├───────────────────────────────────────────────────────────────────┤
+│  NAME .........: pi-cpp                                           │
+│  TYPE .........: source :: C++23 agent loop runtime               │
+│  RIPPED FROM ..: badlogic/pi-mono (TypeScript) -- ported by hand  │
+│  BUILD SYS ....: CMake 3.28+                                      │
+│  COMPILER .....: g++ 13+ / clang 17+                              │
+│  STATUS .......: ACTIVE. UNPACK AND ENJOY.                        │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 no keygens, no cracks -- just a from-scratch C++23 reimplementation of
 the [pi-mono](https://github.com/badlogic/pi-mono) core agent loop
 runtime. everything below is 100% legit source, built with CMake.
 r-t-f-m before you `make dev`.
+
+```
+┌──────────────────────────────────────────┐
+│               QUICK START                │
+├──────────────────────────────────────────┤
+│ $ make dev                               │
+│ $ ./build/pi-cli -p "hello, agent"       │
+└──────────────────────────────────────────┘
+```
 
 ## ░▒▓ ARCHITECTURE ▓▒░
 
@@ -117,8 +126,18 @@ runtime above:
 | `acp/*.h/.cpp` | ~1700 | ACP HTTP server: `/agents`, `/runs`, `/tasks/*` |
 | `test/` | ~25200 | GoogleTest-based harness, 40+ binaries (no Catch2) |
 
-**Total: ~45,900 lines of C++ in `src/`, ~25,200 in `test/`** (~71,000
-combined; the tables above are highlights, not a sum of these totals)
+```
+┌─────────────────────────────┐
+│            STATS            │
+├─────────────────────────────┤
+│ src/      ~45,900 lines     │
+│ test/     ~25,200 lines     │
+│ -------------------------   │
+│ total     ~71,000 lines     │
+└─────────────────────────────┘
+```
+
+(the tables above are highlights, not a sum of these totals)
 
 ## ░▒▓ CORE TYPES ▓▒░
 
@@ -209,8 +228,12 @@ directory, credentials, and host sockets are not mounted. Existing process-group
 timeouts and cancellation still apply. `--no-sandbox` is an alias for
 `--sandbox disabled`.
 
-The Lua `before_tool_call` hook remains a policy layer; it can block calls but
-cannot weaken the C++ sandbox boundary.
+```
+╔══[ NOTE ]══════════════════════════════════════════════════════════╗
+║ The Lua before_tool_call hook remains a policy layer; it can block ║
+║ calls but cannot weaken the C++ sandbox boundary.                  ║
+╚════════════════════════════════════════════════════════════════════╝
+```
 
 ## ░▒▓ RENDERER ▓▒░
 
@@ -404,9 +427,15 @@ cmake --build build --target test-markdown --parallel
 ### Streaming diagnostics
 
 When a provider appears to return a complete response instead of streaming,
-enable the privacy-safe JSONL trace. It records elapsed times, transport SSE
-events, parser events, renderer events, and byte counts; it does not record
-prompts, response text, tool arguments, or API keys.
+enable the privacy-safe JSONL trace:
+
+```
+╔══[ PRIVACY ]═══════════════════════════════════════════════════════╗
+║ The stream trace records elapsed times, transport SSE events,      ║
+║ parser events, renderer events, and byte counts. It does not       ║
+║ record prompts, response text, tool arguments, or API keys.        ║
+╚════════════════════════════════════════════════════════════════════╝
+```
 
 ```bash
 ./build/pi-cli --stream-trace /tmp/pici-stream.jsonl -p "say hello"
@@ -706,8 +735,14 @@ subagents may be closed through the model-facing tool. Delivery is
 at-least-once: message IDs are stable and a crash or expired lease can cause
 redelivery.
 
-The mailbox path is sensitive local state; do not put it on a shared or
-world-readable directory. Mailbox startup failures print a diagnostic and
+```
+╔══[ WARNING ]═══════════════════════════════════════════════════════╗
+║ The mailbox path is sensitive local state; do not put it on a      ║
+║ shared or world-readable directory.                                ║
+╚════════════════════════════════════════════════════════════════════╝
+```
+
+Mailbox startup failures print a diagnostic and
 disable mailbox only, allowing ordinary chat to continue. The source-tree
 bundled addon path is used by development builds; packaging/install support
 for relocating that addon is a follow-up. Remote A2A transport and process
@@ -777,11 +812,18 @@ The command prints two independent panels:
   by content-block kind (text / tool_result / tool_use / other). This is what
   tokens are charged for, not a heap measurement.
 
-The panels are deliberately **not nested**: they are different quantities in
-different units that diverge in both directions. Base64 inflates image JSON
-to ~1.33x the decoded bytes on the heap, while per-turn context snapshots
-deep-copy the whole transcript -- real heap for a transcript is plausibly 3-5x
-the wire estimate at peak. Neither number contains the other.
+```
+╔══[ NOTE ]══════════════════════════════════════════════════════════╗
+║ The heap and context-composition panels are deliberately not       ║
+║ nested -- different quantities, different units, diverging in both ║
+║ directions.                                                        ║
+╚════════════════════════════════════════════════════════════════════╝
+```
+
+Base64 inflates image JSON to ~1.33x the decoded bytes on the heap, while
+per-turn context snapshots deep-copy the whole transcript -- real heap for a
+transcript is plausibly 3-5x the wire estimate at peak. Neither number
+contains the other.
 
 ### Enabling the heap panel
 
@@ -874,4 +916,10 @@ Numbers are good attribution, not audited totals:
            C++ in 2026
   nfo by : this file. read the whole thing, ship the loop.
 ────────────────────────────────────────────────────────────────────────
+```
+
+```
+┌───────────────┐
+│ -=[ EOF ]=-   │
+└───────────────┘
 ```
