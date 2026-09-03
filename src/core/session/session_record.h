@@ -48,6 +48,16 @@ struct SessionCompactionRecord {
 struct SessionRecord {
   SessionHeader header;
   std::vector<Message> messages;
+  // Parallel to `messages`: the id of the entry-tree node that contributed
+  // each message. A message contributed by a compaction (or, in the future,
+  // a branch) record shares that record's single id with every other
+  // message it produced wholesale. Populated by the chain-based loader in
+  // session_store.cpp; see `index_entries`/`walk_from_leaf` there.
+  std::vector<std::string> entry_ids;
+  // The id of the entry-tree node the replay walk started from (the
+  // session's current leaf), or nullopt if the session (and, when forked,
+  // its inherited parent prefix) has no entries at all.
+  std::optional<std::string> leaf_entry_id;
 };
 
 } // namespace pi::core

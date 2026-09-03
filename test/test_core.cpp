@@ -934,3 +934,214 @@ TEST(SessionStore, RefusesToCompactASessionWithForkedChildren) {
   ASSERT_TRUE(child_record.has_value());
   EXPECT_EQ(child_record->messages.size(), std::size_t(1));
 }
+
+TEST(SessionStore, LegacyEntryIdsAreLineOrdinalsAndSkipMetaLines) {
+  pi::test::TemporaryDirectory directory("pici-session-legacy-ids-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-legacy-ids"};
+  const auto id = store.create(header);
+
+  // Header is physical line 1, first message is line 2.
+  store.append_message(id, make_user_message("first"));
+  // A meta line (line 3) must not consume an entry id or become a link in
+  // the parent chain.
+  store.set_name(id, "renamed");
+  // Second message is physical line 4.
+  store.append_message(id, make_user_message("second"));
+
+  auto record = store.load(id);
+  ASSERT_TRUE(record.has_value());
+  ASSERT_EQ(record->messages.size(), std::size_t(2));
+  ASSERT_EQ(record->entry_ids.size(), std::size_t(2));
+  EXPECT_EQ(record->entry_ids[0], "legacy-2");
+  // Not off-by-one from the meta line at physical line 3: the second
+  // message is physical line 4, not line 3.
+  EXPECT_EQ(record->entry_ids[1], "legacy-4");
+  EXPECT_EQ(record->leaf_entry_id, std::optional<std::string>("legacy-4"));
+}
+
+TEST(SessionStore, CompactionEntryGetsASingleLegacyId) {
+  pi::test::TemporaryDirectory directory("pici-session-compaction-id-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-compaction-id"};
+  const auto id = store.create(header);
+
+  store.append_message(id, make_user_message("one"));
+  store.append_message(id, make_user_message("two"));
+
+  SessionCompactionRecord compaction;
+  compaction.messages.push_back(make_user_message("retained-a"));
+  compaction.messages.push_back(make_user_message("retained-b"));
+  compaction.provider = "remote";
+  compaction.model = "some-model";
+  compaction.summary = "server";
+  compaction.timestamp = 42;
+  // Compaction record is physical line 4 (header=1, one=2, two=3).
+  store.append_compaction(id, compaction);
+
+  auto record = store.load(id);
+  ASSERT_TRUE(record.has_value());
+  ASSERT_EQ(record->messages.size(), std::size_t(2));
+  ASSERT_EQ(record->entry_ids.size(), std::size_t(2));
+  // Both messages the compaction contributed wholesale share its single
+  // legacy id.
+  EXPECT_EQ(record->entry_ids[0], "legacy-4");
+  EXPECT_EQ(record->entry_ids[1], "legacy-4");
+  EXPECT_EQ(record->leaf_entry_id, std::optional<std::string>("legacy-4"));
+}
+
+TEST(SessionStore, ForkedSessionWithParentTruncationReplaysIdentically) {
+  pi::test::TemporaryDirectory directory("pici-session-fork-truncate-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader parent_header{.id = "session-parent-truncate"};
+  const auto parent_id = store.create(parent_header);
+
+  store.append_message(parent_id, make_user_message("p0"));
+  store.append_message(parent_id, make_user_message("p1"));
+  store.append_message(parent_id, make_user_message("p2"));
+  store.append_truncate(parent_id, 1);
+  store.append_message(parent_id, make_user_message("p3"));
+
+  auto parent_record = store.load(parent_id);
+  ASSERT_TRUE(parent_record.has_value());
+  // Parent replay: [p0,p1,p2] -> truncate(1) -> [p0] -> push p3 -> [p0,p3].
+  ASSERT_EQ(parent_record->messages.size(), std::size_t(2));
+
+  // Fork landing exactly at the truncated boundary (offset 1: just "p0").
+  SessionHeader child_at_boundary{.id = "session-child-at-boundary",
+                                  .parent_id = parent_id,
+                                  .parent_offset = std::size_t(1)};
+  const auto child_at_boundary_id = store.create(child_at_boundary);
+  auto child_at_boundary_record = store.load(child_at_boundary_id);
+  ASSERT_TRUE(child_at_boundary_record.has_value());
+  ASSERT_EQ(child_at_boundary_record->messages.size(), std::size_t(1));
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(child_at_boundary_record->messages[0])
+                    .content[0])
+                .text,
+            "p0");
+
+  // Fork landing past the boundary (offset 2: "p0" and "p3").
+  SessionHeader child_past_boundary{.id = "session-child-past-boundary",
+                                    .parent_id = parent_id,
+                                    .parent_offset = std::size_t(2)};
+  const auto child_past_boundary_id = store.create(child_past_boundary);
+  auto child_past_boundary_record = store.load(child_past_boundary_id);
+  ASSERT_TRUE(child_past_boundary_record.has_value());
+  ASSERT_EQ(child_past_boundary_record->messages.size(), std::size_t(2));
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(child_past_boundary_record->messages[0])
+                    .content[0])
+                .text,
+            "p0");
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(child_past_boundary_record->messages[1])
+                    .content[0])
+                .text,
+            "p3");
+}
+
+TEST(SessionStore, CompactionFollowedByTruncateReplaysIdentically) {
+  pi::test::TemporaryDirectory directory(
+      "pici-session-compaction-then-truncate-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-compaction-then-truncate"};
+  const auto id = store.create(header);
+
+  store.append_message(id, make_user_message("m0"));
+  store.append_message(id, make_user_message("m1"));
+  store.append_message(id, make_user_message("m2"));
+
+  SessionCompactionRecord compaction;
+  compaction.messages.push_back(make_user_message("c0"));
+  compaction.provider = "remote";
+  compaction.model = "some-model";
+  compaction.summary = "server";
+  compaction.timestamp = 7;
+  store.append_compaction(id, compaction);
+
+  store.append_message(id, make_user_message("m3"));
+  store.append_message(id, make_user_message("m4"));
+
+  // Post-compaction vector before this truncate is [c0, m3, m4]; truncate
+  // through 2 must resize *that* vector, not reinterpret 2 as an entry
+  // index into the whole file.
+  store.append_truncate(id, 2);
+
+  auto record = store.load(id);
+  ASSERT_TRUE(record.has_value());
+  ASSERT_EQ(record->messages.size(), std::size_t(2));
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(record->messages[0]).content[0])
+                .text,
+            "c0");
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(record->messages[1]).content[0])
+                .text,
+            "m3");
+}
+
+TEST(SessionStore, CycleInParentPointersThrows) {
+  pi::test::TemporaryDirectory directory("pici-session-entry-cycle-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-entry-cycle"};
+  const auto id = store.create(header);
+
+  // Hand-write two messages whose explicit ids/parentIds form a cycle,
+  // bypassing append_message's (id-less) writer to simulate a corrupted
+  // file, same style as MalformedCompactionRecordFailsLoudly.
+  {
+    std::ofstream f(dir / (id + ".jsonl"), std::ios::app);
+    f << "{\"role\":\"user\",\"id\":\"a\",\"parentId\":\"b\",\"content\":[{"
+         "\"type\":\"text\",\"text\":\"x\"}]}\n";
+    f << "{\"role\":\"user\",\"id\":\"b\",\"parentId\":\"a\",\"content\":[{"
+         "\"type\":\"text\",\"text\":\"y\"}]}\n";
+  }
+
+  bool threw = false;
+  std::string what;
+  try {
+    (void)store.load(id);
+  } catch (const std::exception &e) {
+    threw = true;
+    what = e.what();
+  }
+  EXPECT_TRUE(threw);
+  EXPECT_THAT(what, testing::HasSubstr("cycle"));
+}
+
+TEST(SessionStore, DanglingParentIdThrows) {
+  pi::test::TemporaryDirectory directory("pici-session-dangling-parent-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-dangling-parent"};
+  const auto id = store.create(header);
+
+  {
+    std::ofstream f(dir / (id + ".jsonl"), std::ios::app);
+    f << "{\"role\":\"user\",\"id\":\"a\",\"parentId\":\"does-not-exist\","
+         "\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}\n";
+  }
+
+  bool threw = false;
+  std::string what;
+  try {
+    (void)store.load(id);
+  } catch (const std::exception &e) {
+    threw = true;
+    what = e.what();
+  }
+  EXPECT_TRUE(threw);
+  EXPECT_THAT(what, testing::HasSubstr("does-not-exist"));
+}

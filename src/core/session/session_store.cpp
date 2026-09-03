@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -84,26 +85,78 @@ parse_compaction_record(const nlohmann::json &j,
   return record;
 }
 
-// NOLINTNEXTLINE(misc-no-recursion)
-SessionRecord load_recursive(const std::filesystem::path &base_dir,
-                             const std::string &session_id,
-                             std::set<std::string> &visited) {
-  if (!visited.insert(session_id).second)
-    throw std::runtime_error("session cycle detected at: " + session_id);
+// One indexed entry-tree node: a message, a legacy truncate (the "through"
+// count it carries), or a compaction record. Meta and unparseable/empty
+// lines never become nodes (see `index_entries`).
+struct SessionEntryNode {
+  std::string id;
+  std::optional<std::string> parent_id;
+  std::variant<Message, std::size_t, SessionCompactionRecord> payload;
+};
 
-  auto path = base_dir / (session_id + ".jsonl");
-  std::ifstream f(path);
-  if (!f)
-    throw std::runtime_error("session file not found: " + path.string());
-
+struct SessionIndex {
   SessionHeader header;
-  std::vector<Message> messages;
-  std::vector<std::variant<Message, std::size_t, SessionCompactionRecord>>
-      records;
+  // File order.
+  std::vector<SessionEntryNode> nodes;
+  std::unordered_map<std::string, std::size_t> id_to_index;
+};
+
+// Single forward pass over a session file, building an id + parent-pointer
+// tree out of every message/legacy-truncate/compaction line (the same
+// line-skipping/parse-failure tolerance as the pre-chain loader).
+//
+// Legacy id scheme: a line with no "id" key gets the permanent, on-disk-
+// referenceable id "legacy-<1-based physical line number>". The physical
+// line number is assigned before parsing decides whether the line is a
+// message/truncate/meta/garbage line — i.e. it counts every `getline` call,
+// including blank and unparseable lines — so this id is stable even if a
+// future change alters which record types count as entries. The header is
+// always line 1, so the first possible entry candidate is line 2.
+//
+// Similarly, a line with no "parentId" key defaults its parent to "the most
+// recently assigned entry id", which by construction skips meta lines
+// exactly as the old separate header-mutation pass already did. A line MAY
+// carry an explicit "id"/"parentId" pair (silently ignored by pre-chain
+// code, per message_types.cpp's tolerant parsing) — the walk below resolves
+// those the same way it resolves legacy ids, which is what lets malformed
+// hand-written fixtures exercise cycle/dangling-parent detection even
+// though nothing in this phase *writes* real ids yet.
+SessionIndex index_entries(std::ifstream &f, const std::string &session_id,
+                           const std::filesystem::path &path) {
+  SessionIndex index;
   bool first = true;
   std::string line;
+  std::size_t line_number = 0;
+  std::optional<std::string> last_entry_id;
+
+  auto entry_id = [&](const nlohmann::json &j) -> std::string {
+    if (j.contains("id") && j["id"].is_string())
+      return j["id"].get<std::string>();
+    return "legacy-" + std::to_string(line_number);
+  };
+  auto entry_parent =
+      [&](const nlohmann::json &j) -> std::optional<std::string> {
+    if (j.contains("parentId")) {
+      if (j["parentId"].is_string())
+        return j["parentId"].get<std::string>();
+      return std::nullopt; // explicit null => root
+    }
+    return last_entry_id;
+  };
+  auto add_node =
+      [&](const nlohmann::json &j,
+          std::variant<Message, std::size_t, SessionCompactionRecord>
+              payload) {
+        std::string id = entry_id(j);
+        SessionEntryNode node{
+            .id = id, .parent_id = entry_parent(j), .payload = std::move(payload)};
+        index.nodes.push_back(std::move(node));
+        index.id_to_index[id] = index.nodes.size() - 1;
+        last_entry_id = std::move(id);
+      };
 
   while (std::getline(f, line)) {
+    ++line_number;
     if (line.empty())
       continue;
     nlohmann::json j;
@@ -119,7 +172,7 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
         throw std::runtime_error("invalid session file: first line type != "
                                  "session in " +
                                  path.string());
-      header = parse_header_line(j, session_id);
+      index.header = parse_header_line(j, session_id);
       continue;
     }
 
@@ -129,24 +182,24 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
       // transcript, which is exactly the "corrupted session" outcome this
       // format must not produce without telling the caller.
       auto record = parse_compaction_record(j, path);
-      header.min_schema_version =
-          std::max(header.min_schema_version, j["minVersion"].get<int>());
-      records.emplace_back(std::move(record));
+      index.header.min_schema_version = std::max(
+          index.header.min_schema_version, j["minVersion"].get<int>());
+      add_node(j, std::move(record));
     } else if (j.contains("role")) {
       if (auto msg = json::from_json(line))
-        records.emplace_back(std::move(*msg));
+        add_node(j, std::move(*msg));
     } else if (j.value("type", std::string{}) == "truncate" &&
                j.contains("through") && j["through"].is_number_unsigned()) {
-      records.emplace_back(j["through"].get<std::size_t>());
+      add_node(j, j["through"].get<std::size_t>());
     } else if (j.value("type", std::string{}) == "meta") {
       if (j.contains("name") && j["name"].is_string())
-        header.name = j["name"].get<std::string>();
+        index.header.name = j["name"].get<std::string>();
       if (j.contains("sandboxMode") && j["sandboxMode"].is_string())
-        header.sandbox_mode = j["sandboxMode"].get<std::string>();
+        index.header.sandbox_mode = j["sandboxMode"].get<std::string>();
       if (j.contains("provider") && j["provider"].is_string() &&
           j.contains("model") && j["model"].is_string()) {
-        header.provider = j["provider"].get<std::string>();
-        header.model = j["model"].get<std::string>();
+        index.header.provider = j["provider"].get<std::string>();
+        index.header.model = j["model"].get<std::string>();
       }
     }
   }
@@ -155,35 +208,111 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
     throw std::runtime_error("empty or unreadable session file: " +
                              path.string());
 
-  if (header.parent_id) {
-    auto parent = load_recursive(base_dir, *header.parent_id, visited);
-    std::size_t offset = header.parent_offset.value_or(parent.messages.size());
+  return index;
+}
+
+// Walks parent pointers from the leaf (default: the last entry, in file
+// order — matching pi's `leaf ??= entries[entries.length-1]`) to the root,
+// collecting the ordered chain of node ids, then reverses it to root-to-leaf
+// order. Throws on a cycle or a dangling parent reference rather than
+// silently truncating the walk — this format's existing convention (see
+// `parse_compaction_record`'s minVersion check) is to fail loudly on any
+// corrupted/ambiguous session state.
+std::vector<std::string> walk_from_leaf(const SessionIndex &index,
+                                        const std::filesystem::path &path) {
+  if (index.nodes.empty())
+    return {};
+
+  std::vector<std::string> chain;
+  std::set<std::string> seen;
+  std::optional<std::string> current = index.nodes.back().id;
+
+  while (current) {
+    if (!seen.insert(*current).second)
+      throw std::runtime_error("session entry cycle detected in " +
+                               path.string() + " at " + *current);
+    auto it = index.id_to_index.find(*current);
+    if (it == index.id_to_index.end())
+      throw std::runtime_error("session entry references unknown parent " +
+                               *current + " in " + path.string());
+    const auto &node = index.nodes[it->second];
+    chain.push_back(node.id);
+    current = node.parent_id;
+  }
+
+  std::ranges::reverse(chain);
+  return chain;
+}
+
+// NOLINTNEXTLINE(misc-no-recursion)
+SessionRecord load_recursive(const std::filesystem::path &base_dir,
+                             const std::string &session_id,
+                             std::set<std::string> &visited) {
+  if (!visited.insert(session_id).second)
+    throw std::runtime_error("session cycle detected at: " + session_id);
+
+  auto path = base_dir / (session_id + ".jsonl");
+  std::ifstream f(path);
+  if (!f)
+    throw std::runtime_error("session file not found: " + path.string());
+
+  SessionIndex index = index_entries(f, session_id, path);
+  std::vector<std::string> chain = walk_from_leaf(index, path);
+
+  std::vector<Message> messages;
+  std::vector<std::string> entry_ids;
+
+  if (index.header.parent_id) {
+    auto parent = load_recursive(base_dir, *index.header.parent_id, visited);
+    std::size_t offset =
+        index.header.parent_offset.value_or(parent.messages.size());
     if (offset > parent.messages.size())
       throw std::runtime_error(
-          "corrupted fork: parent \"" + *header.parent_id +
+          "corrupted fork: parent \"" + *index.header.parent_id +
           "\" has fewer messages than parentOffset=" + std::to_string(offset));
 
-    messages.reserve(offset + records.size());
+    messages.reserve(offset + chain.size());
+    entry_ids.reserve(offset + chain.size());
     messages.insert(messages.end(), parent.messages.begin(),
                     std::next(parent.messages.begin(),
                               static_cast<std::ptrdiff_t>(offset)));
+    entry_ids.insert(entry_ids.end(), parent.entry_ids.begin(),
+                     std::next(parent.entry_ids.begin(),
+                               static_cast<std::ptrdiff_t>(offset)));
   }
 
-  for (auto &record : records) {
-    if (std::holds_alternative<Message>(record)) {
-      messages.push_back(std::move(std::get<Message>(record)));
-    } else if (std::holds_alternative<std::size_t>(record)) {
-      messages.resize(std::min(std::get<std::size_t>(record), messages.size()));
+  // Replay the reconstructed chain forward, applying exactly the same
+  // per-node-type effects the pre-chain imperative loop used: push
+  // (message), resize (legacy truncate), wholesale-replace (compaction).
+  // For any purely-linear (pre-migration) file this is provably identical
+  // to today's behavior, because the chain *is* file order when nothing has
+  // ever branched.
+  for (const auto &id : chain) {
+    auto &node = index.nodes[index.id_to_index.at(id)];
+    if (std::holds_alternative<Message>(node.payload)) {
+      messages.push_back(std::move(std::get<Message>(node.payload)));
+      entry_ids.push_back(id);
+    } else if (std::holds_alternative<std::size_t>(node.payload)) {
+      std::size_t new_size =
+          std::min(std::get<std::size_t>(node.payload), messages.size());
+      messages.resize(new_size);
+      entry_ids.resize(new_size);
     } else {
       // Compaction record: wholesale replace, discarding everything before
-      // it (including any parent-inherited prefix). Subsequent records
-      // append after the replacement.
-      messages = std::move(std::get<SessionCompactionRecord>(record).messages);
+      // it (including any parent-inherited prefix). Subsequent chain nodes
+      // append after the replacement. Every message it contributes shares
+      // this node's single id.
+      messages = std::move(std::get<SessionCompactionRecord>(node.payload).messages);
+      entry_ids.assign(messages.size(), id);
     }
   }
 
-  return SessionRecord{.header = std::move(header),
-                       .messages = std::move(messages)};
+  return SessionRecord{
+      .header = std::move(index.header),
+      .messages = std::move(messages),
+      .entry_ids = std::move(entry_ids),
+      .leaf_entry_id = chain.empty() ? std::nullopt
+                                     : std::optional<std::string>(chain.back())};
 }
 
 } // namespace
