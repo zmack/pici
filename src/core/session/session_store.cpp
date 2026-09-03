@@ -458,12 +458,29 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
   if (target_is_leaf) {
     chain = walk_from_leaf(index, path);
   } else if (target_id) {
-    if (!index.id_to_index.contains(*target_id))
+    if (!index.id_to_index.contains(*target_id)) {
+      // Not a local entry -- it may belong to an ancestor's own tree (this
+      // session's inherited prefix can itself be forked, compacted, or
+      // arbitrarily deep). Recurse with the same target instead of
+      // assuming corruption; the recursive call applies this exact same
+      // check one level up, so an id that resolves nowhere in the whole
+      // ancestor chain still fails loudly, just from whichever file
+      // actually should have had it. This session contributes nothing
+      // when the target predates its own fork point, so the ancestor's
+      // result is returned directly -- bypassing this session's own
+      // parent-prefix-seeding switch and (necessarily empty) local chain
+      // replay below, both of which would be no-ops here anyway.
+      if (index.header.parent_id)
+        return load_recursive(base_dir, *index.header.parent_id, visited,
+                              target_id, /*target_is_leaf=*/false);
       throw std::runtime_error("corrupted fork: parent \"" + session_id +
                                "\" has no entry \"" + *target_id + "\"");
+    }
     chain = walk_from_leaf(index, path, target_id);
   }
-  // else: target is root -- empty chain, no entries replayed.
+  // else: target is root -- empty local chain; the parent-prefix-seeding
+  // switch below (if this session has a parent) still applies, correctly
+  // leaving just the inherited prefix rather than a truly empty history.
 
   std::vector<Message> messages;
   std::vector<std::string> entry_ids;
@@ -728,36 +745,36 @@ SessionStore::branch(const std::string &session_id,
   auto path = session_path(session_id);
   auto minted = mint_entry_locked(path, session_id);
 
-  std::vector<std::string> chain;
-  if (target_entry_id) {
-    if (!minted.index.id_to_index.contains(*target_entry_id))
-      throw std::runtime_error("branch target not found: \"" +
-                               *target_entry_id + "\" in session \"" +
-                               session_id + "\"");
-    chain = walk_from_leaf(minted.index, path, target_entry_id);
+  if (target_entry_id && !minted.index.id_to_index.contains(*target_entry_id) &&
+      !minted.index.header.parent_id) {
+    // Not local, and no parent to search for it either -- genuinely
+    // unknown (load_recursive below performs the same "not local -> try
+    // the parent" resolution when there IS a parent; this pre-check exists
+    // only to give the common "bogus id on a standalone session" case
+    // branch()'s own clearer error, matching this function's documented
+    // contract of never trusting a caller-supplied id blindly).
+    throw std::runtime_error("branch target not found: \"" +
+                             *target_entry_id + "\" in session \"" +
+                             session_id + "\"");
   }
-  // else: target is the root -- an empty chain replays to an empty
-  // message list below, exactly like any other session with no entries.
 
-  // Replay the target's chain forward with the same per-node-type effects
-  // load_recursive's own chain replay uses (push / resize / wholesale
-  // replace) -- this is what makes the branch record's "messages" field
-  // identical to what a load() to that same point would have produced. No
-  // new node type is needed: a compaction node the walk lands on already
-  // terminates ancestor lookup and wholesale-replaces, exactly like this
-  // function's own output will once it's written and later replayed.
-  std::vector<Message> messages;
-  for (const auto &id : chain) {
-    auto &node = minted.index.nodes[minted.index.id_to_index.at(id)];
-    if (std::holds_alternative<Message>(node.payload)) {
-      messages.push_back(std::get<Message>(node.payload));
-    } else if (std::holds_alternative<std::size_t>(node.payload)) {
-      messages.resize(
-          std::min(std::get<std::size_t>(node.payload), messages.size()));
-    } else {
-      messages = std::get<SessionCompactionRecord>(node.payload).messages;
-    }
-  }
+  // Compute the target's flat message list via load_recursive rather than
+  // a hand-rolled local-only chain replay: a session forked from a parent
+  // has an inherited prefix that only load_recursive's parent-anchor
+  // handling knows how to seed (see its own comments) -- a local-only walk
+  // would silently drop that prefix for any forked session, and would
+  // throw on a perfectly valid target that happens to belong to the
+  // parent's own tree (e.g. a rewind into the inherited portion of a
+  // forked session's history). Reusing load_recursive means this function
+  // gets that handling, and any future fix to it, for free; it's a no-op
+  // extra file read on top of mint_entry_locked's own indexing pass, which
+  // this codebase already accepts as the cost of always resolving against
+  // the true current disk state rather than a cache (see
+  // mint_entry_locked's own comment).
+  std::set<std::string> visited;
+  auto target_record = load_recursive(base_dir_, session_id, visited,
+                                      target_entry_id, /*target_is_leaf=*/false);
+  std::vector<Message> messages = std::move(target_record.messages);
 
   nlohmann::json j = nlohmann::json::object();
   j["type"] = "compaction";

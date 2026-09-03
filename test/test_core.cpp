@@ -1678,3 +1678,98 @@ TEST(SessionStore, ForkOfAForkWithNoOwnEntriesGetsRootAnchorNotNone) {
   // misbehave, to legacy-offset-slice B's near-empty message vector).
   EXPECT_TRUE(c_record->messages.empty());
 }
+
+// SessionStore::branch() originally computed its replayed "messages" from
+// this session's own local entry chain only, never consulting
+// header.parent_id/parent_entry_anchor at all -- so branching (i.e.
+// SessionRuntime::truncate_active_session, reached via the Lua/addon
+// truncate_to hook) on ANY forked (entry-anchor) session silently dropped
+// its inherited parent prefix, contradicting load()'s own correct
+// handling of the identical header. Fixed by having branch() delegate its
+// message computation to load_recursive (the same function load() uses),
+// which already seeds the inherited prefix per ParentEntryAnchor -- this
+// test is the regression proof.
+TEST(SessionStore, BranchOnAForkedSessionPreservesTheInheritedPrefix) {
+  pi::test::TemporaryDirectory directory(
+      "pici-session-branch-forked-inherited-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader parent_header{.id = "session-branch-parent"};
+  const auto parent_id = store.create(parent_header);
+  store.append_message(parent_id, make_user_message("p0"));
+  store.append_message(parent_id, make_user_message("p1"));
+
+  auto anchor = store.current_leaf_anchor(parent_id);
+  ASSERT_EQ(anchor.anchor, ParentEntryAnchor::entry);
+
+  SessionHeader child_header{.id = "session-branch-child",
+                             .parent_id = parent_id,
+                             .parent_offset = std::size_t(2),
+                             .parent_entry_anchor = anchor.anchor,
+                             .parent_entry_id = anchor.entry_id};
+  const auto child_id = store.create(child_header);
+  store.append_message(child_id, make_user_message("c0"));
+
+  // Rewind the child all the way back to its own local root (no target --
+  // "before any of the child's own entries"). This must still show the
+  // inherited parent prefix (p0, p1), not an empty history: the fork
+  // point represents what this session looked like at creation, and that
+  // included two inherited messages.
+  auto messages = store.branch(child_id, std::nullopt);
+  ASSERT_EQ(messages.size(), std::size_t(2));
+  EXPECT_EQ(
+      std::get<TextContent>(std::get<UserMessage>(messages[0]).content[0])
+          .text,
+      "p0");
+  EXPECT_EQ(
+      std::get<TextContent>(std::get<UserMessage>(messages[1]).content[0])
+          .text,
+      "p1");
+
+  // The durable record must agree: reloading the child after this branch
+  // replays to the same two inherited messages, not the pre-fix empty
+  // result.
+  auto record = store.load(child_id);
+  ASSERT_TRUE(record.has_value());
+  ASSERT_EQ(record->messages.size(), std::size_t(2));
+}
+
+// Companion to the above: SessionRuntime::truncate_active_session resolves
+// its branch target from a forked session's *combined* entry_ids vector
+// (inherited prefix followed by local entries), so `through` landing
+// inside the inherited portion produces a target entry id that belongs to
+// the PARENT's own file, not the child's. branch() must resolve that by
+// walking into the parent's tree rather than throwing "not found."
+TEST(SessionStore, BranchOnAForkedSessionCanTargetAnEntryInTheInheritedPrefix) {
+  pi::test::TemporaryDirectory directory(
+      "pici-session-branch-forked-inherited-target-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader parent_header{.id = "session-branch-target-parent"};
+  const auto parent_id = store.create(parent_header);
+  store.append_message(parent_id, make_user_message("p0"));
+  store.append_message(parent_id, make_user_message("p1"));
+
+  auto parent_record = store.load(parent_id);
+  ASSERT_TRUE(parent_record.has_value());
+  ASSERT_EQ(parent_record->entry_ids.size(), std::size_t(2));
+  const auto p0_entry_id = parent_record->entry_ids[0];
+
+  auto anchor = store.current_leaf_anchor(parent_id);
+  SessionHeader child_header{.id = "session-branch-target-child",
+                             .parent_id = parent_id,
+                             .parent_offset = std::size_t(2),
+                             .parent_entry_anchor = anchor.anchor,
+                             .parent_entry_id = anchor.entry_id};
+  const auto child_id = store.create(child_header);
+  store.append_message(child_id, make_user_message("c0"));
+
+  auto messages = store.branch(child_id, p0_entry_id);
+  ASSERT_EQ(messages.size(), std::size_t(1));
+  EXPECT_EQ(
+      std::get<TextContent>(std::get<UserMessage>(messages[0]).content[0])
+          .text,
+      "p0");
+}
