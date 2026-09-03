@@ -551,6 +551,14 @@ void RpcMode::handle_session_command(const nlohmann::json &command,
                                    std::chrono::system_clock::now()),
                                .model = model.id,
                                .provider = model.provider};
+    // Alongside the unconditional legacy parentOffset above, also record a
+    // stable entry-id anchor (Phase 3) so this fork survives a later
+    // compaction of the parent without its inherited prefix being lost.
+    if (auto *store = session_.session_store()) {
+      const auto anchor = store->current_leaf_anchor(*parent);
+      header.parent_entry_anchor = anchor.anchor;
+      header.parent_entry_id = anchor.entry_id;
+    }
     const auto id = session_.fork_session(std::move(header));
     response(command, true,
              {{"session_id", id}, {"parent_session_id", *parent}});

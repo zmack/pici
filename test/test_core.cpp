@@ -907,7 +907,17 @@ TEST(SessionStore, CompactionRecordFromANewerSchemaFailsClosed) {
   EXPECT_THAT(what, testing::HasSubstr("99"));
 }
 
-TEST(SessionStore, RefusesToCompactASessionWithForkedChildren) {
+// Phase 3 narrowed append_compaction's children-guard to only block on
+// children whose anchor is `none` (this legacy count-slice case) or an
+// unresolvable `entry` anchor -- see UnresolvableAnchorStillBlocksCompaction
+// and ForkParentEntryIdSurvivesLaterParentCompaction for those two other
+// cases. This test (originally
+// RefusesToCompactASessionWithForkedChildren, from before Phase 3) now
+// exists specifically to document/pin that the `none` case -- a child
+// header written with only the legacy parentOffset, no anchor fields at
+// all (i.e. simulating a pre-Phase-3 fork, since child_header below never
+// sets parent_entry_anchor and it defaults to `none`) -- still blocks.
+TEST(SessionStore, LegacyOffsetOnlyForkStillBlocksCompaction) {
   pi::test::TemporaryDirectory directory("pici-session-compaction-fork-test");
   const auto &dir = directory.path();
 
@@ -921,6 +931,7 @@ TEST(SessionStore, RefusesToCompactASessionWithForkedChildren) {
   SessionHeader child_header{.id = "session-child",
                              .parent_id = parent_id,
                              .parent_offset = std::size_t(1)};
+  ASSERT_EQ(child_header.parent_entry_anchor, ParentEntryAnchor::none);
   const auto child_id = store.create(child_header);
   (void)child_id;
 
@@ -1423,4 +1434,247 @@ TEST(SessionStore, BranchRecordIsGatedByExistingCompactionMinVersionCheck) {
   EXPECT_TRUE(threw);
   EXPECT_THAT(what,
              testing::HasSubstr(std::to_string(kSessionSchemaVersion + 1)));
+}
+
+TEST(SessionStore, ForkRecordsEntryAnchorAlongsideLegacyOffset) {
+  pi::test::TemporaryDirectory directory("pici-session-fork-anchor-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader parent_header{.id = "session-fork-anchor-parent"};
+  const auto parent_id = store.create(parent_header);
+  store.append_message(parent_id, make_user_message("p0"));
+  store.append_message(parent_id, make_user_message("p1"));
+
+  auto anchor = store.current_leaf_anchor(parent_id);
+  EXPECT_EQ(anchor.anchor, ParentEntryAnchor::entry);
+  ASSERT_TRUE(anchor.entry_id.has_value());
+
+  SessionHeader child_header{.id = "session-fork-anchor-child",
+                             .parent_id = parent_id,
+                             .parent_offset = std::size_t(2),
+                             .parent_entry_anchor = anchor.anchor,
+                             .parent_entry_id = anchor.entry_id};
+  const auto child_id = store.create(child_header);
+
+  // Both the legacy parentOffset and the new anchor fields are present on
+  // the raw header line -- the anchor is written ALONGSIDE, not instead
+  // of, the legacy field.
+  auto lines = read_nonempty_lines(dir / (child_id + ".jsonl"));
+  ASSERT_FALSE(lines.empty());
+  auto header_json = nlohmann::json::parse(lines[0]);
+  ASSERT_TRUE(header_json["parentOffset"].is_number_unsigned());
+  EXPECT_EQ(header_json["parentOffset"].get<std::size_t>(), std::size_t(2));
+  ASSERT_TRUE(header_json.contains("parentEntryAnchor"));
+  EXPECT_EQ(header_json["parentEntryAnchor"].get<std::string>(), "entry");
+  ASSERT_TRUE(header_json.contains("parentEntryId"));
+  EXPECT_EQ(header_json["parentEntryId"].get<std::string>(), *anchor.entry_id);
+
+  auto child_record = store.load(child_id);
+  ASSERT_TRUE(child_record.has_value());
+  EXPECT_EQ(child_record->header.parent_entry_anchor, ParentEntryAnchor::entry);
+  EXPECT_EQ(child_record->header.parent_entry_id, anchor.entry_id);
+  ASSERT_EQ(child_record->messages.size(), std::size_t(2));
+}
+
+TEST(SessionStore, ForkParentEntryIdSurvivesLaterParentCompaction) {
+  pi::test::TemporaryDirectory directory(
+      "pici-session-fork-survives-compaction-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader parent_header{.id = "session-survives-parent"};
+  const auto parent_id = store.create(parent_header);
+  store.append_message(parent_id, make_user_message("p0"));
+  store.append_message(parent_id, make_user_message("p1"));
+
+  auto anchor = store.current_leaf_anchor(parent_id);
+  ASSERT_EQ(anchor.anchor, ParentEntryAnchor::entry);
+  ASSERT_TRUE(anchor.entry_id.has_value());
+
+  SessionHeader child_header{.id = "session-survives-child",
+                             .parent_id = parent_id,
+                             .parent_offset = std::size_t(2),
+                             .parent_entry_anchor = anchor.anchor,
+                             .parent_entry_id = anchor.entry_id};
+  const auto child_id = store.create(child_header);
+
+  auto before = store.load(child_id);
+  ASSERT_TRUE(before.has_value());
+  ASSERT_EQ(before->messages.size(), std::size_t(2));
+
+  // Compacting the parent must NOT be blocked (the child's anchor still
+  // resolves against the parent's post-compaction index -- entries are
+  // permanent, compaction only appends), and the child must still load
+  // its unchanged inherited prefix afterward. This is the key regression
+  // proof for the Phase 3 guard-narrowing.
+  SessionCompactionRecord compaction;
+  compaction.messages.push_back(make_user_message("summary"));
+  store.append_compaction(parent_id, compaction);
+
+  auto after = store.load(child_id);
+  ASSERT_TRUE(after.has_value());
+  ASSERT_EQ(after->messages.size(), std::size_t(2));
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(after->messages[0]).content[0])
+                .text,
+            "p0");
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(after->messages[1]).content[0])
+                .text,
+            "p1");
+
+  // The parent itself now replays as just the compacted summary -- the
+  // child's messages are unchanged even though the parent's own live view
+  // shrank.
+  auto parent_after = store.load(parent_id);
+  ASSERT_TRUE(parent_after.has_value());
+  ASSERT_EQ(parent_after->messages.size(), std::size_t(1));
+}
+
+TEST(SessionStore, ForkFallsBackToParentOffsetWhenAnchorIsNone) {
+  pi::test::TemporaryDirectory directory(
+      "pici-session-fork-legacy-fallback-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader parent_header{.id = "session-legacy-fallback-parent"};
+  const auto parent_id = store.create(parent_header);
+  store.append_message(parent_id, make_user_message("p0"));
+  store.append_message(parent_id, make_user_message("p1"));
+  store.append_message(parent_id, make_user_message("p2"));
+
+  // Hand-write a child header with ONLY "parentOffset" -- no
+  // "parentEntryAnchor"/"parentEntryId" keys at all -- simulating a fork
+  // written by a pre-Phase-3 binary.
+  const std::string child_id = "session-legacy-fallback-child";
+  {
+    std::ofstream f(dir / (child_id + ".jsonl"), std::ios::app);
+    nlohmann::json header = nlohmann::json::object();
+    header["type"] = "session";
+    header["id"] = child_id;
+    header["parentId"] = parent_id;
+    header["parentOffset"] = 2;
+    header["created"] = 0;
+    header["model"] = "";
+    header["provider"] = "";
+    f << header.dump() << "\n";
+  }
+
+  auto record = store.load(child_id);
+  ASSERT_TRUE(record.has_value());
+  EXPECT_EQ(record->header.parent_entry_anchor, ParentEntryAnchor::none);
+  ASSERT_EQ(record->messages.size(), std::size_t(2));
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(record->messages[0]).content[0])
+                .text,
+            "p0");
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(record->messages[1]).content[0])
+                .text,
+            "p1");
+}
+
+TEST(SessionStore, UnresolvableAnchorStillBlocksCompaction) {
+  pi::test::TemporaryDirectory directory(
+      "pici-session-unresolvable-anchor-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader parent_header{.id = "session-unresolvable-parent"};
+  const auto parent_id = store.create(parent_header);
+  store.append_message(parent_id, make_user_message("p0"));
+
+  // Hand-corrupt a child's "parentEntryId" to an id that does not exist in
+  // the parent's current index -- an unresolvable anchor must still block
+  // compaction, not silently allow it.
+  const std::string child_id = "session-unresolvable-child";
+  {
+    std::ofstream f(dir / (child_id + ".jsonl"), std::ios::app);
+    nlohmann::json header = nlohmann::json::object();
+    header["type"] = "session";
+    header["id"] = child_id;
+    header["parentId"] = parent_id;
+    header["parentOffset"] = 1;
+    header["parentEntryAnchor"] = "entry";
+    header["parentEntryId"] = "does-not-exist";
+    header["created"] = 0;
+    header["model"] = "";
+    header["provider"] = "";
+    f << header.dump() << "\n";
+  }
+
+  EXPECT_TRUE(store.has_children(parent_id));
+
+  SessionCompactionRecord compaction;
+  compaction.messages.push_back(make_user_message("summary"));
+  bool threw = false;
+  try {
+    store.append_compaction(parent_id, compaction);
+  } catch (const std::exception &) {
+    threw = true;
+  }
+  EXPECT_TRUE(threw);
+
+  // Confirm the parent really wasn't touched.
+  auto parent_after = store.load(parent_id);
+  ASSERT_TRUE(parent_after.has_value());
+  ASSERT_EQ(parent_after->messages.size(), std::size_t(1));
+}
+
+TEST(SessionStore, ForkOfAForkWithNoOwnEntriesGetsRootAnchorNotNone) {
+  pi::test::TemporaryDirectory directory(
+      "pici-session-fork-of-fork-root-anchor-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader a_header{.id = "session-a"};
+  const auto a_id = store.create(a_header);
+  store.append_message(a_id, make_user_message("a0"));
+  store.append_message(a_id, make_user_message("a1"));
+
+  auto a_anchor = store.current_leaf_anchor(a_id);
+  ASSERT_EQ(a_anchor.anchor, ParentEntryAnchor::entry);
+
+  // Fork B from A.
+  SessionHeader b_header{.id = "session-b",
+                         .parent_id = a_id,
+                         .parent_offset = std::size_t(2),
+                         .parent_entry_anchor = a_anchor.anchor,
+                         .parent_entry_id = a_anchor.entry_id};
+  const auto b_id = store.create(b_header);
+
+  // B never gets any of its own entries appended -- fork C from B
+  // immediately. This is the tri-state design's regression proof: B's OWN
+  // file has zero entries of its own, but B is NOT anchor-less -- a bare
+  // optional<string> anchor would have collapsed "B has no own entries"
+  // and "B has no anchor at all" into the same nullopt, incorrectly
+  // telling C's header-parser to fall back to legacy parentOffset
+  // count-slicing against B (which itself has 0 messages of its own
+  // recorded, only an inherited count). The tri-state anchor instead
+  // reports `root`: "C's fork point is before B's first own entry",
+  // distinct from `none`.
+  auto b_anchor = store.current_leaf_anchor(b_id);
+  EXPECT_EQ(b_anchor.anchor, ParentEntryAnchor::root);
+  EXPECT_FALSE(b_anchor.entry_id.has_value());
+
+  SessionHeader c_header{.id = "session-c",
+                         .parent_id = b_id,
+                         .parent_offset = std::size_t(2),
+                         .parent_entry_anchor = b_anchor.anchor,
+                         .parent_entry_id = b_anchor.entry_id};
+  const auto c_id = store.create(c_header);
+
+  auto c_record = store.load(c_id);
+  ASSERT_TRUE(c_record.has_value());
+  EXPECT_EQ(c_record->header.parent_entry_anchor, ParentEntryAnchor::root);
+  EXPECT_NE(c_record->header.parent_entry_anchor, ParentEntryAnchor::none);
+
+  // A `root` anchor's inherited prefix is empty by this phase's explicit
+  // design (see load_recursive's ParentEntryAnchor::root case) -- C does
+  // not transitively re-inherit B's own inherited-from-A prefix. The
+  // regression this test guards against is specifically the anchor being
+  // `none` (which would instead try, and in general fail or silently
+  // misbehave, to legacy-offset-slice B's near-empty message vector).
+  EXPECT_TRUE(c_record->messages.empty());
 }

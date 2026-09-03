@@ -2315,6 +2315,15 @@ private:
     child_hdr.provider = current_model.provider;
     child_hdr.parent_id = current_session_id_;
     child_hdr.parent_offset = agent().state().messages().size();
+    // Alongside the unconditional legacy parent_offset above, also record a
+    // stable entry-id anchor (Phase 3) so this fork survives a later
+    // compaction of the parent without its inherited prefix being lost.
+    if (bundle_.session_store) {
+      const auto anchor =
+          bundle_.session_store->current_leaf_anchor(current_session_id_);
+      child_hdr.parent_entry_anchor = anchor.anchor;
+      child_hdr.parent_entry_id = anchor.entry_id;
+    }
     runtime().mailbox_runtime().drop_queued_delivery();
     current_session_id_ = runtime().fork_session(child_hdr);
     current_session_name_.reset();

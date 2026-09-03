@@ -25,6 +25,26 @@ namespace pi::core {
 // be taught to respect a version field attached to it.
 inline constexpr int kSessionSchemaVersion = 3;
 
+// Tri-state anchor for a forked session's fork point into its parent's
+// entry tree, alongside (not instead of) the legacy `parent_offset`
+// message-count slice. A bare `optional<string>` was rejected here because
+// it conflates "no anchor recorded" (session predates Phase 3, or was
+// forked by a pre-Phase-3 binary) with "the fork point is the parent's
+// root" -- which specifically breaks forking a session that was itself
+// forked but has zero entries of its own: such a session's *own* leaf is
+// its inherited root, not "no anchor", so a child forking from it must be
+// able to say "root" explicitly rather than falling back to `none` (which
+// would instead trigger the legacy parent_offset path against a parent
+// that may since have grown or been compacted).
+//   none  -- no anchor recorded; fall back to legacy parent_offset
+//            count-slicing (the only behavior available before this field
+//            existed).
+//   root  -- the fork point is before the parent's first entry (an
+//            entry-id walk to nullopt/root).
+//   entry -- the fork point is the specific entry named by
+//            `parent_entry_id`.
+enum class ParentEntryAnchor { none, root, entry };
+
 struct SessionHeader {
   std::string id;
   std::optional<std::string> parent_id;
@@ -39,6 +59,10 @@ struct SessionHeader {
   // means the session predates compaction and is fully compatible with
   // every pici build.
   int min_schema_version{1};
+  // See ParentEntryAnchor's comment. `parent_entry_id` is set only when
+  // `parent_entry_anchor == entry`.
+  ParentEntryAnchor parent_entry_anchor{ParentEntryAnchor::none};
+  std::optional<std::string> parent_entry_id;
 };
 
 // A replayable "compaction" journal record: replaces the current in-memory

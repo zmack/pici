@@ -48,6 +48,19 @@ parse_header_line(const nlohmann::json &j, // NOLINT(misc-include-cleaner)
     hdr.parent_offset = j["parentOffset"].get<std::size_t>();
   if (j.contains("name") && j["name"].is_string())
     hdr.name = j["name"].get<std::string>();
+  if (j.contains("parentEntryAnchor") && j["parentEntryAnchor"].is_string()) {
+    const auto anchor = j["parentEntryAnchor"].get<std::string>();
+    if (anchor == "root") {
+      hdr.parent_entry_anchor = ParentEntryAnchor::root;
+    } else if (anchor == "entry") {
+      hdr.parent_entry_anchor = ParentEntryAnchor::entry;
+      if (j.contains("parentEntryId") && j["parentEntryId"].is_string())
+        hdr.parent_entry_id = j["parentEntryId"].get<std::string>();
+    }
+    // Any other/unrecognized value is treated as absent (`none`) --
+    // fail open to the legacy parent_offset path rather than throwing on a
+    // forward-compat value this build doesn't understand.
+  }
   return hdr;
 }
 
@@ -322,10 +335,115 @@ MintedEntry mint_entry_locked(const std::filesystem::path &path,
                      .index = std::move(index)};
 }
 
+// Must be called only while the caller holds SessionStore::mutex_ (reads
+// every other session file directly, same convention as
+// `mint_entry_locked`). Scans the store's directory for children of
+// `session_id` the way `has_children` does, but decides per-child whether
+// it actually BLOCKS compaction rather than treating "has any child" as
+// disqualifying:
+//   - a child with no anchor recorded (`parentEntryAnchor` absent --
+//     either a pre-Phase-3 fork, or one written by a pre-Phase-3 binary)
+//     relies entirely on the exact message-count `parentOffset`, which a
+//     wholesale compaction invalidates -- BLOCKS.
+//   - a child anchored `root` never depended on a specific entry --
+//     compacting only ever appends one new node whose parent is the
+//     current leaf, so it never renumbers, deletes, or hides the "before
+//     any entries" fork point -- does NOT block.
+//   - a child anchored `entry` whose `parentEntryId` still resolves
+//     against `session_id`'s CURRENT index does not block, for the same
+//     reason: entries are permanent once written (compaction appends, it
+//     never rewrites or removes an existing node), so the child can walk
+//     to that exact ancestor entry forever, regardless of how many times
+//     `session_id` itself is later compacted.
+//   - a child anchored `entry` whose `parentEntryId` does NOT resolve
+//     (corrupted/stale header) still BLOCKS -- a broken anchor must never
+//     be treated as safe to compact past.
+//
+// IMPORTANT caveat this narrowing deliberately accepts, not an oversight:
+// none of this lets a compacted parent shrink an entry-anchored child's
+// inherited prefix. The child's inherited prefix is always computed by
+// walking `session_id`'s tree to that specific old entry id (see
+// `load_recursive`'s `ParentEntryAnchor::entry` case), never to
+// `session_id`'s new post-compaction leaf -- so `session_id`'s on-disk
+// file can never be pruned or deleted while such a child exists; it must
+// keep replaying the full pre-compaction ancestor chain forever. That is
+// the tradeoff this narrowing makes in exchange for no longer blanket-
+// refusing to compact a session with any fork at all.
+bool has_blocking_children_locked(const std::filesystem::path &base_dir,
+                                  const std::string &session_id) {
+  auto self_path = base_dir / (session_id + ".jsonl");
+  std::ifstream self_f(self_path);
+  SessionIndex self_index;
+  bool have_self_index = false;
+  if (self_f) {
+    self_index = index_entries(self_f, session_id, self_path);
+    have_self_index = true;
+  }
+  // If the session's own file can't be read/indexed here, fall through and
+  // let append_compaction's own subsequent open surface the real error;
+  // this scan just treats it as "can't verify resolvability", which the
+  // `entry` branch below already handles by blocking.
+
+  std::error_code ec;
+  for (const auto &entry : std::filesystem::directory_iterator(base_dir, ec)) {
+    if (ec)
+      break;
+    if (entry.path().extension() != ".jsonl")
+      continue;
+    if (entry.path().stem().string() == session_id)
+      continue;
+    std::ifstream f(entry.path());
+    if (!f)
+      continue;
+    std::string line;
+    if (!std::getline(f, line) || line.empty())
+      continue;
+    auto j = nlohmann::json::parse(line, nullptr, false);
+    if (j.is_discarded() || j.value("type", std::string{}) != "session")
+      continue;
+    if (!(j.contains("parentId") && j["parentId"].is_string() &&
+         j["parentId"].get<std::string>() == session_id))
+      continue;
+
+    auto child_hdr = parse_header_line(j, entry.path().stem().string());
+    switch (child_hdr.parent_entry_anchor) {
+    case ParentEntryAnchor::root:
+      continue; // never blocks
+    case ParentEntryAnchor::entry:
+      if (!have_self_index || !child_hdr.parent_entry_id ||
+          !self_index.id_to_index.contains(*child_hdr.parent_entry_id))
+        return true; // unresolvable/malformed anchor -- must still block
+      continue;       // resolvable -- does not block
+    case ParentEntryAnchor::none:
+      return true; // legacy count-slice fork -- still blocks
+    }
+  }
+  return false;
+}
+
 // NOLINTNEXTLINE(misc-no-recursion)
+//
+// `target_is_leaf`/`target_id` select which node of THIS session's own
+// chain to walk to and replay (not how it recurses into its parent, which
+// is driven entirely by the loaded header's own parent_entry_anchor):
+//   target_is_leaf == true  -- walk to the leaf (default; every top-level
+//                              `load()` call and the legacy `none`-anchor
+//                              parent recursion use this).
+//   target_is_leaf == false, target_id set    -- walk to that specific
+//                              entry id within this session's own index
+//                              (used when recursing into a parent for an
+//                              `entry`-anchored child).
+//   target_is_leaf == false, target_id nullopt -- empty chain (root),
+//                              mirroring SessionStore::branch's own
+//                              nullopt-target handling. Not reached via the
+//                              anchor==root path below (that path never
+//                              recurses into the parent at all), kept for
+//                              symmetry/future callers.
 SessionRecord load_recursive(const std::filesystem::path &base_dir,
                              const std::string &session_id,
-                             std::set<std::string> &visited) {
+                             std::set<std::string> &visited,
+                             std::optional<std::string> target_id = std::nullopt,
+                             bool target_is_leaf = true) {
   if (!visited.insert(session_id).second)
     throw std::runtime_error("session cycle detected at: " + session_id);
 
@@ -335,28 +453,69 @@ SessionRecord load_recursive(const std::filesystem::path &base_dir,
     throw std::runtime_error("session file not found: " + path.string());
 
   SessionIndex index = index_entries(f, session_id, path);
-  std::vector<std::string> chain = walk_from_leaf(index, path);
+
+  std::vector<std::string> chain;
+  if (target_is_leaf) {
+    chain = walk_from_leaf(index, path);
+  } else if (target_id) {
+    if (!index.id_to_index.contains(*target_id))
+      throw std::runtime_error("corrupted fork: parent \"" + session_id +
+                               "\" has no entry \"" + *target_id + "\"");
+    chain = walk_from_leaf(index, path, target_id);
+  }
+  // else: target is root -- empty chain, no entries replayed.
 
   std::vector<Message> messages;
   std::vector<std::string> entry_ids;
 
   if (index.header.parent_id) {
-    auto parent = load_recursive(base_dir, *index.header.parent_id, visited);
-    std::size_t offset =
-        index.header.parent_offset.value_or(parent.messages.size());
-    if (offset > parent.messages.size())
-      throw std::runtime_error(
-          "corrupted fork: parent \"" + *index.header.parent_id +
-          "\" has fewer messages than parentOffset=" + std::to_string(offset));
+    switch (index.header.parent_entry_anchor) {
+    case ParentEntryAnchor::entry: {
+      if (!index.header.parent_entry_id)
+        throw std::runtime_error(
+            "corrupted fork: session \"" + session_id +
+            "\" has parentEntryAnchor \"entry\" but no parentEntryId");
+      // Walk the PARENT's own tree to this specific entry (not the
+      // parent's current leaf) -- entries are permanent once written
+      // (compaction only ever appends a new node), so this resolves
+      // correctly even if the parent has since gained new entries, been
+      // branched elsewhere, or been compacted.
+      auto parent = load_recursive(base_dir, *index.header.parent_id, visited,
+                                   index.header.parent_entry_id,
+                                   /*target_is_leaf=*/false);
+      messages = std::move(parent.messages);
+      entry_ids = std::move(parent.entry_ids);
+      break;
+    }
+    case ParentEntryAnchor::root:
+      // Fork point is before the parent's first entry -- no inherited
+      // prefix at all (not even a recursive grandparent-inherited prefix):
+      // matches SessionStore::branch's own nullopt-target ("root") case,
+      // where the resulting history is genuinely empty.
+      break;
+    case ParentEntryAnchor::none: {
+      // Legacy path, UNCHANGED: sessions forked by a pre-Phase-3 binary
+      // (or predating this field) only ever recorded a message-count
+      // offset into the parent's own replayed vector.
+      auto parent = load_recursive(base_dir, *index.header.parent_id, visited);
+      std::size_t offset =
+          index.header.parent_offset.value_or(parent.messages.size());
+      if (offset > parent.messages.size())
+        throw std::runtime_error(
+            "corrupted fork: parent \"" + *index.header.parent_id +
+            "\" has fewer messages than parentOffset=" + std::to_string(offset));
 
-    messages.reserve(offset + chain.size());
-    entry_ids.reserve(offset + chain.size());
-    messages.insert(messages.end(), parent.messages.begin(),
-                    std::next(parent.messages.begin(),
-                              static_cast<std::ptrdiff_t>(offset)));
-    entry_ids.insert(entry_ids.end(), parent.entry_ids.begin(),
-                     std::next(parent.entry_ids.begin(),
-                               static_cast<std::ptrdiff_t>(offset)));
+      messages.reserve(offset + chain.size());
+      entry_ids.reserve(offset + chain.size());
+      messages.insert(messages.end(), parent.messages.begin(),
+                      std::next(parent.messages.begin(),
+                                static_cast<std::ptrdiff_t>(offset)));
+      entry_ids.insert(entry_ids.end(), parent.entry_ids.begin(),
+                       std::next(parent.entry_ids.begin(),
+                                 static_cast<std::ptrdiff_t>(offset)));
+      break;
+    }
+    }
   }
 
   // Replay the reconstructed chain forward, applying exactly the same
@@ -464,6 +623,21 @@ std::string SessionStore::create(const SessionHeader &hdr) {
   j["provider"] = hdr.provider;
   j["sandboxMode"] = hdr.sandbox_mode ? nlohmann::json(*hdr.sandbox_mode)
                                       : nlohmann::json(nullptr);
+  switch (hdr.parent_entry_anchor) {
+  case ParentEntryAnchor::root:
+    j["parentEntryAnchor"] = "root";
+    break;
+  case ParentEntryAnchor::entry:
+    j["parentEntryAnchor"] = "entry";
+    j["parentEntryId"] = hdr.parent_entry_id ? nlohmann::json(*hdr.parent_entry_id)
+                                              : nlohmann::json(nullptr);
+    break;
+  case ParentEntryAnchor::none:
+    // Absent entirely -- matches how a pre-Phase-3 header looks, so an old
+    // binary (and this build's own `none`-fallback parsing) treats it
+    // identically to "no anchor recorded".
+    break;
+  }
 
   write_line_locked(sid, j);
   return sid;
@@ -511,17 +685,6 @@ void SessionStore::set_model(const std::string &session_id,
 
 void SessionStore::append_compaction(const std::string &session_id,
                                      const SessionCompactionRecord &record) {
-  // V1 concurrency policy: refuse compaction on any session that has
-  // children on disk rather than silently invalidating every child's
-  // parentOffset (which is a raw message-count index into this session's
-  // replayed vector — a wholesale replacement changes what that index
-  // means). Fork the session first, then compact the fork.
-  if (has_children(session_id))
-    throw std::runtime_error(
-        "cannot compact session \"" + session_id +
-        "\": it has forked children on disk; fork first, then compact the "
-        "fork");
-
   nlohmann::json j = nlohmann::json::object();
   j["type"] = "compaction";
   j["minVersion"] = kSessionSchemaVersion;
@@ -536,6 +699,20 @@ void SessionStore::append_compaction(const std::string &session_id,
   j["messages"] = std::move(messages);
 
   std::scoped_lock lock(mutex_);
+  // Narrowed (Phase 3) concurrency guard: refuse compaction only for
+  // children that would actually be broken by it -- see
+  // `has_blocking_children_locked`'s comment for the full reasoning and
+  // the deliberate "parent file can never be pruned while an entry-
+  // anchored child exists" tradeoff this narrowing accepts. Checked here,
+  // under the lock, instead of via the old pre-lock `has_children()` call,
+  // because it also needs to resolve candidate children's anchors against
+  // THIS session's current index.
+  if (has_blocking_children_locked(base_dir_, session_id))
+    throw std::runtime_error(
+        "cannot compact session \"" + session_id +
+        "\": it has forked children on disk that still depend on a "
+        "message-count offset; fork first, then compact the fork");
+
   auto minted = mint_entry_locked(session_path(session_id), session_id);
   j["id"] = minted.id;
   j["parentId"] =
@@ -628,6 +805,39 @@ bool SessionStore::has_children(const std::string &session_id) const {
       return true;
   }
   return false;
+}
+
+SessionStore::LeafAnchor
+SessionStore::current_leaf_anchor(const std::string &session_id) const {
+  std::scoped_lock lock(mutex_);
+  auto path = session_path(session_id);
+  // Deliberately does NOT go through mint_entry_locked (that mints and
+  // discards a throwaway random id for no reason here) or through the
+  // public, self-locking load() (would deadlock against the lock already
+  // held above -- no method that holds mutex_ may call another method
+  // that also takes it). Reads and indexes the file directly instead, the
+  // same way mint_entry_locked itself does.
+  std::ifstream f(path);
+  if (!f)
+    throw std::runtime_error("session file not found: " + path.string());
+  SessionIndex index = index_entries(f, session_id, path);
+
+  if (index.nodes.empty())
+    // No entries at all -- a child forking from this session anchors
+    // "before any entries" (root), NOT "no anchor recorded" (none). This
+    // is what fixes forking a fork that itself has zero own entries: such
+    // a session's own file has no nodes of its own even though it
+    // inherits a non-empty prefix from ITS parent, so `root` here
+    // correctly means "no entries of *this* session's own", matching
+    // `load_recursive`'s ParentEntryAnchor::root handling (no inherited
+    // prefix at all, not even a further-inherited grandparent one).
+    return LeafAnchor{.anchor = ParentEntryAnchor::root, .entry_id = std::nullopt};
+
+  auto chain = walk_from_leaf(index, path);
+  // index.nodes is non-empty, so the leaf's own chain always contains at
+  // least itself -- chain can't be empty here.
+  return LeafAnchor{.anchor = ParentEntryAnchor::entry,
+                    .entry_id = std::optional<std::string>(chain.back())};
 }
 
 void SessionStore::set_sandbox_mode(const std::string &session_id,

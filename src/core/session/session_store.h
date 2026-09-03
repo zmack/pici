@@ -58,6 +58,21 @@ public:
   // True if any session file in this store has `parentId == session_id`.
   bool has_children(const std::string &session_id) const;
 
+  // Tri-state description of `session_id`'s CURRENT leaf, for a caller
+  // about to fork FROM it (see ParentEntryAnchor in session_record.h).
+  // Read-only: builds a fresh index of `session_id` for this one call and
+  // does NOT touch the write-path `leaf_ids_` cache. Never returns `none`
+  // -- `none` is purely a header-parsing/backward-compat state for OLD
+  // session files that predate this field; a live session being forked
+  // FROM always has a concrete answer: `root` (no entries at all yet -- so
+  // a child forking from it correctly anchors "before any entries", not
+  // "no anchor recorded") or `entry` (the id of its current leaf).
+  struct LeafAnchor {
+    ParentEntryAnchor anchor{ParentEntryAnchor::root};
+    std::optional<std::string> entry_id;
+  };
+  LeafAnchor current_leaf_anchor(const std::string &session_id) const;
+
   std::optional<SessionRecord> load(const std::string &session_id) const;
   std::optional<std::string> latest_session_id() const;
   std::vector<SessionHeader> list() const;
