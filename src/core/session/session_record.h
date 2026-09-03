@@ -13,8 +13,17 @@ namespace pi::core {
 // Bumped whenever a new JSONL record type is introduced that an older
 // loader would silently misinterpret if it fell through unrecognized
 // records instead of failing loudly. 1 = the original message/truncate/meta
-// format. 2 = adds the "compaction" record (see SessionCompactionRecord).
-inline constexpr int kSessionSchemaVersion = 2;
+// format. 2 = adds the "compaction" record (see SessionCompactionRecord). 3 =
+// SessionStore writes real, collision-checked "id"/"parentId" entry-tree
+// pointers on every message/compaction record, and adds non-destructive
+// rewind: SessionCompactionRecord's "kind" discriminator lets a
+// "compaction"-typed record be either a real LLM-driven summarization
+// ("summary", the default) or a rewind ("branch") that leaves the abandoned
+// entries on disk and simply moves the leaf. Rewind is deliberately *not* a
+// new record type -- it reuses "compaction"'s existing minVersion gate,
+// since an old binary that doesn't parse a novel "type" at all could never
+// be taught to respect a version field attached to it.
+inline constexpr int kSessionSchemaVersion = 3;
 
 struct SessionHeader {
   std::string id;
@@ -43,6 +52,13 @@ struct SessionCompactionRecord {
   std::string model;
   std::string summary; // e.g. "server" (remote) or "local" (fallback)
   std::int64_t timestamp{0};
+  // Discriminates a real LLM-driven summarization ("summary", the default)
+  // from a non-destructive rewind ("branch") -- both replay identically
+  // (wholesale-replace), so this is purely informational for pici's own
+  // code (and a future /tree UI) to tell them apart. A record with no
+  // "kind" key (every compaction record written before this field existed)
+  // parses as "summary", which is correct: that's what they all were.
+  std::string kind{"summary"};
 };
 
 struct SessionRecord {

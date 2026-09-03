@@ -276,14 +276,43 @@ std::string SessionRuntime::fork_session(SessionHeader header) {
 }
 
 bool SessionRuntime::truncate_active_session(std::size_t through) {
-  if (!active_session_id_)
+  if (!active_session_id_ || !session_store_)
     return false;
 
-  auto messages = agent_.state().messages();
-  messages.resize(std::min(through, messages.size()));
-  agent_.state().set_messages(messages);
-  if (session_store_)
-    session_store_->append_truncate(*active_session_id_, through);
+  // Both the branch target and the vector installed in memory below must
+  // come from the SAME fresh walk of the durable session, not from
+  // separately resizing agent_.state()'s own (possibly not-yet-fully-
+  // persisted) vector -- those two can diverge, e.g. on a prior persistence
+  // error. load()'s entry_ids is that one source of truth.
+  auto record = load_session(*active_session_id_);
+  if (!record)
+    return false;
+
+  const auto &entry_ids = record->entry_ids;
+  through = std::min(through, entry_ids.size());
+
+  // A `through` that lands strictly inside an atomic (multi-message,
+  // single-entry-id) contribution -- e.g. mid-compaction -- can't be
+  // expressed as a branch target: that would mean keeping only part of an
+  // entry that's indivisible on disk.
+  if (through > 0 && through < entry_ids.size() &&
+      entry_ids[through] == entry_ids[through - 1]) {
+    throw std::runtime_error(
+        "cannot truncate to " + std::to_string(through) +
+        ": that point falls inside an atomic session entry");
+  }
+
+  std::optional<std::string> target_entry_id =
+      through > 0 ? std::optional<std::string>(entry_ids[through - 1])
+                  : std::nullopt;
+
+  // branch() persists the rewind non-destructively (the abandoned messages
+  // stay on disk, replayable) and hands back the exact flat vector it just
+  // wrote, which is installed as-is below -- the single source of truth for
+  // both the disk record and the in-memory state, so the two can never
+  // disagree.
+  auto messages = session_store_->branch(*active_session_id_, target_entry_id);
+  agent_.state().set_messages(std::move(messages));
   return true;
 }
 

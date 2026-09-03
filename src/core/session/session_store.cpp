@@ -9,11 +9,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <ios>
 #include <iterator>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -73,6 +75,9 @@ parse_compaction_record(const nlohmann::json &j,
   record.model = j.value("model", std::string{});
   record.summary = j.value("summary", std::string{});
   record.timestamp = j.value("timestamp", std::int64_t{0});
+  // Absent "kind" (every compaction record written before this field
+  // existed) means "summary" -- that's what they all were.
+  record.kind = j.value("kind", std::string{"summary"});
   record.messages.reserve(j["messages"].size());
   for (const auto &raw : j["messages"]) {
     auto msg = json::from_json(raw.dump());
@@ -211,21 +216,30 @@ SessionIndex index_entries(std::ifstream &f, const std::string &session_id,
   return index;
 }
 
-// Walks parent pointers from the leaf (default: the last entry, in file
-// order — matching pi's `leaf ??= entries[entries.length-1]`) to the root,
-// collecting the ordered chain of node ids, then reverses it to root-to-leaf
-// order. Throws on a cycle or a dangling parent reference rather than
-// silently truncating the walk — this format's existing convention (see
-// `parse_compaction_record`'s minVersion check) is to fail loudly on any
-// corrupted/ambiguous session state.
-std::vector<std::string> walk_from_leaf(const SessionIndex &index,
-                                        const std::filesystem::path &path) {
+// Walks parent pointers from `start_id` (default: nullopt, meaning the
+// leaf — the last entry, in file order, matching pi's
+// `leaf ??= entries[entries.length-1]`) to the root, collecting the ordered
+// chain of node ids, then reverses it to root-to-leaf order. Throws on a
+// cycle or a dangling parent reference rather than silently truncating the
+// walk — this format's existing convention (see `parse_compaction_record`'s
+// minVersion check) is to fail loudly on any corrupted/ambiguous session
+// state. Phase 2's `branch()` reuses this to walk from an arbitrary
+// explicit rewind target instead of only ever the file's own leaf; the
+// caller is responsible for having already verified `start_id` resolves
+// (branch() does, before calling in, so a bad caller-supplied id is
+// reported as "branch target not found" rather than the generic
+// dangling-parent message below).
+std::vector<std::string>
+walk_from_leaf(const SessionIndex &index, const std::filesystem::path &path,
+               std::optional<std::string> start_id = std::nullopt) {
   if (index.nodes.empty())
     return {};
 
   std::vector<std::string> chain;
   std::set<std::string> seen;
-  std::optional<std::string> current = index.nodes.back().id;
+  std::optional<std::string> current =
+      start_id ? std::move(start_id)
+               : std::optional<std::string>(index.nodes.back().id);
 
   while (current) {
     if (!seen.insert(*current).second)
@@ -242,6 +256,70 @@ std::vector<std::string> walk_from_leaf(const SessionIndex &index,
 
   std::ranges::reverse(chain);
   return chain;
+}
+
+// Mirrors pi's `randomUUID().slice(0,8)` id-minting scheme: an 8-hex-digit
+// random id, not a per-session monotonic counter. A counter is unsafe here
+// because two processes touching the same session file (or a stale
+// in-process counter after a restart) would mint colliding "e0"/"e1"/...
+// ids, silently corrupting the id -> node map; a random id makes an actual
+// collision astronomically unlikely, and mint_entry_locked below still
+// checks and regenerates rather than relying on luck alone.
+std::string random_entry_id() {
+  static thread_local std::mt19937_64 rng(std::random_device{}());
+  std::uniform_int_distribution<std::uint32_t> dist;
+  return std::format("{:08x}", dist(rng));
+}
+
+// Result of minting a new entry id for a write: the id itself, the entry
+// id to write as this record's "parentId" (nullopt == root), and the
+// on-disk index it was checked against (handed back so branch() can also
+// walk an arbitrary target from the very index it minted against, instead
+// of re-reading the file a second time).
+struct MintedEntry {
+  std::string id;
+  std::optional<std::string> parent;
+  SessionIndex index;
+};
+
+// Must be called only while the caller holds SessionStore::mutex_ (reads
+// the file directly, bypassing the public, self-locking `load()` — see the
+// module-wide locking rule: no method that takes mutex_ may call another
+// method that also takes it). Rebuilds `session_id`'s on-disk index fresh
+// on every call and resolves the current leaf from THAT SAME index via
+// `walk_from_leaf`, rather than trusting a previously-cached leaf id --
+// deliberately, even though this process may already have a cached value
+// in `leaf_ids`: the index is already being rebuilt for the id-collision
+// check below (a counter would be unsafe against another process or a
+// stale in-process view, per `random_entry_id`'s comment; a random id only
+// makes collision astronomically unlikely, so this still checks rather
+// than trusting luck), so re-deriving the leaf from it costs no extra I/O
+// and stays correct even if something else appended to this session's file
+// since `leaf_ids` was last set (a second process, or -- as this file's own
+// hand-written-fixture tests do -- a raw append bypassing the store
+// entirely). Callers still record the minted id into their own leaf_ids_
+// cache after a successful write; that cache exists as this process's
+// record of its own last write (for future callers that want a leaf
+// without a disk read), not as an authority this function trusts over the
+// disk.
+MintedEntry mint_entry_locked(const std::filesystem::path &path,
+                              const std::string &session_id) {
+  std::ifstream f(path);
+  if (!f)
+    throw std::runtime_error("session file not found: " + path.string());
+  SessionIndex index = index_entries(f, session_id, path);
+
+  std::string id;
+  do {
+    id = random_entry_id();
+  } while (index.id_to_index.contains(id));
+
+  auto chain = walk_from_leaf(index, path);
+  std::optional<std::string> parent =
+      chain.empty() ? std::nullopt : std::optional<std::string>(chain.back());
+
+  return MintedEntry{.id = std::move(id), .parent = std::move(parent),
+                     .index = std::move(index)};
 }
 
 // NOLINTNEXTLINE(misc-no-recursion)
@@ -396,14 +474,12 @@ void SessionStore::append_message(const std::string &session_id,
   auto line = json::to_jsonl_line(msg);
   nlohmann::json j = nlohmann::json::parse(line);
   std::scoped_lock lock(mutex_);
+  auto minted = mint_entry_locked(session_path(session_id), session_id);
+  j["id"] = minted.id;
+  j["parentId"] =
+      minted.parent ? nlohmann::json(*minted.parent) : nlohmann::json(nullptr);
   write_line_locked(session_id, j);
-}
-
-void SessionStore::append_truncate(const std::string &session_id,
-                                   std::size_t through) {
-  nlohmann::json j = {{"type", "truncate"}, {"through", through}};
-  std::scoped_lock lock(mutex_);
-  write_line_locked(session_id, j);
+  leaf_ids_[session_id] = std::move(minted.id);
 }
 
 void SessionStore::set_name(const std::string &session_id,
@@ -452,6 +528,7 @@ void SessionStore::append_compaction(const std::string &session_id,
   j["provider"] = record.provider;
   j["model"] = record.model;
   j["summary"] = record.summary;
+  j["kind"] = record.kind;
   j["timestamp"] = record.timestamp;
   nlohmann::json messages = nlohmann::json::array();
   for (const auto &msg : record.messages)
@@ -459,7 +536,72 @@ void SessionStore::append_compaction(const std::string &session_id,
   j["messages"] = std::move(messages);
 
   std::scoped_lock lock(mutex_);
+  auto minted = mint_entry_locked(session_path(session_id), session_id);
+  j["id"] = minted.id;
+  j["parentId"] =
+      minted.parent ? nlohmann::json(*minted.parent) : nlohmann::json(nullptr);
   write_line_locked(session_id, j);
+  leaf_ids_[session_id] = std::move(minted.id);
+}
+
+std::vector<Message>
+SessionStore::branch(const std::string &session_id,
+                     std::optional<std::string> target_entry_id) {
+  std::scoped_lock lock(mutex_);
+  auto path = session_path(session_id);
+  auto minted = mint_entry_locked(path, session_id);
+
+  std::vector<std::string> chain;
+  if (target_entry_id) {
+    if (!minted.index.id_to_index.contains(*target_entry_id))
+      throw std::runtime_error("branch target not found: \"" +
+                               *target_entry_id + "\" in session \"" +
+                               session_id + "\"");
+    chain = walk_from_leaf(minted.index, path, target_entry_id);
+  }
+  // else: target is the root -- an empty chain replays to an empty
+  // message list below, exactly like any other session with no entries.
+
+  // Replay the target's chain forward with the same per-node-type effects
+  // load_recursive's own chain replay uses (push / resize / wholesale
+  // replace) -- this is what makes the branch record's "messages" field
+  // identical to what a load() to that same point would have produced. No
+  // new node type is needed: a compaction node the walk lands on already
+  // terminates ancestor lookup and wholesale-replaces, exactly like this
+  // function's own output will once it's written and later replayed.
+  std::vector<Message> messages;
+  for (const auto &id : chain) {
+    auto &node = minted.index.nodes[minted.index.id_to_index.at(id)];
+    if (std::holds_alternative<Message>(node.payload)) {
+      messages.push_back(std::get<Message>(node.payload));
+    } else if (std::holds_alternative<std::size_t>(node.payload)) {
+      messages.resize(
+          std::min(std::get<std::size_t>(node.payload), messages.size()));
+    } else {
+      messages = std::get<SessionCompactionRecord>(node.payload).messages;
+    }
+  }
+
+  nlohmann::json j = nlohmann::json::object();
+  j["type"] = "compaction";
+  j["id"] = minted.id;
+  j["parentId"] =
+      minted.parent ? nlohmann::json(*minted.parent) : nlohmann::json(nullptr);
+  j["minVersion"] = kSessionSchemaVersion;
+  j["kind"] = "branch";
+  j["provider"] = minted.index.header.provider;
+  j["model"] = minted.index.header.model;
+  j["summary"] = std::string{};
+  j["timestamp"] = static_cast<std::int64_t>(
+      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+  nlohmann::json messages_json = nlohmann::json::array();
+  for (const auto &msg : messages)
+    messages_json.push_back(nlohmann::json::parse(json::to_jsonl_line(msg)));
+  j["messages"] = std::move(messages_json);
+
+  write_line_locked(session_id, j);
+  leaf_ids_[session_id] = std::move(minted.id);
+  return messages;
 }
 
 bool SessionStore::has_children(const std::string &session_id) const {

@@ -2346,7 +2346,17 @@ private:
     if (!result.handled)
       return false;
     if (result.truncate_to) {
-      runtime().truncate_active_session(*result.truncate_to);
+      // truncate_active_session now persists the rewind as a branch (see
+      // SessionStore::branch) and can throw -- e.g. if `through` lands
+      // inside an atomic compaction entry, or the durable session fails to
+      // load. Mirror handle_reload_addons_command's pattern: surface the
+      // failure through the renderer instead of letting it escape the REPL
+      // loop with no enclosing try.
+      try {
+        runtime().truncate_active_session(*result.truncate_to);
+      } catch (const std::exception &e) {
+        renderer_->on_command_output("rewind failed: " + std::string(e.what()));
+      }
       std::scoped_lock lock(effective_context_mutex_);
       effective_context_.reset();
     }

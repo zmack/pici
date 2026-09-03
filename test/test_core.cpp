@@ -26,6 +26,7 @@
 #include "support/gtest_helpers.h"
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 using namespace pi::core;
 
@@ -34,6 +35,18 @@ Message make_user_message(std::string text) {
   UserMessage message;
   message.content.emplace_back(TextContent{.text = std::move(text)});
   return Message{std::move(message)};
+}
+
+// SessionStore::append_truncate was removed in Phase 2 (no new "truncate"
+// records are ever written again -- see SessionStore::branch), but Phase 1's
+// read path must still replay old ones forever. Tests that want to exercise
+// that legacy replay path hand-write the raw JSONL line directly, same as
+// this file's other hand-written malformed/legacy fixtures.
+void append_raw_legacy_truncate(const std::filesystem::path &dir,
+                                const std::string &session_id,
+                                std::size_t through) {
+  std::ofstream f(dir / (session_id + ".jsonl"), std::ios::app);
+  f << "{\"type\":\"truncate\",\"through\":" << through << "}\n";
 }
 } // namespace
 
@@ -764,7 +777,7 @@ TEST(SessionStore, OrderedMessagesAndTruncationReplay) {
 
   store.append_message(id, make_user("one"));
   store.append_message(id, make_user("two"));
-  store.append_truncate(id, 1);
+  append_raw_legacy_truncate(dir, id, 1);
   store.append_message(id, make_user("three"));
 
   store.set_model(id, "remote", "accounts/company/models/coder");
@@ -835,7 +848,10 @@ TEST(SessionStore, CompactionRecordReplacesTranscriptWholesale) {
                 std::get<UserMessage>(record->messages[2]).content[0])
                 .text,
             "after compaction");
-  EXPECT_EQ(record->header.min_schema_version, 2);
+  // As of Phase 2, kSessionSchemaVersion is 3 (real entry ids + the
+  // "kind" compaction discriminator), and append_compaction always writes
+  // minVersion == kSessionSchemaVersion.
+  EXPECT_EQ(record->header.min_schema_version, kSessionSchemaVersion);
 }
 
 TEST(SessionStore, MalformedCompactionRecordFailsLoudly) {
@@ -943,13 +959,23 @@ TEST(SessionStore, LegacyEntryIdsAreLineOrdinalsAndSkipMetaLines) {
   SessionHeader header{.id = "session-legacy-ids"};
   const auto id = store.create(header);
 
-  // Header is physical line 1, first message is line 2.
-  store.append_message(id, make_user_message("first"));
-  // A meta line (line 3) must not consume an entry id or become a link in
-  // the parent chain.
-  store.set_name(id, "renamed");
-  // Second message is physical line 4.
-  store.append_message(id, make_user_message("second"));
+  // Hand-write raw legacy-format lines (no "id"/"parentId" keys) directly,
+  // bypassing the store's (now id-minting) append_message/set_name, to pin
+  // Phase 1's legacy-id derivation in isolation from Phase 2's real-id
+  // write path (see AppendedMessagesGetCollisionCheckedRandomEntryIds and
+  // MixedLegacyAndRealEntryIdsChainCorrectly for that).
+  {
+    std::ofstream f(dir / (id + ".jsonl"), std::ios::app);
+    // Header is physical line 1, first message is line 2.
+    f << "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+         "\"first\"}]}\n";
+    // A meta line (line 3) must not consume an entry id or become a link
+    // in the parent chain.
+    f << "{\"type\":\"meta\",\"name\":\"renamed\"}\n";
+    // Second message is physical line 4.
+    f << "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+         "\"second\"}]}\n";
+  }
 
   auto record = store.load(id);
   ASSERT_TRUE(record.has_value());
@@ -970,18 +996,25 @@ TEST(SessionStore, CompactionEntryGetsASingleLegacyId) {
   SessionHeader header{.id = "session-compaction-id"};
   const auto id = store.create(header);
 
-  store.append_message(id, make_user_message("one"));
-  store.append_message(id, make_user_message("two"));
-
-  SessionCompactionRecord compaction;
-  compaction.messages.push_back(make_user_message("retained-a"));
-  compaction.messages.push_back(make_user_message("retained-b"));
-  compaction.provider = "remote";
-  compaction.model = "some-model";
-  compaction.summary = "server";
-  compaction.timestamp = 42;
-  // Compaction record is physical line 4 (header=1, one=2, two=3).
-  store.append_compaction(id, compaction);
+  // Hand-write raw legacy-format lines directly (no "id"/"parentId" keys),
+  // bypassing the store's (now id-minting) append_message/append_compaction,
+  // to pin Phase 1's legacy-id derivation for a compaction record in
+  // isolation from Phase 2's real-id write path.
+  {
+    std::ofstream f(dir / (id + ".jsonl"), std::ios::app);
+    f << "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+         "\"one\"}]}\n";
+    f << "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+         "\"two\"}]}\n";
+    // Compaction record is physical line 4 (header=1, one=2, two=3).
+    f << "{\"type\":\"compaction\",\"minVersion\":" << kSessionSchemaVersion
+      << ",\"provider\":\"remote\",\"model\":\"some-model\",\"summary\":"
+         "\"server\",\"timestamp\":42,\"messages\":["
+         "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+         "\"retained-a\"}]},"
+         "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+         "\"retained-b\"}]}]}\n";
+  }
 
   auto record = store.load(id);
   ASSERT_TRUE(record.has_value());
@@ -1005,7 +1038,7 @@ TEST(SessionStore, ForkedSessionWithParentTruncationReplaysIdentically) {
   store.append_message(parent_id, make_user_message("p0"));
   store.append_message(parent_id, make_user_message("p1"));
   store.append_message(parent_id, make_user_message("p2"));
-  store.append_truncate(parent_id, 1);
+  append_raw_legacy_truncate(dir, parent_id, 1);
   store.append_message(parent_id, make_user_message("p3"));
 
   auto parent_record = store.load(parent_id);
@@ -1074,7 +1107,7 @@ TEST(SessionStore, CompactionFollowedByTruncateReplaysIdentically) {
   // Post-compaction vector before this truncate is [c0, m3, m4]; truncate
   // through 2 must resize *that* vector, not reinterpret 2 as an entry
   // index into the whole file.
-  store.append_truncate(id, 2);
+  append_raw_legacy_truncate(dir, id, 2);
 
   auto record = store.load(id);
   ASSERT_TRUE(record.has_value());
@@ -1144,4 +1177,250 @@ TEST(SessionStore, DanglingParentIdThrows) {
   }
   EXPECT_TRUE(threw);
   EXPECT_THAT(what, testing::HasSubstr("does-not-exist"));
+}
+
+namespace {
+std::vector<std::string> read_nonempty_lines(const std::filesystem::path &path) {
+  std::ifstream f(path);
+  std::vector<std::string> lines;
+  std::string line;
+  while (std::getline(f, line))
+    if (!line.empty())
+      lines.push_back(line);
+  return lines;
+}
+} // namespace
+
+TEST(SessionStore, AppendedMessagesGetCollisionCheckedRandomEntryIds) {
+  pi::test::TemporaryDirectory directory("pici-session-random-ids-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-random-ids"};
+  const auto id = store.create(header);
+
+  store.append_message(id, make_user_message("one"));
+  store.append_message(id, make_user_message("two"));
+  store.append_message(id, make_user_message("three"));
+
+  auto record = store.load(id);
+  ASSERT_TRUE(record.has_value());
+  ASSERT_EQ(record->entry_ids.size(), std::size_t(3));
+  for (const auto &eid : record->entry_ids) {
+    EXPECT_FALSE(eid.empty());
+    EXPECT_THAT(eid, testing::Not(testing::StartsWith("legacy-")));
+  }
+  EXPECT_NE(record->entry_ids[0], record->entry_ids[1]);
+  EXPECT_NE(record->entry_ids[1], record->entry_ids[2]);
+  EXPECT_NE(record->entry_ids[0], record->entry_ids[2]);
+  EXPECT_EQ(record->leaf_entry_id,
+           std::optional<std::string>(record->entry_ids[2]));
+
+  // Raw file: each message line's own "parentId" chains to the previous
+  // message's "id", and the first real message's "parentId" is null (root).
+  auto lines = read_nonempty_lines(dir / (id + ".jsonl"));
+  ASSERT_EQ(lines.size(), std::size_t(4)); // header + 3 messages
+  auto j1 = nlohmann::json::parse(lines[1]);
+  auto j2 = nlohmann::json::parse(lines[2]);
+  auto j3 = nlohmann::json::parse(lines[3]);
+  EXPECT_TRUE(j1["parentId"].is_null());
+  EXPECT_EQ(j2["parentId"].get<std::string>(), j1["id"].get<std::string>());
+  EXPECT_EQ(j3["parentId"].get<std::string>(), j2["id"].get<std::string>());
+}
+
+TEST(SessionStore,
+    ReopeningAnExistingSessionInANewProcessResumesLeafWithoutCollision) {
+  pi::test::TemporaryDirectory directory("pici-session-reopen-test");
+  const auto &dir = directory.path();
+
+  SessionStore store_a(dir);
+  SessionHeader header{.id = "session-reopen"};
+  const auto id = store_a.create(header);
+  store_a.append_message(id, make_user_message("a0"));
+  store_a.append_message(id, make_user_message("a1"));
+
+  // A second SessionStore instance over the same directory, simulating a
+  // different process reopening the file: its leaf_ids_ cache starts empty
+  // for this session.
+  SessionStore store_b(dir);
+  store_b.append_message(id, make_user_message("b0"));
+
+  auto record = store_a.load(id);
+  ASSERT_TRUE(record.has_value());
+  ASSERT_EQ(record->messages.size(), std::size_t(3));
+  ASSERT_EQ(record->entry_ids.size(), std::size_t(3));
+  EXPECT_NE(record->entry_ids[2], record->entry_ids[0]);
+  EXPECT_NE(record->entry_ids[2], record->entry_ids[1]);
+
+  auto lines = read_nonempty_lines(dir / (id + ".jsonl"));
+  ASSERT_EQ(lines.size(), std::size_t(4));
+  auto j_prev = nlohmann::json::parse(lines[2]);
+  auto j_last = nlohmann::json::parse(lines[3]);
+  ASSERT_TRUE(j_last["parentId"].is_string());
+  EXPECT_EQ(j_last["parentId"].get<std::string>(),
+           j_prev["id"].get<std::string>());
+}
+
+TEST(SessionStore, MixedLegacyAndRealEntryIdsChainCorrectly) {
+  pi::test::TemporaryDirectory directory(
+      "pici-session-mixed-legacy-real-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-mixed-legacy-real"};
+  const auto id = store.create(header);
+
+  // Hand-write one legacy message (no "id"/"parentId" keys) at physical
+  // line 2 (header is line 1) -- Phase 1's legacy-id scheme gives it the id
+  // "legacy-2".
+  {
+    std::ofstream f(dir / (id + ".jsonl"), std::ios::app);
+    f << "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":"
+         "\"legacy\"}]}\n";
+  }
+
+  store.append_message(id, make_user_message("real"));
+
+  // Pin the format: the new (real) line's raw on-disk "parentId" is
+  // literally "legacy-2" -- a format-stability regression test for Phase
+  // 1's legacy-id definition, not just a functional replay check.
+  auto lines = read_nonempty_lines(dir / (id + ".jsonl"));
+  ASSERT_EQ(lines.size(), std::size_t(3));
+  auto j_real = nlohmann::json::parse(lines[2]);
+  ASSERT_TRUE(j_real["parentId"].is_string());
+  EXPECT_EQ(j_real["parentId"].get<std::string>(), "legacy-2");
+
+  auto record = store.load(id);
+  ASSERT_TRUE(record.has_value());
+  ASSERT_EQ(record->messages.size(), std::size_t(2));
+  EXPECT_EQ(record->entry_ids[0], "legacy-2");
+}
+
+TEST(SessionStore, BranchIsNonDestructiveAndMovesTheLeaf) {
+  pi::test::TemporaryDirectory directory("pici-session-branch-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-branch"};
+  const auto id = store.create(header);
+
+  store.append_message(id, make_user_message("m0"));
+  store.append_message(id, make_user_message("m1"));
+  store.append_message(id, make_user_message("m2"));
+
+  auto before = store.load(id);
+  ASSERT_TRUE(before.has_value());
+  ASSERT_EQ(before->entry_ids.size(), std::size_t(3));
+  const auto target = before->entry_ids[0]; // branch back to just after m0
+
+  auto branched_messages = store.branch(id, target);
+  ASSERT_EQ(branched_messages.size(), std::size_t(1));
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(branched_messages[0]).content[0])
+                .text,
+            "m0");
+
+  store.append_message(id, make_user_message("m3-after-branch"));
+
+  auto after = store.load(id);
+  ASSERT_TRUE(after.has_value());
+  ASSERT_EQ(after->messages.size(), std::size_t(2));
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(after->messages[0]).content[0])
+                .text,
+            "m0");
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(after->messages[1]).content[0])
+                .text,
+            "m3-after-branch");
+
+  // Non-destructive: m1/m2 are still present verbatim in the raw file even
+  // though they're no longer part of the live (replayed) chain, and the
+  // branch record itself is a "kind":"branch" compaction, not a new record
+  // type.
+  std::ifstream f(dir / (id + ".jsonl"));
+  std::string contents((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+  EXPECT_THAT(contents, testing::HasSubstr("\"m1\""));
+  EXPECT_THAT(contents, testing::HasSubstr("\"m2\""));
+  EXPECT_THAT(contents, testing::HasSubstr("\"kind\":\"branch\""));
+  EXPECT_THAT(contents, testing::HasSubstr("\"type\":\"compaction\""));
+}
+
+TEST(SessionStore, BranchToRootResetsLeafWhenTargetIsNullopt) {
+  pi::test::TemporaryDirectory directory("pici-session-branch-root-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-branch-root"};
+  const auto id = store.create(header);
+
+  store.append_message(id, make_user_message("m0"));
+  store.append_message(id, make_user_message("m1"));
+
+  auto branched = store.branch(id, std::nullopt);
+  EXPECT_TRUE(branched.empty());
+
+  auto record = store.load(id);
+  ASSERT_TRUE(record.has_value());
+  EXPECT_TRUE(record->messages.empty());
+
+  store.append_message(id, make_user_message("fresh-start"));
+  auto after = store.load(id);
+  ASSERT_TRUE(after.has_value());
+  ASSERT_EQ(after->messages.size(), std::size_t(1));
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(after->messages[0]).content[0])
+                .text,
+            "fresh-start");
+}
+
+TEST(SessionStore, BranchThrowsOnUnknownTargetEntryId) {
+  pi::test::TemporaryDirectory directory("pici-session-branch-unknown-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-branch-unknown"};
+  const auto id = store.create(header);
+  store.append_message(id, make_user_message("m0"));
+
+  bool threw = false;
+  std::string what;
+  try {
+    (void)store.branch(id, std::string("does-not-exist"));
+  } catch (const std::exception &e) {
+    threw = true;
+    what = e.what();
+  }
+  EXPECT_TRUE(threw);
+  EXPECT_THAT(what, testing::HasSubstr("does-not-exist"));
+}
+
+TEST(SessionStore, BranchRecordIsGatedByExistingCompactionMinVersionCheck) {
+  pi::test::TemporaryDirectory directory(
+      "pici-session-branch-version-gate-test");
+  const auto &dir = directory.path();
+
+  SessionStore store(dir);
+  SessionHeader header{.id = "session-branch-version-gate"};
+  const auto id = store.create(header);
+
+  {
+    std::ofstream f(dir / (id + ".jsonl"), std::ios::app);
+    f << "{\"type\":\"compaction\",\"minVersion\":"
+      << (kSessionSchemaVersion + 1)
+      << ",\"kind\":\"branch\",\"messages\":[]}\n";
+  }
+
+  bool threw = false;
+  std::string what;
+  try {
+    (void)store.load(id);
+  } catch (const std::exception &e) {
+    threw = true;
+    what = e.what();
+  }
+  EXPECT_TRUE(threw);
+  EXPECT_THAT(what,
+             testing::HasSubstr(std::to_string(kSessionSchemaVersion + 1)));
 }

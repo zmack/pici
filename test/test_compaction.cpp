@@ -3,8 +3,10 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -632,6 +634,181 @@ TEST(
     EXPECT_EQ(record->messages.size(), std::size_t(2));
     EXPECT_TRUE(std::holds_alternative<UserMessage>(record->messages[0]));
   }
+
+  store.reset();
+  std::filesystem::remove_all(session_dir);
+}
+
+// --- Phase 2: non-destructive rewind (SessionRuntime::truncate_active_session
+// rewritten to persist via SessionStore::branch instead of a destructive
+// "truncate" record) --------------------------------------------------------
+
+TEST(Compaction,
+    SessionRuntime_truncate_active_session_is_non_destructive_via_branch) {
+  const auto session_dir =
+      std::filesystem::temp_directory_path() /
+      ("pici-truncate-branch-session-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  auto store = std::make_shared<SessionStore>(session_dir);
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "truncate-branch-test";
+  config.agent_options.model.provider = "faux";
+  config.session_store = store;
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  const auto session_id = session.create_session(header);
+
+  // truncate_active_session now derives its branch target from the durable
+  // (SessionStore) history, not the in-memory agent transcript, so these
+  // messages must actually be persisted, not just appended to agent state.
+  auto persist = [&](std::string text) {
+    Message msg{make_user_message(std::move(text))};
+    store->append_message(session_id, msg);
+    session.agent().state().append_message(msg);
+  };
+  persist("m0");
+  persist("m1");
+  persist("m2");
+
+  ASSERT_TRUE(session.truncate_active_session(1));
+
+  // In-memory state reflects the truncation: only "m0" remains.
+  const auto messages_after = session.agent().state().messages();
+  ASSERT_EQ(messages_after.size(), std::size_t(1));
+  ASSERT_TRUE(std::holds_alternative<UserMessage>(messages_after[0]));
+  EXPECT_EQ(std::get<TextContent>(
+                std::get<UserMessage>(messages_after[0]).content[0])
+                .text,
+            "m0");
+
+  // Non-destructive: reloading from disk replays to the same truncated
+  // state, but the "discarded" m1/m2 lines are still present verbatim in
+  // the raw file, and the rewind is a "kind":"branch" compaction record --
+  // not a new record type.
+  auto record_after = store->load(session_id);
+  ASSERT_TRUE(record_after.has_value());
+  ASSERT_EQ(record_after->messages.size(), std::size_t(1));
+
+  std::ifstream f(session_dir / (session_id + ".jsonl"));
+  std::string contents((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+  EXPECT_NE(contents.find("\"m1\""), std::string::npos);
+  EXPECT_NE(contents.find("\"m2\""), std::string::npos);
+  EXPECT_NE(contents.find("\"kind\":\"branch\""), std::string::npos);
+  EXPECT_NE(contents.find("\"type\":\"compaction\""), std::string::npos);
+
+  store.reset();
+  std::filesystem::remove_all(session_dir);
+}
+
+TEST(Compaction,
+    SessionRuntime_truncate_active_session_installs_the_same_vector_it_persists) {
+  const auto session_dir =
+      std::filesystem::temp_directory_path() /
+      ("pici-truncate-branch-vector-session-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  auto store = std::make_shared<SessionStore>(session_dir);
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "truncate-branch-vector-test";
+  config.agent_options.model.provider = "faux";
+  config.session_store = store;
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  const auto session_id = session.create_session(header);
+
+  auto persist = [&](std::string text) {
+    Message msg{make_user_message(std::move(text))};
+    store->append_message(session_id, msg);
+    session.agent().state().append_message(msg);
+  };
+  persist("m0");
+  persist("m1");
+  persist("m2");
+
+  ASSERT_TRUE(session.truncate_active_session(2));
+
+  // Regression proof for the two-vectors divergence bug: the vector
+  // installed in memory must be exactly what a fresh reload from disk
+  // replays to, not a separately-resized copy of the old in-memory vector.
+  const auto in_memory = session.agent().state().messages();
+  auto reloaded = store->load(session_id);
+  ASSERT_TRUE(reloaded.has_value());
+  ASSERT_EQ(in_memory.size(), reloaded->messages.size());
+  ASSERT_EQ(in_memory.size(), std::size_t(2));
+  for (std::size_t i = 0; i < in_memory.size(); ++i) {
+    ASSERT_TRUE(std::holds_alternative<UserMessage>(in_memory[i]));
+    ASSERT_TRUE(std::holds_alternative<UserMessage>(reloaded->messages[i]));
+    EXPECT_EQ(std::get<TextContent>(
+                  std::get<UserMessage>(in_memory[i]).content[0])
+                  .text,
+              std::get<TextContent>(
+                  std::get<UserMessage>(reloaded->messages[i]).content[0])
+                  .text);
+  }
+
+  store.reset();
+  std::filesystem::remove_all(session_dir);
+}
+
+TEST(Compaction,
+    SessionRuntime_truncate_active_session_throws_inside_an_atomic_compaction_entry) {
+  const auto session_dir =
+      std::filesystem::temp_directory_path() /
+      ("pici-truncate-atomic-session-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  auto store = std::make_shared<SessionStore>(session_dir);
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "truncate-atomic-test";
+  config.agent_options.model.provider = "faux";
+  config.session_store = store;
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  const auto session_id = session.create_session(header);
+
+  Message m0{make_user_message("m0")};
+  store->append_message(session_id, m0);
+  session.agent().state().append_message(m0);
+
+  // A compaction record contributing two messages under a single entry id
+  // -- an atomic, indivisible contribution.
+  SessionCompactionRecord compaction;
+  compaction.messages.push_back(Message{make_user_message("c0")});
+  compaction.messages.push_back(
+      Message{make_assistant_message("c1", "truncate-atomic-test", "faux",
+                                     "faux-model")});
+  compaction.provider = "faux";
+  compaction.model = "faux-model";
+  compaction.summary = "server";
+  compaction.timestamp = 1;
+  store->append_compaction(session_id, compaction);
+
+  auto record = store->load(session_id);
+  ASSERT_TRUE(record.has_value());
+  ASSERT_EQ(record->entry_ids.size(), std::size_t(2));
+  // Both compaction-contributed messages share one entry id.
+  EXPECT_EQ(record->entry_ids[0], record->entry_ids[1]);
+
+  // through=1 lands strictly inside that atomic two-message entry --
+  // unrepresentable as a branch target.
+  bool threw = false;
+  try {
+    session.truncate_active_session(1);
+  } catch (const std::exception &) {
+    threw = true;
+  }
+  EXPECT_TRUE(threw);
 
   store.reset();
   std::filesystem::remove_all(session_dir);

@@ -27,7 +27,6 @@ public:
 
   std::string create(const SessionHeader &hdr);
   void append_message(const std::string &session_id, const Message &msg);
-  void append_truncate(const std::string &session_id, std::size_t through);
   void set_name(const std::string &session_id, const std::string &name);
   void set_model(const std::string &session_id, std::string provider,
                  std::string model);
@@ -39,6 +38,22 @@ public:
   // in place would silently invalidate every child's parentOffset).
   void append_compaction(const std::string &session_id,
                          const SessionCompactionRecord &record);
+
+  // Non-destructive rewind. If `target_entry_id` is set, it must resolve
+  // against this session's current on-disk entry tree (throws
+  // std::runtime_error, "branch target not found", otherwise -- a
+  // caller-supplied id is never trusted blindly); if nullopt, the target is
+  // the tree's root (empty history). Appends a "compaction"-shaped record
+  // (kind == "branch") whose messages are the target's flat walk, so the
+  // abandoned entries between the old leaf and the target remain on disk
+  // forever, replayable, just no longer part of the live chain -- then
+  // advances the cached leaf to this new record. Returns the flat message
+  // vector it just computed, so callers (SessionRuntime::
+  // truncate_active_session) can install the exact same vector in memory
+  // that was just persisted, rather than deriving a second, possibly
+  // divergent one.
+  std::vector<Message> branch(const std::string &session_id,
+                              std::optional<std::string> target_entry_id);
 
   // True if any session file in this store has `parentId == session_id`.
   bool has_children(const std::string &session_id) const;
@@ -55,6 +70,12 @@ private:
   std::filesystem::path base_dir_;
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::ofstream> handles_;
+  // This process's cached view of each touched session's current leaf
+  // entry id (nullopt == root / no entries yet), used to chain a new
+  // write's "parentId" without re-walking the tree on every call once a
+  // session has been touched once (cold open still resolves it from a
+  // fresh on-disk index -- see mint_entry_locked in session_store.cpp).
+  std::unordered_map<std::string, std::optional<std::string>> leaf_ids_;
 
   // Both callers must hold mutex_.
   void write_line_locked(const std::string &session_id,
