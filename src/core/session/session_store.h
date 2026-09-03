@@ -70,11 +70,15 @@ private:
   std::filesystem::path base_dir_;
   mutable std::mutex mutex_;
   std::unordered_map<std::string, std::ofstream> handles_;
-  // This process's cached view of each touched session's current leaf
-  // entry id (nullopt == root / no entries yet), used to chain a new
-  // write's "parentId" without re-walking the tree on every call once a
-  // session has been touched once (cold open still resolves it from a
-  // fresh on-disk index -- see mint_entry_locked in session_store.cpp).
+  // This process's record of each touched session's current leaf entry id
+  // (nullopt == root / no entries yet), set after every successful write.
+  // NOT consulted for correctness during minting -- mint_entry_locked
+  // always re-derives the leaf from a fresh on-disk index (it's already
+  // rebuilding one for the id-collision check), so this cache staying
+  // correct is a side effect of that, not a shortcut this class relies on.
+  // Kept as a member for future callers that want a leaf without a disk
+  // read; see mint_entry_locked's own comment in session_store.cpp for why
+  // that shortcut isn't taken internally.
   std::unordered_map<std::string, std::optional<std::string>> leaf_ids_;
 
   // Both callers must hold mutex_.
