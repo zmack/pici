@@ -1505,6 +1505,29 @@ private:
         return {{"error", *result.error}};
       return {{"accepted", true}};
     };
+    // Phase 2 (plans/velvety-skipping-marble.md): resolve+auth-check happen
+    // synchronously inside request_deferred_model_switch() itself, before
+    // the pending slot is ever touched -- an unresolved model or a
+    // provider with missing authentication comes back here as a rejection,
+    // never a stale slot.
+    info.session.request_model_switch =
+        [this](const nlohmann::json &args) -> nlohmann::json {
+      const auto model_id = args.value("model", std::string{});
+      if (model_id.empty())
+        return {{"error", "request_model_switch requires a model"}};
+      core::ModelSelection selection{.model = model_id, .source = "lua"};
+      if (args.contains("provider") && args.at("provider").is_string())
+        selection.provider = args.at("provider").get<std::string>();
+      auto thinking = agent().state().thinking_level();
+      if (args.contains("thinking") && args.at("thinking").is_string()) {
+        thinking = core::thinking_level_from_string(
+            args.at("thinking").get<std::string>());
+      }
+      auto result = runtime().request_deferred_model_switch(selection, thinking);
+      if (!result.accepted)
+        return {{"error", *result.error}};
+      return {{"accepted", true}};
+    };
     info.session.action_status =
         [this](const nlohmann::json &) -> nlohmann::json {
       return runtime().action_status();

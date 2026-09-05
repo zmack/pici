@@ -725,6 +725,10 @@ public:
     lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_session_request_compaction, 1);
     lua_setfield(L_, -2, "request_compaction");
     lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_session_request_model_switch,
+                     1);
+    lua_setfield(L_, -2, "request_model_switch");
+    lua_pushlightuserdata(L_, this);
     lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_session_action_status, 1);
     lua_setfield(L_, -2, "action_status");
     lua_setfield(L_, -2, "session");
@@ -1498,6 +1502,12 @@ public:
   static int lua_pici_session_request_compaction(lua_State *L) {
     auto *impl = impl_from(L);
     return push_agent_binding(L, impl->session_bindings_.request_compaction,
+                              agent_args(L), "session");
+  }
+
+  static int lua_pici_session_request_model_switch(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->session_bindings_.request_model_switch,
                               agent_args(L), "session");
   }
 

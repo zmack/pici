@@ -1645,3 +1645,217 @@ TEST(Compaction, CompactionEvent_trigger_field_round_trips_through_event_to_json
   EXPECT_EQ(json["data"]["trigger"], "lua_requested");
   EXPECT_FALSE(json.contains("trigger"));
 }
+
+// --- Phase 2: Lua-initiated session-lifecycle actions
+// (plans/velvety-skipping-marble.md) -- model switch. Same central
+// constraint as Phase 1: request_deferred_model_switch() only ever
+// enqueues (after a synchronous resolve+auth precheck that never touches
+// the pending slot on failure); try_drain_pending_action() is still the
+// only place that ever applies it. -------------------------------------
+
+TEST(Compaction,
+     SessionRuntime_deferred_model_switch_applies_after_the_turn_and_is_observable_on_the_model_field) {
+  AssistantMessage reply = make_assistant_message(
+      "hello", "lua-deferred-model-switch-test", "faux", "faux-model");
+  FauxClient::Script script;
+  script.events = {
+      AssistantMessageEvent{AssistantMessageStartEvent{}},
+      AssistantMessageEvent{AssistantMessageDoneEvent{StopReason::stop, reply}},
+  };
+  LLMClientRegistry::instance().register_client(
+      "lua-deferred-model-switch-test", [script] {
+        return std::make_shared<FauxClient>(
+            std::vector<FauxClient::Script>{script});
+      });
+
+  // Two models under the same provider/api so resolve_model() can resolve
+  // the switch target (request_deferred_model_switch() rejects synchronously
+  // if it can't).
+  ProviderConfig provider;
+  provider.id = "faux";
+  provider.api = "lua-deferred-model-switch-test";
+  provider.base_url = "http://faux.test/v1";
+  provider.auth = ProviderAuthPolicy::none;
+  ConfiguredModel initial;
+  initial.id = "faux-model";
+  provider.models.push_back(initial);
+  ConfiguredModel other;
+  other.id = "other-model";
+  // reasoning=true so resolve_thinking_level() (a non-reasoning model
+  // normalizes any non-off request down to off) doesn't mask the
+  // thinking-level assertion below -- the point here is proving the
+  // requested thinking level travels through the deferred switch, not
+  // exercising that normalization.
+  other.reasoning = true;
+  provider.models.push_back(other);
+  auto registry = std::make_shared<const ModelCatalog>(
+      std::map<std::string, ProviderConfig>{{"faux", provider}});
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-model-switch-test";
+  config.agent_options.model.provider = "faux";
+  config.agent_options.model_catalog = registry;
+  config.model_catalog = registry;
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  session.create_session(header);
+
+  // Simulates a mid-turn on_event hook requesting a model switch, exactly
+  // like Phase 1's deferred-compaction test simulates one requesting a
+  // compaction.
+  bool requested = false;
+  auto result = session.run_prompt("hi", [&](const AgentEvent &ev) {
+    if (!requested && std::holds_alternative<MessageEndEvent>(ev)) {
+      requested = true;
+      ModelSelection selection{
+          .provider = "faux", .model = "other-model", .source = "test"};
+      auto request_result =
+          session.request_deferred_model_switch(selection, ThinkingLevel::high);
+      EXPECT_TRUE(request_result.accepted);
+    }
+  });
+
+  EXPECT_TRUE(!result.error.has_value());
+  EXPECT_TRUE(requested);
+  // Applied after the turn (try_drain_pending_action runs at the end of
+  // run_messages(), inside this same run_prompt() call) -- observable on
+  // the model field without any further turn needed.
+  EXPECT_EQ(session.agent().state().model().id, std::string("other-model"));
+  EXPECT_EQ(session.agent().state().thinking_level(), ThinkingLevel::high);
+}
+
+TEST(Compaction,
+     SessionRuntime_precheck_rejects_a_model_switch_to_a_provider_with_missing_auth_immediately) {
+  ProviderConfig provider;
+  provider.id = "faux";
+  provider.api = "lua-deferred-auth-missing-test";
+  provider.base_url = "http://faux.test/v1";
+  provider.auth = ProviderAuthPolicy::none;
+  ConfiguredModel model;
+  model.id = "faux-model";
+  provider.models.push_back(model);
+  auto registry = std::make_shared<const ModelCatalog>(
+      std::map<std::string, ProviderConfig>{{"faux", provider}});
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-auth-missing-test";
+  config.agent_options.model.provider = "faux";
+  config.agent_options.model_catalog = registry;
+  config.model_catalog = registry;
+  // Always reports missing, regardless of provider -- the precheck must
+  // reject before pending_action_ is ever touched.
+  config.auth_availability = [](std::string_view) {
+    return pi::auth::AuthAvailability::missing;
+  };
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  session.create_session(header);
+
+  ModelSelection selection{
+      .provider = "faux", .model = "faux-model", .source = "test"};
+  auto result =
+      session.request_deferred_model_switch(selection, ThinkingLevel::off);
+  EXPECT_FALSE(result.accepted);
+  ASSERT_TRUE(result.error.has_value());
+  EXPECT_NE(result.error->find("authentication"), std::string::npos);
+
+  // No stale slot/applying-flag left behind by the rejected request: a
+  // fresh request_deferred_compaction() immediately afterward must still
+  // succeed.
+  auto compaction_result = session.request_deferred_compaction();
+  EXPECT_TRUE(compaction_result.accepted);
+}
+
+TEST(Compaction,
+     SessionRuntime_a_model_switch_accepted_at_request_time_but_failing_at_drain_time_is_reported_not_silently_dropped) {
+  AssistantMessage reply =
+      make_assistant_message("hello", "lua-deferred-model-switch-drain-fail-test",
+                             "faux", "faux-model");
+  FauxClient::Script script;
+  script.events = {
+      AssistantMessageEvent{AssistantMessageStartEvent{}},
+      AssistantMessageEvent{AssistantMessageDoneEvent{StopReason::stop, reply}},
+  };
+  LLMClientRegistry::instance().register_client(
+      "lua-deferred-model-switch-drain-fail-test", [script] {
+        return std::make_shared<FauxClient>(
+            std::vector<FauxClient::Script>{script});
+      });
+
+  ProviderConfig provider;
+  provider.id = "faux";
+  provider.api = "lua-deferred-model-switch-drain-fail-test";
+  provider.base_url = "http://faux.test/v1";
+  provider.auth = ProviderAuthPolicy::none;
+  ConfiguredModel initial;
+  initial.id = "faux-model";
+  provider.models.push_back(initial);
+  ConfiguredModel other;
+  other.id = "other-model";
+  provider.models.push_back(other);
+  auto registry = std::make_shared<const ModelCatalog>(
+      std::map<std::string, ProviderConfig>{{"faux", provider}});
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-model-switch-drain-fail-test";
+  config.agent_options.model.provider = "faux";
+  config.agent_options.model_catalog = registry;
+  config.model_catalog = registry;
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  session.create_session(header);
+
+  // What this exercises: with_idle_transition (shared by set_model/compact)
+  // checks a FULLER idle definition than is_streaming() alone -- steering
+  // and follow-up queues must also be empty -- and only does so at the
+  // point set_model() actually runs, i.e. at drain time, not at the earlier
+  // request_deferred_model_switch() call. To reach that specific rejection
+  // deterministically (rather than racing a real background thread against
+  // this test), the request is accepted, and a steering message is queued,
+  // both from inside the callback handling the turn's own AgentEndEvent --
+  // the last event the agent loop publishes. This test's harness installs
+  // no should_stop_after_turn hook (that's a Lua-hooks-only mechanism), so
+  // the bare agent loop's own steering-queue check (which runs once per
+  // turn, right after TurnEndEvent) has already found the queue empty and
+  // moved on to publish AgentEndEvent by the time this callback runs;
+  // nothing else drains the queue between here and
+  // run_messages()'s try_drain_pending_action() call right after this
+  // run_prompt() returns. This exercises exactly the "accepted, then
+  // rejected by the fuller idle check at drain time" path -- not a
+  // provider-auth change between request and drain (see the precheck test
+  // above for that half of the plan's Phase 2 test list).
+  bool requested = false;
+  auto result = session.run_prompt("hi", [&](const AgentEvent &ev) {
+    if (!requested && std::holds_alternative<AgentEndEvent>(ev)) {
+      requested = true;
+      ModelSelection selection{
+          .provider = "faux", .model = "other-model", .source = "test"};
+      auto request_result =
+          session.request_deferred_model_switch(selection, ThinkingLevel::off);
+      EXPECT_TRUE(request_result.accepted);
+      session.agent().steer({Message{make_user_message("queued")}});
+    }
+  });
+
+  EXPECT_TRUE(!result.error.has_value());
+  EXPECT_TRUE(requested);
+
+  // The switch did NOT apply: with_idle_transition rejected it at drain
+  // time because the steering queue was non-empty.
+  EXPECT_EQ(session.agent().state().model().id, std::string("faux-model"));
+
+  auto status = session.action_status();
+  EXPECT_TRUE(status["pending"].is_null());
+  EXPECT_FALSE(status["applying"].get<bool>());
+  ASSERT_FALSE(status["last_error"].is_null());
+  EXPECT_NE(status["last_error"].get<std::string>().find("steering"),
+            std::string::npos);
+
+  session.agent().clear_steering_queue();
+}

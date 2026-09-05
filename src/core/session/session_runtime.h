@@ -201,10 +201,12 @@ public:
   struct PendingFork {
     std::optional<std::string> name;
   };
-  // Phase 1 only ever constructs/handles PendingCompaction; PendingModelSwitch
-  // and PendingFork are declared now (unused until Phases 2/3) so the single
-  // std::visit in try_drain_pending_action() only ever needs to grow, not be
-  // reshaped, as later phases land.
+  // Phase 1 constructed/handled only PendingCompaction; Phase 2 adds
+  // PendingModelSwitch (request_deferred_model_switch(), handled in
+  // try_drain_pending_action()'s std::visit). PendingFork is still declared
+  // but unused until Phase 3 -- it and PendingModelSwitch were declared
+  // together up front so the single std::visit only ever needs to grow, not
+  // be reshaped, as later phases land.
   using PendingSessionAction =
       std::variant<PendingCompaction, PendingModelSwitch, PendingFork>;
 
@@ -220,6 +222,26 @@ public:
   // point: this is how a Lua add-on requests a compaction without itself
   // ever touching compact_active_session).
   DeferredActionResult request_deferred_compaction();
+
+  // Enqueue-only, Phase 2 (plans/velvety-skipping-marble.md): resolves
+  // `selection` and checks provider auth availability SYNCHRONOUSLY, before
+  // pending_action_ is touched at all -- an unresolved model or a provider
+  // with missing authentication is rejected immediately, right here, so a
+  // bad request never occupies the pending slot (and never has to be
+  // cleaned up at drain time). Only once both checks pass does this lock
+  // pending_action_mutex_ and install PendingModelSwitch{resolved model,
+  // thinking}, same shape as request_deferred_compaction(). Still never
+  // drains/applies anything itself -- see the class-level note above.
+  //
+  // Note on provider_auth_missing()'s thread-safety: this may now be called
+  // from an arbitrary thread (a std::async tool-execution thread, or the
+  // compaction worker), not just the REPL/RPC driving thread as before. See
+  // provider_auth_missing()'s own comment for why this is safe without a
+  // new mutex given the concrete Authentication-backed implementation
+  // frontends bind here.
+  DeferredActionResult
+  request_deferred_model_switch(const ModelSelection &selection,
+                                ThinkingLevel thinking);
 
   // Current state of the single pending-action slot, guarded by
   // pending_action_mutex_: {"pending": "compaction"|null, "applying": bool,
@@ -306,6 +328,38 @@ private:
   // that case -- acceptable, not a bug.
   void try_drain_pending_action(const EventCallback &callback);
 
+  // Narrowly-extracted boolean condition from set_model()'s existing inline
+  // auth check (plans/velvety-skipping-marble.md Phase 2) -- extracting
+  // only the predicate, not the surrounding block, so set_model() keeps its
+  // own last_warning_.reset() and ModelSwitchResult construction exactly as
+  // before for its existing callers (RPC, the CLI /model command).
+  // request_deferred_model_switch() reuses this to reject synchronously at
+  // request time, before pending_action_ is touched.
+  //
+  // Thread-safety finding (Phase 2): unlike set_model(), which is only ever
+  // called from the REPL/RPC/ACP driving thread, request_deferred_model_switch()
+  // means this predicate -- and therefore auth_availability_ -- can now be
+  // invoked from an arbitrary thread (a std::async tool-execution thread, or
+  // the compaction worker thread). Traced the concrete implementation
+  // frontends bind here (cli::build_agent_session_config in
+  // cli/session_runtime.cpp closes over pi::auth::Authentication::availability):
+  // its only mutable state is Authentication::runtime_api_keys_ (a plain
+  // std::map), written only by set_runtime_api_key()/clear_runtime_api_key(),
+  // which in turn is only ever called once, at ACP startup
+  // (src/acp/main.cpp), before any session runs -- never during one -- and
+  // Authentication::configured_env_keys_ is populated once in the
+  // constructor and never mutated after. The OAuth adapter path
+  // (OpenAICodexOAuth::availability) reads CredentialStore::read_oauth(),
+  // which re-reads its backing file fresh on every call rather than caching
+  // in memory, so concurrent calls are independent reads, not a shared-state
+  // race. In short: every piece of state availability() reads is either
+  // read-only for the lifetime of a live session or independently
+  // re-fetched per call, matching the "in-memory map populated once at
+  // startup and never mutated after" case the plan calls out as not needing
+  // a new mutex -- so none is added here. If a future auth adapter gains
+  // session-lifetime-mutable state, this analysis would need revisiting.
+  bool provider_auth_missing(const std::string &provider) const;
+
   Agent agent_;
   std::shared_ptr<SessionStore> session_store_;
   SandboxPolicyPtr sandbox_policy_;
@@ -317,12 +371,20 @@ private:
   AutoCompactionConfig auto_compaction_;
 
   // Lua-initiated session-lifecycle action queue
-  // (plans/velvety-skipping-marble.md). All four guarded by
+  // (plans/velvety-skipping-marble.md). All five guarded by
   // pending_action_mutex_; see request_deferred_compaction(),
   // try_drain_pending_action(), and action_status() above/below.
   mutable std::mutex pending_action_mutex_;
   std::optional<PendingSessionAction> pending_action_;
   bool applying_action_{false};
+  // Kind name of whatever action is currently being applied (only
+  // meaningful while applying_action_ is true) -- always a pointer into a
+  // string literal returned by pending_action_kind_name(), so this never
+  // dangles. Phase 1 could hardcode "compaction" in the applying-rejection
+  // message because PendingCompaction was the only alternative it ever
+  // installed; Phase 2 adds PendingModelSwitch as a second one that can be
+  // "applying" too, so the message needs the real kind, not an assumption.
+  std::string_view applying_action_kind_;
   std::optional<std::string> last_deferred_action_error_;
 
   // mailbox_runtime_ must be destroyed (detaching its observer) before

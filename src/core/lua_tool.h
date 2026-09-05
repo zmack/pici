@@ -168,6 +168,15 @@ struct LuaHooks {
     // {accepted=true} or {error="..."} synchronously -- it never blocks
     // waiting for the compaction itself.
     std::function<nlohmann::json(const nlohmann::json &)> request_compaction;
+    // Enqueues a model-switch request (Phase 2): parses
+    // {"model": "...", "provider": "...", "thinking": "..."} from the input
+    // table. Unlike request_compaction, this can be rejected synchronously
+    // (an unresolved model or a provider with missing authentication) --
+    // the rejection still happens without ever touching the pending-action
+    // slot, so it never leaves a stale slot behind. Applied only after the
+    // current turn (or, if none is in flight, the next one) finishes
+    // running, same as request_compaction.
+    std::function<nlohmann::json(const nlohmann::json &)> request_model_switch;
     // Returns {pending, applying, last_error} describing the single
     // pending-action slot's current state.
     std::function<nlohmann::json(const nlohmann::json &)> action_status;

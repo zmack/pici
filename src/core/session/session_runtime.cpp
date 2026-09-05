@@ -177,11 +177,15 @@ SessionRuntime::resolve_model(const ModelSelection &selection) const {
   return model_catalog_->resolve(selection);
 }
 
+bool SessionRuntime::provider_auth_missing(const std::string &provider) const {
+  return auth_availability_ &&
+         auth_availability_(provider) == pi::auth::AuthAvailability::missing;
+}
+
 ModelSwitchResult SessionRuntime::set_model(Model model,
                                             ThinkingLevel thinking) {
   last_warning_.reset();
-  if (auth_availability_ && auth_availability_(model.provider) ==
-                                pi::auth::AuthAvailability::missing) {
+  if (provider_auth_missing(model.provider)) {
     const auto current = agent_.state().model();
     return ModelSwitchResult{.previous = current,
                              .current = current,
@@ -491,13 +495,47 @@ SessionRuntime::request_deferred_compaction() {
                      " is already pending"};
   }
   if (applying_action_) {
-    // applying_action_ is only ever true while a PendingCompaction is being
-    // applied in Phase 1 (the only alternative this phase ever installs),
-    // so the message is precise without needing to remember which kind was
-    // being applied.
-    return {.accepted = false, .error = "a compaction is already applying"};
+    return {.accepted = false,
+            .error = "a " + std::string(applying_action_kind_) +
+                     " is already applying"};
   }
   pending_action_ = PendingCompaction{};
+  return {.accepted = true, .error = {}};
+}
+
+SessionRuntime::DeferredActionResult
+SessionRuntime::request_deferred_model_switch(const ModelSelection &selection,
+                                              ThinkingLevel thinking) {
+  // Resolve + auth-check happen BEFORE the pending slot is ever touched, so
+  // an invalid request never occupies it (plans/velvety-skipping-marble.md
+  // Phase 2) -- no cleanup needed at drain time for a request that should
+  // never have been accepted in the first place.
+  const auto resolution = resolve_model(selection);
+  if (!resolution)
+    return {.accepted = false, .error = resolution.error};
+  // resolution's operator bool() is defined as model.has_value(), so the
+  // check above already guarantees model is set here.
+  // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+  const auto &resolved_model = resolution.model.value();
+  if (provider_auth_missing(resolved_model.provider)) {
+    return {.accepted = false,
+            .error = "missing authentication for provider '" +
+                     resolved_model.provider + "'"};
+  }
+
+  std::scoped_lock lock(pending_action_mutex_);
+  if (pending_action_) {
+    return {.accepted = false,
+            .error = "a " +
+                     std::string(pending_action_kind_name(*pending_action_)) +
+                     " is already pending"};
+  }
+  if (applying_action_) {
+    return {.accepted = false,
+            .error = "a " + std::string(applying_action_kind_) +
+                     " is already applying"};
+  }
+  pending_action_ = PendingModelSwitch{resolved_model, thinking};
   return {.accepted = true, .error = {}};
 }
 
@@ -523,6 +561,7 @@ void SessionRuntime::try_drain_pending_action(const EventCallback &callback) {
       return;
     action = std::exchange(pending_action_, std::nullopt);
     applying_action_ = true;
+    applying_action_kind_ = pending_action_kind_name(*action);
   }
 
   try {
@@ -536,10 +575,22 @@ void SessionRuntime::try_drain_pending_action(const EventCallback &callback) {
               std::scoped_lock lock(pending_action_mutex_);
               last_deferred_action_error_ = result.error;
             }
+          } else if constexpr (std::is_same_v<T, PendingModelSwitch>) {
+            // May legitimately throw here even though the request was
+            // accepted earlier: with_idle_transition's fuller idle
+            // definition (steering/follow-up queues empty, not just
+            // is_streaming() false) is only checked at drain time, not at
+            // request time. The outer try/catch below is what turns that
+            // into a reported, not silently dropped, failure.
+            auto result = set_model(value.model, value.thinking);
+            if (result.error) {
+              std::scoped_lock lock(pending_action_mutex_);
+              last_deferred_action_error_ = result.error;
+            }
           }
-          // PendingModelSwitch/PendingFork: not yet reachable in Phase 1
-          // (request_deferred_compaction() is the only installer), handled
-          // by Phases 2/3 respectively.
+          // PendingFork: not yet reachable before Phase 3 lands
+          // (request_deferred_compaction()/request_deferred_model_switch()
+          // are the only installers so far).
         },
         *action);
   } catch (const std::exception &e) {
