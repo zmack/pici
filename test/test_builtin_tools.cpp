@@ -235,6 +235,52 @@ TEST(BuiltinTools, Truncation_detail_line_limit_message) {
   std::filesystem::remove_all(root);
 }
 
+TEST(BuiltinTools, Bash_truncation_details_report_bytes_limit) {
+  const auto tools = create_all_tools(std::filesystem::temp_directory_path(),
+                                      disabled_sandbox());
+  auto bash = find_tool(tools, "bash");
+  // Deliberately misaligned from the 4096-byte read chunk size used by
+  // BashTool's own read loop: a plain "yes | head -c 200000" (as suggested
+  // by the design doc) turns out to land its final read exactly on a 4096
+  // boundary in practice (65536 = 16*4096), so the read loop's own byte cap
+  // and truncate_head_ex's cap coincide exactly -- content.size() ends up
+  // == max_bytes, which truncate_head_ex correctly treats as "fits exactly,
+  // no truncation needed". Leading with a single stray byte (printf x)
+  // shifts every subsequent chunk boundary off that alignment, guaranteeing
+  // the accumulated output overshoots the 64KB cap and lands in the "bytes"
+  // truncation regime deterministically. The command's own exit status is
+  // irrelevant to this test (a still-writing `head` can be cut off by the
+  // early pipe close and report a nonzero/signal-derived exit code) -- only
+  // the structured truncation metadata is under test here.
+  auto r = bash->execute(
+      "1", R"({"command":"printf x; head -c 200000 /dev/zero"})");
+
+  auto details = r->details();
+  ASSERT_TRUE(details.has_value());
+  auto parsed = nlohmann::json::parse(*details);
+  ASSERT_TRUE(parsed.contains("truncation"));
+  const auto &truncation = parsed["truncation"];
+  EXPECT_TRUE(truncation["truncated"].get<bool>());
+  EXPECT_EQ(truncation["truncated_by"].get<std::string>(), "bytes");
+
+  const auto output_bytes = truncation["output_bytes"].get<std::size_t>();
+  const auto input_bytes = truncation["input_bytes"].get<std::size_t>();
+  const auto max_bytes = truncation["max_bytes"].get<std::size_t>();
+  EXPECT_LE(output_bytes, max_bytes);
+  // Should be close to the cap, not some tiny fraction of it.
+  EXPECT_GT(output_bytes, max_bytes - 1024);
+  EXPECT_GE(input_bytes, output_bytes);
+}
+
+TEST(BuiltinTools, Bash_no_truncation_details_when_under_limit) {
+  const auto tools = create_all_tools(std::filesystem::temp_directory_path(),
+                                      disabled_sandbox());
+  auto bash = find_tool(tools, "bash");
+  auto r = bash->execute("1", R"({"command":"echo hello"})");
+  EXPECT_TRUE(!r->is_error());
+  EXPECT_EQ(r->details(), std::nullopt);
+}
+
 TEST(BuiltinTools, GitIgnore_find_respects_gitignore) {
   const auto root =
       std::filesystem::temp_directory_path() / "pici-gitignore-test";

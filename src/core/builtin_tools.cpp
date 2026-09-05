@@ -214,8 +214,37 @@ std::vector<std::string> split_lines(const std::string &content) {
   return lines;
 }
 
-std::string truncate_head(const std::string &content, std::size_t max_lines,
-                          std::size_t max_bytes) {
+// Structured metadata about a truncate_head_ex() call, computed as a
+// byproduct of the same single walk over `content` that produces the
+// (possibly truncated) output string.
+//
+// Naming note: `input_lines`/`input_bytes` describe the size of the string
+// truncate_head_ex actually saw -- NOT necessarily the real underlying
+// command/file output. At every call site, that string may already be
+// lossy upstream of here: BashTool's own read loop caps `output` before
+// this ever sees it (see the bash spill-file design for what actually
+// bounds that), ReadTool's string already has its own
+// "[N more lines in file...]" note counted as content, and Ls/Find/Grep
+// are already limit-capped upstream. Calling these fields "total_*" would
+// wrongly imply they describe the command's real, uncapped output size.
+struct TruncationInfo {
+  bool truncated = false;
+  std::optional<std::string> truncated_by; // "lines" or "bytes"
+  std::size_t input_lines = 0, input_bytes = 0;
+  std::size_t output_lines = 0, output_bytes = 0;
+  bool last_line_partial = false;
+  bool first_line_exceeds_limit = false;
+  std::size_t max_lines = 0, max_bytes = 0;
+};
+
+struct TruncatedContent {
+  std::string content;
+  TruncationInfo info;
+};
+
+TruncatedContent truncate_head_ex(const std::string &content,
+                                  std::size_t max_lines,
+                                  std::size_t max_bytes) {
   std::size_t total_lines = 0;
   for (char c : content)
     if (c == '\n')
@@ -242,6 +271,33 @@ std::string truncate_head(const std::string &content, std::size_t max_lines,
       ++out_lines;
   }
 
+  TruncationInfo info;
+  info.input_lines = total_lines;
+  info.input_bytes = content.size();
+  info.output_lines = out_lines;
+  info.output_bytes = out.size();
+  info.max_lines = max_lines;
+  info.max_bytes = max_bytes;
+  info.truncated = hit_lines || hit_bytes;
+  if (hit_lines) {
+    info.truncated_by = "lines";
+  } else if (hit_bytes) {
+    info.truncated_by = "bytes";
+  }
+  // The break above happens before `ch` is pushed, so when truncation was
+  // triggered by the byte cap the output can end mid-line (the last
+  // character need not be '\n'). When triggered by the line cap, out_lines
+  // has already reached max_lines via a completed '\n', so this is always
+  // false in that case -- but we compute it generically off `out` itself
+  // rather than branching on hit_lines/hit_bytes, since that's the actual
+  // condition callers care about.
+  info.last_line_partial =
+      info.truncated && !out.empty() && out.back() != '\n';
+  // True when even the first line alone was too big to fit under the byte
+  // cap (truncation hit on the byte limit before a single '\n' was ever
+  // written to `out`).
+  info.first_line_exceeds_limit = hit_bytes && out_lines == 0;
+
   if (hit_lines || hit_bytes) {
     if (hit_lines) {
       out += "\n\n[Truncated: showing " + std::to_string(max_lines) + " of " +
@@ -251,7 +307,12 @@ std::string truncate_head(const std::string &content, std::size_t max_lines,
              std::to_string(max_bytes / 1024) + "KB limit)]";
     }
   }
-  return out;
+  return {std::move(out), info};
+}
+
+std::string truncate_head(const std::string &content, std::size_t max_lines,
+                          std::size_t max_bytes) {
+  return truncate_head_ex(content, max_lines, max_bytes).content;
 }
 
 std::string glob_to_regex(std::string_view glob) {
@@ -1564,24 +1625,49 @@ public:
 
       if (output.empty())
         output = "(no output)";
-      output = truncate_head(output, kMaxBytes, kMaxBytes);
+      auto truncated = truncate_head_ex(output, kMaxBytes, kMaxBytes);
+      output = std::move(truncated.content);
+
+      // Structured sidecar mirroring the human-readable "[Truncated: ...]"
+      // footer above, for callers that want to act on truncation instead of
+      // just reading the note. NOTE: an after-tool Lua hook can overwrite
+      // `details` on the returned result (see agent_loop.cpp), which would
+      // clobber this sidecar -- not guarded against here.
+      std::optional<std::string> details;
+      if (truncated.info.truncated) {
+        nlohmann::json details_json;
+        details_json["truncation"] = {
+            {"truncated", truncated.info.truncated},
+            {"truncated_by", truncated.info.truncated_by.value_or("")},
+            {"input_lines", truncated.info.input_lines},
+            {"input_bytes", truncated.info.input_bytes},
+            {"output_lines", truncated.info.output_lines},
+            {"output_bytes", truncated.info.output_bytes},
+            {"last_line_partial", truncated.info.last_line_partial},
+            {"first_line_exceeds_limit",
+             truncated.info.first_line_exceeds_limit},
+            {"max_lines", truncated.info.max_lines},
+            {"max_bytes", truncated.info.max_bytes},
+        };
+        details = details_json.dump();
+      }
 
       if (aborted) {
         output += "\n\n[Command aborted]";
-        return std::make_shared<TextToolResult>(output, true);
+        return std::make_shared<TextToolResult>(output, true, details);
       }
       if (timed_out) {
         output += "\n\n[Command timed out after " +
                   std::to_string(timeout_secs) + "s]";
-        return std::make_shared<TextToolResult>(output, true);
+        return std::make_shared<TextToolResult>(output, true, details);
       }
       if (status != 0 && WIFEXITED(status)) { // NOLINT(misc-include-cleaner)
         output +=
             "\n\nCommand exited with code " +
             std::to_string(WEXITSTATUS(status)); // NOLINT(misc-include-cleaner)
-        return std::make_shared<TextToolResult>(output, true);
+        return std::make_shared<TextToolResult>(output, true, details);
       }
-      return std::make_shared<TextToolResult>(output);
+      return std::make_shared<TextToolResult>(output, false, details);
     } catch (const std::exception &err) {
       return error_result(err);
     }
