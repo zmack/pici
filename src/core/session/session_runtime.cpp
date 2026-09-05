@@ -15,6 +15,7 @@
 #include "core/stream.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <exception>
 #include <functional>
@@ -62,6 +63,7 @@ SessionRuntime::SessionRuntime(Config config)
       model_catalog_(config.model_catalog ? std::move(config.model_catalog)
                                           : config.agent_options.model_catalog),
       auth_availability_(std::move(config.auth_availability)),
+      on_session_forked_(std::move(config.on_session_forked)),
       auto_compaction_(config.auto_compaction),
       mailbox_runtime_(std::move(config.mailbox)) {
   if (!sandbox_policy_)
@@ -539,6 +541,27 @@ SessionRuntime::request_deferred_model_switch(const ModelSelection &selection,
   return {.accepted = true, .error = {}};
 }
 
+SessionRuntime::DeferredActionResult
+SessionRuntime::request_deferred_fork(std::optional<std::string> name) {
+  // No synchronous precheck here, unlike request_deferred_model_switch():
+  // a fork has no equivalent "resolve first" step, so the single-slot
+  // pending/applying rejection below is the entire check.
+  std::scoped_lock lock(pending_action_mutex_);
+  if (pending_action_) {
+    return {.accepted = false,
+            .error = "a " +
+                     std::string(pending_action_kind_name(*pending_action_)) +
+                     " is already pending"};
+  }
+  if (applying_action_) {
+    return {.accepted = false,
+            .error = "a " + std::string(applying_action_kind_) +
+                     " is already applying"};
+  }
+  pending_action_ = PendingFork{std::move(name)};
+  return {.accepted = true, .error = {}};
+}
+
 nlohmann::json SessionRuntime::action_status() const {
   std::scoped_lock lock(pending_action_mutex_);
   nlohmann::json status;
@@ -550,6 +573,12 @@ nlohmann::json SessionRuntime::action_status() const {
   status["last_error"] = last_deferred_action_error_
                              ? nlohmann::json(*last_deferred_action_error_)
                              : nlohmann::json(nullptr);
+  // Phase 3: persists until the next successful fork overwrites it (see
+  // last_fork_result_'s declaration comment) -- not reset to null here just
+  // because it was read.
+  status["last_fork_session_id"] = last_fork_result_
+                                       ? nlohmann::json(*last_fork_result_)
+                                       : nlohmann::json(nullptr);
   return status;
 }
 
@@ -587,10 +616,61 @@ void SessionRuntime::try_drain_pending_action(const EventCallback &callback) {
               std::scoped_lock lock(pending_action_mutex_);
               last_deferred_action_error_ = result.error;
             }
+          } else if constexpr (std::is_same_v<T, PendingFork>) {
+            // Parent linkage is built here, at drain time, from whatever
+            // session/message state is current now -- not at request time
+            // -- mirroring exactly what handle_fork_command()
+            // (cmd_run_session.h) and the RPC "fork" handler (rpc_mode.cpp)
+            // already build on their own header before calling
+            // fork_session() directly. fork_session() itself only ever
+            // defaults id/model/provider/sandbox_mode (see its own body);
+            // it does not populate parent_id/parent_offset/
+            // parent_entry_anchor, so those still have to be set here.
+            if (!active_session_id_)
+              throw std::runtime_error("no active session to fork");
+            const auto parent_id = *active_session_id_;
+
+            SessionHeader header;
+            header.name = value.name;
+            header.created = std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+            header.parent_id = parent_id;
+            header.parent_offset = agent_.state().messages().size();
+            if (session_store_) {
+              const auto anchor =
+                  session_store_->current_leaf_anchor(parent_id);
+              header.parent_entry_anchor = anchor.anchor;
+              header.parent_entry_id = anchor.entry_id;
+            }
+
+            // Fork-ordering tradeoff (plans/velvety-skipping-marble.md
+            // Phase 3, accepted rather than a deeper fork_session()
+            // redesign): fork_session() writes the new session's header to
+            // disk via session_store_->create() BEFORE calling
+            // agent_.set_session_identity(), which can itself throw via
+            // with_idle_transition if the fuller idle condition (steering/
+            // follow-up queues empty, not just is_streaming() false) isn't
+            // satisfied -- newly reachable here because, unlike /fork and
+            // the RPC fork handler (which only ever call fork_session()
+            // once they already know the agent is fully idle), a deferred
+            // fork has no such guarantee at drain time. If that throws,
+            // the newly-created session file is left on disk as a
+            // harmless orphan: a valid, unparented-from-anything-live
+            // session record with no messages -- clutter, not corruption.
+            // The outer try/catch around this whole std::visit is what
+            // turns that throw into a reported last_deferred_action_error_
+            // instead of letting it escape run_messages() uncaught;
+            // building cleanup machinery for the orphan file is
+            // deliberately out of scope (see the plan).
+            const auto new_id = fork_session(header);
+
+            {
+              std::scoped_lock lock(pending_action_mutex_);
+              last_fork_result_ = new_id;
+            }
+            if (on_session_forked_)
+              on_session_forked_(new_id, parent_id);
           }
-          // PendingFork: not yet reachable before Phase 3 lands
-          // (request_deferred_compaction()/request_deferred_model_switch()
-          // are the only installers so far).
         },
         *action);
   } catch (const std::exception &e) {

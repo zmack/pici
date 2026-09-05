@@ -1155,6 +1155,22 @@ private:
             },
         .session_store = injected_session_store_,
         .ensure_mailbox = injected_ensure_mailbox_,
+        // Phase 3 (plans/velvety-skipping-marble.md): a deferred fork
+        // (pici.session.request_fork()) is applied inside
+        // SessionRuntime::run_messages(), which updates SessionRuntime's
+        // own active_session_id_ but has no way to reach this class's
+        // separately-tracked current_session_id_/current_session_name_,
+        // mailbox root identity, or effective_context_ -- this callback is
+        // what keeps those in sync, mirroring exactly what
+        // handle_fork_command() does around its own direct fork_session()
+        // call (see adopt_forked_session_identity()). Captures `this`,
+        // which is safe here even though current_session_id_ etc. aren't
+        // set up yet at this point in run() -- the callback only runs
+        // later, once a turn is in flight, by which point they are.
+        .on_session_forked =
+            [this](const std::string &, const std::string &) {
+              adopt_forked_session_identity();
+            },
     };
     bundle_ = cli::open_runtime_bundle(runtime_config);
     if (bundle_.error) {
@@ -1524,6 +1540,21 @@ private:
             args.at("thinking").get<std::string>());
       }
       auto result = runtime().request_deferred_model_switch(selection, thinking);
+      if (!result.accepted)
+        return {{"error", *result.error}};
+      return {{"accepted", true}};
+    };
+    // Phase 3 (plans/velvety-skipping-marble.md): no synchronous precheck
+    // here, unlike request_model_switch -- a fork has no equivalent
+    // "resolve first" step. Parent linkage is built at drain time inside
+    // SessionRuntime itself (try_drain_pending_action()'s PendingFork arm),
+    // not here.
+    info.session.request_fork =
+        [this](const nlohmann::json &args) -> nlohmann::json {
+      std::optional<std::string> name;
+      if (args.contains("name") && args.at("name").is_string())
+        name = args.at("name").get<std::string>();
+      auto result = runtime().request_deferred_fork(std::move(name));
       if (!result.accepted)
         return {{"error", *result.error}};
       return {{"accepted", true}};
@@ -2346,6 +2377,36 @@ private:
     std::cerr << "[new session: " << current_session_id_ << "]\n";
   }
 
+  // Adopts whatever session runtime().fork_session() (or a deferred fork
+  // drained inside SessionRuntime::run_messages -- see
+  // SessionRuntime::Config::on_session_forked, wired in open_runtime()
+  // above) just made active as THIS class's own active session identity.
+  // Mirrors the four steps handle_fork_command() always performed inline
+  // around its own direct fork_session() call, before Phase 3
+  // (plans/velvety-skipping-marble.md) added a second caller that needed
+  // the exact same fixup: drop any queued mailbox delivery, update
+  // current_session_id_/current_session_name_, reactivate the mailbox root
+  // identity, and clear effective_context_. Reads the new id/name back from
+  // runtime()/agent() (both already updated by fork_session() itself)
+  // rather than taking them as parameters, so this same helper works
+  // whether the fork just happened synchronously (handle_fork_command) or
+  // asynchronously (the on_session_forked callback, which only knows the
+  // new id at that point anyway). The relative order of these four steps
+  // is not behavior-sensitive here -- drop_queued_delivery()/activate_root()
+  // are keyed by mailbox identity, not by session id -- so unifying them
+  // into one post-fork helper changes nothing observable for the direct
+  // /fork path.
+  void adopt_forked_session_identity() {
+    runtime().mailbox_runtime().drop_queued_delivery();
+    current_session_id_ = *runtime().active_session_id();
+    current_session_name_ = agent().state().session_name();
+    if (const auto identity = runtime().mailbox_runtime().activate_root(
+            current_session_id_, current_session_name_))
+      agent().set_runtime_identity(identity);
+    std::scoped_lock lock(effective_context_mutex_);
+    effective_context_.reset();
+  }
+
   void handle_fork_command() {
     core::SessionHeader child_hdr;
     child_hdr.id = core::generate_session_id();
@@ -2365,16 +2426,8 @@ private:
       child_hdr.parent_entry_anchor = anchor.anchor;
       child_hdr.parent_entry_id = anchor.entry_id;
     }
-    runtime().mailbox_runtime().drop_queued_delivery();
-    current_session_id_ = runtime().fork_session(child_hdr);
-    current_session_name_.reset();
-    if (const auto identity = runtime().mailbox_runtime().activate_root(
-            current_session_id_, current_session_name_))
-      agent().set_runtime_identity(identity);
-    {
-      std::scoped_lock lock(effective_context_mutex_);
-      effective_context_.reset();
-    }
+    runtime().fork_session(child_hdr);
+    adopt_forked_session_identity();
     std::cerr << "[fork: " << current_session_id_ << "]\n";
   }
 

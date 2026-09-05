@@ -224,6 +224,12 @@ RuntimeBundle open_runtime_bundle(const RuntimeBuildConfig &config) {
       options_result.options, config.model_catalog, /*tools=*/{}, session_store,
       sandbox_policy, config.args, config.capabilities, mailbox,
       config.authentication);
+  // Forwarded as-is (see RuntimeBuildConfig::on_session_forked's comment) --
+  // not part of build_agent_session_config()'s own parameter list because
+  // ACP calls that function directly, bypassing this bundle, and has no
+  // equivalent CLI-owned session-identity state to fix up.
+  if (config.on_session_forked)
+    session_config.on_session_forked = config.on_session_forked;
   auto runtime =
       std::make_shared<core::SessionRuntime>(std::move(session_config));
 

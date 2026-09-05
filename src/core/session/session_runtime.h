@@ -92,6 +92,24 @@ public:
     // command.
     std::function<pi::auth::AuthAvailability(std::string_view provider)>
         auth_availability;
+    // Optional: invoked by the fork drain step (Phase 3,
+    // plans/velvety-skipping-marble.md) right after a successful
+    // fork_session() call, with the new session id and the id that was
+    // active immediately before the fork. A deferred fork applied inside
+    // run_messages() updates this class's own active_session_id_ (and
+    // AgentState's session id, via fork_session()'s existing
+    // set_session_identity() call) but has no way to reach into a
+    // frontend's OWN separately-tracked session-identity state -- the CLI
+    // (cmd_run_session.h) keeps its own current_session_id_/
+    // current_session_name_, mailbox root identity, and effective_context_
+    // in sync with a direct /fork only because handle_fork_command() does
+    // so explicitly right after its own fork_session() call; this callback
+    // is what lets a deferred fork do the same. Null (the default) is fine
+    // for any caller that never calls request_deferred_fork() -- ACP's
+    // per-run sessions, RPC mode, and any frontend with no Lua add-ons
+    // active.
+    std::function<void(const std::string &new_id, const std::string &parent_id)>
+        on_session_forked;
   };
 
   using EventCallback = std::function<void(const AgentEvent &)>;
@@ -201,12 +219,12 @@ public:
   struct PendingFork {
     std::optional<std::string> name;
   };
-  // Phase 1 constructed/handled only PendingCompaction; Phase 2 adds
+  // Phase 1 constructed/handled only PendingCompaction; Phase 2 added
   // PendingModelSwitch (request_deferred_model_switch(), handled in
-  // try_drain_pending_action()'s std::visit). PendingFork is still declared
-  // but unused until Phase 3 -- it and PendingModelSwitch were declared
-  // together up front so the single std::visit only ever needs to grow, not
-  // be reshaped, as later phases land.
+  // try_drain_pending_action()'s std::visit); Phase 3 adds PendingFork
+  // (request_deferred_fork(), handled the same way) -- all three were
+  // declared together up front so the single std::visit only ever needed
+  // to grow, not be reshaped, as later phases landed.
   using PendingSessionAction =
       std::variant<PendingCompaction, PendingModelSwitch, PendingFork>;
 
@@ -243,11 +261,29 @@ public:
   request_deferred_model_switch(const ModelSelection &selection,
                                 ThinkingLevel thinking);
 
+  // Enqueue-only, Phase 3 (plans/velvety-skipping-marble.md): installs
+  // PendingFork{name} if no action is currently pending or applying, same
+  // shape as request_deferred_compaction(). Unlike
+  // request_deferred_model_switch(), there is no synchronous precheck here
+  // -- a fork has no equivalent "resolve first" step, so the single-slot
+  // pending/applying rejection is the entire check. Parent linkage
+  // (parent_id/parent_offset/parent_entry_anchor) is built at drain time
+  // from whatever session/message state is current then, not at request
+  // time -- see try_drain_pending_action()'s PendingFork arm.
+  DeferredActionResult request_deferred_fork(std::optional<std::string> name);
+
   // Current state of the single pending-action slot, guarded by
-  // pending_action_mutex_: {"pending": "compaction"|null, "applying": bool,
-  // "last_error": string|null}. Lets a Lua add-on (which only ever observes
-  // events, never blocks on a drain it can't safely trigger) poll status
-  // instead of guessing.
+  // pending_action_mutex_: {"pending": "compaction"|"model_switch"|"fork"|
+  // null, "applying": bool, "last_error": string|null, "last_fork_session_id":
+  // string|null}. Lets a Lua add-on (which only ever observes events, never
+  // blocks on a drain it can't safely trigger) poll status instead of
+  // guessing. "last_fork_session_id" (Phase 3) is set the moment a
+  // PendingFork successfully drains and persists until overwritten by the
+  // next successful fork -- it does not reset to null after being read, the
+  // same "persists until overwritten" choice already made for
+  // last_deferred_action_error_ -- this is the only way a headless
+  // (on_event-only) Lua consumer can learn a deferred fork's new session id
+  // without a new event type.
   nlohmann::json action_status() const;
 
   // Phase B of construction (plans/session-runtime-migration.md Phase 6):
@@ -366,12 +402,20 @@ private:
   std::shared_ptr<const ModelCatalog> model_catalog_;
   std::function<pi::auth::AuthAvailability(std::string_view)>
       auth_availability_;
+  // Phase 3 (plans/velvety-skipping-marble.md): copied from
+  // Config::on_session_forked at construction time; see that field's
+  // comment. Invoked from try_drain_pending_action()'s PendingFork arm,
+  // never from fork_session() itself (fork_session() is also called
+  // directly by /fork and the RPC fork handler, both of which already fix
+  // up their own caller-side state inline and would double-fire this).
+  std::function<void(const std::string &new_id, const std::string &parent_id)>
+      on_session_forked_;
   std::optional<std::string> active_session_id_;
   std::optional<std::string> last_warning_;
   AutoCompactionConfig auto_compaction_;
 
   // Lua-initiated session-lifecycle action queue
-  // (plans/velvety-skipping-marble.md). All five guarded by
+  // (plans/velvety-skipping-marble.md). All six guarded by
   // pending_action_mutex_; see request_deferred_compaction(),
   // try_drain_pending_action(), and action_status() above/below.
   mutable std::mutex pending_action_mutex_;
@@ -386,6 +430,12 @@ private:
   // "applying" too, so the message needs the real kind, not an assumption.
   std::string_view applying_action_kind_;
   std::optional<std::string> last_deferred_action_error_;
+  // Phase 3: the new session id from the most recently successfully-applied
+  // PendingFork, surfaced via action_status()'s "last_fork_session_id" --
+  // persists until the next successful fork overwrites it (same choice
+  // last_deferred_action_error_ already made), not reset to null after
+  // being read once.
+  std::optional<std::string> last_fork_result_;
 
   // mailbox_runtime_ must be destroyed (detaching its observer) before
   // agent_'s own teardown reaches its owned TaskTree, or mailbox delivery

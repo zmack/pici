@@ -197,6 +197,16 @@ struct RuntimeBuildConfig {
   // pre-existing core::start_mailbox() fallback exactly.
   std::function<std::shared_ptr<core::Mailbox>(const core::MailboxOptions &)>
       ensure_mailbox;
+  // CLI-only instrumentation hook (plans/velvety-skipping-marble.md Phase
+  // 3), forwarded as-is into the constructed core::SessionRuntime::Config's
+  // own on_session_forked field -- see that field's comment for why this
+  // exists (a deferred fork applied inside SessionRuntime::run_messages has
+  // no way to reach a frontend's own separately-tracked session-identity
+  // state). Same shape as on_effective_context above: closes over
+  // caller-local state, must be set before SessionRuntime construction.
+  // Null preserves today's behavior exactly (no fixup callback fires).
+  std::function<void(const std::string &new_id, const std::string &parent_id)>
+      on_session_forked;
 };
 
 struct RuntimeBundle {

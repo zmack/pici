@@ -1859,3 +1859,195 @@ TEST(Compaction,
 
   session.agent().clear_steering_queue();
 }
+
+// --- Phase 3: Lua-initiated session-lifecycle actions
+// (plans/velvety-skipping-marble.md) -- fork. Same central constraint as
+// Phases 1/2: request_deferred_fork() only ever enqueues;
+// try_drain_pending_action() is still the only place that ever applies it,
+// from run_messages() right after maybe_auto_compact_after_turn(). Uses a
+// real on-disk SessionStore (like the compact_active_session tests above),
+// not the in-memory-only default, so the forked child's persisted header
+// (in particular parent_id) can actually be inspected. ------------------
+
+TEST(Compaction,
+     SessionRuntime_deferred_fork_applies_after_the_turn_and_switches_the_active_session_id) {
+  AssistantMessage reply = make_assistant_message(
+      "hello", "lua-deferred-fork-test", "faux", "faux-model");
+  FauxClient::Script script;
+  script.events = {
+      AssistantMessageEvent{AssistantMessageStartEvent{}},
+      AssistantMessageEvent{AssistantMessageDoneEvent{StopReason::stop, reply}},
+  };
+  LLMClientRegistry::instance().register_client(
+      "lua-deferred-fork-test", [script] {
+        return std::make_shared<FauxClient>(
+            std::vector<FauxClient::Script>{script});
+      });
+
+  const auto session_dir =
+      std::filesystem::temp_directory_path() /
+      ("pici-deferred-fork-session-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  auto store = std::make_shared<SessionStore>(session_dir);
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-fork-test";
+  config.agent_options.model.provider = "faux";
+  config.session_store = store;
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  const auto original_session_id = session.create_session(header);
+
+  // Simulates a mid-turn on_event hook requesting a fork, exactly like
+  // Phase 1/2's deferred tests simulate one requesting a
+  // compaction/model-switch.
+  bool requested = false;
+  auto result = session.run_prompt("hi", [&](const AgentEvent &ev) {
+    if (!requested && std::holds_alternative<MessageEndEvent>(ev)) {
+      requested = true;
+      auto request_result = session.request_deferred_fork(std::nullopt);
+      EXPECT_TRUE(request_result.accepted);
+    }
+  });
+
+  EXPECT_TRUE(!result.error.has_value());
+  EXPECT_TRUE(requested);
+  // Applied after the turn (try_drain_pending_action runs at the end of
+  // run_messages(), inside this same run_prompt() call) -- observable on
+  // active_session_id() without any further turn needed.
+  ASSERT_TRUE(session.active_session_id().has_value());
+  const auto new_session_id = *session.active_session_id();
+  EXPECT_NE(new_session_id, original_session_id);
+
+  auto record = store->load(new_session_id);
+  ASSERT_TRUE(record.has_value());
+  ASSERT_TRUE(record->header.parent_id.has_value());
+  EXPECT_EQ(*record->header.parent_id, original_session_id);
+
+  store.reset();
+  std::filesystem::remove_all(session_dir);
+}
+
+TEST(Compaction,
+     SessionRuntime_deferred_fork_invokes_on_session_forked_with_correct_old_and_new_ids) {
+  AssistantMessage reply = make_assistant_message(
+      "hello", "lua-deferred-fork-callback-test", "faux", "faux-model");
+  FauxClient::Script script;
+  script.events = {
+      AssistantMessageEvent{AssistantMessageStartEvent{}},
+      AssistantMessageEvent{AssistantMessageDoneEvent{StopReason::stop, reply}},
+  };
+  LLMClientRegistry::instance().register_client(
+      "lua-deferred-fork-callback-test", [script] {
+        return std::make_shared<FauxClient>(
+            std::vector<FauxClient::Script>{script});
+      });
+
+  const auto session_dir =
+      std::filesystem::temp_directory_path() /
+      ("pici-deferred-fork-callback-session-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  auto store = std::make_shared<SessionStore>(session_dir);
+
+  // Records on_session_forked()'s arguments -- this is the CLI-state-desync
+  // fix under test: SessionRuntime::Config::on_session_forked is exactly
+  // what cmd_run_session.h binds to keep its own current_session_id_/
+  // mailbox root/effective_context_ in sync with a deferred fork.
+  std::vector<std::pair<std::string, std::string>> forked_calls;
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-fork-callback-test";
+  config.agent_options.model.provider = "faux";
+  config.session_store = store;
+  config.on_session_forked = [&](const std::string &new_id,
+                                 const std::string &parent_id) {
+    forked_calls.emplace_back(new_id, parent_id);
+  };
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  const auto original_session_id = session.create_session(header);
+
+  bool requested = false;
+  auto result = session.run_prompt("hi", [&](const AgentEvent &ev) {
+    if (!requested && std::holds_alternative<MessageEndEvent>(ev)) {
+      requested = true;
+      auto request_result = session.request_deferred_fork(std::nullopt);
+      EXPECT_TRUE(request_result.accepted);
+    }
+  });
+
+  EXPECT_TRUE(!result.error.has_value());
+  EXPECT_TRUE(requested);
+  ASSERT_TRUE(session.active_session_id().has_value());
+  const auto new_session_id = *session.active_session_id();
+
+  ASSERT_EQ(forked_calls.size(), std::size_t(1));
+  EXPECT_EQ(forked_calls[0].first, new_session_id);
+  EXPECT_EQ(forked_calls[0].second, original_session_id);
+
+  store.reset();
+  std::filesystem::remove_all(session_dir);
+}
+
+TEST(Compaction,
+     SessionRuntime_deferred_fork_result_is_observable_via_action_status) {
+  AssistantMessage reply = make_assistant_message(
+      "hello", "lua-deferred-fork-status-test", "faux", "faux-model");
+  FauxClient::Script script;
+  script.events = {
+      AssistantMessageEvent{AssistantMessageStartEvent{}},
+      AssistantMessageEvent{AssistantMessageDoneEvent{StopReason::stop, reply}},
+  };
+  LLMClientRegistry::instance().register_client(
+      "lua-deferred-fork-status-test", [script] {
+        return std::make_shared<FauxClient>(
+            std::vector<FauxClient::Script>{script});
+      });
+
+  const auto session_dir =
+      std::filesystem::temp_directory_path() /
+      ("pici-deferred-fork-status-session-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  auto store = std::make_shared<SessionStore>(session_dir);
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-fork-status-test";
+  config.agent_options.model.provider = "faux";
+  config.session_store = store;
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  session.create_session(header);
+
+  bool requested = false;
+  auto result = session.run_prompt("hi", [&](const AgentEvent &ev) {
+    if (!requested && std::holds_alternative<MessageEndEvent>(ev)) {
+      requested = true;
+      auto request_result = session.request_deferred_fork(std::nullopt);
+      EXPECT_TRUE(request_result.accepted);
+    }
+  });
+
+  EXPECT_TRUE(!result.error.has_value());
+  EXPECT_TRUE(requested);
+  ASSERT_TRUE(session.active_session_id().has_value());
+
+  // "last_fork_session_id" (Phase 3's addition to action_status()) is the
+  // headless-Lua-consumer path to learn the new id without a new event
+  // type -- see action_status()'s doc comment.
+  auto status = session.action_status();
+  ASSERT_FALSE(status["last_fork_session_id"].is_null());
+  EXPECT_EQ(status["last_fork_session_id"].get<std::string>(),
+            *session.active_session_id());
+
+  store.reset();
+  std::filesystem::remove_all(session_dir);
+}

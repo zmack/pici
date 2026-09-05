@@ -177,8 +177,19 @@ struct LuaHooks {
     // current turn (or, if none is in flight, the next one) finishes
     // running, same as request_compaction.
     std::function<nlohmann::json(const nlohmann::json &)> request_model_switch;
-    // Returns {pending, applying, last_error} describing the single
-    // pending-action slot's current state.
+    // Enqueues a fork request (Phase 3): parses an optional
+    // {"name": "..."} from the input table. Unlike request_model_switch,
+    // there is no synchronous precheck -- a fork has no equivalent
+    // "resolve first" step, so this can only be rejected by the same
+    // pending/applying single-slot check every request_* here shares.
+    // Applied only after the current turn (or, if none is in flight, the
+    // next one) finishes running, same as the others. The new session id
+    // is not returned here (this call returns before the fork actually
+    // happens) -- see action_status()'s "last_fork_session_id" for how to
+    // learn it once the fork has applied.
+    std::function<nlohmann::json(const nlohmann::json &)> request_fork;
+    // Returns {pending, applying, last_error, last_fork_session_id}
+    // describing the single pending-action slot's current state.
     std::function<nlohmann::json(const nlohmann::json &)> action_status;
   };
 
