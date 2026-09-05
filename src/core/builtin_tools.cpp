@@ -21,6 +21,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <queue>
@@ -32,6 +33,7 @@
 #include <string_view>
 #include <sys/poll.h>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -199,15 +201,224 @@ std::string read_text_file(const std::filesystem::path &path) {
   return ss.str();
 }
 
+// Writes `content` to `path` atomically: write to a sibling temp file in
+// the same directory (so the final rename() stays on one filesystem, and
+// so it's a real replace, not a partial in-place overwrite), then
+// rename() into place. Mirrors credential_store.cpp's save_document()
+// precedent (mkstemp -> fchmod -> fsync -> rename -> fsync parent
+// directory), which is the review's fix for the "torn read" symptom
+// class: the old trunc-then-stream write left a window where a
+// concurrent, deliberately-unlocked ReadTool call could observe a
+// zero-length or half-written file (see FileMutationLock below for what
+// *is* locked -- reads are not, on purpose, matching pi's write-vs-write-
+// only locking model).
+//
+// Unlike credential_store's auth file (always fchmod'd to 0600, since it
+// holds secrets), these are ordinary workspace files: an existing file's
+// permissions (e.g. an executable script) are preserved, and a brand-new
+// file gets a normal, non-restrictive default instead of mkstemp's 0600.
 void write_text_file(const std::filesystem::path &path,
                      const std::string &content) {
-  std::filesystem::create_directories(path.parent_path());
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (!out) {
+  auto dir = path.parent_path();
+  if (dir.empty())
+    dir = ".";
+  std::filesystem::create_directories(dir);
+
+  auto tmpl = dir / (path.filename().string() + ".tmp.XXXXXX");
+  std::string tmpl_string = tmpl.string();
+  std::vector<char> buffer(tmpl_string.begin(), tmpl_string.end());
+  buffer.push_back('\0');
+  // mkstemp is a POSIX extension declared via <cstdlib> on this platform;
+  // the tool has no better header to suggest for it.
+  // NOLINTNEXTLINE(misc-include-cleaner)
+  const int fd = ::mkstemp(buffer.data());
+  if (fd < 0)
     throw std::runtime_error("Cannot write file: " + path.string());
+  const std::filesystem::path temp_path(buffer.data());
+
+  std::error_code perm_ec;
+  const auto existing_status = std::filesystem::status(path, perm_ec);
+  const bool preserve_perms =
+      !perm_ec && existing_status.type() != std::filesystem::file_type::not_found;
+  const auto perms =
+      preserve_perms
+          ? existing_status.permissions()
+          : (std::filesystem::perms::owner_read |
+             std::filesystem::perms::owner_write |
+             std::filesystem::perms::group_read |
+             std::filesystem::perms::others_read);
+
+  bool closed = false;
+  try {
+    if (::fchmod(fd, static_cast<mode_t>(perms & std::filesystem::perms::mask)) !=
+        0)
+      throw std::runtime_error("Cannot secure temporary file: " +
+                               temp_path.string());
+    std::size_t offset = 0;
+    while (offset < content.size()) {
+      const auto written =
+          ::write(fd, content.data() + offset, content.size() - offset);
+      if (written < 0) {
+        if (errno == EINTR)
+          continue;
+        throw std::runtime_error("Cannot write file: " + path.string());
+      }
+      offset += static_cast<std::size_t>(written);
+    }
+    if (::fsync(fd) != 0)
+      throw std::runtime_error("Cannot flush file: " + path.string());
+    if (::close(fd) != 0)
+      throw std::runtime_error("Cannot close file: " + path.string());
+    closed = true;
+    if (::rename(temp_path.c_str(), path.c_str()) != 0)
+      throw std::runtime_error("Cannot write file: " + path.string());
+  } catch (...) {
+    if (!closed)
+      ::close(fd);
+    std::error_code remove_ec;
+    std::filesystem::remove(temp_path, remove_ec);
+    throw;
   }
-  out << content;
+
+  const int dir_fd = ::open(dir.c_str(), O_RDONLY | O_CLOEXEC);
+  if (dir_fd >= 0) {
+    ::fsync(dir_fd);
+    ::close(dir_fd);
+  }
 }
+
+// --- FileMutationLock -------------------------------------------------
+//
+// Serializes edit/write/apply_patch tool calls against each other on the
+// same file. PreparedToolCall holds a shared_ptr<const ToolDefinition> --
+// the *same* tool instance create_all_tools built once -- and
+// execute_tool_calls_parallel dispatches calls via
+// std::async(std::launch::async, ...), so two edit/write/apply_patch calls
+// against the same file within one turn genuinely race on shared instances
+// without this.
+//
+// Guarantee boundary, stated explicitly rather than left to be inferred:
+// this lock covers edit/write/apply_patch against EACH OTHER ONLY. A
+// `bash` command mutating the same file in the same turn (e.g. `sed -i`,
+// a shell redirection) is entirely outside its scope -- nothing in this
+// phase prevents that cross-tool-type race. Reads (ReadTool) are also
+// deliberately not locked against writers, matching pi's own write-vs-
+// write-only locking model; write_text_file's atomicity fix above is what
+// keeps a concurrent, unlocked read from observing a torn write.
+//
+// Lock-key derivation: weakly_canonical (std::error_code overload) on the
+// tool's already-resolved absolute path, with the same lexically_normal
+// fallback resolve_workspace_path itself uses above for a permission-
+// denied or nonexistent ancestor -- not the throwing overload, so a path
+// like that can't turn into an uncaught exception here. Known, accepted
+// limitation (not worth solving now, just stated as a boundary of the
+// guarantee): this key scheme does not unify hardlinks (two different
+// paths, one inode) or case-differing paths on a case-insensitive
+// filesystem.
+std::string lock_key_for(const std::filesystem::path &resolved_path) {
+  std::error_code ec;
+  auto canonical = std::filesystem::weakly_canonical(resolved_path, ec);
+  if (ec)
+    canonical = resolved_path.lexically_normal();
+  return canonical.string();
+}
+
+// Returns the process-wide std::mutex guarding `key`, creating one on
+// first use. The registry is keyed by weak_ptr, not a never-erased map, so
+// a path's mutex frees itself once nothing holds it -- relevant for
+// pi-acp's long-running process, which constructs a fresh tool set per
+// session: a per-instance registry would miss cross-session collisions on
+// the same cwd entirely, so this is a process-wide static, not just nicer
+// to have.
+//
+// The exact sequence below is entirely under ONE hold of registry_mutex:
+// look up the key, call .lock() on the stored weak_ptr (returns an empty
+// shared_ptr if expired/absent); if null, make_shared<std::mutex>() and
+// overwrite the registry slot with a weak_ptr to it; take a strong
+// shared_ptr copy of whichever mutex is now current. registry_mutex is
+// then RELEASED. ONLY AFTER releasing it does the caller construct the
+// unique_lock on the per-path mutex (that's the step that actually blocks
+// the calling thread) -- that construction happens back in
+// FileMutationLock's constructor, outside this function entirely.
+//
+// Getting either half of this wrong is a real, serious bug, not a style
+// nit:
+//   - if the weak_ptr::lock()-or-make_shared-on-miss step isn't atomic
+//     under registry_mutex, two threads racing to be first on a
+//     brand-new path can each mint their own separate std::mutex,
+//     silently defeating the lock -- a bug that would pass a light test
+//     and corrupt files under real load;
+//   - if the per-path mutex's *acquisition* (not just this lookup)
+//     happened while registry_mutex were still held, every file
+//     operation in the whole process would serialize behind one global
+//     lock.
+std::shared_ptr<std::mutex> mutex_for_key(const std::string &key) {
+  static std::mutex registry_mutex;
+  static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
+
+  std::shared_ptr<std::mutex> mutex;
+  {
+    std::lock_guard<std::mutex> guard(registry_mutex);
+    auto &slot = registry[key];
+    mutex = slot.lock();
+    if (!mutex) {
+      mutex = std::make_shared<std::mutex>();
+      slot = mutex;
+    }
+  } // registry_mutex released here -- the per-path mutex itself is locked
+    // only after this point, by the caller.
+  return mutex;
+}
+
+class FileMutationLock {
+public:
+  static FileMutationLock acquire(const std::filesystem::path &resolved_path) {
+    auto locks = acquire_all({resolved_path});
+    return std::move(locks.front());
+  }
+
+  // Locks N paths, sorted AND DEDUPLICATED by canonical key first, so a
+  // multi-path caller (ApplyPatchTool) can never deadlock against a
+  // single-path caller (Edit/Write) racing on an overlapping file set, and
+  // so a patch naming the same file twice (or whose move_path collides
+  // with another hunk's path, or two paths that are symlink-aliased to
+  // the same canonical target) never double-locks the same std::mutex on
+  // this one thread.
+  static std::vector<FileMutationLock>
+  acquire_all(std::vector<std::filesystem::path> resolved_paths) {
+    std::vector<std::string> keys;
+    keys.reserve(resolved_paths.size());
+    for (const auto &p : resolved_paths)
+      keys.push_back(lock_key_for(p));
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+    std::vector<FileMutationLock> out;
+    out.reserve(keys.size());
+    for (const auto &key : keys)
+      // Not emplace_back: std::vector's emplace_back constructs via
+      // std::construct_at, which is not a member of FileMutationLock and
+      // so can't reach the private constructor even when called from
+      // here. Build the temporary in this (member) scope, where the
+      // private constructor is accessible, then move it in via the
+      // implicit (public) move constructor.
+      out.push_back(FileMutationLock(mutex_for_key(key)));
+    return out;
+  }
+
+private:
+  explicit FileMutationLock(std::shared_ptr<std::mutex> mutex)
+      : mutex_(std::move(mutex)), lock_(*mutex_) {}
+
+  std::shared_ptr<std::mutex> mutex_; // declared before lock_ so lock_
+  std::unique_lock<std::mutex> lock_; // (released first) is destroyed first
+                                      // -- confirmed necessary, not
+                                      // decorative: with a weak_ptr
+                                      // registry the lock holder can be
+                                      // the LAST strong reference to the
+                                      // mutex, so mutex_ must outlive
+                                      // lock_'s own destructor.
+};
 
 std::vector<std::string> split_lines(const std::string &content) {
   std::vector<std::string> lines;
@@ -737,6 +948,7 @@ public:
       const auto json = parse_args(args);
       const auto path = resolve_workspace_path(json.value("path", ""));
       const auto content = json.value("content", std::string{});
+      auto lock = FileMutationLock::acquire(path);
       write_text_file(path, content);
       return std::make_shared<TextToolResult>(
           "Successfully wrote " + std::to_string(content.size()) +
@@ -1082,6 +1294,19 @@ public:
       if (on_update)
         on_update(
             std::make_shared<TextToolResult>(json["input"].get<std::string>()));
+
+      // Lock every path the patch touches (source and, for a move,
+      // destination too -- apply_patch()'s internal get() reads/writes
+      // both) before applying, so a concurrent edit/write against any of
+      // them can't race this call. patch_paths() is the single, shared
+      // enumeration apply_patch() itself also uses for its own internal
+      // consistency check, so this can't silently drift out of sync with
+      // what apply_patch() actually visits.
+      std::vector<std::filesystem::path> resolved_paths;
+      for (const auto &name : pi::core::patch_paths(*patch))
+        resolved_paths.push_back(resolve_workspace_path(name));
+      auto locks = FileMutationLock::acquire_all(std::move(resolved_paths));
+
       const auto applied = pi::core::apply_patch(cwd(), *patch);
       const auto count = applied.added.size() + applied.updated.size() +
                          applied.deleted.size() + applied.moved.size();
@@ -1155,6 +1380,7 @@ public:
       json = prepare_arguments(json);
       const auto rel_path = json.value("path", "");
       const auto abs_path = resolve_workspace_path(rel_path);
+      auto lock = FileMutationLock::acquire(abs_path);
 
       bool had_bom = false;
       const auto raw = read_text_file(abs_path);

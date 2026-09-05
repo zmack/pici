@@ -1,3 +1,5 @@
+#include <atomic>
+#include <barrier>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +15,7 @@
 #include <string_view>
 #include <thread>
 #include <variant>
+#include <vector>
 
 #include "core/builtin_tools.h"
 #include <gtest/gtest.h>
@@ -671,5 +674,206 @@ TEST(BuiltinTools, Find_tool_fuzzy_mode_ranks_and_tokenizes) {
       "1", R"({"pattern":"buildtools cpp","mode":"fuzzy"})", {}, {});
   EXPECT_TRUE(!result->is_error());
   EXPECT_TRUE(result->content().find("src/build_tools.cpp") == 0);
+  std::filesystem::remove_all(root);
+}
+
+// --- Phase 3: file-mutation lock ---------------------------------------
+
+TEST(BuiltinTools, Write_tool_creates_new_and_overwrites_existing_atomically) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-write-atomic";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto read = find_tool(tools, "read");
+
+  // New file that doesn't exist yet.
+  auto create_result =
+      write->execute("1", R"({"path":"f.txt","content":"first content"})");
+  EXPECT_TRUE(!create_result->is_error());
+  auto first_read = read->execute("2", R"({"path":"f.txt"})");
+  EXPECT_TRUE(first_read->content().find("first content") != std::string::npos);
+
+  // Overwrite with shorter content -- write_text_file's atomic
+  // temp-file-then-rename swap must leave no trace of the longer original
+  // (no leftover bytes past the new EOF, which a naive trunc-in-place
+  // write would also get right, but is worth pinning down now that the
+  // implementation changed).
+  auto overwrite_result = write->execute("3", R"({"path":"f.txt","content":"hi"})");
+  EXPECT_TRUE(!overwrite_result->is_error());
+  auto second_read = read->execute("4", R"({"path":"f.txt"})");
+  EXPECT_TRUE(second_read->content().find("hi") != std::string::npos);
+  EXPECT_TRUE(second_read->content().find("first content") ==
+              std::string::npos);
+
+  // The rename-based swap should leave no ".tmp.XXXXXX" sibling behind,
+  // on either the create or the overwrite path.
+  //
+  // Note: this doesn't (and can't easily, without adding test-only
+  // production hooks) deterministically prove a concurrent reader never
+  // observes a torn/empty file mid-write -- that would need an injection
+  // seam to pause the writer mid-rename. What it does confirm is the
+  // observable, end-to-end contract: the target always ends up with
+  // exactly the new content, and the temp file used to get there is
+  // always cleaned up rather than left behind as debris.
+  int leftover_temp_files = 0;
+  for (const auto &entry : std::filesystem::directory_iterator(root)) {
+    if (entry.path().filename().string().find(".tmp.") != std::string::npos)
+      ++leftover_temp_files;
+  }
+  EXPECT_EQ(leftover_temp_files, 0);
+  std::filesystem::remove_all(root);
+}
+
+TEST(BuiltinTools, Concurrent_disjoint_edits_to_same_file_all_apply) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-concurrent-edits";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto edit = find_tool(tools, "edit");
+  auto read = find_tool(tools, "read");
+
+  constexpr int kThreads = 20;
+  // Zero-padded so no token is a substring of another (e.g. unpadded
+  // "SLOT_1" would be a substring of "SLOT_10".."SLOT_19", making
+  // EditTool reject it as ambiguous -- a test-construction bug, not
+  // anything to do with the lock).
+  auto slot_token = [](const char *prefix, int i) {
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "%s_%02d", prefix, i);
+    return std::string(buf);
+  };
+  std::string content;
+  for (int i = 0; i < kThreads; ++i)
+    content += slot_token("SLOT", i) + "\n";
+  nlohmann::json write_args = {{"path", "shared.txt"}, {"content", content}};
+  auto write_result = write->execute("seed", write_args.dump());
+  ASSERT_TRUE(!write_result->is_error());
+
+  // Each thread performs a *disjoint* edit (its own unique token) so that,
+  // with a correct lock, every single one of them succeeds and no
+  // replacement is lost to an unsynchronized read-modify-write race. A
+  // shared-counter/read-then-increment design would be wrong here:
+  // EditTool hard-errors when oldText isn't found, so once the lock is
+  // serializing threads correctly, every thread but the first would
+  // legitimately fail against a file that already changed underneath it
+  // -- that's the lock working, not a bug, but it would make "no thread
+  // errors" an impossible assertion. Disjoint edits sidestep that: they
+  // don't depend on serialization order, only on not being lost.
+  std::barrier sync_point(kThreads);
+  std::vector<std::thread> threads;
+  std::vector<std::shared_ptr<ToolResult>> results(kThreads);
+  for (int i = 0; i < kThreads; ++i) {
+    threads.emplace_back([&, i]() {
+      nlohmann::json edit_args = {
+          {"path", "shared.txt"},
+          {"edits", nlohmann::json::array({nlohmann::json{
+                        {"oldText", slot_token("SLOT", i)},
+                        {"newText", slot_token("DONE", i)}}})}};
+      const auto args_str = edit_args.dump();
+      sync_point.arrive_and_wait(); // release all threads at once so they
+                                    // collide with near-certainty on a
+                                    // real filesystem
+      results[i] = edit->execute(std::to_string(i), args_str);
+    });
+  }
+  for (auto &t : threads)
+    t.join();
+
+  for (int i = 0; i < kThreads; ++i) {
+    EXPECT_TRUE(!results[i]->is_error())
+        << "thread " << i << " failed: " << results[i]->content();
+  }
+
+  auto final_read = read->execute("final", R"({"path":"shared.txt"})");
+  for (int i = 0; i < kThreads; ++i) {
+    EXPECT_TRUE(final_read->content().find(slot_token("DONE", i)) !=
+                std::string::npos)
+        << slot_token("DONE", i) << " missing from final file -- a "
+        << "concurrent edit was lost";
+  }
+  std::filesystem::remove_all(root);
+}
+
+TEST(BuiltinTools, ApplyPatch_and_Edit_on_same_file_both_apply) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-concurrent-patch-edit";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root);
+  auto write = find_tool(tools, "write");
+  auto edit = find_tool(tools, "edit");
+  auto apply_patch_tool = find_tool(tools, "apply_patch");
+  auto read = find_tool(tools, "read");
+  ASSERT_TRUE(apply_patch_tool != nullptr);
+
+  constexpr int kIterations = 10;
+  std::string content;
+  for (int i = 0; i < kIterations; ++i)
+    content += "A_" + std::to_string(i) + "\n";
+  for (int i = 0; i < kIterations; ++i)
+    content += "B_" + std::to_string(i) + "\n";
+  nlohmann::json write_args = {{"path", "shared.txt"}, {"content", content}};
+  ASSERT_TRUE(!write->execute("seed", write_args.dump())->is_error());
+
+  // Two actors race repeatedly against the SAME file, each confined to its
+  // own disjoint token region ("A_*" for apply_patch, "B_*" for edit) so
+  // that a lost update in either region is unambiguous and doesn't depend
+  // on inter-thread ordering. Released together via the same barrier so
+  // they overlap for the whole run, not just at the start.
+  std::barrier sync_point(2);
+  std::atomic<bool> patch_ok{true};
+  std::atomic<bool> edit_ok{true};
+
+  std::thread patch_thread([&]() {
+    sync_point.arrive_and_wait();
+    for (int i = 0; i < kIterations; ++i) {
+      const std::string old_token = "A_" + std::to_string(i);
+      const std::string new_token = "AD_" + std::to_string(i);
+      const std::string patch_text = "*** Begin Patch\n"
+                                     "*** Update File: shared.txt\n"
+                                     "@@\n"
+                                     "-" +
+                                     old_token + "\n+" + new_token +
+                                     "\n*** End Patch\n";
+      nlohmann::json patch_args = {{"input", patch_text}};
+      auto result = apply_patch_tool->execute(
+          "patch-" + std::to_string(i), patch_args.dump());
+      if (result->is_error())
+        patch_ok = false;
+    }
+  });
+  std::thread edit_thread([&]() {
+    sync_point.arrive_and_wait();
+    for (int i = 0; i < kIterations; ++i) {
+      nlohmann::json edit_args = {
+          {"path", "shared.txt"},
+          {"edits", nlohmann::json::array({nlohmann::json{
+                        {"oldText", "B_" + std::to_string(i)},
+                        {"newText", "BD_" + std::to_string(i)}}})}};
+      auto result =
+          edit->execute("edit-" + std::to_string(i), edit_args.dump());
+      if (result->is_error())
+        edit_ok = false;
+    }
+  });
+  patch_thread.join();
+  edit_thread.join();
+
+  EXPECT_TRUE(patch_ok.load()) << "an apply_patch call in region A failed";
+  EXPECT_TRUE(edit_ok.load()) << "an edit call in region B failed";
+
+  auto final_read = read->execute("final", R"({"path":"shared.txt"})");
+  for (int i = 0; i < kIterations; ++i) {
+    EXPECT_TRUE(final_read->content().find("AD_" + std::to_string(i)) !=
+                std::string::npos)
+        << "AD_" << i << " missing -- an apply_patch update was lost";
+    EXPECT_TRUE(final_read->content().find("BD_" + std::to_string(i)) !=
+                std::string::npos)
+        << "BD_" << i << " missing -- an edit update was lost";
+  }
   std::filesystem::remove_all(root);
 }

@@ -1,14 +1,18 @@
 #include "core/apply_patch.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cctype>
+#include <cerrno>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <ios>
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -17,6 +21,10 @@
 #include <utility>
 #include <variant>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace pi::core {
 namespace {
@@ -143,7 +151,107 @@ std::string read_file(const std::filesystem::path &p) {
     throw std::runtime_error("Cannot read file: " + p.string());
   return {std::istreambuf_iterator<char>(in), {}};
 }
+
+// Writes `content` to `p` atomically: write to a sibling temp file in the
+// same directory then rename() into place, mirroring
+// credential_store.cpp's save_document() precedent (mkstemp -> fchmod ->
+// fsync -> rename -> fsync parent directory) -- the same treatment
+// builtin_tools.cpp's write_text_file() applies, and for the same reason:
+// a plain trunc-then-stream write leaves a window where a concurrent,
+// unlocked reader could observe a zero-length or half-written file.
+// Duplicated here (rather than shared) because apply_patch.cpp and
+// builtin_tools.cpp are separate translation units with no existing
+// shared "file I/O primitives" header; both mirror the same upstream
+// precedent independently.
+//
+// As with write_text_file, an existing file's permissions are preserved
+// (these are ordinary workspace files, not secrets) and a brand-new file
+// gets a normal, non-restrictive default instead of mkstemp's 0600.
+void write_file_atomic(const std::filesystem::path &p,
+                       const std::string &content) {
+  auto dir = p.parent_path();
+  if (dir.empty())
+    dir = ".";
+
+  auto tmpl = dir / (p.filename().string() + ".tmp.XXXXXX");
+  std::string tmpl_string = tmpl.string();
+  std::vector<char> buffer(tmpl_string.begin(), tmpl_string.end());
+  buffer.push_back('\0');
+  // mkstemp is a POSIX extension declared via <cstdlib> on this platform;
+  // the tool has no better header to suggest for it.
+  // NOLINTNEXTLINE(misc-include-cleaner)
+  const int fd = ::mkstemp(buffer.data());
+  if (fd < 0)
+    throw std::runtime_error("Cannot write file: " + p.string());
+  const std::filesystem::path temp_path(buffer.data());
+
+  std::error_code perm_ec;
+  const auto existing_status = std::filesystem::status(p, perm_ec);
+  const bool preserve_perms =
+      !perm_ec && existing_status.type() != std::filesystem::file_type::not_found;
+  const auto perms =
+      preserve_perms
+          ? existing_status.permissions()
+          : (std::filesystem::perms::owner_read |
+             std::filesystem::perms::owner_write |
+             std::filesystem::perms::group_read |
+             std::filesystem::perms::others_read);
+
+  bool closed = false;
+  try {
+    if (::fchmod(fd, static_cast<mode_t>(perms & std::filesystem::perms::mask)) !=
+        0)
+      throw std::runtime_error("Cannot secure temporary file: " +
+                               temp_path.string());
+    std::size_t offset = 0;
+    while (offset < content.size()) {
+      const auto written =
+          ::write(fd, content.data() + offset, content.size() - offset);
+      if (written < 0) {
+        if (errno == EINTR)
+          continue;
+        throw std::runtime_error("Cannot write file: " + p.string());
+      }
+      offset += static_cast<std::size_t>(written);
+    }
+    if (::fsync(fd) != 0)
+      throw std::runtime_error("Cannot flush file: " + p.string());
+    if (::close(fd) != 0)
+      throw std::runtime_error("Cannot close file: " + p.string());
+    closed = true;
+    if (::rename(temp_path.c_str(), p.c_str()) != 0)
+      throw std::runtime_error("Cannot write file: " + p.string());
+  } catch (...) {
+    if (!closed)
+      ::close(fd);
+    std::error_code remove_ec;
+    std::filesystem::remove(temp_path, remove_ec);
+    throw;
+  }
+
+  const int dir_fd = ::open(dir.c_str(), O_RDONLY | O_CLOEXEC);
+  if (dir_fd >= 0) {
+    ::fsync(dir_fd);
+    ::close(dir_fd);
+  }
+}
 } // namespace
+
+std::vector<std::string> patch_paths(const Patch &patch) {
+  std::vector<std::string> paths;
+  for (const auto &h : patch.hunks) {
+    if (const auto *a = std::get_if<AddFile>(&h)) {
+      paths.push_back(a->path);
+    } else if (const auto *d = std::get_if<DeleteFile>(&h)) {
+      paths.push_back(d->path);
+    } else if (const auto *u = std::get_if<UpdateFile>(&h)) {
+      paths.push_back(u->path);
+      if (u->move_path)
+        paths.push_back(*u->move_path);
+    }
+  }
+  return paths;
+}
 
 std::optional<Patch> parse_patch(std::string_view text, bool lenient,
                                  ParseDiagnostic &error) {
@@ -341,14 +449,31 @@ AppliedPatch apply_patch(const std::filesystem::path &cwd, const Patch &patch,
       result.updated.push_back(u.path);
     }
   }
+#ifndef NDEBUG
+  // Debug-only consistency check (the review's concern: a future hunk type
+  // that get()s a path this loop doesn't also feed through patch_paths()
+  // would produce an under-covering lock enumeration in
+  // ApplyPatchTool::execute with no error). patch_paths() must enumerate
+  // at least every path actually visited via get() above (the `paths` map
+  // keys); cheap and only compiled into non-NDEBUG builds, so it adds no
+  // cost to a release build on this hot path.
+  {
+    std::set<std::string> expected;
+    for (const auto &name : patch_paths(patch))
+      expected.insert(safe_path(cwd, name).string());
+    for (const auto &[key, entry] : paths) {
+      (void)entry;
+      assert(expected.contains(key) &&
+             "apply_patch() visited a path patch_paths() did not enumerate");
+    }
+  }
+#endif
   for (auto &[key, e] : overlay) {
     auto p = paths[key];
     if (e.exists) {
       if (options.create_parents)
         std::filesystem::create_directories(p.parent_path());
-      std::ofstream out(p, std::ios::binary | std::ios::trunc);
-      if (!out)
-        throw std::runtime_error("Cannot write file: " + p.string());
+      std::ostringstream out;
       if (e.bom)
         out << "\xEF\xBB\xBF";
       for (std::size_t i = 0; i < e.lines.size(); ++i) {
@@ -358,6 +483,7 @@ AppliedPatch apply_patch(const std::filesystem::path &cwd, const Patch &patch,
       }
       if (e.trailing_newline && !e.lines.empty())
         out << '\n';
+      write_file_atomic(p, out.str());
     } else if (std::filesystem::exists(p))
       std::filesystem::remove(p);
   }

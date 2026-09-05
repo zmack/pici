@@ -40,6 +40,15 @@ struct ParseDiagnostic {
 std::optional<Patch> parse_patch(std::string_view text, bool lenient,
                                  ParseDiagnostic &error);
 
+// Every path a patch touches: AddFile::path, DeleteFile::path,
+// UpdateFile::path, and UpdateFile::move_path when present -- exactly the
+// set apply_patch()'s own internal `get()` lambda visits. Callers that
+// need to take a file-mutation lock before applying a patch (see
+// builtin_tools.cpp's ApplyPatchTool::execute) should enumerate paths via
+// this function rather than re-deriving the visitation rule ad hoc, so a
+// future hunk type can't silently drift out of sync between the two.
+std::vector<std::string> patch_paths(const Patch &patch);
+
 enum class LineEndings { normalize_lf, preserve };
 struct ApplyPatchOptions {
   bool create_parents{true};
