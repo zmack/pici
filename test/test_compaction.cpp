@@ -22,6 +22,7 @@
 #include "core/agent.h"
 #include "core/agent_state.h"
 #include "core/compaction.h"
+#include "core/event_json.h"
 #include "core/event_types.h"
 #include "core/llm_client.h"
 #include "core/message_types.h"
@@ -1386,4 +1387,261 @@ TEST(Compaction,
 
   store.reset();
   std::filesystem::remove_all(session_dir);
+}
+
+// --- Phase 1: Lua-initiated session-lifecycle actions
+// (plans/velvety-skipping-marble.md) -- queue infrastructure + compaction
+// only. The central constraint under test throughout this section:
+// request_deferred_compaction() only ever enqueues; the ONLY place that
+// applies a pending action is SessionRuntime::run_messages, via
+// try_drain_pending_action, right after the turn's own event stream (and
+// maybe_auto_compact_after_turn) have already finished. -----------------
+
+TEST(Compaction,
+     SessionRuntime_lua_requested_compaction_is_deferred_and_applied_after_the_turn_ends) {
+  AssistantMessage reply = make_assistant_message(
+      "hello", "lua-deferred-compaction-test", "faux", "faux-model");
+  FauxClient::Script script;
+  script.events = {
+      AssistantMessageEvent{AssistantMessageStartEvent{}},
+      AssistantMessageEvent{AssistantMessageDoneEvent{StopReason::stop, reply}},
+  };
+  CompactionResult compact_success;
+  compact_success.messages.push_back(Message{make_user_message("summary")});
+
+  LLMClientRegistry::instance().register_client(
+      "lua-deferred-compaction-test", [script, compact_success] {
+        return std::make_shared<FauxClient>(
+            std::vector<FauxClient::Script>{script},
+            std::vector<CompactionResult>{compact_success});
+      });
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-compaction-test";
+  config.agent_options.model.provider = "faux";
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  session.create_session(header);
+
+  // Simulates a mid-turn on_event hook requesting a compaction -- called
+  // from inside the very callback run_messages() drains its own turn
+  // events through, exactly as a Lua on_event hook would (minus the actual
+  // Lua call). request_deferred_compaction() must only enqueue: it must
+  // not itself cause a CompactionEvent to appear before the turn (marked
+  // here by TurnEndEvent) finishes.
+  bool requested = false;
+  bool turn_finished = false;
+  bool compaction_seen_before_turn_finished = false;
+  std::vector<std::pair<CompactionEventKind, CompactionTrigger>>
+      compaction_events;
+
+  auto result = session.run_prompt("hi", [&](const AgentEvent &ev) {
+    if (const auto *ce = std::get_if<CompactionEvent>(&ev)) {
+      if (!turn_finished)
+        compaction_seen_before_turn_finished = true;
+      compaction_events.push_back({ce->kind, ce->trigger});
+      return;
+    }
+    if (std::holds_alternative<TurnEndEvent>(ev))
+      turn_finished = true;
+    if (!requested && std::holds_alternative<MessageEndEvent>(ev)) {
+      requested = true;
+      auto request_result = session.request_deferred_compaction();
+      EXPECT_TRUE(request_result.accepted);
+    }
+  });
+
+  EXPECT_TRUE(!result.error.has_value());
+  EXPECT_TRUE(requested);
+  // The whole point of the deferred design: no CompactionEvent appears
+  // mid-turn, only after the turn (and maybe_auto_compact_after_turn) have
+  // already completed.
+  EXPECT_FALSE(compaction_seen_before_turn_finished);
+  ASSERT_EQ(compaction_events.size(), std::size_t(2));
+  EXPECT_EQ(compaction_events[0].first, CompactionEventKind::start);
+  EXPECT_EQ(compaction_events[0].second, CompactionTrigger::lua_requested);
+  EXPECT_EQ(compaction_events[1].first, CompactionEventKind::complete);
+  EXPECT_EQ(compaction_events[1].second, CompactionTrigger::lua_requested);
+}
+
+TEST(Compaction,
+     SessionRuntime_a_second_pending_action_is_rejected_while_one_is_pending) {
+  AssistantMessage reply = make_assistant_message(
+      "hello", "lua-deferred-reject-test", "faux", "faux-model");
+  FauxClient::Script script;
+  script.events = {
+      AssistantMessageEvent{AssistantMessageStartEvent{}},
+      AssistantMessageEvent{AssistantMessageDoneEvent{StopReason::stop, reply}},
+  };
+  CompactionResult compact_success;
+  compact_success.messages.push_back(Message{make_user_message("summary")});
+
+  LLMClientRegistry::instance().register_client(
+      "lua-deferred-reject-test", [script, compact_success] {
+        return std::make_shared<FauxClient>(
+            std::vector<FauxClient::Script>{script},
+            std::vector<CompactionResult>{compact_success});
+      });
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-reject-test";
+  config.agent_options.model.provider = "faux";
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  session.create_session(header);
+
+  bool requested_once = false;
+  std::optional<SessionRuntime::DeferredActionResult> first_result;
+  std::optional<SessionRuntime::DeferredActionResult> second_result;
+
+  auto result = session.run_prompt("hi", [&](const AgentEvent &ev) {
+    if (!requested_once && std::holds_alternative<MessageEndEvent>(ev)) {
+      requested_once = true;
+      first_result = session.request_deferred_compaction();
+      second_result = session.request_deferred_compaction();
+    }
+  });
+
+  EXPECT_TRUE(!result.error.has_value());
+  ASSERT_TRUE(first_result.has_value());
+  ASSERT_TRUE(second_result.has_value());
+  EXPECT_TRUE(first_result->accepted);
+  EXPECT_FALSE(second_result->accepted);
+  ASSERT_TRUE(second_result->error.has_value());
+  // Names the already-pending kind rather than a generic "another action".
+  EXPECT_NE(second_result->error->find("compaction"), std::string::npos);
+  EXPECT_NE(second_result->error->find("pending"), std::string::npos);
+}
+
+TEST(Compaction,
+     SessionRuntime_a_request_made_with_no_turn_in_flight_applies_at_the_end_of_the_next_turn) {
+  AssistantMessage reply = make_assistant_message(
+      "hello", "lua-deferred-idle-test", "faux", "faux-model");
+  FauxClient::Script script;
+  script.events = {
+      AssistantMessageEvent{AssistantMessageStartEvent{}},
+      AssistantMessageEvent{AssistantMessageDoneEvent{StopReason::stop, reply}},
+  };
+  CompactionResult compact_success;
+  compact_success.messages.push_back(Message{make_user_message("summary")});
+
+  LLMClientRegistry::instance().register_client(
+      "lua-deferred-idle-test", [script, compact_success] {
+        return std::make_shared<FauxClient>(
+            std::vector<FauxClient::Script>{script},
+            std::vector<CompactionResult>{compact_success});
+      });
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-idle-test";
+  config.agent_options.model.provider = "faux";
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  session.create_session(header);
+  session.agent().state().append_message(
+      Message{make_user_message("already here")});
+  const auto messages_before_count =
+      session.agent().state().messages().size();
+
+  // No run_messages()/run_prompt() call in flight at all -- the agent is
+  // fully idle. This replaces the invalid "applies immediately when idle"
+  // behavior: v1 deliberately waits for the next turn instead.
+  auto request_result = session.request_deferred_compaction();
+  EXPECT_TRUE(request_result.accepted);
+
+  EXPECT_EQ(session.agent().state().messages().size(),
+            messages_before_count);
+  auto status_before = session.action_status();
+  EXPECT_EQ(status_before["pending"], "compaction");
+  EXPECT_FALSE(status_before["applying"].get<bool>());
+
+  std::size_t compaction_event_count = 0;
+  auto result = session.run_prompt("hi", [&](const AgentEvent &ev) {
+    if (std::holds_alternative<CompactionEvent>(ev))
+      compaction_event_count++;
+  });
+
+  EXPECT_TRUE(!result.error.has_value());
+  // Exactly one start+complete pair: applied at the end of this turn.
+  EXPECT_EQ(compaction_event_count, std::size_t(2));
+
+  auto status_after = session.action_status();
+  EXPECT_TRUE(status_after["pending"].is_null());
+  EXPECT_FALSE(status_after["applying"].get<bool>());
+}
+
+TEST(
+    Compaction,
+    SessionRuntime_a_failed_deferred_action_is_reported_via_last_deferred_action_error_not_silently_dropped) {
+  AssistantMessage reply = make_assistant_message(
+      "hello", "lua-deferred-fail-test", "faux", "faux-model");
+  FauxClient::Script script;
+  script.events = {
+      AssistantMessageEvent{AssistantMessageStartEvent{}},
+      AssistantMessageEvent{AssistantMessageDoneEvent{StopReason::stop, reply}},
+  };
+  // http_status = 400 keeps this a non-retryable, immediate failure rather
+  // than exercising run_compaction's retry-with-backoff path.
+  CompactionResult failing;
+  failing.error_message = "deferred compaction boom";
+  failing.http_status = 400;
+
+  LLMClientRegistry::instance().register_client(
+      "lua-deferred-fail-test", [script, failing] {
+        return std::make_shared<FauxClient>(
+            std::vector<FauxClient::Script>{script},
+            std::vector<CompactionResult>{failing});
+      });
+
+  SessionRuntime::Config config;
+  config.agent_options.model.id = "faux-model";
+  config.agent_options.model.api = "lua-deferred-fail-test";
+  config.agent_options.model.provider = "faux";
+  SessionRuntime session(std::move(config));
+
+  SessionHeader header;
+  session.create_session(header);
+
+  bool requested = false;
+  auto result = session.run_prompt("hi", [&](const AgentEvent &ev) {
+    if (!requested && std::holds_alternative<MessageEndEvent>(ev)) {
+      requested = true;
+      auto request_result = session.request_deferred_compaction();
+      EXPECT_TRUE(request_result.accepted);
+    }
+  });
+
+  EXPECT_TRUE(!result.error.has_value());
+  EXPECT_TRUE(requested);
+
+  // The failure is not silently dropped: last_deferred_action_error_
+  // (surfaced via action_status()) reports it, and the pending/applying
+  // slot is cleanly reset rather than left stuck.
+  auto status = session.action_status();
+  EXPECT_TRUE(status["pending"].is_null());
+  EXPECT_FALSE(status["applying"].get<bool>());
+  ASSERT_FALSE(status["last_error"].is_null());
+  EXPECT_NE(
+      status["last_error"].get<std::string>().find("deferred compaction boom"),
+      std::string::npos);
+}
+
+TEST(Compaction, CompactionEvent_trigger_field_round_trips_through_event_to_json) {
+  CompactionEvent event(CompactionEventKind::start);
+  event.trigger = CompactionTrigger::lua_requested;
+
+  auto json = event_to_json(AgentEvent{event});
+
+  // Regression check for an earlier draft's bug: trigger lives inside the
+  // "data" object (CompactionEvent's own fields), not at the top level of
+  // the {"type","event","sequence","timestamp","data"} envelope.
+  ASSERT_TRUE(json.contains("data"));
+  EXPECT_EQ(json["data"]["trigger"], "lua_requested");
+  EXPECT_FALSE(json.contains("trigger"));
 }

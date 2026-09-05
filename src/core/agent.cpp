@@ -698,11 +698,13 @@ Agent::compact(CompactionTrigger trigger) {
             CompactionEvent error_event(CompactionEventKind::error);
             error_event.snapshot_epoch = epoch;
             error_event.error_message = error.what();
+            error_event.trigger = request.trigger;
             stream.push(AgentEvent{std::move(error_event)});
           } catch (...) {
             CompactionEvent error_event(CompactionEventKind::error);
             error_event.snapshot_epoch = epoch;
             error_event.error_message = "Unknown compaction error";
+            error_event.trigger = request.trigger;
             stream.push(AgentEvent{std::move(error_event)});
           }
           // A Ctrl-C during the network call above (compact() never marks

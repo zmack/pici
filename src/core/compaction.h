@@ -16,12 +16,10 @@
 
 namespace pi::core {
 
-enum class CompactionTrigger {
-  manual,
-  automatic_pre_turn,
-  context_window_retry,
-};
-
+// CompactionTrigger itself is defined in event_types.h (included above) --
+// see the comment there for why (CompactionEvent needs it as a field and
+// this header includes event_types.h, so the reverse include would be
+// circular). It is still reached as pi::core::CompactionTrigger from here.
 std::string_view compaction_trigger_to_string(CompactionTrigger trigger);
 
 // Provider-neutral, static capability query: does this model's API expose a

@@ -722,6 +722,15 @@ public:
 
     lua_newtable(L_);
     lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_session_request_compaction, 1);
+    lua_setfield(L_, -2, "request_compaction");
+    lua_pushlightuserdata(L_, this);
+    lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_session_action_status, 1);
+    lua_setfield(L_, -2, "action_status");
+    lua_setfield(L_, -2, "session");
+
+    lua_newtable(L_);
+    lua_pushlightuserdata(L_, this);
     lua_pushcclosure(L_, &LuaHooksImpl::lua_pici_mailbox_self, 1);
     lua_setfield(L_, -2, "self");
     lua_pushlightuserdata(L_, this);
@@ -1267,13 +1276,18 @@ public:
     return 0;
   }
 
+  // `domain` names the pici.<domain> table this binding belongs to (e.g.
+  // "agents", "session") -- used to build both the "not available" message
+  // and the generic error fallback so callers under pici.session.* don't
+  // misleadingly say "agent task error".
   static int push_agent_binding(
       lua_State *L,
       const std::function<nlohmann::json(const nlohmann::json &)> &fn,
-      const nlohmann::json &args) {
+      const nlohmann::json &args, std::string_view domain) {
     if (!fn) {
       lua_pushnil(L);
-      lua_pushstring(L, "pici.agents is not available");
+      const auto message = "pici." + std::string(domain) + " is not available";
+      lua_pushstring(L, message.c_str());
       return 2;
     }
     try {
@@ -1281,8 +1295,9 @@ public:
       if (result.contains("error")) {
         lua_pushnil(L);
         const auto &error = result["error"];
+        const auto fallback = std::string(domain) + " action error";
         const auto message = error.is_object()
-                                 ? error.value("message", "agent task error")
+                                 ? error.value("message", fallback)
                                  : error.get<std::string>();
         lua_pushstring(L, message.c_str());
         return 2;
@@ -1430,12 +1445,14 @@ public:
 
   static int lua_pici_agents_spawn(lua_State *L) {
     auto *impl = impl_from(L);
-    return push_agent_binding(L, impl->agent_bindings_.spawn, agent_args(L));
+    return push_agent_binding(L, impl->agent_bindings_.spawn, agent_args(L),
+                              "agents");
   }
 
   static int lua_pici_agents_get(lua_State *L) {
     auto *impl = impl_from(L);
-    return push_agent_binding(L, impl->agent_bindings_.get, agent_args(L));
+    return push_agent_binding(L, impl->agent_bindings_.get, agent_args(L),
+                              "agents");
   }
 
   static int lua_pici_agents_list(lua_State *L) {
@@ -1445,35 +1462,49 @@ public:
       args = nlohmann::json{{"path_prefix", lua_tostring(L, 1)}};
     else
       args = agent_args(L);
-    return push_agent_binding(L, impl->agent_bindings_.list, args);
+    return push_agent_binding(L, impl->agent_bindings_.list, args, "agents");
   }
 
   static int lua_pici_agents_send(lua_State *L) {
     auto *impl = impl_from(L);
     return push_agent_binding(L, impl->agent_bindings_.send_message,
-                              agent_args(L));
+                              agent_args(L), "agents");
   }
 
   static int lua_pici_agents_follow_up(lua_State *L) {
     auto *impl = impl_from(L);
     return push_agent_binding(L, impl->agent_bindings_.follow_up,
-                              agent_args(L));
+                              agent_args(L), "agents");
   }
 
   static int lua_pici_agents_interrupt(lua_State *L) {
     auto *impl = impl_from(L);
     return push_agent_binding(L, impl->agent_bindings_.interrupt,
-                              agent_args(L));
+                              agent_args(L), "agents");
   }
 
   static int lua_pici_agents_wait(lua_State *L) {
     auto *impl = impl_from(L);
-    return push_agent_binding(L, impl->agent_bindings_.wait, agent_args(L));
+    return push_agent_binding(L, impl->agent_bindings_.wait, agent_args(L),
+                              "agents");
   }
 
   static int lua_pici_agents_close(lua_State *L) {
     auto *impl = impl_from(L);
-    return push_agent_binding(L, impl->agent_bindings_.close, agent_args(L));
+    return push_agent_binding(L, impl->agent_bindings_.close, agent_args(L),
+                              "agents");
+  }
+
+  static int lua_pici_session_request_compaction(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->session_bindings_.request_compaction,
+                              agent_args(L), "session");
+  }
+
+  static int lua_pici_session_action_status(lua_State *L) {
+    auto *impl = impl_from(L);
+    return push_agent_binding(L, impl->session_bindings_.action_status,
+                              agent_args(L), "session");
   }
 
   static int lua_pici_run_agent(lua_State *L) {
@@ -1570,6 +1601,7 @@ public:
     run_agent_fn_ = info.run_agent;
     agent_bindings_ = info.agents;
     mailbox_bindings_ = info.mailbox;
+    session_bindings_ = info.session;
     storage_path_ = info.storage_path;
     load_storage();
 
@@ -1893,6 +1925,7 @@ private:
   LuaHooks::RunAgentFn run_agent_fn_;
   LuaHooks::AgentBindings agent_bindings_;
   LuaHooks::MailboxBindings mailbox_bindings_;
+  LuaHooks::SessionBindings session_bindings_;
   nlohmann::json storage_{nlohmann::json::object()};
   std::filesystem::path storage_path_;
   mutable std::mutex mutex_;

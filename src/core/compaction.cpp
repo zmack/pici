@@ -31,6 +31,8 @@ std::string_view compaction_trigger_to_string(CompactionTrigger trigger) {
     return "automatic_pre_turn";
   case CompactionTrigger::context_window_retry:
     return "context_window_retry";
+  case CompactionTrigger::lua_requested:
+    return "lua_requested";
   }
   return "unknown";
 }
@@ -205,6 +207,7 @@ CompactionOutcome run_compaction(const CompactionRunRequest &request,
   start.snapshot_epoch = request.snapshot_epoch;
   start.provider = request.context.model.provider;
   start.model = request.context.model.id;
+  start.trigger = request.trigger;
   if (push)
     push(AgentEvent{std::move(start)});
 
@@ -219,6 +222,7 @@ CompactionOutcome run_compaction(const CompactionRunRequest &request,
     error_event.model = request.context.model.id;
     error_event.error_message = outcome.error;
     error_event.unsupported = true;
+    error_event.trigger = request.trigger;
     if (push)
       push(AgentEvent{std::move(error_event)});
     return outcome;
@@ -258,6 +262,7 @@ CompactionOutcome run_compaction(const CompactionRunRequest &request,
                             : "compaction was cancelled");
     error_event.cancelled = outcome.cancelled;
     error_event.unsupported = outcome.unsupported;
+    error_event.trigger = request.trigger;
     if (push)
       push(AgentEvent{std::move(error_event)});
     return outcome;
@@ -276,6 +281,7 @@ CompactionOutcome run_compaction(const CompactionRunRequest &request,
   complete.usage_before = usage_before;
   complete.usage_after = result.usage;
   complete.retained_message_count = outcome.retained_message_count;
+  complete.trigger = request.trigger;
   if (push)
     push(AgentEvent{std::move(complete)});
 

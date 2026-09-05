@@ -23,9 +23,12 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace pi::core {
@@ -169,6 +172,62 @@ public:
   compact_active_session(CompactionTrigger trigger = CompactionTrigger::manual,
                          const EventCallback &callback = {});
 
+  // --- Lua-initiated session-lifecycle actions
+  // (plans/velvety-skipping-marble.md) ---
+  //
+  // The central constraint (see that plan's revision note): no
+  // session-lifecycle action may ever be applied from a thread that could be
+  // holding a LuaHooksImpl::mutex_ -- i.e. from inside any Lua hook call,
+  // including on_event fired from the compaction worker thread itself
+  // (Agent::compact() never marks is_streaming(), so a naive "apply
+  // immediately if idle" check is always wrong for the compaction case).
+  // request_deferred_compaction() (and, in later phases, its model-switch
+  // and fork siblings) therefore ONLY enqueues a request; it never applies
+  // it. The only place that ever applies a pending action is
+  // try_drain_pending_action(), called from exactly one site:
+  // run_messages(), immediately after maybe_auto_compact_after_turn() --
+  // never from a Lua-hook-holding thread. Do not add another drain call
+  // site or an "apply now if idle" fast path; see the plan for the
+  // deadlock/terminate hazard that shape caused.
+  //
+  // A request made with no turn in flight is a deliberate v1 limitation: it
+  // simply waits for the next turn to complete before it applies -- there is
+  // no "apply immediately if idle" path.
+  struct PendingCompaction {};
+  struct PendingModelSwitch {
+    Model model;
+    ThinkingLevel thinking{ThinkingLevel::off};
+  };
+  struct PendingFork {
+    std::optional<std::string> name;
+  };
+  // Phase 1 only ever constructs/handles PendingCompaction; PendingModelSwitch
+  // and PendingFork are declared now (unused until Phases 2/3) so the single
+  // std::visit in try_drain_pending_action() only ever needs to grow, not be
+  // reshaped, as later phases land.
+  using PendingSessionAction =
+      std::variant<PendingCompaction, PendingModelSwitch, PendingFork>;
+
+  struct DeferredActionResult {
+    bool accepted{false};
+    std::optional<std::string> error;
+  };
+
+  // Enqueue-only: installs a PendingCompaction if no action is currently
+  // pending or applying, and returns immediately. Never drains/applies
+  // anything itself -- see the class-level note above. Safe to call from any
+  // thread, including from inside a Lua on_event hook (which is the whole
+  // point: this is how a Lua add-on requests a compaction without itself
+  // ever touching compact_active_session).
+  DeferredActionResult request_deferred_compaction();
+
+  // Current state of the single pending-action slot, guarded by
+  // pending_action_mutex_: {"pending": "compaction"|null, "applying": bool,
+  // "last_error": string|null}. Lets a Lua add-on (which only ever observes
+  // events, never blocks on a drain it can't safely trigger) poll status
+  // instead of guessing.
+  nlohmann::json action_status() const;
+
   // Phase B of construction (plans/session-runtime-migration.md Phase 6):
   // builds a TaskTree (fanning out extra_task_event_callback alongside the
   // owned mailbox runtime's own task-event callback -- both must be known
@@ -221,6 +280,32 @@ private:
   // turn that already completed successfully.
   void maybe_auto_compact_after_turn(const EventCallback &callback);
 
+  // Human-readable name for whatever PendingSessionAction alternative is
+  // currently installed (or, if none, unused) -- shared by
+  // request_deferred_compaction()'s (and later phases' request_deferred_*'s)
+  // rejection message and action_status()'s "pending" field, so the two
+  // never drift into naming the same kind differently.
+  static std::string_view
+  pending_action_kind_name(const PendingSessionAction &action);
+
+  // The ONLY call site that ever applies a pending action
+  // (plans/velvety-skipping-marble.md's central constraint -- see the
+  // class-level note above request_deferred_compaction()). Called from
+  // run_messages() right after maybe_auto_compact_after_turn(), i.e. on
+  // whatever thread drives run_messages (REPL/RPC/ACP), never from inside a
+  // Lua hook call. Takes the pending action (if any, and if not already
+  // applying) via std::exchange, marks applying_action_ true while it runs
+  // (so a concurrent request_deferred_* sees "applying" rather than racing
+  // to install a second action), applies it inside a try/catch, and records
+  // any failure -- reported or thrown -- into last_deferred_action_error_
+  // rather than letting it vanish or escape run_messages uncaught.
+  //
+  // Note: on the context-window-retry path, a retry has already run one
+  // compaction plus a full extra turn before this drain fires, so a
+  // Lua-requested compaction can become a third round-trip back-to-back in
+  // that case -- acceptable, not a bug.
+  void try_drain_pending_action(const EventCallback &callback);
+
   Agent agent_;
   std::shared_ptr<SessionStore> session_store_;
   SandboxPolicyPtr sandbox_policy_;
@@ -230,6 +315,15 @@ private:
   std::optional<std::string> active_session_id_;
   std::optional<std::string> last_warning_;
   AutoCompactionConfig auto_compaction_;
+
+  // Lua-initiated session-lifecycle action queue
+  // (plans/velvety-skipping-marble.md). All four guarded by
+  // pending_action_mutex_; see request_deferred_compaction(),
+  // try_drain_pending_action(), and action_status() above/below.
+  mutable std::mutex pending_action_mutex_;
+  std::optional<PendingSessionAction> pending_action_;
+  bool applying_action_{false};
+  std::optional<std::string> last_deferred_action_error_;
 
   // mailbox_runtime_ must be destroyed (detaching its observer) before
   // agent_'s own teardown reaches its owned TaskTree, or mailbox delivery

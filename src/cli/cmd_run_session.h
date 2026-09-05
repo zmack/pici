@@ -1492,6 +1492,24 @@ private:
     info.storage_path = std::move(storage_path);
     info.mailbox = core::make_mailbox_bindings(mailbox);
 
+    // Lua-initiated session-lifecycle actions
+    // (plans/velvety-skipping-marble.md): enqueue-only, applied only from
+    // SessionRuntime::run_messages between turns -- see
+    // SessionRuntime::request_deferred_compaction's doc comment for why
+    // this never applies anything itself, even when called from inside an
+    // on_event hook.
+    info.session.request_compaction =
+        [this](const nlohmann::json &) -> nlohmann::json {
+      auto result = runtime().request_deferred_compaction();
+      if (!result.accepted)
+        return {{"error", *result.error}};
+      return {{"accepted", true}};
+    };
+    info.session.action_status =
+        [this](const nlohmann::json &) -> nlohmann::json {
+      return runtime().action_status();
+    };
+
     bind_run_agent(info, task_manager);
     bind_agent_spawn(info, task_manager);
     bind_agent_get(info, task_manager);

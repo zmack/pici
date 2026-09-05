@@ -157,6 +157,22 @@ struct LuaHooks {
     std::function<nlohmann::json(const nlohmann::json &)> close;
   };
 
+  // Lua-initiated session-lifecycle actions (plans/velvety-skipping-marble.md).
+  // Each function only ever enqueues a request (see
+  // SessionRuntime::request_deferred_compaction) -- it never applies
+  // anything itself, so it is always safe to call from inside a Lua hook
+  // (on_event in particular, including from a compaction's own on_event).
+  struct SessionBindings {
+    // Enqueues a compaction request; applied only after the current turn
+    // (or, if none is in flight, the next one) finishes running. Returns
+    // {accepted=true} or {error="..."} synchronously -- it never blocks
+    // waiting for the compaction itself.
+    std::function<nlohmann::json(const nlohmann::json &)> request_compaction;
+    // Returns {pending, applying, last_error} describing the single
+    // pending-action slot's current state.
+    std::function<nlohmann::json(const nlohmann::json &)> action_status;
+  };
+
   struct MailboxBindings {
     struct InvocationContext {
       const std::optional<AgentRuntimeIdentity> &actor;
@@ -190,6 +206,7 @@ struct LuaHooks {
     RunAgentFn run_agent;
     AgentBindings agents;
     MailboxBindings mailbox;
+    SessionBindings session;
   };
 
   // Call once after the parent agent and tools are fully configured.

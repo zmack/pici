@@ -19,10 +19,14 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -452,7 +456,102 @@ SessionRuntime::run_messages(std::vector<AgentInput> messages,
   if (!result.error && !retried)
     maybe_auto_compact_after_turn(callback);
 
+  // The ONLY call site that ever applies a pending Lua-requested session
+  // action (plans/velvety-skipping-marble.md's central constraint). This
+  // runs on whatever thread called run_messages -- never on a thread that
+  // could be holding a LuaHooksImpl::mutex_. Do not add another drain call
+  // site; see try_drain_pending_action()'s declaration comment.
+  try_drain_pending_action(callback);
+
   return result;
+}
+
+std::string_view SessionRuntime::pending_action_kind_name(
+    const PendingSessionAction &action) {
+  return std::visit(
+      [](const auto &value) -> std::string_view {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, PendingCompaction>)
+          return "compaction";
+        else if constexpr (std::is_same_v<T, PendingModelSwitch>)
+          return "model_switch";
+        else
+          return "fork";
+      },
+      action);
+}
+
+SessionRuntime::DeferredActionResult
+SessionRuntime::request_deferred_compaction() {
+  std::scoped_lock lock(pending_action_mutex_);
+  if (pending_action_) {
+    return {.accepted = false,
+            .error = "a " +
+                     std::string(pending_action_kind_name(*pending_action_)) +
+                     " is already pending"};
+  }
+  if (applying_action_) {
+    // applying_action_ is only ever true while a PendingCompaction is being
+    // applied in Phase 1 (the only alternative this phase ever installs),
+    // so the message is precise without needing to remember which kind was
+    // being applied.
+    return {.accepted = false, .error = "a compaction is already applying"};
+  }
+  pending_action_ = PendingCompaction{};
+  return {.accepted = true, .error = {}};
+}
+
+nlohmann::json SessionRuntime::action_status() const {
+  std::scoped_lock lock(pending_action_mutex_);
+  nlohmann::json status;
+  status["pending"] =
+      pending_action_
+          ? nlohmann::json(std::string(pending_action_kind_name(*pending_action_)))
+          : nlohmann::json(nullptr);
+  status["applying"] = applying_action_;
+  status["last_error"] = last_deferred_action_error_
+                             ? nlohmann::json(*last_deferred_action_error_)
+                             : nlohmann::json(nullptr);
+  return status;
+}
+
+void SessionRuntime::try_drain_pending_action(const EventCallback &callback) {
+  std::optional<PendingSessionAction> action;
+  {
+    std::scoped_lock lock(pending_action_mutex_);
+    if (applying_action_ || !pending_action_)
+      return;
+    action = std::exchange(pending_action_, std::nullopt);
+    applying_action_ = true;
+  }
+
+  try {
+    std::visit(
+        [&](auto &&value) {
+          using T = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, PendingCompaction>) {
+            auto result =
+                compact_active_session(CompactionTrigger::lua_requested, callback);
+            if (result.error) {
+              std::scoped_lock lock(pending_action_mutex_);
+              last_deferred_action_error_ = result.error;
+            }
+          }
+          // PendingModelSwitch/PendingFork: not yet reachable in Phase 1
+          // (request_deferred_compaction() is the only installer), handled
+          // by Phases 2/3 respectively.
+        },
+        *action);
+  } catch (const std::exception &e) {
+    std::scoped_lock lock(pending_action_mutex_);
+    last_deferred_action_error_ = e.what();
+  } catch (...) {
+    std::scoped_lock lock(pending_action_mutex_);
+    last_deferred_action_error_ = "Unknown deferred session action error";
+  }
+
+  std::scoped_lock lock(pending_action_mutex_);
+  applying_action_ = false;
 }
 
 SessionRuntime::CompactionRunResult

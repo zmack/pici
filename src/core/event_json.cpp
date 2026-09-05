@@ -1,5 +1,6 @@
 #include "core/event_json.h"
 
+#include "core/compaction.h"
 #include "core/event_types.h"
 #include "core/input_provenance.h"
 #include "core/message_types.h"
@@ -155,7 +156,8 @@ nlohmann::json event_to_json(const AgentEvent &event) {
                   {"provider", value.provider},
                   {"model", value.model},
                   {"summary", value.summary},
-                  {"retained_message_count", value.retained_message_count}};
+                  {"retained_message_count", value.retained_message_count},
+                  {"trigger", compaction_trigger_to_string(value.trigger)}};
           if (value.response_id)
             data["response_id"] = *value.response_id;
           if (value.error_message)

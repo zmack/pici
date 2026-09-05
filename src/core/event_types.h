@@ -301,6 +301,25 @@ enum class CompactionEventKind {
 
 std::string_view compaction_event_kind_to_string(CompactionEventKind kind);
 
+// Origin of a triggered compaction. Defined here rather than in
+// core/compaction.h (where the rest of the compaction orchestration API
+// lives, including compaction_trigger_to_string()'s definition) purely
+// because CompactionEvent below needs it as a plain-value field and
+// compaction.h already includes this header -- the reverse include would be
+// circular. compaction.h includes this header, so callers reach this enum as
+// pi::core::CompactionTrigger from there exactly as before.
+enum class CompactionTrigger {
+  manual,
+  automatic_pre_turn,
+  context_window_retry,
+  // A Lua add-on's own deferred request (see
+  // SessionRuntime::request_deferred_compaction), applied only from
+  // SessionRuntime::run_messages between turns -- never from inside the
+  // requesting Lua-hook call itself. See
+  // plans/velvety-skipping-marble.md's revision note for why.
+  lua_requested,
+};
+
 // Published by CompactionManager (see core/compaction.h) on the same
 // EventStream mechanism Agent::prompt() uses, so a `complete` event is
 // observed by the caller-drained consumer thread rather than the compaction
@@ -311,6 +330,11 @@ std::string_view compaction_event_kind_to_string(CompactionEventKind kind);
 struct CompactionEvent : EventBase {
   static constexpr EventType type = EventType::compaction;
   CompactionEventKind kind{CompactionEventKind::start};
+  // What caused this compaction attempt. Purely additive/informational; set
+  // at every CompactionEvent construction site in compaction.cpp's
+  // run_compaction() and agent.cpp's compaction-worker exception handlers
+  // from the originating CompactionRunRequest::trigger.
+  CompactionTrigger trigger{CompactionTrigger::manual};
 
   // The transcript_epoch (AgentState::transcript_epoch()) observed at
   // snapshot time. The drain-side installer rechecks this against the live
