@@ -993,21 +993,23 @@ inline void parse_agent_context(const nlohmann::json &value,
 
 class CmdRunSession {
 public:
-  CmdRunSession(cli::Args args,
-                std::shared_ptr<const core::ModelCatalog> registry,
-                std::shared_ptr<pi::auth::Authentication> authentication = {},
-                std::shared_ptr<core::SessionStore> session_store = {},
-                std::function<std::shared_ptr<core::Mailbox>(
-                    const core::MailboxOptions &)>
-                    ensure_mailbox = {},
-                std::function<std::vector<core::ProviderRefreshStatus>(
-                    const std::vector<std::string> &, std::stop_token)>
-                    refresh_model_catalog = {})
+  CmdRunSession(
+      cli::Args args, std::shared_ptr<const core::ModelCatalog> registry,
+      std::shared_ptr<pi::auth::Authentication> authentication = {},
+      std::shared_ptr<core::SessionStore> session_store = {},
+      std::function<std::shared_ptr<core::Mailbox>(
+          const core::MailboxOptions &)>
+          ensure_mailbox = {},
+      std::function<std::vector<core::ProviderRefreshStatus>(
+          const std::vector<std::string> &, std::stop_token)>
+          refresh_model_catalog = {},
+      std::vector<std::shared_ptr<const core::ToolDefinition>> mcp_tools = {})
       : args_(std::move(args)), registry_(std::move(registry)),
         injected_authentication_(std::move(authentication)),
         injected_session_store_(std::move(session_store)),
         injected_ensure_mailbox_(std::move(ensure_mailbox)),
-        injected_refresh_model_catalog_(std::move(refresh_model_catalog)) {}
+        injected_refresh_model_catalog_(std::move(refresh_model_catalog)),
+        mcp_tools_(std::move(mcp_tools)) {}
 
   int run() {
     if (!resolve_model())
@@ -1223,6 +1225,24 @@ private:
     if (!args_.no_tools && !args_.tools_dir.empty() &&
         args_.faux_control_socket.empty()) {
       for (auto &t : core::load_lua_tools(args_.tools_dir)) {
+        if (args_.tools.empty()) {
+          agent().add_tool(t);
+        } else {
+          for (const auto &name : args_.tools)
+            if (t->name() == name) {
+              agent().add_tool(t);
+              break;
+            }
+        }
+      }
+    }
+
+    // MCP tools: --no-tools suppresses these too ("no tools at all");
+    // --no-builtin-tools deliberately does NOT (it's specifically about
+    // builtins, not MCP); faux-control mode skips these the same way it
+    // already skips every other tool-loading branch above.
+    if (!args_.no_tools && args_.faux_control_socket.empty()) {
+      for (auto &t : mcp_tools_) {
         if (args_.tools.empty()) {
           agent().add_tool(t);
         } else {
@@ -2485,6 +2505,11 @@ private:
   std::function<std::vector<core::ProviderRefreshStatus>(
       const std::vector<std::string> &, std::stop_token)>
       injected_refresh_model_catalog_;
+  // Tools discovered from the process's configured MCP servers (see
+  // PiciProcess::mcp_tools()) -- appended in load_tools(), subject to the
+  // same --no-tools/--tools-allowlist gating as builtins (but NOT
+  // --no-builtin-tools, which is specifically about builtins).
+  std::vector<std::shared_ptr<const core::ToolDefinition>> mcp_tools_;
   std::mutex effective_context_mutex_;
   std::optional<core::AgentContext> effective_context_;
   cli::RuntimeBundle bundle_;
@@ -2523,10 +2548,12 @@ inline int cmd_run(
         ensure_mailbox = {},
     std::function<std::vector<core::ProviderRefreshStatus>(
         const std::vector<std::string> &, std::stop_token)>
-        refresh_model_catalog = {}) {
+        refresh_model_catalog = {},
+    std::vector<std::shared_ptr<const core::ToolDefinition>> mcp_tools = {}) {
   CmdRunSession session(args, registry, std::move(authentication),
                         std::move(session_store), std::move(ensure_mailbox),
-                        std::move(refresh_model_catalog));
+                        std::move(refresh_model_catalog),
+                        std::move(mcp_tools));
   return session.run();
 }
 

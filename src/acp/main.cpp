@@ -144,6 +144,10 @@ int main(int argc, char *argv[]) noexcept {
   static const std::map<std::string, pi::cli::ProviderConfig> empty_config;
   const auto &configured =
       args.config_document ? args.config_document->providers : empty_config;
+  static const std::vector<pi::core::mcp::McpServerConfig> empty_mcp_servers;
+  const auto &configured_mcp_servers =
+      args.config_document ? args.config_document->mcp_servers
+                           : empty_mcp_servers;
   std::optional<pi::core::PiciProcess> process;
   try {
     process.emplace(pi::core::PiciProcess::Config{
@@ -151,6 +155,7 @@ int main(int argc, char *argv[]) noexcept {
         .session_dir = args.session_dir,
         .inference_adapters = build_inference_adapters(),
         .discovery_adapters = build_discovery_adapters(),
+        .mcp_servers = configured_mcp_servers,
     });
   } catch (const std::exception &error) {
     std::cerr << "error: " << error.what() << "\n";
@@ -243,6 +248,8 @@ int main(int argc, char *argv[]) noexcept {
       for (auto &t : pi::core::load_lua_tools(args.tools_dir))
         cfg.tools.push_back(t);
     }
+    for (auto &t : process->mcp_tools())
+      cfg.tools.push_back(t);
   }
 
   std::vector<std::string> tool_names;

@@ -287,10 +287,20 @@ json_validator &get_or_create_validator(const std::string &schema_str,
   if (it != g_validator_cache.end()) {
     return it->second;
   }
-  auto &v =
-      g_validator_cache.emplace(schema_str, json_validator{}).first->second;
-  v.set_root_schema(schema_json);
-  return v;
+  // Build and load the validator in a LOCAL first, and only insert into
+  // g_validator_cache once set_root_schema has actually succeeded. The
+  // previous ordering inserted the (empty) validator into the cache before
+  // calling set_root_schema, so a schema that threw here left a permanently
+  // broken cache entry keyed by that schema string -- every later lookup
+  // hit the cache and got a validator with no root schema set, rather than
+  // retrying, breaking that tool for the rest of the process. On failure
+  // here, nothing is cached, so the next call retries fresh instead of
+  // being poisoned; set_root_schema's exception still propagates to the
+  // caller exactly as before.
+  json_validator validator;
+  validator.set_root_schema(schema_json);
+  return g_validator_cache.emplace(schema_str, std::move(validator))
+      .first->second;
 }
 
 struct ValidationError {

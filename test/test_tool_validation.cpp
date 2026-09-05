@@ -182,4 +182,43 @@ TEST(ToolValidator, CacheHit) {
   EXPECT_EQ(args2["n"].get<int>(), 99);
 }
 
+// ─── Test 13: get_or_create_validator's cache-insert-order fix ────────────
+//
+// A schema whose set_root_schema() throws (e.g. an unresolvable local
+// $ref -- nlohmann::json_schema::json_validator confirmed, by reading its
+// source, to throw std::invalid_argument in this case) reaches
+// get_or_create_validator via ToolValidator::validate(), which has no
+// try/catch around that call (only around the later validator.validate()
+// call) -- so the first call below throwing is expected and unchanged by
+// this fix.
+//
+// The fix is about the SECOND call with the exact same schema string.
+// Before the fix, g_validator_cache.emplace(schema_str, json_validator{})
+// ran BEFORE set_root_schema(), so the first call's throw still left an
+// empty (rootless) validator permanently cached under that schema string.
+// The second call would then hit the cache, skip set_root_schema entirely,
+// and call validate() on a validator with no root schema set -- which
+// doesn't crash (confirmed by reading root_schema::validate: it reports
+// "no root schema has yet been set..." via the error_handler) but silently
+// degrades every later call for that tool into an ordinary validation
+// failure instead of the same clear throw. After the fix, nothing is
+// cached on failure, so the second call retries set_root_schema fresh and
+// throws again, consistently -- proving the schema string isn't
+// permanently poisoned.
+TEST(ToolValidator, MalformedSchemaThrowDoesNotPoisonCacheForRetry) {
+  const std::string schema =
+      R"({"type":"object","properties":{"x":{"$ref":"#/definitions/Missing"}}})";
+
+  ToolArguments args1 = nlohmann::json::object();
+  EXPECT_THROW(ToolValidator::validate("tool", schema, args1),
+              std::invalid_argument);
+
+  ToolArguments args2 = nlohmann::json::object();
+  EXPECT_THROW(ToolValidator::validate("tool", schema, args2),
+              std::invalid_argument)
+      << "a poisoned cache entry from the first (thrown) call would make "
+         "this second call against the SAME schema string silently return "
+         "a validation-failed string instead of throwing again";
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────

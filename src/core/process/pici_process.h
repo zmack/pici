@@ -8,6 +8,8 @@
 #include "core/auth/authentication.h"
 #include "core/auth/credential_store.h"
 #include "core/mailbox/mailbox_coordinator.h"
+#include "core/mcp/mcp_config.h"
+#include "core/message_types.h"
 #include "core/models.h"
 #include "core/session/session_store.h"
 
@@ -39,10 +41,19 @@ public:
     // provider's discovery binding, if any, simply has no adapter to
     // resolve -- refresh() reports that per-provider rather than throwing).
     std::shared_ptr<ModelDiscoveryAdapterCollection> discovery_adapters;
+    // Configured MCP servers. Each ENABLED entry is spawned and handshaken
+    // (initialize/initialized) concurrently at construction time (a bounded
+    // handful of seconds, not per-server serial addition -- see
+    // pici_process.cpp); a server whose handshake fails or times out is
+    // logged as a warning and simply contributes no tools, it does not
+    // throw or abort construction. See mcp_tools().
+    std::vector<mcp::McpServerConfig> mcp_servers;
   };
 
   // Throws std::runtime_error (propagated from ModelCatalog construction /
-  // validate_registered_apis()) on bad provider configuration.
+  // validate_registered_apis()) on bad provider configuration. Never throws
+  // for MCP server misconfiguration/handshake failure -- those are caught,
+  // logged, and simply absent from mcp_tools() (see Config::mcp_servers).
   explicit PiciProcess(const Config &config);
 
   std::shared_ptr<const ModelCatalog> model_catalog() const {
@@ -78,6 +89,15 @@ public:
   // MailboxAttachment to it (plans/object-taxonomy-migration.md Phase 8).
   std::shared_ptr<Mailbox> ensure_mailbox(const MailboxOptions &options) const;
 
+  // Tools discovered from every configured, enabled MCP server whose
+  // handshake succeeded, merged and de-duplicated (see pici_process.cpp).
+  // Frozen for this process's lifetime -- tools are discovered once at
+  // construction; a server's notifications/tools/list_changed is a
+  // documented Phase 3 non-goal.
+  std::vector<std::shared_ptr<const ToolDefinition>> mcp_tools() const {
+    return mcp_tools_;
+  }
+
 private:
   std::shared_ptr<ModelCatalog> model_catalog_;
   auth::CredentialStore credential_store_;
@@ -85,6 +105,7 @@ private:
   std::shared_ptr<SessionStore> session_store_;
   mutable std::mutex mailbox_mutex_;
   mutable std::shared_ptr<Mailbox> mailbox_;
+  std::vector<std::shared_ptr<const ToolDefinition>> mcp_tools_;
 };
 
 } // namespace pi::core

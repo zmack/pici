@@ -1,22 +1,31 @@
 // Standalone test fixture: a minimal MCP server speaking newline-delimited
 // JSON-RPC 2.0 over stdio. Built as its own executable (`fake-mcp-server`,
 // see CMakeLists.txt) and driven as a real child process by
-// test_mcp_transport.cpp and test_mcp_client.cpp, so the tests exercise a
-// real process boundary (pipes, signals, EOF-on-close) rather than a mock.
+// test_mcp_transport.cpp, test_mcp_client.cpp, test_mcp_tool.cpp, and
+// test_pici_process.cpp, so the tests exercise a real process boundary
+// (pipes, signals, EOF-on-close) rather than a mock.
 //
 // Behavior is controlled two ways:
-//   - FAKE_MCP_SERVER_MODE env var, read once at startup: "normal" (default),
-//     "silent_init" (never replies to "initialize" -- for the client
-//     handshake-timeout test), or "malformed_init" (replies to "initialize"
-//     with a response missing "capabilities" -- for the malformed-handshake
-//     test).
+//   - Env vars, read once at startup:
+//       FAKE_MCP_SERVER_MODE: "normal" (default), "silent_init" (never
+//         replies to "initialize" -- for the client handshake-timeout
+//         test), or "malformed_init" (replies to "initialize" with a
+//         response missing "capabilities" -- for the malformed-handshake
+//         test).
+//       FAKE_MCP_SERVER_INIT_DELAY_MS: if set and > 0, sleeps this many
+//         milliseconds before replying to "initialize" (in "normal" mode
+//         only) -- used by test_pici_process.cpp's concurrent-handshake
+//         test to prove wall-clock latency scales with the slowest
+//         configured server, not the sum of all of them.
 //   - A handful of test-only JSON-RPC methods (see the dispatch below),
 //     issued as ordinary requests/notifications by the test through the
 //     transport under test, covering: echoing (with optional reply delay,
 //     for the out-of-order and timeout/race tests), triggering a
 //     server-initiated request with a caller-chosen id (for the demux
-//     regression test), crashing, and emitting non-JSON/oversized stdout
-//     (for the reader-hardening tests).
+//     regression test), crashing, emitting non-JSON/oversized stdout (for
+//     the reader-hardening tests), and serving tools/list + tools/call (for
+//     McpTool/McpClient discovery+invocation tests -- see the fixed tool
+//     list below).
 //
 // This process itself also implements the SAME method-presence-first demux
 // rule the client under test implements (see mcp_protocol.h's discriminator
@@ -27,6 +36,22 @@
 // client answered our server-initiated request correctly instead of
 // cross-wiring it with a real pending client call that happens to share the
 // same id.
+//
+// Fixed tools/list response (see build_tools_list_result() below):
+//   - "test_tool": a flexible echo/control tool. Its tools/call arguments
+//     drive the response shape rather than needing many distinct tool
+//     names: {"text": "..."} -> single text content block; {"blocks":
+//     [...]} -> one text content block per array entry (joined test);
+//     {"fail": true, "fail_message": "..."} -> isError:true with that
+//     message; {"include_image_block": true} -> an extra non-text "image"
+//     content block appended (must be dropped by McpTool, not mapped);
+//     {"delay_ms": N} -> reply after an N-millisecond delay (for the
+//     concurrency test).
+//   - "broken_schema_tool": advertises an inputSchema with an unresolvable
+//     local $ref ("#/definitions/DoesNotExist"), which
+//     nlohmann::json_schema::json_validator::set_root_schema() is confirmed
+//     (by reading its source) to throw std::invalid_argument on -- the
+//     fixture for the discovery-time schema-validation test.
 
 #include <nlohmann/json.hpp>
 
@@ -60,12 +85,108 @@ std::string mode_from_env() {
   return value != nullptr ? std::string(value) : std::string("normal");
 }
 
+int init_delay_ms_from_env() {
+  const char *value = std::getenv( // NOLINT(concurrency-mt-unsafe)
+      "FAKE_MCP_SERVER_INIT_DELAY_MS");
+  if (value == nullptr)
+    return 0;
+  try {
+    return std::stoi(value);
+  } catch (...) {
+    return 0;
+  }
+}
+
 json canned_initialize_result() {
   return json{
       {"protocolVersion", "2024-11-05"},
       {"capabilities", json::object()},
       {"serverInfo", {{"name", "fake-mcp-server"}, {"version", "0.0.1"}}},
   };
+}
+
+json tools_list_result() {
+  return json{
+      {"tools",
+       json::array({
+           json{{"name", "test_tool"},
+                {"description",
+                 "Flexible echo/control tool driven by its own arguments; "
+                 "see fake_mcp_server.cpp's file comment."},
+                {"inputSchema",
+                 json{{"type", "object"},
+                      {"properties",
+                       json{{"text", json{{"type", "string"}}},
+                            {"blocks", json{{"type", "array"},
+                                            {"items", json{{"type",
+                                                            "string"}}}}},
+                            {"fail", json{{"type", "boolean"}}},
+                            {"fail_message", json{{"type", "string"}}},
+                            {"include_image_block",
+                             json{{"type", "boolean"}}},
+                            {"delay_ms", json{{"type", "integer"}}}}}}}},
+           json{{"name", "broken_schema_tool"},
+                {"description",
+                 "Advertises a malformed inputSchema (unresolvable $ref) -- "
+                 "must be skipped at discovery time, never constructed into "
+                 "an McpTool."},
+                {"inputSchema",
+                 json{{"type", "object"},
+                      {"properties",
+                       json{{"x", json{{"$ref",
+                                        "#/definitions/DoesNotExist"}}}}}}}},
+       })},
+  };
+}
+
+json test_tool_call_result(const json &arguments) {
+  json content = json::array();
+  if (arguments.value("fail", false)) {
+    content.push_back(json{
+        {"type", "text"},
+        {"text", arguments.value("fail_message", std::string("failed"))},
+    });
+  } else if (arguments.contains("blocks") &&
+            arguments.at("blocks").is_array()) {
+    for (const auto &block : arguments.at("blocks")) {
+      if (block.is_string())
+        content.push_back(
+            json{{"type", "text"}, {"text", block.get<std::string>()}});
+    }
+  } else {
+    content.push_back(json{
+        {"type", "text"},
+        {"text", arguments.value("text", std::string("ok"))},
+    });
+  }
+  if (arguments.value("include_image_block", false)) {
+    // Deliberately non-text: McpTool must drop this, not map it.
+    content.push_back(json{{"type", "image"},
+                           {"data", "YmFzZTY0Cg=="},
+                           {"mimeType", "image/png"}});
+  }
+
+  json result = json{{"content", content}};
+  if (arguments.value("fail", false)) {
+    result["isError"] = true;
+  }
+  return result;
+}
+
+json tools_call_result(const json &params) {
+  const std::string name = params.value("name", std::string());
+  const json arguments =
+      params.contains("arguments") ? params.at("arguments") : json::object();
+  if (name == "test_tool")
+    return test_tool_call_result(arguments);
+  if (name == "broken_schema_tool")
+    return json{{"content", json::array({json{{"type", "text"},
+                                               {"text", "unreachable in "
+                                                        "practice"}}})}};
+  return json{{"isError", true},
+             {"content", json::array({json{{"type", "text"},
+                                           {"text", "unknown tool: " +
+                                                        name}}})}};
 }
 
 } // namespace
@@ -148,9 +269,37 @@ int main() {
                         {"result", json{{"protocolVersion", "2024-11-05"}}}});
         continue;
       }
+      const int delay_ms = init_delay_ms_from_env();
+      if (delay_ms > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
       write_json(json{{"jsonrpc", "2.0"},
                       {"id", id},
                       {"result", canned_initialize_result()}});
+      continue;
+    }
+
+    if (method == "tools/list") {
+      write_json(json{
+          {"jsonrpc", "2.0"}, {"id", id}, {"result", tools_list_result()}});
+      continue;
+    }
+
+    if (method == "tools/call") {
+      const int delay_ms = params.contains("arguments")
+                              ? params.at("arguments").value("delay_ms", 0)
+                              : 0;
+      if (delay_ms > 0) {
+        std::thread([id, params, delay_ms]() mutable {
+          std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+          write_json(json{{"jsonrpc", "2.0"},
+                          {"id", id},
+                          {"result", tools_call_result(params)}});
+        }).detach();
+      } else {
+        write_json(json{{"jsonrpc", "2.0"},
+                        {"id", id},
+                        {"result", tools_call_result(params)}});
+      }
       continue;
     }
 

@@ -248,6 +248,115 @@ api_key_env = "PICI_CODEX_KEY"
   }
 }
 
+TEST_F(ConfigTest, McpServerParsesCommandArgsEnv) {
+  auto p = write_toml("pici_mcp_basic.toml", R"toml(
+[[mcp_servers]]
+name    = "filesystem"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/project"]
+env     = { MCP_LOG_LEVEL = "warn", MCP_TOKEN = "secret" }
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(!config.has_errors());
+  ASSERT_EQ(config.mcp_servers.size(), std::size_t(1));
+
+  const auto &server = config.mcp_servers.front();
+  EXPECT_EQ(server.name, std::string("filesystem"));
+  EXPECT_EQ(server.command, std::string("npx"));
+  ASSERT_EQ(server.args.size(), std::size_t(3));
+  EXPECT_EQ(server.args[0], std::string("-y"));
+  EXPECT_EQ(server.args[1],
+           std::string("@modelcontextprotocol/server-filesystem"));
+  EXPECT_EQ(server.args[2], std::string("/tmp/project"));
+  EXPECT_EQ(server.env.at("MCP_LOG_LEVEL"), std::string("warn"));
+  EXPECT_EQ(server.env.at("MCP_TOKEN"), std::string("secret"));
+  // Defaults: enabled true, cwd/call_timeout_ms unset.
+  EXPECT_TRUE(server.enabled);
+  EXPECT_TRUE(!server.cwd.has_value());
+  EXPECT_TRUE(!server.call_timeout_ms.has_value());
+}
+
+TEST_F(ConfigTest, McpServerCwdAndEnabledFieldsParse) {
+  auto p = write_toml("pici_mcp_cwd_enabled.toml", R"toml(
+[[mcp_servers]]
+name    = "internal"
+command = "/opt/mcp/server"
+cwd     = "/opt/mcp"
+enabled = false
+call_timeout_ms = 15000
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(!config.has_errors());
+  ASSERT_EQ(config.mcp_servers.size(), std::size_t(1));
+
+  const auto &server = config.mcp_servers.front();
+  EXPECT_EQ(server.cwd.value(), std::string("/opt/mcp"));
+  EXPECT_TRUE(!server.enabled);
+  EXPECT_EQ(server.call_timeout_ms.value(), std::int64_t(15000));
+}
+
+TEST_F(ConfigTest, McpServerMissingCommandIsDiagnosticError) {
+  auto p = write_toml("pici_mcp_missing_command.toml", R"toml(
+[[mcp_servers]]
+name = "broken"
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(config.has_errors());
+  EXPECT_TRUE(has_diagnostic(config, "mcp_servers"));
+  EXPECT_TRUE(config.mcp_servers.empty());
+}
+
+TEST_F(ConfigTest, McpServerMissingNameIsDiagnosticError) {
+  auto p = write_toml("pici_mcp_missing_name.toml", R"toml(
+[[mcp_servers]]
+command = "some-server"
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(config.has_errors());
+  EXPECT_TRUE(config.mcp_servers.empty());
+}
+
+TEST_F(ConfigTest, McpServerDuplicateNameIsDiagnosticError) {
+  auto p = write_toml("pici_mcp_duplicate.toml", R"toml(
+[[mcp_servers]]
+name    = "dup"
+command = "server-one"
+
+[[mcp_servers]]
+name    = "DUP"
+command = "server-two"
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(config.has_errors());
+  EXPECT_TRUE(has_diagnostic(config, "duplicate mcp server name"));
+  // Case-insensitive dedupe (mirrors the provider duplicate-id check):
+  // only the first entry survives.
+  ASSERT_EQ(config.mcp_servers.size(), std::size_t(1));
+  EXPECT_EQ(config.mcp_servers.front().command, std::string("server-one"));
+}
+
+TEST_F(ConfigTest, McpServerArrayOfTablesRoundTrip) {
+  auto p = write_toml("pici_mcp_multi.toml", R"toml(
+[[mcp_servers]]
+name    = "alpha"
+command = "alpha-server"
+
+[[mcp_servers]]
+name    = "beta"
+command = "beta-server"
+args    = ["--stdio"]
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(!config.has_errors());
+  ASSERT_EQ(config.mcp_servers.size(), std::size_t(2));
+  EXPECT_EQ(config.mcp_servers[0].name, std::string("alpha"));
+  EXPECT_EQ(config.mcp_servers[0].command, std::string("alpha-server"));
+  EXPECT_EQ(config.mcp_servers[1].name, std::string("beta"));
+  EXPECT_EQ(config.mcp_servers[1].command, std::string("beta-server"));
+  ASSERT_EQ(config.mcp_servers[1].args.size(), std::size_t(1));
+  EXPECT_EQ(config.mcp_servers[1].args[0], std::string("--stdio"));
+}
+
 TEST(Config, BuiltinProviderConfigurationSnapshot) {
   struct Snapshot {
     const char *id;

@@ -24,21 +24,21 @@ McpServerProcessConfig fake_server_config(const std::string &mode) {
 } // namespace
 
 TEST(McpClient, InitializeSucceedsAgainstFakeServer) {
-  McpClient client(fake_server_config("normal"));
+  McpClient client("test-server", fake_server_config("normal"));
   EXPECT_NO_THROW(client.initialize(std::chrono::milliseconds(2000)));
   EXPECT_TRUE(client.is_initialized());
   EXPECT_TRUE(client.is_alive());
 }
 
 TEST(McpClient, InitializeThrowsOnMalformedHandshakeResponse) {
-  McpClient client(fake_server_config("malformed_init"));
+  McpClient client("test-server", fake_server_config("malformed_init"));
   EXPECT_THROW(client.initialize(std::chrono::milliseconds(2000)),
                std::runtime_error);
   EXPECT_FALSE(client.is_initialized());
 }
 
 TEST(McpClient, InitializeTimesOutIfServerNeverResponds) {
-  McpClient client(fake_server_config("silent_init"));
+  McpClient client("test-server", fake_server_config("silent_init"));
   EXPECT_THROW(client.initialize(std::chrono::milliseconds(300)),
                std::runtime_error);
   EXPECT_FALSE(client.is_initialized());

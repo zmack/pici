@@ -237,6 +237,11 @@ int main(int argc, char *argv[]) noexcept {
   const auto &configured_providers =
       args.config_document ? args.config_document->providers : empty_providers;
 
+  static const std::vector<pi::core::mcp::McpServerConfig> empty_mcp_servers;
+  const auto &configured_mcp_servers =
+      args.config_document ? args.config_document->mcp_servers
+                           : empty_mcp_servers;
+
   std::optional<pi::core::PiciProcess> process;
   try {
     process.emplace(pi::core::PiciProcess::Config{
@@ -244,6 +249,7 @@ int main(int argc, char *argv[]) noexcept {
         .session_dir = args.session_dir,
         .inference_adapters = pi::build_inference_adapters(),
         .discovery_adapters = pi::build_discovery_adapters(),
+        .mcp_servers = configured_mcp_servers,
     });
   } catch (const std::exception &error) {
     std::cerr << "error: " << error.what() << "\n";
@@ -267,5 +273,6 @@ int main(int argc, char *argv[]) noexcept {
                  std::stop_token stop_token) {
         return process->refresh_model_catalog(provider_ids,
                                               std::move(stop_token));
-      });
+      },
+      process->mcp_tools());
 }

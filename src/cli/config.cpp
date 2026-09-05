@@ -442,6 +442,100 @@ void parse_provider(const std::string &provider_id, const toml::table &table,
   config.providers.emplace(provider_id, std::move(provider));
 }
 
+// Table-of-strings helper for mcp_servers[].env. Mirrors parse_headers'
+// shape (config.cpp:173-200) -- the closest existing precedent for this
+// exact table-of-strings pattern -- but does NOT apply parse_headers'
+// protected-header filtering (Authorization/Cookie/etc.), which is a
+// headers-specific concept that doesn't apply to an arbitrary child
+// process's environment table.
+void parse_env_table(const toml::table &table, std::string_view path,
+                     std::map<std::string, std::string> &env, Config &config) {
+  const auto *node = get(table, "env");
+  if (node == nullptr)
+    return;
+  const auto *env_table = node->as_table();
+  const auto env_path = std::string(path) + ".env";
+  if (env_table == nullptr) {
+    diagnostic(config, true, env_path, "expected a table of strings");
+    return;
+  }
+  for (const auto &[key, value] : *env_table) {
+    const auto name = std::string(key.str());
+    const auto field_path = child_path(env_path, name);
+    const auto *string_value = value.as_string();
+    if (string_value == nullptr) {
+      diagnostic(config, true, field_path, "expected a string");
+      continue;
+    }
+    env[name] = string_value->get();
+  }
+}
+
+std::vector<std::string> parse_string_array(const toml::table &table,
+                                            std::string_view key,
+                                            std::string_view path,
+                                            Config &config) {
+  std::vector<std::string> result;
+  const auto *node = get(table, key);
+  if (node == nullptr)
+    return result;
+  const auto field_path = std::string(path) + "." + std::string(key);
+  const auto *array = node->as_array();
+  if (array == nullptr) {
+    diagnostic(config, true, field_path, "expected an array of strings");
+    return result;
+  }
+  for (std::size_t index = 0; index < array->size(); ++index) {
+    const auto item_path = field_path + "[" + std::to_string(index) + "]";
+    const auto *string_value = (*array)[index].as_string();
+    if (string_value == nullptr) {
+      diagnostic(config, true, item_path, "expected a string");
+      continue;
+    }
+    result.push_back(string_value->get());
+  }
+  return result;
+}
+
+// New parsing logic, not a reuse of parse_provider (an earlier plan draft
+// incorrectly cited parse_provider as already parsing command/args/env --
+// verified against current source, it only ever parsed `id` and provider
+// fields; there was no existing reusable string-array/table-of-strings
+// helper besides parse_headers, hence parse_string_array/parse_env_table
+// above).
+std::optional<McpServerConfig>
+parse_mcp_server(std::size_t index, const toml::table &table, Config &config) {
+  const auto index_path = "mcp_servers[" + std::to_string(index) + "]";
+
+  auto name = read_string(table, "name", index_path, config);
+  if (!name || name->empty()) {
+    diagnostic(config, true, index_path,
+              "name is required and must not be empty");
+    return std::nullopt;
+  }
+  const auto path = "mcp_servers." + *name;
+
+  auto command = read_string(table, "command", path, config);
+  if (!command || command->empty()) {
+    diagnostic(config, true, path,
+              "command is required and must not be empty");
+    return std::nullopt;
+  }
+
+  McpServerConfig server;
+  server.name = std::move(*name);
+  server.command = std::move(*command);
+  server.args = parse_string_array(table, "args", path, config);
+  parse_env_table(table, path, server.env, config);
+  server.cwd = read_string(table, "cwd", path, config);
+  server.enabled = read_boolean(table, "enabled", path, config).value_or(true);
+  if (const auto timeout =
+          read_positive_integer(table, "call_timeout_ms", path, config))
+    server.call_timeout_ms = static_cast<std::int64_t>(*timeout);
+
+  return server;
+}
+
 } // namespace
 
 std::filesystem::path default_config_path() {
@@ -658,6 +752,41 @@ Config load_config_document(const std::filesystem::path &path) {
         } else {
           parse_provider(provider_id, *provider, config);
         }
+      }
+    }
+  }
+
+  if (const auto *mcp_servers_node = tbl.get("mcp_servers")) {
+    const auto *mcp_servers = mcp_servers_node->as_array();
+    if (mcp_servers == nullptr) {
+      diagnostic(config, true, "mcp_servers", "expected an array of tables");
+    } else {
+      for (std::size_t index = 0; index < mcp_servers->size(); ++index) {
+        const auto index_path = "mcp_servers[" + std::to_string(index) + "]";
+        const auto *server_table = (*mcp_servers)[index].as_table();
+        if (server_table == nullptr) {
+          diagnostic(config, true, index_path, "expected a table");
+          continue;
+        }
+        auto server = parse_mcp_server(index, *server_table, config);
+        if (!server)
+          continue;
+        const auto canonical = lower_ascii(server->name);
+        // Mirrors the provider duplicate-id check just above (verified at
+        // its real current location, config.cpp:650-658 as of this
+        // writing -- an earlier plan draft's citation of 641-647 was
+        // wrong).
+        const bool duplicate =
+            std::ranges::any_of(config.mcp_servers, [&](const auto &entry) {
+              return lower_ascii(entry.name) == canonical;
+            });
+        if (duplicate) {
+          diagnostic(config, true, index_path,
+                    "duplicate mcp server name \"" + server->name +
+                        "\" (lookup is case-insensitive)");
+          continue;
+        }
+        config.mcp_servers.push_back(std::move(*server));
       }
     }
   }

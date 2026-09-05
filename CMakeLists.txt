@@ -489,6 +489,7 @@ add_library(pi-core
     src/core/lua_tool.cpp
     src/core/mcp/mcp_transport.cpp
     src/core/mcp/mcp_client.cpp
+    src/core/mcp/mcp_tool.cpp
     src/core/markdown.cpp
     src/core/syntax_highlight.cpp
     src/core/terminal.cpp
@@ -783,6 +784,24 @@ if(PI_CPP_BUILD_TESTS)
     add_dependencies(test-mcp_client fake-mcp-server)
     add_test(NAME test-mcp_client COMMAND test-mcp_client)
 
+    add_executable(test-mcp_tool test/test_mcp_tool.cpp)
+    target_link_libraries(test-mcp_tool PRIVATE pi-core)
+    target_compile_definitions(test-mcp_tool PRIVATE
+        FAKE_MCP_SERVER_BINARY="$<TARGET_FILE:fake-mcp-server>"
+    )
+    add_dependencies(test-mcp_tool fake-mcp-server)
+    add_test(NAME test-mcp_tool COMMAND test-mcp_tool)
+
+    # test-pici_process (declared above, before fake-mcp-server existed as a
+    # target) also needs the fake server binary: its
+    # McpServerHandshakesRunConcurrentlyNotSerially /
+    # McpServerHandshakeFailureLogsAndSkipsWithoutThrowing tests spawn it as
+    # a configured MCP server.
+    target_compile_definitions(test-pici_process PRIVATE
+        FAKE_MCP_SERVER_BINARY="$<TARGET_FILE:fake-mcp-server>"
+    )
+    add_dependencies(test-pici_process fake-mcp-server)
+
     add_executable(test-system_prompt test/test_system_prompt.cpp src/cli/system_prompt.cpp)
     target_include_directories(test-system_prompt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test-system_prompt COMMAND test-system_prompt)
@@ -931,7 +950,7 @@ if(PI_CPP_BUILD_TESTS)
         test-faux_control_mode test-readline test-wrap test-vim-mode test-model_picker
         test-model_picker_settings test-acp
         test-frontend-parity test-cmd_run test-cmd_run_repl
-        test-mcp_transport test-mcp_client
+        test-mcp_transport test-mcp_client test-mcp_tool
     )
     foreach(test_target IN LISTS PI_CPP_GTEST_TEST_TARGETS)
         target_link_libraries(${test_target} PRIVATE GTest::gtest_main

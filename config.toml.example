@@ -40,6 +40,30 @@
 # [providers.openai.model_overrides."gpt-4.1"]
 # context_window = 200000
 
+# MCP servers are spawned as persistent child processes and their tools
+# appear alongside builtins, qualified as "<name>__<tool>" (sanitized to a
+# provider-safe character set, e.g. "filesystem__read_file"). --no-tools
+# suppresses them the same as builtins; --no-builtin-tools does NOT (that
+# flag is specifically about builtins). The child inherits pici's own
+# environment, with `env` overlaid on top -- it is not a way to get a
+# scrubbed environment. `enabled = false` keeps a server's config block
+# around without spawning it. A server whose handshake fails or times out
+# is skipped with a warning; it does not stop pici from starting.
+#
+# [[mcp_servers]]
+# name    = "filesystem"
+# command = "npx"
+# args    = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/project"]
+# enabled = true
+#
+# [[mcp_servers]]
+# name    = "internal-tools"
+# command = "/opt/mcp/internal-server"
+# args    = ["--stdio"]
+# cwd     = "/opt/mcp"
+# env     = { MCP_LOG_LEVEL = "warn" }
+# call_timeout_ms = 30000
+
 [agent]
 # system_prompt = "You are a helpful coding assistant."  # --system-prompt
 # thinking      = "off"   # --thinking: off|minimal|low|medium|high|xhigh

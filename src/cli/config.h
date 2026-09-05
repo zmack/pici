@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cli/args.h"
+#include "core/mcp/mcp_config.h"
 #include "core/models.h"
 
 #include <filesystem>
@@ -16,6 +17,7 @@ using ApiKeyConfig = core::ApiKeyConfig;
 using ConfiguredCost = core::ConfiguredCost;
 using ConfiguredModel = core::ConfiguredModel;
 using ProviderConfig = core::ProviderConfig;
+using McpServerConfig = core::mcp::McpServerConfig;
 
 struct MailboxSettings {
   bool enabled{false};
@@ -32,6 +34,7 @@ struct Config {
   Args defaults;
   MailboxSettings mailbox;
   std::map<std::string, ProviderConfig> providers;
+  std::vector<McpServerConfig> mcp_servers;
   std::vector<Args::Diagnostic> diagnostics;
 
   bool has_errors() const;

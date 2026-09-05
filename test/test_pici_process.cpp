@@ -4,6 +4,7 @@
 #include "core/llm_client.h"
 #include "core/mailbox/mailbox_coordinator.h"
 #include "core/mailbox/mailbox_types.h"
+#include "core/mcp/mcp_config.h"
 #include "core/models.h"
 #include "core/session/session_record.h"
 #include "support/gtest_helpers.h"
@@ -16,6 +17,10 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#ifndef FAKE_MCP_SERVER_BINARY
+#error "FAKE_MCP_SERVER_BINARY must be defined by CMakeLists.txt"
+#endif
 
 namespace {
 
@@ -46,6 +51,17 @@ pi::core::PiciProcess::Config two_provider_config(std::string session_dir = {}) 
   };
   config.session_dir = std::move(session_dir);
   return config;
+}
+
+pi::core::mcp::McpServerConfig
+fake_mcp_server(const std::string &name, int init_delay_ms = 0) {
+  pi::core::mcp::McpServerConfig server;
+  server.name = name;
+  server.command = FAKE_MCP_SERVER_BINARY;
+  server.env["FAKE_MCP_SERVER_MODE"] = "normal";
+  if (init_delay_ms > 0)
+    server.env["FAKE_MCP_SERVER_INIT_DELAY_MS"] = std::to_string(init_delay_ms);
+  return server;
 }
 
 } // namespace
@@ -138,4 +154,91 @@ TEST(PiciProcess, SessionStoreReflectsConfiguredSessionDirectory) {
   ASSERT_TRUE(loaded.has_value());
   EXPECT_EQ(loaded->header.provider, // NOLINT(bugprone-unchecked-optional-access)
             "alpha");
+}
+
+TEST(PiciProcess, McpToolsPopulatedFromConfiguredServers) {
+  auto config = two_provider_config();
+  config.mcp_servers = {fake_mcp_server("fs")};
+
+  pi::core::PiciProcess process(config);
+  const auto tools = process.mcp_tools();
+
+  // The fake server always advertises "test_tool" (valid) and
+  // "broken_schema_tool" (a deliberately malformed inputSchema, skipped at
+  // discovery) -- see fake_mcp_server.cpp's file comment.
+  ASSERT_EQ(tools.size(), 1u);
+  EXPECT_EQ(tools.front()->name(), "fs__test_tool");
+}
+
+TEST(PiciProcess, McpToolNamesAreQualifiedByServerName) {
+  auto config = two_provider_config();
+  config.mcp_servers = {fake_mcp_server("server-one"),
+                        fake_mcp_server("server-two")};
+
+  pi::core::PiciProcess process(config);
+  const auto tools = process.mcp_tools();
+
+  ASSERT_EQ(tools.size(), 2u);
+  bool has_one = false;
+  bool has_two = false;
+  for (const auto &tool : tools) {
+    if (tool->name() == "server-one__test_tool")
+      has_one = true;
+    if (tool->name() == "server-two__test_tool")
+      has_two = true;
+  }
+  EXPECT_TRUE(has_one);
+  EXPECT_TRUE(has_two);
+}
+
+TEST(PiciProcess, McpServerHandshakeFailureLogsAndSkipsWithoutThrowing) {
+  auto config = two_provider_config();
+  pi::core::mcp::McpServerConfig broken;
+  broken.name = "nonexistent";
+  broken.command = "/nonexistent/path/to/an/mcp/server/binary";
+
+  // A GOOD server alongside the broken one, to prove the failure is
+  // isolated to the misconfigured server rather than aborting discovery
+  // for everyone.
+  config.mcp_servers = {broken, fake_mcp_server("good")};
+
+  pi::core::PiciProcess process(config); // must not throw
+  const auto tools = process.mcp_tools();
+  ASSERT_EQ(tools.size(), 1u);
+  EXPECT_EQ(tools.front()->name(), "good__test_tool");
+}
+
+TEST(PiciProcess, McpServerDisabledIsNotSpawned) {
+  auto config = two_provider_config();
+  auto disabled = fake_mcp_server("off");
+  disabled.enabled = false;
+  config.mcp_servers = {disabled};
+
+  pi::core::PiciProcess process(config);
+  EXPECT_TRUE(process.mcp_tools().empty());
+}
+
+TEST(PiciProcess, McpServerHandshakesRunConcurrentlyNotSerially) {
+  auto config = two_provider_config();
+  // Two servers, each deliberately slow to reply to "initialize". If
+  // handshakes ran serially, total construction time would be roughly the
+  // SUM of both delays (>= 800ms); run concurrently, it should be close to
+  // a SINGLE delay (~400ms) plus overhead. The assertion below uses a
+  // generous threshold to avoid CI flakiness while still being meaningful:
+  // strictly less than the sum of both delays.
+  constexpr int kDelayMs = 400;
+  config.mcp_servers = {fake_mcp_server("slow-one", kDelayMs),
+                        fake_mcp_server("slow-two", kDelayMs)};
+
+  const auto start = std::chrono::steady_clock::now();
+  pi::core::PiciProcess process(config);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+
+  EXPECT_EQ(process.mcp_tools().size(), 2u);
+  EXPECT_LT(elapsed, std::chrono::milliseconds(kDelayMs * 2))
+      << "construction took "
+      << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+      << "ms, expected well under the "
+      << (kDelayMs * 2)
+      << "ms a fully-serial (sum-of-delays) handshake would take";
 }

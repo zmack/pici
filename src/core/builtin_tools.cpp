@@ -436,6 +436,8 @@ std::vector<std::string> split_lines(const std::string &content) {
   return lines;
 }
 
+} // namespace
+
 // Structured metadata about a truncate_head_ex() call, computed as a
 // byproduct of the same single walk over `content` that produces the
 // (possibly truncated) output string.
@@ -449,21 +451,11 @@ std::vector<std::string> split_lines(const std::string &content) {
 // "[N more lines in file...]" note counted as content, and Ls/Find/Grep
 // are already limit-capped upstream. Calling these fields "total_*" would
 // wrongly imply they describe the command's real, uncapped output size.
-struct TruncationInfo {
-  bool truncated = false;
-  std::optional<std::string> truncated_by; // "lines" or "bytes"
-  std::size_t input_lines = 0, input_bytes = 0;
-  std::size_t output_lines = 0, output_bytes = 0;
-  bool last_line_partial = false;
-  bool first_line_exceeds_limit = false;
-  std::size_t max_lines = 0, max_bytes = 0;
-};
-
-struct TruncatedContent {
-  std::string content;
-  TruncationInfo info;
-};
-
+//
+// Exposed (declared in builtin_tools.h) rather than kept anonymous-namespace
+// private: McpTool (src/core/mcp/mcp_tool.cpp) reuses this exact truncation
+// path to cap MCP tool-call results the same way BashTool caps its own
+// output, rather than duplicating the byte/line-cap logic a second time.
 TruncatedContent truncate_head_ex(const std::string &content,
                                   std::size_t max_lines,
                                   std::size_t max_bytes) {
@@ -536,6 +528,8 @@ std::string truncate_head(const std::string &content, std::size_t max_lines,
                           std::size_t max_bytes) {
   return truncate_head_ex(content, max_lines, max_bytes).content;
 }
+
+namespace {
 
 std::string glob_to_regex(std::string_view glob) {
   std::string out = "^";
