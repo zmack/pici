@@ -74,6 +74,10 @@ int main(int argc, char *argv[]) noexcept {
               [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
   std::signal(SIGTERM,
               [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
+  // See src/main.cpp's identical addition: without this, the first write to
+  // a crashed MCP server's dead stdin pipe kills this whole process via the
+  // default SIGPIPE disposition rather than failing that one call cleanly.
+  std::signal(SIGPIPE, SIG_IGN); // NOLINT(concurrency-mt-unsafe)
 
   // Parse shared CLI flags
   auto args = pi::cli::load_and_merge(argc, argv);

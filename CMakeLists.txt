@@ -487,6 +487,8 @@ add_library(pi-core
     src/core/skills.cpp
     src/core/sandbox.cpp
     src/core/lua_tool.cpp
+    src/core/mcp/mcp_transport.cpp
+    src/core/mcp/mcp_client.cpp
     src/core/markdown.cpp
     src/core/syntax_highlight.cpp
     src/core/terminal.cpp
@@ -756,6 +758,31 @@ if(PI_CPP_BUILD_TESTS)
     target_link_libraries(test-sandbox PRIVATE pi-core)
     add_test(NAME test-sandbox COMMAND test-sandbox)
 
+    # Standalone test fixture: a minimal MCP server speaking newline-
+    # delimited JSON-RPC over stdio, driven as a real child process by
+    # test-mcp_transport/test-mcp_client -- see
+    # test/fixtures/fake_mcp_server.cpp's file comment. Not a GoogleTest/
+    # CTest target itself, mirroring how pi-cli is a plain dependency of
+    # test-cmd_run below rather than a test target of its own.
+    add_executable(fake-mcp-server test/fixtures/fake_mcp_server.cpp)
+    target_link_libraries(fake-mcp-server PRIVATE nlohmann_json::nlohmann_json)
+
+    add_executable(test-mcp_transport test/test_mcp_transport.cpp)
+    target_link_libraries(test-mcp_transport PRIVATE pi-core)
+    target_compile_definitions(test-mcp_transport PRIVATE
+        FAKE_MCP_SERVER_BINARY="$<TARGET_FILE:fake-mcp-server>"
+    )
+    add_dependencies(test-mcp_transport fake-mcp-server)
+    add_test(NAME test-mcp_transport COMMAND test-mcp_transport)
+
+    add_executable(test-mcp_client test/test_mcp_client.cpp)
+    target_link_libraries(test-mcp_client PRIVATE pi-core)
+    target_compile_definitions(test-mcp_client PRIVATE
+        FAKE_MCP_SERVER_BINARY="$<TARGET_FILE:fake-mcp-server>"
+    )
+    add_dependencies(test-mcp_client fake-mcp-server)
+    add_test(NAME test-mcp_client COMMAND test-mcp_client)
+
     add_executable(test-system_prompt test/test_system_prompt.cpp src/cli/system_prompt.cpp)
     target_include_directories(test-system_prompt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME test-system_prompt COMMAND test-system_prompt)
@@ -904,6 +931,7 @@ if(PI_CPP_BUILD_TESTS)
         test-faux_control_mode test-readline test-wrap test-vim-mode test-model_picker
         test-model_picker_settings test-acp
         test-frontend-parity test-cmd_run test-cmd_run_repl
+        test-mcp_transport test-mcp_client
     )
     foreach(test_target IN LISTS PI_CPP_GTEST_TEST_TARGETS)
         target_link_libraries(${test_target} PRIVATE GTest::gtest_main

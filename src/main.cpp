@@ -192,6 +192,13 @@ int main(int argc, char *argv[]) noexcept {
   }); // NOLINT(concurrency-mt-unsafe)
   std::signal(SIGTERM,
               [](int) { std::exit(0); }); // NOLINT(concurrency-mt-unsafe)
+  // Without this, the first write to a crashed MCP server's dead stdin
+  // pipe kills this entire process via the default SIGPIPE disposition,
+  // not just that one tool call. Global and unconditional: with SIGPIPE
+  // ignored, such a write instead fails with EPIPE, which
+  // McpStdioTransport (src/core/mcp/mcp_transport.cpp) already treats as
+  // "transport is dead".
+  std::signal(SIGPIPE, SIG_IGN); // NOLINT(concurrency-mt-unsafe)
 
   auto args = pi::cli::load_and_merge(argc, argv);
 
