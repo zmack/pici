@@ -357,6 +357,83 @@ args    = ["--stdio"]
   EXPECT_EQ(config.mcp_servers[1].args[0], std::string("--stdio"));
 }
 
+TEST_F(ConfigTest, SubagentLimitsParsesAllFields) {
+  auto p = write_toml("pici_subagents_full.toml", R"toml(
+[subagents]
+max_active_executions = 16
+max_resident_tasks     = 32
+max_nesting_depth      = 3
+max_direct_children    = 16
+max_wait_seconds       = 120
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(!config.has_errors());
+  ASSERT_TRUE(config.subagents.max_active_executions.has_value());
+  EXPECT_EQ(*config.subagents.max_active_executions, std::size_t(16));
+  ASSERT_TRUE(config.subagents.max_resident_tasks.has_value());
+  EXPECT_EQ(*config.subagents.max_resident_tasks, std::size_t(32));
+  ASSERT_TRUE(config.subagents.max_nesting_depth.has_value());
+  EXPECT_EQ(*config.subagents.max_nesting_depth, std::size_t(3));
+  ASSERT_TRUE(config.subagents.max_direct_children.has_value());
+  EXPECT_EQ(*config.subagents.max_direct_children, std::size_t(16));
+  ASSERT_TRUE(config.subagents.max_wait_seconds.has_value());
+  EXPECT_EQ(*config.subagents.max_wait_seconds, std::size_t(120));
+}
+
+TEST_F(ConfigTest, SubagentLimitsAbsentSectionKeepsAllFieldsUnset) {
+  auto p = write_toml("pici_subagents_absent.toml", R"toml(
+[agent]
+thinking = "off"
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(!config.has_errors());
+  EXPECT_TRUE(!config.subagents.max_active_executions.has_value());
+  EXPECT_TRUE(!config.subagents.max_resident_tasks.has_value());
+  EXPECT_TRUE(!config.subagents.max_nesting_depth.has_value());
+  EXPECT_TRUE(!config.subagents.max_direct_children.has_value());
+  EXPECT_TRUE(!config.subagents.max_wait_seconds.has_value());
+}
+
+TEST_F(ConfigTest, SubagentLimitsWrongTypeIsDiagnosticError) {
+  auto p = write_toml("pici_subagents_wrong_type.toml", R"toml(
+[subagents]
+max_active_executions = "sixteen"
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(config.has_errors());
+  EXPECT_TRUE(has_diagnostic(config, "subagents"));
+  EXPECT_TRUE(!config.subagents.max_active_executions.has_value());
+}
+
+TEST_F(ConfigTest, BuildTaskTreeLimitsOverridesOnlySetFields) {
+  auto p = write_toml("pici_subagents_partial.toml", R"toml(
+[subagents]
+max_active_executions = 20
+)toml");
+  Args args;
+  args.config_document =
+      std::make_shared<const Config>(load_config_document(p));
+  const auto limits = build_task_tree_limits(args);
+
+  const pi::core::TaskTree::Limits defaults;
+  EXPECT_EQ(limits.max_active_executions, std::size_t(20));
+  EXPECT_EQ(limits.max_resident_tasks, defaults.max_resident_tasks);
+  EXPECT_EQ(limits.max_nesting_depth, defaults.max_nesting_depth);
+  EXPECT_EQ(limits.max_direct_children, defaults.max_direct_children);
+  EXPECT_EQ(limits.max_wait, defaults.max_wait);
+}
+
+TEST_F(ConfigTest, BuildTaskTreeLimitsAllDefaultsWhenConfigEmpty) {
+  Args args; // no config_document at all
+  const auto limits = build_task_tree_limits(args);
+  const pi::core::TaskTree::Limits defaults;
+  EXPECT_EQ(limits.max_active_executions, defaults.max_active_executions);
+  EXPECT_EQ(limits.max_resident_tasks, defaults.max_resident_tasks);
+  EXPECT_EQ(limits.max_nesting_depth, defaults.max_nesting_depth);
+  EXPECT_EQ(limits.max_direct_children, defaults.max_direct_children);
+  EXPECT_EQ(limits.max_wait, defaults.max_wait);
+}
+
 TEST(Config, BuiltinProviderConfigurationSnapshot) {
   struct Snapshot {
     const char *id;

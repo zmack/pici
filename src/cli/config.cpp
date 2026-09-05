@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -717,6 +718,29 @@ Config load_config_document(const std::filesystem::path &path) {
         config.mailbox.retention_days = *value;
     }
   }
+  if (const auto *subagents_node = tbl.get("subagents")) {
+    const auto *subagents = subagents_node->as_table();
+    if (subagents == nullptr) {
+      diagnostic(config, true, "subagents", "expected a table");
+    } else {
+      if (const auto value = read_positive_int64(
+              *subagents, "max_active_executions", "subagents", config))
+        config.subagents.max_active_executions =
+            static_cast<std::size_t>(*value);
+      if (const auto value = read_positive_int64(
+              *subagents, "max_resident_tasks", "subagents", config))
+        config.subagents.max_resident_tasks = static_cast<std::size_t>(*value);
+      if (const auto value = read_positive_int64(
+              *subagents, "max_nesting_depth", "subagents", config))
+        config.subagents.max_nesting_depth = static_cast<std::size_t>(*value);
+      if (const auto value = read_positive_int64(
+              *subagents, "max_direct_children", "subagents", config))
+        config.subagents.max_direct_children = static_cast<std::size_t>(*value);
+      if (const auto value = read_positive_int64(*subagents, "max_wait_seconds",
+                                                 "subagents", config))
+        config.subagents.max_wait_seconds = static_cast<std::size_t>(*value);
+    }
+  }
   if (config.defaults.provider == "openai-codex" &&
       !config.defaults.api_key.empty()) {
     diagnostic(config, true, "model.api_key",
@@ -890,6 +914,24 @@ Args merge_args(const Args &config, const Args &cli) {
   out.diagnostics = cli.diagnostics;
 
   return out;
+}
+
+core::TaskTree::Limits build_task_tree_limits(const Args &args) {
+  core::TaskTree::Limits limits;
+  if (!args.config_document)
+    return limits;
+  const auto &cfg = args.config_document->subagents;
+  if (cfg.max_active_executions)
+    limits.max_active_executions = *cfg.max_active_executions;
+  if (cfg.max_resident_tasks)
+    limits.max_resident_tasks = *cfg.max_resident_tasks;
+  if (cfg.max_nesting_depth)
+    limits.max_nesting_depth = *cfg.max_nesting_depth;
+  if (cfg.max_direct_children)
+    limits.max_direct_children = *cfg.max_direct_children;
+  if (cfg.max_wait_seconds)
+    limits.max_wait = std::chrono::seconds(*cfg.max_wait_seconds);
+  return limits;
 }
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays)

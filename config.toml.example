@@ -74,6 +74,19 @@
 # "all" additionally permits bash and requires sandbox.mode != "disabled".
 # write_tools = "none"   # none | core | all
 
+[subagents]
+# How much subagent concurrency/nesting a session allows. All fields are
+# optional and independently overridable; an absent field (or an absent
+# [subagents] table entirely) keeps pici's built-in default, shown below.
+# Raise these for workflows that fan out across many subagents at once
+# (batch review, parallel test triage, broad research) -- the defaults are
+# tuned for occasional single-helper delegation, not batch fan-out.
+# max_active_executions = 4     # concurrent subagents running at once
+# max_resident_tasks     = 8     # total subagents held in memory at once
+# max_nesting_depth      = 2     # how many levels deep delegation can go
+# max_direct_children    = 4     # children one task may spawn directly
+# max_wait_seconds       = 60    # how long agents.wait() blocks per call
+
 [tools]
 # dir        = "~/.config/pici/tools"  # --tools-dir  (Lua tool scripts)
 # disabled   = false                   # --no-tools

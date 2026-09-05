@@ -233,6 +233,13 @@ struct RuntimeBundle {
   std::optional<core::SessionRecord> loaded_session;
   core::TaskTree::ChildWriteTools child_write_tools{
       core::TaskTree::ChildWriteTools::none};
+  // Resolved by open_runtime_bundle() (from build_task_tree_limits(),
+  // cli/config.h) at the point config.args -- and hence
+  // config.args.config_document's [subagents] table -- is still in scope;
+  // activate_runtime_bundle() itself only receives this bundle, not the
+  // original RuntimeBuildConfig, so the resolved value is carried here
+  // rather than being recomputed later.
+  core::TaskTree::Limits task_tree_limits;
   std::vector<ContextFile> context_files;
   std::shared_ptr<const core::SkillCatalog> skill_catalog;
   const core::SkillCatalog *skill_catalog_ptr{nullptr};

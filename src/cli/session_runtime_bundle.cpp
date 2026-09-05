@@ -239,6 +239,7 @@ RuntimeBundle open_runtime_bundle(const RuntimeBuildConfig &config) {
       .sandbox_policy = std::move(sandbox_policy),
       .loaded_session = std::move(loaded_session),
       .child_write_tools = child_write_tools,
+      .task_tree_limits = build_task_tree_limits(config.args),
       .context_files = std::move(context_files),
       .skill_catalog = std::move(skill_catalog),
       .skill_catalog_ptr = skill_catalog_ptr,
@@ -255,7 +256,7 @@ void activate_runtime_bundle(
     core::AgentTaskEventCallback extra_task_event_callback,
     std::function<void()> wake_root) {
   bundle.runtime->activate(
-      bundle.agent_options, core::TaskTree::Limits{}, bundle.child_write_tools,
+      bundle.agent_options, bundle.task_tree_limits, bundle.child_write_tools,
       std::move(extra_task_event_callback), std::move(wake_root));
 }
 
