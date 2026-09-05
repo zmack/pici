@@ -1,9 +1,12 @@
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <source_location>
 #include <stop_token>
 #include <string>
@@ -279,6 +282,135 @@ TEST(BuiltinTools, Bash_no_truncation_details_when_under_limit) {
   auto r = bash->execute("1", R"({"command":"echo hello"})");
   EXPECT_TRUE(!r->is_error());
   EXPECT_EQ(r->details(), std::nullopt);
+}
+
+TEST(BuiltinTools, Bash_full_output_written_to_spill_file) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-bash-spill-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root, disabled_sandbox());
+  auto bash = find_tool(tools, "bash");
+
+  // Deterministic content, comfortably over kMaxBytes (64KB) but well under
+  // kMaxSpillBytes (16MB): 8000 fixed-width "line-NNNNN\n" records (11
+  // bytes each) = 88000 bytes total. Unlike
+  // Bash_truncation_details_report_bytes_limit's `yes | head -c 200000`,
+  // there's no risk of landing exactly on a 4096-byte read-chunk boundary
+  // here -- 88000 isn't a multiple of 4096, and this test only needs the
+  // total to clearly exceed kMaxBytes, not land on any particular value.
+  constexpr int kLines = 8000;
+  std::string expected;
+  expected.reserve(static_cast<std::size_t>(kLines) * 11);
+  for (int i = 1; i <= kLines; ++i) {
+    char line[32];
+    std::snprintf(line, sizeof(line), "line-%05d\n", i);
+    expected += line;
+  }
+
+  nlohmann::json args;
+  args["command"] = "for i in $(seq 1 " + std::to_string(kLines) +
+                    "); do printf 'line-%05d\\n' \"$i\"; done";
+  auto r = bash->execute("1", args.dump());
+  EXPECT_TRUE(!r->is_error());
+
+  ASSERT_TRUE(r->details().has_value());
+  auto parsed = nlohmann::json::parse(*r->details());
+  ASSERT_TRUE(parsed.contains("truncation"));
+  EXPECT_TRUE(parsed["truncation"]["truncated"].get<bool>());
+  ASSERT_TRUE(parsed.contains("full_output_path"));
+
+  const auto rel_path = parsed["full_output_path"].get<std::string>();
+  // Must be workspace-relative (not absolute), since that's what makes it
+  // resolvable via ReadTool's resolve_workspace_path.
+  EXPECT_TRUE(std::filesystem::path(rel_path).is_relative());
+  const auto spill_path = root / rel_path;
+  ASSERT_TRUE(std::filesystem::exists(spill_path));
+
+  std::ifstream in(spill_path, std::ios::binary);
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  EXPECT_EQ(ss.str(), expected);
+
+  // Confirm the path is actually reachable the way the review's blocker #1
+  // requires: through ReadTool's resolve_workspace_path, using the exact
+  // relative path bash reported (not just an absolute path this test
+  // happens to know).
+  auto read = find_tool(tools, "read");
+  nlohmann::json read_args;
+  read_args["path"] = rel_path;
+  auto read_result = read->execute("2", read_args.dump());
+  EXPECT_TRUE(!read_result->is_error());
+  EXPECT_NE(read_result->content().find("line-00001"), std::string::npos);
+
+  std::filesystem::remove_all(root);
+}
+
+TEST(BuiltinTools, Bash_small_output_no_spill_file) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-bash-no-spill-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto tools = create_all_tools(root, disabled_sandbox());
+  auto bash = find_tool(tools, "bash");
+
+  auto r = bash->execute("1", R"({"command":"echo hello"})");
+  EXPECT_TRUE(!r->is_error());
+  if (r->details().has_value()) {
+    auto parsed = nlohmann::json::parse(*r->details());
+    EXPECT_FALSE(parsed.contains("full_output_path"));
+  }
+  EXPECT_FALSE(std::filesystem::exists(root / ".pici" / "bash-output"));
+
+  std::filesystem::remove_all(root);
+}
+
+TEST(BuiltinTools, Bash_runaway_output_is_bounded_by_spill_cap) {
+  const auto root =
+      std::filesystem::temp_directory_path() / "pici-bash-runaway-test";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+
+  // Test-only override of kMaxSpillBytes (see effective_max_spill_bytes()
+  // in builtin_tools.cpp) so this test can prove the runaway-producer kill
+  // path works without waiting on a real 16MB write. Picked bigger than
+  // kMaxBytes (64KB) so the run actually exercises spilling past the
+  // visible cap before hitting its own, smaller cap, rather than just the
+  // degenerate "the seed alone already exceeds a tiny cap" case.
+  ::setenv("PICI_TEST_MAX_SPILL_BYTES", "204800", 1); // 200KB
+  auto tools = create_all_tools(root, disabled_sandbox());
+  auto bash = find_tool(tools, "bash");
+
+  const auto start = std::chrono::steady_clock::now();
+  auto r = bash->execute("1", R"({"command":"yes","timeout":120})");
+  const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                           std::chrono::steady_clock::now() - start)
+                           .count();
+  ::unsetenv("PICI_TEST_MAX_SPILL_BYTES");
+
+  // The whole point of the spill cap: a runaway producer like `yes` must
+  // be bounded by a small, predictable amount of extra time, not the full
+  // 120s timeout.
+  EXPECT_LT(elapsed, 20);
+
+  ASSERT_TRUE(r->details().has_value());
+  auto parsed = nlohmann::json::parse(*r->details());
+  ASSERT_TRUE(parsed.contains("full_output_path"));
+  ASSERT_TRUE(parsed.contains("spill_truncated"));
+  EXPECT_TRUE(parsed["spill_truncated"].get<bool>());
+
+  // Confirm the child is actually gone (kill_tree() + waitpid() already
+  // happened synchronously inside execute(), before it returned) rather
+  // than merely detached and still writing in the background: the spill
+  // file's size should be stable, not still growing, once execute() has
+  // returned.
+  const auto spill_path = root / parsed["full_output_path"].get<std::string>();
+  ASSERT_TRUE(std::filesystem::exists(spill_path));
+  const auto size_after_return = std::filesystem::file_size(spill_path);
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  EXPECT_EQ(std::filesystem::file_size(spill_path), size_after_return);
+
+  std::filesystem::remove_all(root);
 }
 
 TEST(BuiltinTools, GitIgnore_find_respects_gitignore) {

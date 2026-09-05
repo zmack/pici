@@ -41,6 +41,7 @@
 #include <csignal>
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -48,6 +49,16 @@ namespace pi::core {
 namespace {
 
 constexpr std::size_t kMaxBytes = static_cast<std::size_t>(64 * 1024);
+// Separate, much larger cap on the total bytes a single bash command may
+// write to its on-disk spill file (see BashTool::execute). kMaxBytes is the
+// small in-memory/visible-content cap; once a command's output crosses it,
+// the read loop no longer breaks early (so a slower command with large but
+// finite output can still capture its full stream on disk) -- but that only
+// works if *something* still bounds a truly unbounded producer (e.g.
+// `yes`), or it would run for the full timeout while writing unbounded data
+// into the workspace. Once the spill file reaches kMaxSpillBytes, BashTool
+// kills the child exactly as it does on timeout.
+constexpr std::size_t kMaxSpillBytes = static_cast<std::size_t>(16 * 1024 * 1024);
 constexpr std::size_t kReadMaxLines = 2000;
 constexpr int kLsDefaultLimit = 500;
 constexpr int kFindDefaultLimit = 1000;
@@ -347,7 +358,7 @@ std::string glob_to_regex(std::string_view glob) {
 bool should_skip_dir(const std::filesystem::path &path) {
   const auto name = path.filename().string();
   return name == ".git" || name == "node_modules" || name == "build" ||
-         name == "build-asan";
+         name == "build-asan" || name == ".pici";
 }
 
 class GitIgnore {
@@ -1473,6 +1484,112 @@ public:
   }
 };
 
+// Relative path (from `cwd`) of the directory bash spill files live under.
+// Kept workspace-relative and named consistently so should_skip_dir() (which
+// excludes ".pici" by name) and the spill-file helpers below always agree on
+// where it is.
+std::filesystem::path bash_spill_dir(const std::filesystem::path &cwd) {
+  return cwd / ".pici" / "bash-output";
+}
+
+// Deletes spill files older than 24h under <cwd>/.pici/bash-output/.
+//
+// Spill files now live inside the workspace (not host /tmp, which at least
+// had OS-level tmpfs/tmp-cleaner conventions backing "eventually goes
+// away"), so they need an explicit retention policy or they'd accumulate in
+// the user's repo forever. This is invoked once per BashTool construction
+// (i.e. once per session in the normal CLI flow) rather than once per bash
+// call: it's an O(files-in-directory) walk, cheap at session-start cadence
+// but wasteful to repeat on every single command. It intentionally doesn't
+// try to be smarter (e.g. deleting a spill file as soon as its result is
+// durably persisted) -- that refinement is left for later; simple
+// age-based cleanup is enough to avoid "never cleaned up" against a
+// directory that now lives in the user's repo.
+void sweep_old_spill_files(const std::filesystem::path &cwd) {
+  std::error_code ec;
+  const auto dir = bash_spill_dir(cwd);
+  if (!std::filesystem::exists(dir, ec) || ec)
+    return;
+  const auto cutoff =
+      std::filesystem::file_time_type::clock::now() - std::chrono::hours(24);
+  std::filesystem::directory_iterator it(dir, ec);
+  if (ec)
+    return;
+  for (const auto &entry : it) {
+    std::error_code entry_ec;
+    if (!entry.is_regular_file(entry_ec))
+      continue;
+    const auto mtime = std::filesystem::last_write_time(entry.path(), entry_ec);
+    if (entry_ec)
+      continue;
+    if (mtime < cutoff)
+      std::filesystem::remove(entry.path(), entry_ec);
+  }
+}
+
+// An open bash-output spill file: `fd` stays open (and positioned for
+// sequential appends) for the lifetime of BashTool::execute's read loop;
+// `path` is its final, absolute on-disk path.
+struct SpillFile {
+  int fd = -1;
+  std::filesystem::path path;
+};
+
+// Creates a new, uniquely-named spill file directly at its final path under
+// <cwd>/.pici/bash-output/ using mkstemp, mirroring the precedent in
+// credential_store.cpp's save_document(): mkstemp + fchmod(0600), with the
+// temp file removed on any failure path. Unlike credential_store's usage,
+// there is no following rename -- this file *is* the final artifact, so
+// composing a filename (e.g. from generate_session_id()) and opening it
+// with a plain std::ofstream would be a symlink-plant hazard once the path
+// lives inside a directory anything else could write to; mkstemp creates
+// and opens the uniquely-named file atomically, so there's no window where
+// a predictable path exists for something else to have planted first.
+SpillFile create_spill_file(const std::filesystem::path &cwd) {
+  const auto dir = bash_spill_dir(cwd);
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec)
+    throw std::runtime_error("Failed to create bash spill directory: " +
+                             ec.message());
+
+  auto tmpl = dir / "spill-XXXXXX";
+  std::string tmpl_string = tmpl.string();
+  std::vector<char> buffer(tmpl_string.begin(), tmpl_string.end());
+  buffer.push_back('\0');
+  // mkstemp is a POSIX extension declared via <cstdlib> on this platform;
+  // the tool has no better header to suggest for it.
+  // NOLINTNEXTLINE(misc-include-cleaner)
+  const int fd = ::mkstemp(buffer.data());
+  if (fd < 0)
+    throw std::runtime_error("Failed to create bash spill file");
+  const std::filesystem::path spill_path(buffer.data());
+  if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
+    ::close(fd);
+    std::filesystem::remove(spill_path, ec);
+    throw std::runtime_error("Failed to secure bash spill file");
+  }
+  return {fd, spill_path};
+}
+
+// PICI_TEST_MAX_SPILL_BYTES lets tests (see
+// Bash_runaway_output_is_bounded_by_spill_cap) exercise the kill-on-spill-
+// cap path with a small cap instead of waiting on a real 16MB write. Not a
+// documented user-facing knob; read once per bash call, which is cheap and
+// avoids threading a test-only constructor parameter through
+// create_all_tools/create_coding_tools and BashTool's public constructor.
+std::size_t effective_max_spill_bytes() {
+  // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only env access; nothing in
+  // this process calls setenv/putenv concurrently with tool execution.
+  if (const char *override_bytes = std::getenv("PICI_TEST_MAX_SPILL_BYTES")) {
+    char *end = nullptr;
+    const auto parsed = std::strtoull(override_bytes, &end, 10);
+    if (end != override_bytes && parsed > 0)
+      return static_cast<std::size_t>(parsed);
+  }
+  return kMaxSpillBytes;
+}
+
 class BashTool final : public BuiltinTool {
 public:
   explicit BashTool(const std::filesystem::path &cwd,
@@ -1483,7 +1600,9 @@ public:
             "stdout and stderr. Optionally provide timeout in seconds.",
             R"json({"type":"object","properties":{"command":{"type":"string","description":"Bash command to execute"},"timeout":{"type":"number","description":"Timeout in seconds (optional)"}},"required":["command"],"additionalProperties":false})json",
             cwd, true),
-        sandbox_policy_(std::move(sandbox_policy)) {}
+        sandbox_policy_(std::move(sandbox_policy)) {
+    sweep_old_spill_files(this->cwd());
+  }
 
   std::shared_ptr<ToolResult>
   execute(std::string_view, std::string_view args, std::stop_token stop_tok,
@@ -1551,6 +1670,55 @@ public:
       bool aborted = false;
       bool timed_out = false;
 
+      // Once `output` (the small, in-memory/visible-content cap) is first
+      // crossed, further chunks are appended to an on-disk spill file
+      // instead of to `output` -- see kMaxSpillBytes for why a distinct,
+      // much larger cap still bounds this instead of letting a runaway
+      // producer (e.g. `yes`) write unbounded data for the full timeout.
+      // `output` itself is left frozen at whatever it held at that moment
+      // (later trimmed to exactly kMaxBytes by truncate_head_ex below) --
+      // it's the visible/truncated preview; the spill file is the full
+      // stream.
+      std::optional<SpillFile> spill;
+      std::size_t spill_bytes = 0;
+      bool spill_truncated = false;
+
+      // Appends one chunk of freshly-read output to whichever of
+      // `output`/the spill file is currently active, lazily creating (and
+      // seeding with everything accumulated in `output` so far) the spill
+      // file the moment `output` first reaches kMaxBytes. Returns true if
+      // the spill cap was just hit, in which case the caller must kill the
+      // child and stop polling -- exactly as it already does on timeout.
+      // `allow_on_update` preserves the existing behavior of only
+      // streaming updates while `output` hasn't yet been capped: once it
+      // has, `output` no longer changes, so repeating the same on_update
+      // call would add nothing (and, once the loop no longer exits early,
+      // could otherwise fire a very large number of times).
+      auto handle_chunk = [&](const char *data, std::size_t len,
+                              bool allow_on_update) {
+        if (output.size() < kMaxBytes) {
+          output.append(data, len);
+          if (allow_on_update && on_update)
+            on_update(std::make_shared<TextToolResult>(output));
+          if (output.size() >= kMaxBytes) {
+            spill = create_spill_file(cwd());
+            write_best_effort(spill->fd, output.data(), output.size());
+            spill_bytes = output.size();
+            // The seed alone can already reach a small (e.g. test-only)
+            // spill cap; check immediately rather than waiting for the
+            // next chunk.
+            if (spill_bytes >= effective_max_spill_bytes())
+              return true;
+          }
+          return false;
+        }
+        // `output` is already frozen at/above kMaxBytes; `spill` must
+        // already be open (created the moment that first happened, above).
+        write_best_effort(spill->fd, data, len);
+        spill_bytes += len;
+        return spill_bytes >= effective_max_spill_bytes();
+      };
+
       {
         // stop_callback writes to the wakeup pipe; destructor unregisters it
         // and synchronises with any in-progress invocation before we close.
@@ -1597,11 +1765,12 @@ public:
             const auto nr = ::read(pipefd[0], buf.data(), buf.size());
             if (nr <= 0)
               break;
-            output.append(buf.data(), static_cast<std::size_t>(nr));
-            if (on_update)
-              on_update(std::make_shared<TextToolResult>(output));
-            if (output.size() >= kMaxBytes)
+            if (handle_chunk(buf.data(), static_cast<std::size_t>(nr),
+                             /*allow_on_update=*/true)) {
+              kill_tree();
+              spill_truncated = true;
               break;
+            }
           } else if ((fds[0].revents & POLLHUP) != 0) {
             break;
           }
@@ -1611,14 +1780,25 @@ public:
       ::close(wakeup[0]);
       ::close(wakeup[1]);
 
-      // Drain any data that arrived between the last read and process exit
-      while (output.size() < kMaxBytes) {
+      // Drain any data that arrived between the last read and process exit.
+      // pipefd[0] is O_NONBLOCK, so this terminates as soon as it hits
+      // EAGAIN/EOF regardless of how much has been read -- no additional
+      // wall-clock risk from applying the same spill-aware logic here in
+      // place of the old `output.size() < kMaxBytes` guard.
+      while (true) {
         const auto nr = ::read(pipefd[0], buf.data(), buf.size());
         if (nr <= 0)
           break;
-        output.append(buf.data(), static_cast<std::size_t>(nr));
+        if (handle_chunk(buf.data(), static_cast<std::size_t>(nr),
+                         /*allow_on_update=*/false)) {
+          kill_tree();
+          spill_truncated = true;
+          break;
+        }
       }
       ::close(pipefd[0]);
+      if (spill)
+        ::close(spill->fd);
 
       int status = 0;
       ::waitpid(pid, &status, 0);
@@ -1634,11 +1814,24 @@ public:
       // `details` on the returned result (see agent_loop.cpp), which would
       // clobber this sidecar -- not guarded against here.
       std::optional<std::string> details;
-      if (truncated.info.truncated) {
+      // A spill file only ever exists because `output` reached kMaxBytes at
+      // some point (see handle_chunk above), which by construction means
+      // more was produced than is visible in `output` -- so a spill implies
+      // truncation even in the one case where truncate_head_ex's own
+      // `truncated` flag says otherwise: `output` landing on *exactly*
+      // kMaxBytes bytes with zero overshoot (a real, observed case --
+      // `yes`'s 2-byte lines read in exact 4096-byte chunks can land
+      // precisely on the 64KB boundary), which truncate_head_ex correctly
+      // treats as "fits exactly, no [in-band] truncation note needed" for
+      // its own generic callers, but which must still surface the spill
+      // metadata here.
+      const bool effectively_truncated = truncated.info.truncated || spill.has_value();
+      if (effectively_truncated) {
         nlohmann::json details_json;
         details_json["truncation"] = {
-            {"truncated", truncated.info.truncated},
-            {"truncated_by", truncated.info.truncated_by.value_or("")},
+            {"truncated", true},
+            {"truncated_by",
+             truncated.info.truncated_by.value_or(spill ? "bytes" : "")},
             {"input_lines", truncated.info.input_lines},
             {"input_bytes", truncated.info.input_bytes},
             {"output_lines", truncated.info.output_lines},
@@ -1649,6 +1842,28 @@ public:
             {"max_lines", truncated.info.max_lines},
             {"max_bytes", truncated.info.max_bytes},
         };
+        if (spill) {
+          // Workspace-relative, deliberately: this is what makes the path
+          // resolvable by ReadTool's resolve_workspace_path (and reachable
+          // by a sandboxed `bash cat`, which mounts the workspace at the
+          // same relative layout) -- an absolute host path would be neither.
+          const auto rel_path =
+              std::filesystem::relative(spill->path, cwd()).generic_string();
+          details_json["full_output_path"] = rel_path;
+          if (spill_truncated)
+            details_json["spill_truncated"] = true;
+          // Additional bash-specific footer (appended the same way as the
+          // "[Command timed out...]"/"[Command aborted]" notes below) name
+          // the full-output path; distinct from truncate_head_ex's own
+          // generic "[Truncated: ... KB limit)]" note already folded into
+          // `output` above, which doesn't know about spill files at all.
+          output += "\n\n[Truncated: " +
+                    std::to_string(truncated.info.output_bytes) + " of " +
+                    std::to_string(spill_bytes) +
+                    " bytes shown. Full output: " + rel_path + "]";
+          if (spill_truncated)
+            output += " (incomplete: exceeded spill cap)";
+        }
         details = details_json.dump();
       }
 
