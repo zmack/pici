@@ -92,8 +92,17 @@ public:
   // Tools discovered from every configured, enabled MCP server whose
   // handshake succeeded, merged and de-duplicated (see pici_process.cpp).
   // Frozen for this process's lifetime -- tools are discovered once at
-  // construction; a server's notifications/tools/list_changed is a
-  // documented Phase 3 non-goal.
+  // construction and never re-discovered afterward.
+  //
+  // Two related non-goals, deliberate for v1 and named together because
+  // they're really the same underlying question ("how should pici react to
+  // a server's tool set changing after startup"): this process never
+  // reconnects/respawns a server whose transport has died (see
+  // McpClient::is_alive()'s doc comment in mcp_client.h -- a dead server's
+  // tools stay registered but every call to them fails cleanly instead of
+  // hanging or retrying), and it never listens for or reacts to a live
+  // server's `notifications/tools/list_changed`. Both are intentional scope
+  // cuts, not oversights -- revisit them together if either is ever needed.
   std::vector<std::shared_ptr<const ToolDefinition>> mcp_tools() const {
     return mcp_tools_;
   }

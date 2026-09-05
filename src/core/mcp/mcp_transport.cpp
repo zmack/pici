@@ -341,6 +341,13 @@ void McpStdioTransport::write_message(const nlohmann::json &message) {
 nlohmann::json McpStdioTransport::call(const std::string &method,
                                        nlohmann::json params,
                                        std::chrono::milliseconds timeout) {
+  return call(method, std::move(params), timeout, std::stop_token{});
+}
+
+nlohmann::json McpStdioTransport::call(const std::string &method,
+                                       nlohmann::json params,
+                                       std::chrono::milliseconds timeout,
+                                       std::stop_token stop_tok) {
   const auto id = next_id_.fetch_add(1);
   auto pending = std::make_shared<Pending>();
   auto future = pending->promise.get_future();
@@ -367,11 +374,42 @@ nlohmann::json McpStdioTransport::call(const std::string &method,
     throw;
   }
 
-  if (future.wait_for(timeout) == std::future_status::timeout) {
+  // Cancellation polling slice: only used when `stop_tok` is actually
+  // stop-capable (a default-constructed std::stop_token{} -- what the
+  // three-argument overload above passes -- has stop_possible() == false,
+  // in which case this takes the plain single-wait path below exactly as
+  // before, unchanged in behavior or latency).
+  constexpr auto kCancelPollSlice = std::chrono::milliseconds(20);
+
+  bool timed_out = false;
+  bool cancelled = false;
+  if (stop_tok.stop_possible()) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) {
+        timed_out = true;
+        break;
+      }
+      if (stop_tok.stop_requested()) {
+        cancelled = true;
+        break;
+      }
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+      const auto slice = std::min(kCancelPollSlice, remaining);
+      if (future.wait_for(slice) == std::future_status::ready)
+        break; // ready: fall through to future.get() below
+    }
+  } else if (future.wait_for(timeout) == std::future_status::timeout) {
+    timed_out = true;
+  }
+
+  if (timed_out || cancelled) {
     // Extract-and-erase under the lock, symmetric with handle_response's
-    // own extract-then-act: whichever side (this timeout, or the reader
-    // thread matching a response) wins the race to erase this id owns
-    // deciding what happens to the promise.
+    // own extract-then-act: whichever side (this timeout/cancellation, or
+    // the reader thread matching a response) wins the race to erase this id
+    // owns deciding what happens to the promise.
     std::shared_ptr<Pending> extracted;
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -385,16 +423,29 @@ nlohmann::json McpStdioTransport::call(const std::string &method,
       // We won: the promise is still unfulfilled and nobody else holds a
       // reference to it (handle_response won't find this id anymore, and
       // will just drop the late response if one arrives). Report a clean
-      // timeout without ever calling future.get() -- the promise is never
-      // going to be fulfilled, so get() would block forever, not throw.
+      // timeout/cancellation without ever calling future.get() -- the
+      // promise is never going to be fulfilled, so get() would block
+      // forever, not throw.
+      if (cancelled) {
+        // Best-effort: the server may already be gone, or the notification
+        // may simply never be delivered -- either way, this call must still
+        // return promptly with a clean error, not wait on the notify.
+        try {
+          notify(std::string(methods::kCancelled),
+                 nlohmann::json{{"requestId", id},
+                                {"reason", "client cancelled the tool call"}});
+        } catch (...) { // NOLINT(bugprone-empty-catch)
+        }
+        throw TransportError("mcp call cancelled: " + method);
+      }
       throw TransportError("mcp call timed out: " + method);
     }
     // The reader thread already extracted this id moments before our
-    // timeout fired: it holds the other shared_ptr to this same Pending
-    // (our local `pending` keeps it alive too) and is in the middle of
-    // calling set_value/set_exception on it. Fall through to future.get()
-    // below, which will return/throw whatever the reader ends up setting,
-    // instead of reporting a spurious second timeout.
+    // timeout/cancellation fired: it holds the other shared_ptr to this
+    // same Pending (our local `pending` keeps it alive too) and is in the
+    // middle of calling set_value/set_exception on it. Fall through to
+    // future.get() below, which will return/throw whatever the reader ends
+    // up setting, instead of reporting a spurious second timeout/cancel.
   }
 
   try {
@@ -433,6 +484,11 @@ void McpStdioTransport::notify(const std::string &method,
 void McpStdioTransport::set_notification_callback(NotificationCallback cb) {
   std::lock_guard<std::mutex> lock(notification_mutex_);
   notification_callback_ = std::move(cb);
+}
+
+std::string McpStdioTransport::recent_stderr() const {
+  std::lock_guard<std::mutex> lock(stderr_buffer_mutex_);
+  return stderr_buffer_;
 }
 
 bool McpStdioTransport::is_alive() const {

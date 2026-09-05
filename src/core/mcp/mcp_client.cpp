@@ -71,9 +71,8 @@ bool schema_is_loadable(const nlohmann::json &input_schema) {
 
 std::vector<std::shared_ptr<const ToolDefinition>>
 McpClient::list_tools(std::chrono::milliseconds timeout) {
-  const auto response =
-      transport_.call(std::string(methods::kToolsList),
-                      nlohmann::json::object(), timeout);
+  const auto response = transport_.call(std::string(methods::kToolsList),
+                                        nlohmann::json::object(), timeout);
   if (!response.is_object() || !response.contains("tools") ||
       !response.at("tools").is_array()) {
     throw std::runtime_error(
@@ -101,13 +100,12 @@ McpClient::list_tools(std::chrono::milliseconds timeout) {
     }
     const auto tool_name = entry.at("name").get<std::string>();
     const auto description = entry.value("description", std::string{});
-    const nlohmann::json input_schema =
-        entry.contains("inputSchema") ? entry.at("inputSchema")
-                                      : nlohmann::json::object();
+    const nlohmann::json input_schema = entry.contains("inputSchema")
+                                            ? entry.at("inputSchema")
+                                            : nlohmann::json::object();
 
     if (!schema_is_loadable(input_schema)) {
-      std::cerr << "mcp: server \"" << server_name_ << "\" tool \""
-                << tool_name
+      std::cerr << "mcp: server \"" << server_name_ << "\" tool \"" << tool_name
                 << "\" has a malformed inputSchema (not a loadable JSON "
                    "Schema); skipping this tool\n";
       continue;
@@ -117,9 +115,9 @@ McpClient::list_tools(std::chrono::milliseconds timeout) {
     if (!claim_tool_name(qualified_name, server_name_, taken_names))
       continue;
 
-    tools.push_back(std::make_shared<McpTool>(
-        server_name_, tool_name, description, input_schema,
-        shared_from_this()));
+    tools.push_back(std::make_shared<McpTool>(server_name_, tool_name,
+                                              description, input_schema,
+                                              shared_from_this()));
   }
 
   return tools;
@@ -127,12 +125,14 @@ McpClient::list_tools(std::chrono::milliseconds timeout) {
 
 nlohmann::json McpClient::call_tool(const std::string &tool_name,
                                     nlohmann::json arguments,
-                                    std::chrono::milliseconds timeout) {
+                                    std::chrono::milliseconds timeout,
+                                    std::stop_token stop_tok) {
   const nlohmann::json params{
       {"name", tool_name},
       {"arguments", std::move(arguments)},
   };
-  return transport_.call(std::string(methods::kToolsCall), params, timeout);
+  return transport_.call(std::string(methods::kToolsCall), params, timeout,
+                         std::move(stop_tok));
 }
 
 } // namespace pi::core::mcp

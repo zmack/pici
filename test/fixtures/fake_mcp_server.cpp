@@ -52,6 +52,26 @@
 //     nlohmann::json_schema::json_validator::set_root_schema() is confirmed
 //     (by reading its source) to throw std::invalid_argument on -- the
 //     fixture for the discovery-time schema-validation test.
+//
+// Phase 3 additions:
+//   - "test_tool" tools/call arguments {"crash": true[, "stderr_message":
+//     "..."]}: optionally writes stderr_message to this process's own
+//     stderr (flushed), then _Exit(1) WITHOUT replying -- simulates a
+//     server dying mid-call (with an optional diagnostic on stderr right
+//     before it goes), for the stderr-capture and dead-transport tests.
+//     Reached from the top-level tools/call dispatch (not
+//     test_tool_call_result(), which returns a value -- this instead needs
+//     to terminate the process before any reply is possible).
+//   - "notifications/cancelled" (a notification the CLIENT sends this
+//     server): recorded (its "requestId") rather than acted on, so the
+//     cancellation regression test can prove the client actually sent it.
+//   - "test/query_cancellations" (a request): returns
+//     {"cancelled_ids": [...]} -- every requestId seen via
+//     notifications/cancelled so far, in receipt order.
+//   - "test/emit_stderr" (a notification): writes params.text to this
+//     process's own stderr, params.repeat times -- for proving
+//     McpStdioTransport::recent_stderr() captures/caps a chatty server's
+//     stderr without blocking it.
 
 #include <nlohmann/json.hpp>
 
@@ -63,12 +83,16 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
 using nlohmann::json;
 
 std::mutex g_stdout_mutex;
+
+std::mutex g_cancelled_mutex;
+std::vector<long long> g_cancelled_ids;
 
 void write_line(const std::string &line) {
   std::lock_guard<std::mutex> lock(g_stdout_mutex);
@@ -244,6 +268,26 @@ int main() {
         // Handshake complete; nothing to do.
       } else if (method == "test/crash") {
         std::_Exit(1); // abrupt, unclean exit -- simulates a crashed server
+      } else if (method == "notifications/cancelled") {
+        // Recorded, not acted on: this fixture doesn't run anything long
+        // enough to actually need to stop it. What matters for the
+        // regression test is that the client sent this at all, with the
+        // right requestId -- see "test/query_cancellations" below.
+        if (params.contains("requestId") &&
+            params.at("requestId").is_number_integer()) {
+          std::lock_guard<std::mutex> lock(g_cancelled_mutex);
+          g_cancelled_ids.push_back(params.at("requestId").get<long long>());
+        }
+      } else if (method == "test/emit_stderr") {
+        // Writes params.text `repeat` times to this process's own stderr --
+        // used to prove the transport's stderr-drain thread keeps up with a
+        // chatty server (not blocking it) and that recent_stderr() reports a
+        // capped tail, not an unbounded accumulation.
+        const std::string text = params.value("text", std::string());
+        const int repeat = params.value("repeat", 1);
+        for (int i = 0; i < repeat; ++i)
+          std::cerr << text;
+        std::cerr.flush();
       } else if (method == "test/emit_oversized") {
         // ~40MB with no trailing newline: exercises the reader's
         // unterminated-line cap. Written directly (not via write_json,
@@ -284,10 +328,31 @@ int main() {
       continue;
     }
 
+    if (method == "test/query_cancellations") {
+      std::lock_guard<std::mutex> lock(g_cancelled_mutex);
+      write_json(json{{"jsonrpc", "2.0"},
+                      {"id", id},
+                      {"result", {{"cancelled_ids", g_cancelled_ids}}}});
+      continue;
+    }
+
     if (method == "tools/call") {
-      const int delay_ms = params.contains("arguments")
-                              ? params.at("arguments").value("delay_ms", 0)
-                              : 0;
+      const json arguments =
+          params.contains("arguments") ? params.at("arguments") : json::object();
+      if (arguments.value("crash", false)) {
+        // Simulates a server dying mid-call: optionally leave a diagnostic
+        // on our own stderr (for the stderr-capture test), then terminate
+        // WITHOUT replying at all -- the caller must see a clean transport-
+        // level failure, not a hang.
+        if (arguments.contains("stderr_message") &&
+            arguments.at("stderr_message").is_string()) {
+          std::cerr << arguments.at("stderr_message").get<std::string>();
+          std::cerr.flush();
+        }
+        std::_Exit(1);
+      }
+
+      const int delay_ms = arguments.value("delay_ms", 0);
       if (delay_ms > 0) {
         std::thread([id, params, delay_ms]() mutable {
           std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));

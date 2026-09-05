@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -79,14 +80,20 @@ discover_mcp_tools(const std::vector<mcp::McpServerConfig> &configs) {
     process_config.env = server.env;
     process_config.cwd = server.cwd;
 
+    const std::optional<std::chrono::milliseconds> call_timeout =
+        server.call_timeout_ms
+            ? std::optional<std::chrono::milliseconds>(
+                  std::chrono::milliseconds(*server.call_timeout_ms))
+            : std::nullopt;
+
     std::shared_ptr<mcp::McpClient> client;
     try {
       // McpClient's constructor spawns the child (via McpStdioTransport) --
       // cheap (a fork+exec), which is why this part stays eager/serial;
       // only the handshake itself (a round-trip that can legitimately take
       // a while) is pushed onto its own thread below.
-      client = std::make_shared<mcp::McpClient>(server.name,
-                                                std::move(process_config));
+      client = std::make_shared<mcp::McpClient>(
+          server.name, std::move(process_config), call_timeout);
     } catch (const std::exception &err) {
       std::cerr << "mcp: server \"" << server.name
                 << "\" failed to start: " << err.what() << "\n";
@@ -117,10 +124,9 @@ discover_mcp_tools(const std::vector<mcp::McpServerConfig> &configs) {
   for (auto &attempt : attempts) {
     const auto now = std::chrono::steady_clock::now();
     const auto remaining =
-        now < deadline
-            ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline -
-                                                                     now)
-            : std::chrono::milliseconds(0);
+        now < deadline ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                             deadline - now)
+                       : std::chrono::milliseconds(0);
 
     bool handshake_ok = false;
     if (attempt.handshake.wait_for(remaining) == std::future_status::ready) {

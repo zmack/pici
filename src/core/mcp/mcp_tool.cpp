@@ -24,20 +24,37 @@ bool is_name_safe_char(char c) {
 
 class McpToolResult : public ToolResult {
 public:
-  McpToolResult(std::string content, bool is_error)
-      : content_(std::move(content)), is_error_(is_error) {}
+  McpToolResult(std::string content, bool is_error,
+                std::optional<std::string> details = std::nullopt)
+      : content_(std::move(content)), details_(std::move(details)),
+        is_error_(is_error) {}
 
   bool is_error() const override { return is_error_; }
   std::string content() const override { return content_; }
-  std::optional<std::string> details() const override { return std::nullopt; }
+  std::optional<std::string> details() const override { return details_; }
 
 private:
   std::string content_;
+  std::optional<std::string> details_;
   bool is_error_{false};
 };
 
-std::shared_ptr<ToolResult> error_result(std::string message) {
-  return std::make_shared<McpToolResult>(std::move(message), true);
+// Builds the details() payload for a failed call: the server's captured
+// stderr tail (if any), as a small JSON object -- never attached on the
+// success path, never printed to pici's own stderr directly (see
+// McpStdioTransport::recent_stderr()'s doc comment).
+std::optional<std::string> stderr_details(const McpClient &client) {
+  auto tail = client.transport().recent_stderr();
+  if (tail.empty())
+    return std::nullopt;
+  return nlohmann::json{{"stderr_tail", std::move(tail)}}.dump();
+}
+
+std::shared_ptr<ToolResult>
+error_result(std::string message,
+             std::optional<std::string> details = std::nullopt) {
+  return std::make_shared<McpToolResult>(std::move(message), true,
+                                         std::move(details));
 }
 
 } // namespace
@@ -67,7 +84,7 @@ std::string sanitize_mcp_tool_name(std::string_view server_name,
   const std::size_t hash_value = std::hash<std::string>{}(qualified);
   char suffix[8];
   std::snprintf(suffix, sizeof(suffix), "_%06zx",
-               static_cast<std::size_t>(hash_value & 0xFFFFFFULL));
+                static_cast<std::size_t>(hash_value & 0xFFFFFFULL));
   constexpr std::size_t kSuffixLength = 7; // '_' + 6 hex chars
   std::string truncated =
       sanitized.substr(0, kMaxSanitizedNameLength - kSuffixLength);
@@ -119,34 +136,50 @@ McpTool::McpTool(std::string server_name, std::string tool_name,
     : server_name_(std::move(server_name)), tool_name_(std::move(tool_name)),
       description_(std::move(description)),
       qualified_name_(sanitize_mcp_tool_name(server_name_, tool_name_)),
-      source_path_("mcp:" + server_name_),
-      schema_(std::move(input_schema)), client_(std::move(client)) {}
+      source_path_("mcp:" + server_name_), schema_(std::move(input_schema)),
+      client_(std::move(client)) {}
 
 std::shared_ptr<ToolResult>
 McpTool::execute(std::string_view call_id, std::string_view args_json,
                  std::stop_token stop_tok, ToolUpdateCallback on_update) const {
-  // No streaming in MCP's base protocol (on_update is never invoked) and no
-  // cooperative cancellation yet (stop_tok is unused) -- both are Phase 3
-  // scope (per-call timeout/cancellation policy layered on top of Phase 1's
-  // already-correct transport mechanics). call_id is unused: McpClient
-  // mints its own JSON-RPC request id independently of pici's tool-call id.
+  // No streaming in MCP's base protocol: on_update is never invoked.
+  // call_id is unused: McpClient mints its own JSON-RPC request id
+  // independently of pici's tool-call id.
   (void)call_id;
-  (void)stop_tok;
   (void)on_update;
+
+  // "Mark unavailable, no auto-reconnect" (see McpClient::is_alive()'s doc
+  // comment): if the transport is already known dead, fail immediately with
+  // a clear message instead of attempting a write at all. This is belt-and-
+  // suspenders on top of the transport's own EPIPE/reader-death handling,
+  // which already makes a dead-transport write safe -- this just avoids the
+  // pointless attempt and gives a clearer error than a generic "write
+  // failed".
+  if (!client_->is_alive()) {
+    return error_result("MCP server \"" + server_name_ +
+                            "\" is no longer running",
+                        stderr_details(*client_));
+  }
 
   auto args = nlohmann::json::parse(args_json, nullptr, false);
   if (args.is_discarded()) {
-    return error_result("invalid JSON arguments for mcp tool \"" +
-                        tool_name_ + "\"");
+    return error_result("invalid JSON arguments for mcp tool \"" + tool_name_ +
+                        "\"");
   }
 
   nlohmann::json result;
   try {
     // The ORIGINAL, unsanitized tool name goes over the wire -- the server
     // has never heard of pici's "<server>__<tool>" qualification scheme.
-    result = client_->call_tool(tool_name_, std::move(args));
+    // `stop_tok` races the wait against cooperative cancellation (see
+    // McpStdioTransport::call()'s stop_token overload) -- if the caller
+    // stops it mid-call, this returns promptly with a cancellation error
+    // instead of waiting out the full per-call timeout.
+    result = client_->call_tool(tool_name_, std::move(args),
+                                client_->effective_call_timeout(), stop_tok);
   } catch (const std::exception &err) {
-    return error_result(std::string("mcp tool call failed: ") + err.what());
+    return error_result(std::string("mcp tool call failed: ") + err.what(),
+                        stderr_details(*client_));
   }
 
   const bool is_error = result.is_object() && result.value("isError", false);

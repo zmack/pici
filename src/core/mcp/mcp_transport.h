@@ -101,6 +101,23 @@ public:
   nlohmann::json call(const std::string &method, nlohmann::json params,
                       std::chrono::milliseconds timeout);
 
+  // Same as above, but also races the wait against `stop_tok`: if it is
+  // stopped before the timeout elapses or a response arrives, this
+  // best-effort sends `notifications/cancelled` (carrying the request id
+  // this call minted) and returns promptly with a TransportError instead of
+  // waiting out the rest of `timeout` -- the cooperative-cancellation path
+  // for McpTool::execute()'s own stop_tok (see mcp_tool.cpp).
+  //
+  // A default-constructed (stop-incapable) std::stop_token makes
+  // stop_tok.stop_possible() false, in which case this takes the exact same
+  // single future::wait_for(timeout) path as the two-argument overload
+  // above -- no polling-loop latency added for callers that pass one. The
+  // two-argument overload is implemented in terms of this one, passing
+  // std::stop_token{}.
+  nlohmann::json call(const std::string &method, nlohmann::json params,
+                      std::chrono::milliseconds timeout,
+                      std::stop_token stop_tok);
+
   // Sends a notification (no id, no reply expected, no pending-map entry).
   // Throws TransportError on a dead transport, same as call().
   void notify(const std::string &method, nlohmann::json params);
@@ -115,6 +132,14 @@ public:
   bool is_alive() const;
 
   pid_t pid() const { return pid_; }
+
+  // The tail (last kMaxStderrBufferBytes) of everything the server has
+  // written to its own stderr, captured by stderr_loop's drain thread since
+  // this transport was constructed. Returns whatever has been captured so
+  // far even while the child is still running -- there is no "final"
+  // snapshot distinct from this. Intended for surfacing on a failed call
+  // (see McpTool::execute()), never printed directly to pici's own stderr.
+  std::string recent_stderr() const;
 
   // Testing/diagnostic hook: the request id the NEXT call() will use.
   // Exists so tests can deliberately construct an id collision between a
@@ -174,8 +199,8 @@ private:
   mutable bool exited_{false};
   mutable int exit_status_{0};
 
-  std::mutex stderr_buffer_mutex_;
-  std::string stderr_buffer_; // capped tail; no external accessor yet (Phase 3)
+  mutable std::mutex stderr_buffer_mutex_;
+  std::string stderr_buffer_; // capped tail; exposed via recent_stderr()
 
   // Set once the reader loop stops for any reason (EOF/POLLHUP, an
   // oversized unterminated line, or shutdown). A fast, purely local

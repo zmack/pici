@@ -1,6 +1,7 @@
 #include "core/mcp/mcp_client.h"
 #include "core/mcp/mcp_tool.h"
 #include "core/message_types.h"
+#include "support/gtest_helpers.h"
 
 #include <gtest/gtest.h>
 
@@ -188,6 +189,55 @@ TEST(McpTool, SanitizesToolNameToProviderSafeCharacterSet) {
         << "unsafe character in sanitized name: " << name;
   }
   EXPECT_LE(name.size(), 64u);
+}
+
+TEST(McpTool, ExecuteReturnsErrorResultImmediatelyWhenTransportAlreadyDead) {
+  auto client = make_initialized_client("dead-server");
+  auto tools = client->list_tools(std::chrono::milliseconds(2000));
+  std::shared_ptr<const ToolDefinition> tool;
+  for (auto &candidate : tools) {
+    if (candidate->name().find("__test_tool") != std::string_view::npos)
+      tool = candidate;
+  }
+  ASSERT_NE(tool, nullptr);
+
+  // Kill the server WITHOUT going through the tool interface (no in-flight
+  // call), then confirm execute() notices via is_alive() and refuses to
+  // even attempt a call.
+  client->transport().notify("test/crash", nlohmann::json::object());
+  ASSERT_TRUE(pi::test::wait_until([&] { return !client->is_alive(); },
+                                   std::chrono::milliseconds(2000),
+                                   "server exiting after test/crash"));
+
+  const auto start = std::chrono::steady_clock::now();
+  auto result = tool->execute("call-dead", R"({"text":"hello"})");
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(result->is_error());
+  EXPECT_NE(result->content().find("no longer running"), std::string::npos)
+      << "actual content: " << result->content();
+  // No call was attempted at all -- this should return near-instantly, not
+  // pay for a write/wait cycle against a dead transport.
+  EXPECT_LT(elapsed, std::chrono::milliseconds(50));
+}
+
+TEST(McpTool, ExecuteResultDetailsIncludeCapturedStderrOnServerCrash) {
+  auto tool = discover_test_tool("crash-server");
+  ASSERT_NE(tool, nullptr);
+
+  const nlohmann::json args{
+      {"crash", true},
+      {"stderr_message", "fatal: simulated crash for test\n"},
+  };
+  auto result = tool->execute("call-crash", args.dump());
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_TRUE(result->is_error());
+  const auto details = result->details();
+  ASSERT_TRUE(details.has_value());
+  EXPECT_NE(details->find("simulated crash for test"), std::string::npos)
+      << "actual details: " << *details;
 }
 
 TEST(McpTool, SanitizeTruncatesOverlongNamesWithDistinctSuffixes) {

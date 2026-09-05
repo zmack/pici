@@ -218,6 +218,63 @@ TEST(PiciProcess, McpServerDisabledIsNotSpawned) {
   EXPECT_TRUE(process.mcp_tools().empty());
 }
 
+TEST(PiciProcess, McpToolsBecomeUnavailableAfterServerCrashWithoutAffectingOtherServers) {
+  auto config = two_provider_config();
+  config.mcp_servers = {fake_mcp_server("crashy"), fake_mcp_server("good")};
+
+  pi::core::PiciProcess process(config);
+  const auto tools = process.mcp_tools();
+  ASSERT_EQ(tools.size(), 2u);
+
+  std::shared_ptr<const pi::core::ToolDefinition> crashy_tool;
+  std::shared_ptr<const pi::core::ToolDefinition> good_tool;
+  for (const auto &tool : tools) {
+    if (tool->name() == "crashy__test_tool")
+      crashy_tool = tool;
+    if (tool->name() == "good__test_tool")
+      good_tool = tool;
+  }
+  ASSERT_NE(crashy_tool, nullptr);
+  ASSERT_NE(good_tool, nullptr);
+
+  // Crash "crashy"'s server through an ordinary tools/call (no direct
+  // transport access) -- exercising exactly the path a real server crash
+  // mid-call would take.
+  auto crash_result = crashy_tool->execute("call-crash", R"({"crash":true})");
+  ASSERT_NE(crash_result, nullptr);
+  EXPECT_TRUE(crash_result->is_error());
+
+  // "good"'s tools must be completely unaffected.
+  auto good_result =
+      good_tool->execute("call-good", R"({"text":"still-fine"})");
+  ASSERT_NE(good_result, nullptr);
+  EXPECT_FALSE(good_result->is_error());
+  EXPECT_EQ(good_result->content(), "still-fine");
+
+  // Subsequent calls to the crashed server's tool must return a CLEAN
+  // error immediately (via McpTool::execute()'s is_alive() pre-check), not
+  // hang -- and must NOT succeed, which would only happen if something had
+  // reconnected/respawned the server. v1 deliberately never does (see
+  // PiciProcess::mcp_tools()'s doc comment) -- repeating the call proves
+  // it, since a respawn (if one existed) would eventually let a later call
+  // through.
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    auto result = crashy_tool->execute("call-crash-retry", R"({"text":"x"})");
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->is_error());
+    EXPECT_NE(result->content().find("no longer running"), std::string::npos)
+        << "attempt " << attempt << ": " << result->content();
+  }
+
+  // "good" keeps working the whole time -- one crashed server never
+  // affects any other configured server.
+  auto good_result_again =
+      good_tool->execute("call-good-2", R"({"text":"still-fine-2"})");
+  ASSERT_NE(good_result_again, nullptr);
+  EXPECT_FALSE(good_result_again->is_error());
+  EXPECT_EQ(good_result_again->content(), "still-fine-2");
+}
+
 TEST(PiciProcess, McpServerHandshakesRunConcurrentlyNotSerially) {
   auto config = two_provider_config();
   // Two servers, each deliberately slow to reply to "initialize". If

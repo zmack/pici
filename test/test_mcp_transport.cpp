@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <future>
 #include <mutex>
+#include <stop_token>
 #include <string>
 #include <sys/wait.h>
 #include <thread>
@@ -213,6 +214,133 @@ TEST(McpTransport, OversizedUnterminatedLineIsTreatedAsDeadTransport) {
   EXPECT_THROW(transport.call("test/echo", {{"tag", "x"}},
                               std::chrono::milliseconds(500)),
                TransportError);
+}
+
+TEST(McpTransport, IsAliveReflectsChildExitWithoutBlocking) {
+  McpStdioTransport transport(fake_server_config());
+  transport.notify("test/crash", nlohmann::json::object());
+
+  ASSERT_TRUE(pi::test::wait_until([&] { return !transport.is_alive(); },
+                                   std::chrono::milliseconds(2000),
+                                   "child exiting after test/crash"));
+
+  // is_alive() itself must never block -- it's WNOHANG-based (see the class
+  // doc comment) -- so a call made well after the child is already known
+  // dead must return essentially instantly, not pause waiting on anything.
+  const auto start = std::chrono::steady_clock::now();
+  const bool alive = transport.is_alive();
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_FALSE(alive);
+  EXPECT_LT(elapsed, std::chrono::milliseconds(50));
+}
+
+TEST(McpTransport, PendingRequestsFailClearlyWhenServerExitsMidCall) {
+  McpStdioTransport transport(fake_server_config());
+
+  // A real in-flight call (the server sleeps before replying) that will
+  // never get its reply, because the server process itself is killed out
+  // from under it moments later -- proving fail_all_pending() (driven by
+  // the reader thread noticing EOF) resolves an actually-outstanding call
+  // promptly and cleanly, rather than the caller hanging until its own
+  // (much longer) timeout.
+  auto in_flight = std::async(std::launch::async, [&] {
+    return transport.call("test/echo", {{"delay_ms", 5000}},
+                          std::chrono::milliseconds(10000));
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  transport.notify("test/crash", nlohmann::json::object());
+
+  ASSERT_EQ(in_flight.wait_for(std::chrono::milliseconds(2000)),
+           std::future_status::ready)
+      << "the in-flight call must be resolved promptly by the reader "
+         "thread's EOF detection, not left hanging until its own timeout";
+  EXPECT_THROW(in_flight.get(), TransportError);
+}
+
+TEST(McpTransport, CallTimesOutWithoutKillingTransport) {
+  McpStdioTransport transport(fake_server_config());
+
+  // The server's reply for THIS call never arrives within any timeframe
+  // relevant to the test (no late-response race, unlike
+  // ConcurrentTimeoutAndLateResponseDoesNotCrash above) -- purely proving a
+  // timed-out call leaves the transport (and its child) alive and usable.
+  EXPECT_THROW(transport.call("test/echo", {{"delay_ms", 60000}},
+                              std::chrono::milliseconds(100)),
+               TransportError);
+
+  EXPECT_TRUE(transport.is_alive());
+  const auto result =
+      transport.call("test/echo", {{"tag", "still-usable"}}, kShortTimeout);
+  EXPECT_EQ(result.value("tag", std::string{}), "still-usable");
+}
+
+TEST(McpTransport, StopTokenCancelsInFlightCallAndSendsCancelledNotification) {
+  McpStdioTransport transport(fake_server_config());
+
+  const auto id_before_call = transport.peek_next_request_id_for_testing();
+
+  std::stop_source source;
+  auto call = std::async(std::launch::async, [&] {
+    return transport.call("test/echo", {{"delay_ms", 5000}},
+                          std::chrono::milliseconds(10000), source.get_token());
+  });
+
+  // Give the request time to actually be written before cancelling it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const auto cancel_start = std::chrono::steady_clock::now();
+  source.request_stop();
+
+  ASSERT_EQ(call.wait_for(std::chrono::milliseconds(2000)),
+           std::future_status::ready)
+      << "a cancelled call must return promptly, not wait out its full "
+         "(much longer) timeout";
+  const auto elapsed = std::chrono::steady_clock::now() - cancel_start;
+  EXPECT_LT(elapsed, std::chrono::milliseconds(1000));
+  EXPECT_THROW(call.get(), TransportError);
+
+  // Confirm the server actually received notifications/cancelled carrying
+  // THIS call's request id -- not just that the client-side wait unblocked.
+  nlohmann::json query_result;
+  ASSERT_TRUE(pi::test::wait_until(
+      [&] {
+        query_result = transport.call(
+            "test/query_cancellations", nlohmann::json::object(),
+            kShortTimeout);
+        const auto &ids = query_result.at("cancelled_ids");
+        for (const auto &value : ids) {
+          if (value.is_number_integer() &&
+              value.get<std::int64_t>() == id_before_call)
+            return true;
+        }
+        return false;
+      },
+      kShortTimeout, "server observing notifications/cancelled for the "
+                    "cancelled call's request id"));
+}
+
+TEST(McpTransport, StderrIsCapturedAndTruncatedNotBlockingChild) {
+  McpStdioTransport transport(fake_server_config());
+
+  // Comfortably past mcp_transport.cpp's kMaxStderrBufferBytes (8KB) so the
+  // cap is actually exercised, not just "whatever fits".
+  const std::string chunk(256, 'e');
+  transport.notify("test/emit_stderr", {{"text", chunk}, {"repeat", 128}});
+
+  ASSERT_TRUE(pi::test::wait_until(
+      [&] { return !transport.recent_stderr().empty(); }, kShortTimeout,
+      "stderr to be captured"));
+
+  // The drain thread must keep up with a chatty server rather than
+  // blocking it on a full pipe -- proven by the transport staying
+  // responsive to an ordinary call right afterward.
+  const auto result =
+      transport.call("test/echo", {{"tag", "after-stderr"}}, kShortTimeout);
+  EXPECT_EQ(result.value("tag", std::string{}), "after-stderr");
+
+  const auto captured = transport.recent_stderr();
+  EXPECT_LE(captured.size(), 8192u);
+  EXPECT_FALSE(captured.empty());
 }
 
 TEST(McpTransport, WritingToACrashedServerReturnsErrorNotSigpipeDeath) {
