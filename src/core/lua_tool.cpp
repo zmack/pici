@@ -17,6 +17,9 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -31,12 +34,15 @@ extern "C" {
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "core/agent_runtime_identity.h"
+#include "core/builtin_tools.h"
 #include "core/event_json.h"
 #include "core/event_types.h"
+#include "core/lua_eval_tool.h"
 #include "core/message_types.h"
 #include "core/terminal.h"
 
@@ -2077,11 +2083,815 @@ InlineLuaTool::execute(std::string_view args_json,
   return impl_->execute_inline_tool(exec_ref_, args_json, std::move(context));
 }
 
+// ===========================================================================
+// The `lua` built-in tool (plans/velvety-skipping-marble.md), Stage 2: the
+// eval-state machinery -- allocator/memory cap, curated libraries, the
+// __gc/setmetatable shim, the count-hook timeout, the pcall/xpcall shims,
+// RAII state ownership, pici.scratch, and the error taxonomy. No
+// pici.agents/session/mailbox trampolines are wired yet (Stage 3).
+//
+// Every one of the pieces below closes a specific, empirically-confirmed
+// process-hang or crash bug found during this plan's adversarial review
+// (see the plan's revision note and §3) -- none of it is speculative
+// hardening, so none of it should be simplified away.
+// ===========================================================================
+
+constexpr std::size_t kEvalMemoryLimitBytes = 64 * 1024 * 1024;
+
+// Reserved headroom before dispatching to a binding trampoline (Stage 3)
+// or any other allocating call whose C++ locals aren't longjmp-safe (see
+// lua_pici_truncate/json.encode, lua_tool.cpp above) -- checked via
+// EvalMemory::has_headroom before the call is even attempted, so the
+// allocating call itself becomes overwhelmingly unlikely to ever hit the
+// cap. Nothing in Stage 2 calls has_headroom yet (there are no
+// trampolines to gate); the mechanism is built now so Stage 3 only has to
+// call it.
+constexpr std::size_t kEvalBindingReserveBytes = 8 * 1024 * 1024;
+
+constexpr int kEvalCountHookInstructionCount = 1000; // matches lua_stop_hook.
+
+constexpr int kEvalDefaultTimeoutMs = 30000;
+constexpr int kEvalMinTimeoutMs = 1;
+constexpr int kEvalMaxTimeoutMs = 120000;
+
+// Output-capture caps (plan §6 / design doc §6.1): the capture buffer is
+// hard-stopped at kEvalOutputHardCapBytes during the run itself (a cheap
+// safety valve against a script that prints gigabytes), then the whole
+// tool-result text is run through the same truncate_head_ex every other
+// built-in tool's output uses, once, after the run finishes.
+constexpr std::size_t kEvalOutputHardCapBytes = 1024 * 1024;
+constexpr std::size_t kEvalOutputMaxLines = 2000;
+constexpr std::size_t kEvalOutputMaxBytes = 64 * 1024;
+
+// pici.scratch caps (plan §4.4): a total cap, PLUS a separate per-key cap
+// and key-count cap -- a single pathological key must not be able to
+// consume the whole total budget on its own, and a flood of many small
+// keys must not be able to grow unboundedly just because each one
+// individually stays under the per-key cap.
+constexpr std::size_t kScratchTotalBytesCap = 1024 * 1024;
+constexpr std::size_t kScratchPerKeyBytesCap = 256 * 1024;
+constexpr std::size_t kScratchMaxKeys = 256;
+
+// ---------------------------------------------------------------------------
+// Memory-capped allocator (plan §3 "Memory cap").
+// ---------------------------------------------------------------------------
+
+struct EvalMemory {
+  std::size_t used{0};
+  std::size_t limit{0};
+
+  // Reserved-headroom check for a binding call or other allocating call
+  // whose C++ locals aren't longjmp-safe across a possible LUA_ERRMEM --
+  // see kEvalBindingReserveBytes above. Not called anywhere in Stage 2;
+  // exists so Stage 3's trampolines can call it before dispatch.
+  bool has_headroom(std::size_t reserve_bytes) const {
+    return reserve_bytes <= limit && used <= limit - reserve_bytes;
+  }
+};
+
+// Lua allocator function (lua_Alloc). `osize` is the previous block's size
+// when `ptr` is non-null; when `ptr` is null, `osize` is instead a *type
+// tag* for the (non-existent) previous block, not a size -- so treating it
+// as a size in that branch would be wrong.
+void *eval_alloc(void *ud, void *ptr, std::size_t osize, std::size_t nsize) {
+  auto *mem = static_cast<EvalMemory *>(ud);
+  const std::size_t old_size = (ptr == nullptr) ? 0 : osize;
+  if (nsize == 0) {
+    std::free(ptr);
+    mem->used -= old_size;
+    return nullptr;
+  }
+  if (nsize > old_size && mem->used + (nsize - old_size) > mem->limit) {
+    // Returning nullptr here (rather than actually running out of system
+    // memory) is what turns a script-controlled allocation loop into a
+    // catchable Lua "not enough memory" error (LUA_ERRMEM) instead of an
+    // OOM of the whole pici process.
+    return nullptr;
+  }
+  void *out = std::realloc(ptr, nsize);
+  if (out == nullptr)
+    return nullptr;
+  // When nsize < old_size (shrinking/realloc-down), `nsize - old_size`
+  // underflows as an unsigned subtraction -- this is intentional, not a
+  // bug: two's-complement wraparound makes `mem->used += (nsize -
+  // old_size)` compute the same result as `mem->used -= (old_size -
+  // nsize)` modulo 2^64, and mem->used never actually goes negative in
+  // practice because it is always kept in sync with real outstanding
+  // allocations.
+  mem->used += nsize - old_size;
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Count-hook run context, retrieved via lua_getextraspace (plan §3
+// "EvalRun* retrieval must use lua_getextraspace, not a registry lookup" --
+// a registry lookup interns a string via luaS_new, which allocates, which
+// can itself raise LUA_ERRMEM from inside the hook under this capped
+// allocator, silently misclassifying a timeout as a memory error).
+//
+// Every member here is trivially destructible on purpose: the hook body
+// below may call luaL_error, which longjmps past any C++ destructors that
+// would otherwise run -- so no non-trivially-destructible local may ever
+// be live inside it, and this struct (accessed only through a pointer, but
+// still worth keeping trivial in its own right) follows the same rule.
+struct EvalRun {
+  const std::stop_token *stop{nullptr};
+  std::chrono::steady_clock::time_point deadline{};
+  bool deadline_hit{false};
+  bool cancelled{false};
+};
+static_assert(std::is_trivially_destructible_v<EvalRun>);
+
+void eval_store_run(lua_State *L, EvalRun *run) {
+  std::memcpy(lua_getextraspace(L), &run, sizeof(run));
+}
+
+EvalRun *eval_run_from(lua_State *L) {
+  EvalRun *run = nullptr;
+  std::memcpy(&run, lua_getextraspace(L), sizeof(run));
+  return run;
+}
+
+// LUA_MASKCOUNT hook, fired every kEvalCountHookInstructionCount VM
+// instructions -- matching the exact existing precedent at lua_stop_hook
+// above (count 1000). No non-trivially-destructible C++ locals: only a
+// pointer and a direct time comparison, per EvalRun's own doc comment.
+void eval_count_hook(lua_State *L, lua_Debug * /*ar*/) {
+  EvalRun *run = eval_run_from(L);
+  if (run == nullptr)
+    return;
+  if (run->stop != nullptr && run->stop->stop_requested()) {
+    run->cancelled = true;
+    luaL_error(L, "pici: execution cancelled");
+  }
+  if (std::chrono::steady_clock::now() >= run->deadline) {
+    run->deadline_hit = true;
+    luaL_error(L, "pici: time budget exceeded");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// pcall/xpcall shims (plan §3, "pcall can swallow the abort"). A budget
+// error raised inside a user pcall would otherwise be caught by the
+// script, the hook would fire again 1000 instructions later, and it would
+// be caught again -- a livelock the tool never returns from. These shims
+// re-raise once the run's deadline/cancellation flag is set, regardless of
+// what the wrapped call did with its own error. Each re-raise unwinds
+// exactly one pcall level (via lua_error's longjmp to the next enclosing
+// protected call), and no new pcall level can be entered without passing
+// back through one of these two shims -- so however deeply pcalls are
+// nested, termination happens in at most "nesting depth" additional
+// re-raises, not a livelock.
+// ---------------------------------------------------------------------------
+
+int eval_pcall(lua_State *L) {
+  luaL_checkany(L, 1);
+  const int nargs = lua_gettop(L) - 1;
+  const int status = lua_pcall(L, nargs, LUA_MULTRET, 0);
+  EvalRun *run = eval_run_from(L);
+  if (status != LUA_OK && run != nullptr &&
+      (run->deadline_hit || run->cancelled)) {
+    return lua_error(L); // A budget/cancellation abort is not catchable.
+  }
+  lua_pushboolean(L, status == LUA_OK);
+  lua_rotate(L, 1, 1); // Mirrors lbaselib.c's finishpcall stack shape.
+  return lua_gettop(L);
+}
+
+int eval_xpcall(lua_State *L) {
+  const int n = lua_gettop(L);
+  luaL_checkany(L, 1);
+  luaL_checktype(L, 2, LUA_TFUNCTION); // Message handler is mandatory.
+  lua_pushvalue(L, 2);                 // Duplicate msgh onto the top.
+  lua_insert(L, 1);                    // Move the duplicate to the bottom.
+  lua_remove(L, 3);                    // Drop the now-redundant original.
+  // Stack is now: [1]=msgh, [2]=f, [3..n]=original extra args (n-2 of them).
+  const int status = lua_pcall(L, n - 2, LUA_MULTRET, 1);
+  EvalRun *run = eval_run_from(L);
+  if (status != LUA_OK && run != nullptr &&
+      (run->deadline_hit || run->cancelled)) {
+    return lua_error(L);
+  }
+  lua_remove(L, 1); // Drop msgh, leaving results (or the error object).
+  lua_pushboolean(L, status == LUA_OK);
+  lua_rotate(L, 1, 1);
+  return lua_gettop(L);
+}
+
+// ---------------------------------------------------------------------------
+// setmetatable shim (plan §3, the __gc shim). Lua only marks an object
+// finalizable if __gc is present on its metatable *at setmetatable time* --
+// a later rawset(mt, "__gc", f) is not honored -- so checking here, and
+// only here, is a complete fix, not a partial one. Without this,
+// setmetatable({}, {__gc = function() while true do end end}) hangs
+// lua_close() forever: the count hook never fires inside a finalizer
+// (empirically confirmed: zero hook fires across a 50-million-iteration
+// finalizer loop), so no timeout/cancellation ever recovers it.
+// ---------------------------------------------------------------------------
+
+int eval_setmetatable(lua_State *L) {
+  const int mt_type = lua_type(L, 2);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  luaL_argexpected(L, mt_type == LUA_TNIL || mt_type == LUA_TTABLE, 2,
+                   "nil or table");
+  if (luaL_getmetafield(L, 1, "__metatable") != LUA_TNIL)
+    return luaL_error(L, "cannot change a protected metatable");
+  if (mt_type == LUA_TTABLE) {
+    lua_getfield(L, 2, "__gc");
+    const bool has_gc = lua_isnil(L, -1) == 0;
+    lua_pop(L, 1);
+    if (has_gc) {
+      return luaL_error(
+          L, "pici: setmetatable with a __gc finalizer is not allowed");
+    }
+  }
+  lua_settop(L, 2);
+  lua_setmetatable(L, 1);
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Output capture (plan §6, design doc §6.1): print/pici.log write into a
+// per-call buffer instead of std::cerr, matching lua_pici_log's own
+// tab-separated/newline-terminated formatting.
+// ---------------------------------------------------------------------------
+
+struct EvalOutput {
+  std::string buffer;
+  bool truncated{false};
+};
+
+void eval_append_output(EvalOutput &out, std::string_view text) {
+  if (out.truncated)
+    return;
+  out.buffer.append(text);
+  if (out.buffer.size() > kEvalOutputHardCapBytes) {
+    out.truncated = true; // Stop growing; final rendering trims further.
+  }
+}
+
+// Shared by both `print` and `pici.log` -- same formatting convention as
+// lua_pici_log above (luaL_tolstring per argument, tab-separated,
+// newline-terminated), just writing into an EvalOutput buffer (upvalue 1)
+// instead of std::cerr. Writing to stderr mid-turn would corrupt the TUI
+// viewport; capturing into the result keeps it self-contained.
+int eval_capture_print(lua_State *L) {
+  auto *out = static_cast<EvalOutput *>(lua_touserdata(L, lua_upvalueindex(1)));
+  const int n = lua_gettop(L);
+  std::string line;
+  for (int i = 1; i <= n; ++i) {
+    if (i > 1)
+      line += '\t';
+    line += luaL_tolstring(L, i, nullptr);
+    lua_pop(L, 1);
+  }
+  line += '\n';
+  if (out != nullptr)
+    eval_append_output(*out, line);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// pici.scratch trampolines (plan §4.4). LuaEvalBindings owns the actual
+// storage (session-length lifetime); these just marshal between Lua and
+// the JSON the holder deals in. Marshaling MUST go through the
+// Stage-1-updated lua_to_json (depth cap + cycle guard baked in) -- do not
+// introduce a second conversion path here that could bypass that cap.
+// ---------------------------------------------------------------------------
+
+int eval_scratch_get(lua_State *L) {
+  auto *bindings =
+      static_cast<LuaEvalBindings *>(lua_touserdata(L, lua_upvalueindex(1)));
+  const char *key = luaL_checkstring(L, 1);
+  if (bindings == nullptr) {
+    lua_pushnil(L);
+    return 1;
+  }
+  auto value = bindings->scratch_get(key);
+  if (!value) {
+    lua_pushnil(L);
+    return 1;
+  }
+  json_to_lua(L, *value);
+  return 1;
+}
+
+int eval_scratch_set(lua_State *L) {
+  auto *bindings =
+      static_cast<LuaEvalBindings *>(lua_touserdata(L, lua_upvalueindex(1)));
+  const char *key = luaL_checkstring(L, 1);
+  luaL_checkany(L, 2);
+  if (bindings == nullptr) {
+    lua_pushnil(L);
+    lua_pushstring(L, "pici.scratch is not available");
+    return 2;
+  }
+  // Depth-capped/cycle-guarded conversion (Stage 1 fix) -- this is the only
+  // path a Lua value takes on its way into scratch storage.
+  const auto value = lua_to_json(L, 2);
+  auto err = bindings->scratch_set(key, value);
+  if (err) {
+    lua_pushnil(L);
+    lua_pushstring(L, err->c_str());
+    return 2;
+  }
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// The curated environment (plan §3, "Curated libraries, not luaL_openlibs").
+// ---------------------------------------------------------------------------
+
+constexpr std::array<luaL_Reg, 5> kEvalLibs{{
+    {LUA_GNAME, luaopen_base},
+    {LUA_TABLIBNAME, luaopen_table},
+    {LUA_STRLIBNAME, luaopen_string},
+    {LUA_MATHLIBNAME, luaopen_math},
+    {LUA_UTF8LIBNAME, luaopen_utf8},
+}};
+
+// Builds a curated `os` global exposing only time/clock/date -- no
+// getenv (API keys), execute/remove/rename/tmpname (shell/filesystem), or
+// exit (kills pici). luaL_requiref's glb=0 leaves the *real* os module
+// off the stack as a global; only the hand-picked fields are copied onto
+// a fresh table that becomes the actual global `os`.
+void eval_build_curated_os(lua_State *L) {
+  luaL_requiref(L, LUA_OSLIBNAME, luaopen_os, 0);
+  lua_newtable(L);
+  for (const char *name : {"time", "clock", "date"}) {
+    lua_getfield(L, -2, name);
+    lua_setfield(L, -2, name);
+  }
+  lua_setglobal(L, "os");
+  lua_pop(L, 1); // Pop the real (uncurated) os module table.
+}
+
+void eval_build_pici_table(lua_State *L, EvalOutput *output,
+                           LuaEvalBindings *bindings) {
+  lua_newtable(L);
+
+  lua_pushlightuserdata(L, output);
+  lua_pushcclosure(L, &eval_capture_print, 1);
+  lua_setfield(L, -2, "log");
+
+  lua_pushcfunction(L, &lua_pici_truncate);
+  lua_setfield(L, -2, "truncate_tool_result");
+
+  lua_newtable(L); // pici.scratch
+  lua_pushlightuserdata(L, bindings);
+  lua_pushcclosure(L, &eval_scratch_get, 1);
+  lua_setfield(L, -2, "get");
+  lua_pushlightuserdata(L, bindings);
+  lua_pushcclosure(L, &eval_scratch_set, 1);
+  lua_setfield(L, -2, "set");
+  lua_setfield(L, -2, "scratch");
+
+  lua_setglobal(L, "pici");
+}
+
+// Builds the full run-mode environment: curated libraries, the
+// setmetatable/__gc shim, the pcall/xpcall shims, print capture, the
+// string pattern-matching removal, the curated os table, json, and pici
+// (log/truncate_tool_result/scratch only in Stage 2 -- agents/session/
+// mailbox are Stage 3). Never called for mode:"check" -- a script that is
+// only compiled, never run, cannot observe or mutate any of this, which is
+// the whole point of check mode.
+void eval_build_environment(lua_State *L, EvalOutput *output,
+                            LuaEvalBindings *bindings) {
+  for (const auto &lib : kEvalLibs) {
+    luaL_requiref(L, lib.name, lib.func, 1);
+    lua_pop(L, 1);
+  }
+
+  // load/loadfile/dofile: bytecode/file-backed chunk loading, both defeat
+  // the "t"-mode guarantee at compile time. collectgarbage: disables
+  // nothing safety-relevant on its own, but its "count"/"generational"/etc
+  // options are a needless surface for a throwaway state. warn: writes
+  // straight to stderr -- the review found this was missed in an earlier
+  // draft; nilled out alongside the others, not redirected.
+  for (const char *name :
+       {"load", "loadfile", "dofile", "collectgarbage", "warn"}) {
+    lua_pushnil(L);
+    lua_setglobal(L, name);
+  }
+
+  lua_pushcfunction(L, &eval_setmetatable);
+  lua_setglobal(L, "setmetatable");
+  lua_pushcfunction(L, &eval_pcall);
+  lua_setglobal(L, "pcall");
+  lua_pushcfunction(L, &eval_xpcall);
+  lua_setglobal(L, "xpcall");
+
+  lua_pushlightuserdata(L, output);
+  lua_pushcclosure(L, &eval_capture_print, 1);
+  lua_setglobal(L, "print");
+
+  // string.dump (defeats "t"-mode the same way load does) plus
+  // find/match/gmatch/gsub: Lua's pattern-matching engine can be driven
+  // into catastrophic backtracking (measured 38+ seconds of unbounded CPU
+  // from one call, zero count-hook fires the whole time -- the hook only
+  // fires between VM instructions, and a C library call is one
+  // instruction regardless of how long it runs internally) using well
+  // under the 64MB memory cap. No budget or cap can close this; removing
+  // the functions is the only clean fix. format/rep/byte/char/sub/upper/
+  // lower/len/reverse all stay.
+  lua_getglobal(L, "string");
+  for (const char *name : {"dump", "find", "match", "gmatch", "gsub"}) {
+    lua_pushnil(L);
+    lua_setfield(L, -2, name);
+  }
+  lua_pop(L, 1);
+
+  eval_build_curated_os(L);
+  register_json_module(L);
+  eval_build_pici_table(L, output, bindings);
+}
+
+// ---------------------------------------------------------------------------
+// Compile-error line extraction ("script:<N>: ..." -> N), and the
+// lua_pcall message handler that appends a traceback to a runtime error.
+// ---------------------------------------------------------------------------
+
+std::optional<int> eval_extract_line(const std::string &message) {
+  constexpr std::string_view prefix = "script:";
+  if (message.compare(0, prefix.size(), prefix) != 0)
+    return std::nullopt;
+  std::size_t pos = prefix.size();
+  std::size_t end = pos;
+  while (end < message.size() && message[end] >= '0' && message[end] <= '9')
+    ++end;
+  if (end == pos)
+    return std::nullopt;
+  try {
+    return std::stoi(message.substr(pos, end - pos));
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
+int eval_message_handler(lua_State *L) {
+  const char *msg = lua_tostring(L, 1);
+  if (msg == nullptr) {
+    if (luaL_callmeta(L, 1, "__tostring") != 0 && lua_isstring(L, -1) != 0)
+      return 1;
+    msg =
+        lua_pushfstring(L, "(error object is a %s value)", luaL_typename(L, 1));
+  }
+  luaL_traceback(L, L, msg, 1);
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// The `lua` tool itself.
+// ---------------------------------------------------------------------------
+
+constexpr std::string_view kLuaEvalSchema =
+    R"json({"type":"object","properties":{"script":{"type":"string","description":"Lua 5.4 source to compile, and (unless mode is \"check\") execute in-process against pici's own API."},"mode":{"type":"string","enum":["run","check"],"description":"\"run\" (default) compiles then executes. \"check\" only compiles and reports syntax errors, with no side effects."},"timeout_ms":{"type":"integer","minimum":1,"maximum":120000,"description":"Wall-clock budget for execution, default 30000. Ignored in check mode."}},"required":["script"],"additionalProperties":false})json";
+
+constexpr std::string_view kLuaEvalDescription =
+    "Execute a Lua 5.4 snippet inside pici itself, against pici's live "
+    "scripting API. Use it to drive subagents, mailbox messaging, and "
+    "session-lifecycle actions in one step instead of many tool calls.\n"
+    "\n"
+    "Available: pici.agents.{spawn,get,list,send,follow_up,interrupt,wait,"
+    "close}, "
+    "pici.session.{request_compaction,request_model_switch,request_fork,"
+    "action_status}, "
+    "pici.mailbox.{self,list,send,request,reply,inbox,ack,wait,status}, "
+    "pici.log(...), pici.truncate_tool_result(s), pici.scratch.{get,set}, "
+    "pici.model, pici.cwd, pici.tools, json.encode/decode, and the "
+    "string/table/math/utf8 libraries.\n"
+    "\n"
+    "Not available: io, os.*(except os.time/clock/date), package/require, "
+    "debug, coroutine, load/loadfile/dofile, string.find/match/gmatch/gsub "
+    "(pattern matching is not available in this sandbox -- use plain "
+    "string operations), and the file/shell tools -- use bash/read/write "
+    "for those.\n"
+    "\n"
+    "Every pici.* call returns either a result table, or nil plus an error "
+    "string as a second value -- check it: `local t, err = "
+    "pici.agents.spawn{...}`.\n"
+    "\n"
+    "Each call runs in a fresh state: locals, globals and functions do NOT "
+    "survive to the next lua call. Anything you need later must be in the "
+    "return value, or stored via pici.scratch.set(key, value) and read "
+    "back with pici.scratch.get(key) from a later call. Subagents, "
+    "mailbox messages and session requests DO persist -- they live in "
+    "pici, not in the script -- so a task spawned in one call can be "
+    "waited on by id in a later call.\n"
+    "\n"
+    "Return values are reported back to you; so is anything you print() "
+    "or pici.log().\n"
+    "\n"
+    "mode:\"check\" compiles without running: use it to catch syntax "
+    "errors before causing side effects. It validates syntax only -- it "
+    "does not detect undefined variables, wrong argument shapes, or "
+    "runtime errors.";
+
+class LuaEvalTool final : public ToolDefinition {
+public:
+  explicit LuaEvalTool(std::shared_ptr<LuaEvalBindings> bindings)
+      : bindings_(std::move(bindings)),
+        schema_(std::make_unique<LuaToolSchema>(std::string(kLuaEvalSchema))) {}
+
+  std::string_view name() const override { return "lua"; }
+  std::string_view description() const override { return kLuaEvalDescription; }
+  ToolSchema &schema() const override { return *schema_; }
+  ToolCapabilities capabilities() const override {
+    // Never child_safe: see the plan's §5.1 -- child_safe=false alone,
+    // with no name-based special-casing, fully excludes this tool from
+    // every child task.
+    return {.child_safe = false};
+  }
+  ToolExecutionMode execution_mode() const override {
+    // See the plan's §3: without this, two `lua` calls in one batch run
+    // concurrently by default (ToolExecutionMode::parallel), turning the
+    // 64MB memory cap into N*64MB and making pici.scratch's
+    // get-then-set non-atomic as a read-modify-write.
+    return ToolExecutionMode::sequential;
+  }
+
+  std::shared_ptr<ToolResult>
+  execute(std::string_view call_id, std::string_view args_json,
+          std::stop_token stop_tok,
+          ToolUpdateCallback on_update) const override {
+    return execute(args_json,
+                   ToolExecutionContext{.call_id = call_id,
+                                        .stop_token = stop_tok,
+                                        .on_update = std::move(on_update)});
+  }
+
+  std::shared_ptr<ToolResult>
+  execute(std::string_view args_json,
+          ToolExecutionContext context) const override {
+    if (context.stop_token.stop_requested())
+      return std::make_shared<LuaToolResult>("Tool execution cancelled", true);
+
+    auto parsed = nlohmann::json::parse(args_json, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object())
+      parsed = nlohmann::json::object();
+
+    const std::string script = parsed.value("script", std::string{});
+    const bool check_only = parsed.value("mode", std::string{"run"}) == "check";
+    int timeout_ms = parsed.value("timeout_ms", kEvalDefaultTimeoutMs);
+    timeout_ms = std::clamp(timeout_ms, kEvalMinTimeoutMs, kEvalMaxTimeoutMs);
+
+    // The bindings snapshot is declared *before* the Lua state (and hence
+    // before the RAII closer that owns it) so that reverse-order C++
+    // destruction tears the state down first, while anything the state
+    // might still reach through a trampoline upvalue pointing into this
+    // snapshot remains valid until that happens. Stage 2 wires no
+    // trampolines that read from it yet (that's Stage 3), but the
+    // declaration order is load-bearing once it does, so it is
+    // established here rather than left for a later stage to get right.
+    const LuaEvalBindings::Snapshot bindings_snapshot =
+        bindings_ ? bindings_->snapshot() : LuaEvalBindings::Snapshot{};
+    static_cast<void>(bindings_snapshot); // Unused until Stage 3.
+
+    EvalMemory memory{.limit = kEvalMemoryLimitBytes};
+    lua_State *raw_state = lua_newstate(&eval_alloc, &memory);
+    if (raw_state == nullptr) {
+      return std::make_shared<LuaToolResult>(
+          "[lua error] failed to create Lua state", true);
+    }
+
+    struct EvalStateCloser {
+      lua_State *L;
+      explicit EvalStateCloser(lua_State *state) : L(state) {}
+      ~EvalStateCloser() {
+        if (L != nullptr)
+          lua_close(L);
+      }
+      EvalStateCloser(const EvalStateCloser &) = delete;
+      EvalStateCloser &operator=(const EvalStateCloser &) = delete;
+      EvalStateCloser(EvalStateCloser &&) = delete;
+      EvalStateCloser &operator=(EvalStateCloser &&) = delete;
+    } state_closer{raw_state};
+    lua_State *L = raw_state;
+
+    EvalOutput output;
+    EvalRun run;
+    run.stop = &context.stop_token;
+    run.deadline = std::chrono::steady_clock::now() +
+                   std::chrono::milliseconds(timeout_ms);
+    eval_store_run(L, &run);
+
+    if (!check_only)
+      eval_build_environment(L, &output, bindings_.get());
+
+    const int load_status = eval_load(L, script);
+    if (load_status != LUA_OK) {
+      std::string message =
+          lua_isstring(L, -1) != 0 ? lua_tostring(L, -1) : "compile error";
+      lua_pop(L, 1);
+      const auto line = eval_extract_line(message);
+      nlohmann::json details{{"mode", check_only ? "check" : "run"},
+                             {"error_kind", "compile"}};
+      if (line)
+        details["line"] = *line;
+      return std::make_shared<LuaToolResult>("[lua compile error] " + message,
+                                             true, details.dump());
+    }
+
+    if (check_only) {
+      lua_pop(L, 1); // Discard the compiled function -- never executed.
+      const auto lines = 1 + static_cast<std::size_t>(std::count(
+                                 script.begin(), script.end(), '\n'));
+      std::string ok_message =
+          "[lua check ok] " + std::to_string(lines) + " lines, " +
+          std::to_string(script.size()) +
+          " bytes -- compiles cleanly.\n"
+          "Syntax only: undefined globals, wrong argument shapes and "
+          "runtime errors are not detected.";
+      nlohmann::json details{{"mode", "check"}};
+      return std::make_shared<LuaToolResult>(std::move(ok_message), false,
+                                             details.dump());
+    }
+
+    // Message handler goes below the compiled chunk on the stack so its
+    // absolute index can be passed as lua_pcall's msgh argument.
+    lua_pushcfunction(L, &eval_message_handler);
+    lua_insert(L, -2);
+    constexpr int kMsghIndex = 1;
+
+    lua_sethook(L, &eval_count_hook, LUA_MASKCOUNT,
+                kEvalCountHookInstructionCount);
+    const auto start = std::chrono::steady_clock::now();
+    const int call_status = lua_pcall(L, 0, LUA_MULTRET, kMsghIndex);
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start)
+            .count();
+    lua_sethook(L, nullptr, 0, 0);
+    lua_remove(L, kMsghIndex);
+
+    // Cancellation/timeout take priority over whatever lua_pcall's status
+    // says: they are deliberate aborts we drove, not a coincidental error
+    // classification race against LUA_ERRMEM.
+    if (run.cancelled || context.stop_token.stop_requested())
+      return std::make_shared<LuaToolResult>("Tool execution cancelled", true);
+    if (run.deadline_hit) {
+      nlohmann::json details{{"mode", "run"},
+                             {"error_kind", "timeout"},
+                             {"timed_out", true},
+                             {"duration_ms", elapsed_ms}};
+      return std::make_shared<LuaToolResult>(
+          "[lua timeout] script exceeded its " + std::to_string(timeout_ms) +
+              " ms budget",
+          true, details.dump());
+    }
+
+    if (call_status != LUA_OK) {
+      nlohmann::json details{{"mode", "run"}, {"duration_ms", elapsed_ms}};
+      if (call_status == LUA_ERRMEM) {
+        details["error_kind"] = "memory";
+        lua_settop(L, 0);
+        return std::make_shared<LuaToolResult>(
+            "[lua memory limit] script exceeded its 64 MB allowance", true,
+            details.dump());
+      }
+      details["error_kind"] = "runtime";
+      std::string content;
+      if (lua_type(L, 1) == LUA_TSTRING) {
+        content = "[lua error] " + std::string(lua_tostring(L, 1));
+      } else {
+        // Non-string error value (e.g. error({code=1})): rendered via the
+        // depth-capped/cycle-guarded lua_to_json, same as everywhere else
+        // a Lua value crosses into JSON in this file.
+        content = "[lua error] " + lua_to_json(L, 1).dump();
+      }
+      lua_settop(L, 0);
+      return std::make_shared<LuaToolResult>(std::move(content), true,
+                                             details.dump());
+    }
+
+    // Success: render the -- output -- and -- return -- sections.
+    const int nresults = lua_gettop(L);
+    std::vector<std::string> rendered;
+    rendered.reserve(static_cast<std::size_t>(nresults));
+    for (int i = 1; i <= nresults; ++i) {
+      if (lua_istable(L, i)) {
+        rendered.push_back(lua_to_json(L, i).dump(2));
+      } else {
+        rendered.emplace_back(luaL_tolstring(L, i, nullptr));
+        lua_pop(L, 1); // Pop the string luaL_tolstring pushed on top.
+      }
+    }
+    lua_settop(L, 0);
+
+    std::string return_section;
+    for (const auto &r : rendered) {
+      if (!return_section.empty())
+        return_section += "\n";
+      return_section += r;
+    }
+
+    std::string rendered_output = output.buffer;
+    if (!rendered_output.empty()) {
+      auto trimmed = truncate_head_ex(rendered_output, kEvalOutputMaxLines,
+                                      kEvalOutputMaxBytes);
+      rendered_output = std::move(trimmed.content);
+    }
+
+    std::string header = "[lua ok] " + std::to_string(elapsed_ms) + "ms";
+    std::string body;
+    if (!rendered_output.empty())
+      body += "\n-- output --\n" + rendered_output;
+    if (!return_section.empty())
+      body += "\n-- return --\n" + return_section;
+    if (body.empty())
+      header += " (no output, no return value)";
+
+    nlohmann::json details{{"mode", "run"}, {"duration_ms", elapsed_ms}};
+    if (output.truncated)
+      details["output_truncated"] = true;
+    return std::make_shared<LuaToolResult>(header + body, false,
+                                           details.dump());
+  }
+
+private:
+  // luaL_loadbufferx with mode "t" -- refuses precompiled bytecode chunks
+  // (a "\27Lua"-prefixed blob is a memory-safety hazard, not a syntax
+  // error) -- and takes an explicit length, so an embedded NUL in the
+  // script can't silently truncate it the way strlen-based loading would.
+  // Chunk name "=script": the leading '=' suppresses Lua's
+  // [string "..."] quoting, so errors read "script:3: ..." rather than
+  // "[string "local x = ..."]:3: ...".
+  static int eval_load(lua_State *L, const std::string &script) {
+    return luaL_loadbufferx(L, script.data(), script.size(), "=script", "t");
+  }
+
+  std::shared_ptr<LuaEvalBindings> bindings_;
+  std::unique_ptr<LuaToolSchema> schema_;
+};
+
 } // namespace
 
 std::shared_ptr<const ToolDefinition>
 load_lua_tool(const std::filesystem::path &path) {
   return std::make_shared<LuaTool>(path);
+}
+
+void LuaEvalBindings::store(const LuaHooks::AgentInfo &info) {
+  std::scoped_lock lock(mutex_);
+  current_.agents = info.agents;
+  current_.session = info.session;
+  current_.mailbox = info.mailbox;
+  current_.model_id = info.model_id;
+  current_.model_provider = info.model_provider;
+  current_.model_api = info.model_api;
+  current_.cwd = info.cwd;
+  current_.tool_names = info.tool_names;
+  current_.configured = true;
+}
+
+LuaEvalBindings::Snapshot LuaEvalBindings::snapshot() const {
+  std::scoped_lock lock(mutex_);
+  return current_;
+}
+
+void LuaEvalBindings::clear() {
+  std::scoped_lock lock(mutex_);
+  current_ = Snapshot{};
+}
+
+std::optional<nlohmann::json>
+LuaEvalBindings::scratch_get(const std::string &key) const {
+  std::scoped_lock lock(scratch_mutex_);
+  auto it = scratch_.find(key);
+  if (it == scratch_.end())
+    return std::nullopt;
+  return it->second.value;
+}
+
+std::optional<std::string>
+LuaEvalBindings::scratch_set(const std::string &key,
+                             const nlohmann::json &value) {
+  const std::string dumped = value.dump();
+  const std::size_t new_size = dumped.size();
+  if (new_size > kScratchPerKeyBytesCap)
+    return "pici: scratch limit exceeded (per-key size)";
+
+  std::scoped_lock lock(scratch_mutex_);
+  auto it = scratch_.find(key);
+  const std::size_t old_size =
+      (it != scratch_.end()) ? it->second.cached_size : 0;
+  const std::size_t projected_total =
+      scratch_total_bytes_ - old_size + new_size;
+  if (projected_total > kScratchTotalBytesCap)
+    return "pici: scratch limit exceeded (total size)";
+  if (it == scratch_.end() && scratch_.size() >= kScratchMaxKeys)
+    return "pici: scratch limit exceeded (key count)";
+
+  scratch_total_bytes_ = projected_total;
+  scratch_[key] = ScratchEntry{value, new_size};
+  return std::nullopt;
+}
+
+std::shared_ptr<const ToolDefinition>
+make_lua_eval_tool(std::shared_ptr<LuaEvalBindings> bindings) {
+  return std::make_shared<LuaEvalTool>(std::move(bindings));
 }
 
 std::vector<std::shared_ptr<const ToolDefinition>>

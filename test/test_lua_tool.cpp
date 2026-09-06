@@ -1,3 +1,4 @@
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -10,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/lua_eval_tool.h"
 #include "core/lua_tool.h"
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -1740,8 +1742,272 @@ return {
   auto tool = load_lua_tool(path);
   auto result = tool->execute("1", "{}");
   EXPECT_TRUE(!result->is_error());
-  EXPECT_EQ(nlohmann::json::parse(result->content()),
-            (nlohmann::json{{"a", 1}, {"b", {{"c", "two"}, {"d", {1, 2, 3}}}}}));
+  EXPECT_EQ(
+      nlohmann::json::parse(result->content()),
+      (nlohmann::json{{"a", 1}, {"b", {{"c", "two"}, {"d", {1, 2, 3}}}}}));
 
   std::filesystem::remove_all(dir);
+}
+
+// ===========================================================================
+// The `lua` built-in tool (LuaEvalTool), Stage 2:
+// plans/velvety-skipping-marble.md. Only the subset of the plan's test list
+// exercisable without pici.agents/session/mailbox bindings (Stage 3) is
+// covered here.
+// ===========================================================================
+
+namespace {
+
+std::pair<std::shared_ptr<const ToolDefinition>,
+          std::shared_ptr<LuaEvalBindings>>
+make_eval_tool_with_bindings() {
+  auto bindings = std::make_shared<LuaEvalBindings>();
+  auto tool = make_lua_eval_tool(bindings);
+  return {tool, bindings};
+}
+
+std::shared_ptr<const ToolDefinition> make_eval_tool() {
+  return make_eval_tool_with_bindings().first;
+}
+
+std::shared_ptr<ToolResult>
+eval_run(const ToolDefinition &tool, const std::string &script,
+         std::optional<int> timeout_ms = std::nullopt,
+         std::string_view mode = "run") {
+  nlohmann::json args{{"script", script}, {"mode", std::string(mode)}};
+  if (timeout_ms)
+    args["timeout_ms"] = *timeout_ms;
+  return tool.execute("1", args.dump());
+}
+
+std::string extract_section(const std::string &content, const char *marker) {
+  const std::string tag = std::string("-- ") + marker + " --\n";
+  auto pos = content.find(tag);
+  if (pos == std::string::npos)
+    return {};
+  auto start = pos + tag.size();
+  auto end = content.find("\n-- ", start);
+  return content.substr(start, end == std::string::npos ? std::string::npos
+                                                        : end - start);
+}
+
+} // namespace
+
+TEST(LuaEvalTool, Check_mode_accepts_valid_source) {
+  auto tool = make_eval_tool();
+  auto result = eval_run(*tool, "return 1 + 1", std::nullopt, "check");
+  EXPECT_FALSE(result->is_error());
+  EXPECT_NE(result->content().find("[lua check ok]"), std::string::npos);
+}
+
+TEST(LuaEvalTool, Check_mode_rejects_invalid_source_with_line_number) {
+  auto tool = make_eval_tool();
+  auto result = eval_run(*tool, "function foo(", std::nullopt, "check");
+  EXPECT_TRUE(result->is_error());
+  EXPECT_NE(result->content().find("[lua compile error]"), std::string::npos);
+  EXPECT_NE(result->content().find("script:1:"), std::string::npos);
+}
+
+TEST(LuaEvalTool, Check_mode_proves_nothing_ran) {
+  auto [tool, bindings] = make_eval_tool_with_bindings();
+  // Syntactically valid, but would clearly execute (and fail, since pici
+  // isn't even a global in check mode's environment) if it ran. Also
+  // directly verifies the actual scratch store, owned by `bindings`, was
+  // never touched -- not just "no error was reported".
+  auto result =
+      eval_run(*tool, "pici.scratch.set('proof', true)", std::nullopt, "check");
+  EXPECT_FALSE(result->is_error());
+  EXPECT_FALSE(bindings->scratch_get("proof").has_value());
+}
+
+TEST(LuaEvalTool, Run_mode_renders_return_values) {
+  auto tool = make_eval_tool();
+  auto result = eval_run(*tool, "return 1 + 1");
+  EXPECT_FALSE(result->is_error());
+  EXPECT_EQ(extract_section(result->content(), "return"), "2");
+}
+
+TEST(LuaEvalTool, Print_and_log_are_captured_not_stderr) {
+  auto tool = make_eval_tool();
+  auto result = eval_run(*tool, "print('hello'); pici.log('world', 42); "
+                                "return 'done'");
+  EXPECT_FALSE(result->is_error());
+  const auto output = extract_section(result->content(), "output");
+  EXPECT_NE(output.find("hello"), std::string::npos);
+  EXPECT_NE(output.find("world\t42"), std::string::npos);
+  EXPECT_EQ(extract_section(result->content(), "return"), "done");
+}
+
+TEST(LuaEvalTool, Runtime_error_reports_error_and_traceback) {
+  auto tool = make_eval_tool();
+  auto result = eval_run(*tool, "error('boom')");
+  EXPECT_TRUE(result->is_error());
+  EXPECT_NE(result->content().find("[lua error]"), std::string::npos);
+  EXPECT_NE(result->content().find("boom"), std::string::npos);
+  EXPECT_NE(result->content().find("stack traceback:"), std::string::npos);
+}
+
+TEST(LuaEvalTool, Infinite_loop_terminates_within_short_timeout) {
+  auto tool = make_eval_tool();
+  const auto start = std::chrono::steady_clock::now();
+  auto result = eval_run(*tool, "while true do end", 100);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_TRUE(result->is_error());
+  EXPECT_NE(result->content().find("[lua timeout]"), std::string::npos);
+  EXPECT_LT(elapsed, std::chrono::milliseconds(900));
+}
+
+// One of the most important tests in the whole plan: a script-level pcall
+// wrapping a busy loop must not be able to swallow the budget abort and
+// livelock the tool. See eval_pcall's re-raise in lua_tool.cpp.
+TEST(LuaEvalTool, Pcall_cannot_swallow_the_timeout_abort) {
+  auto tool = make_eval_tool();
+  const auto start = std::chrono::steady_clock::now();
+  auto result = eval_run(
+      *tool, "while true do pcall(function() while true do end end) end", 100);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_TRUE(result->is_error());
+  EXPECT_NE(result->content().find("[lua timeout]"), std::string::npos);
+  EXPECT_LT(elapsed, std::chrono::milliseconds(900));
+}
+
+// Also one of the most important tests: a __gc finalizer busy loop must be
+// rejected at setmetatable() time -- the count hook never fires inside a
+// finalizer, so nothing else could recover from this once it starts.
+TEST(LuaEvalTool, Setmetatable_rejects_gc_finalizer_immediately) {
+  auto tool = make_eval_tool();
+  const auto start = std::chrono::steady_clock::now();
+  auto result = eval_run(*tool, "setmetatable({}, {__gc = function() "
+                                "while true do end end}); return 'reached'");
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_TRUE(result->is_error());
+  EXPECT_NE(result->content().find("__gc"), std::string::npos);
+  // Rejected immediately at the setmetatable() call -- should be near
+  // instant, nowhere close to the (default 30s) timeout budget.
+  EXPECT_LT(elapsed, std::chrono::milliseconds(900));
+}
+
+TEST(LuaEvalTool, Security_boundary_curated_library_surface) {
+  auto tool = make_eval_tool();
+  auto result = eval_run(*tool, R"lua(
+return json.encode({
+  coroutine = type(coroutine),
+  io = type(io),
+  os_execute = type(os.execute),
+  os_getenv = type(os.getenv),
+  load = type(load),
+  loadfile = type(loadfile),
+  dofile = type(dofile),
+  require = type(require),
+  debug = type(debug),
+  warn = type(warn),
+  collectgarbage = type(collectgarbage),
+  string_dump = type(string.dump),
+  string_find = type(string.find),
+  string_match = type(string.match),
+  string_gmatch = type(string.gmatch),
+  string_gsub = type(string.gsub),
+})
+)lua");
+  ASSERT_FALSE(result->is_error());
+  auto returned =
+      nlohmann::json::parse(extract_section(result->content(), "return"));
+  for (const auto &[key, value] : returned.items()) {
+    EXPECT_EQ(value.get<std::string>(), "nil") << "key: " << key;
+  }
+}
+
+TEST(LuaEvalTool, Memory_cap_triggers_cleanly_no_crash) {
+  auto tool = make_eval_tool();
+  const auto start = std::chrono::steady_clock::now();
+  auto result = eval_run(*tool,
+                         "local t = {} while true do "
+                         "t[#t+1] = string.rep('x', 1024*1024) end",
+                         5000);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  // Reaching this assertion at all (rather than the test binary dying, or
+  // pici's own process OOMing) is most of the proof.
+  EXPECT_TRUE(result->is_error());
+  EXPECT_NE(result->content().find("[lua memory limit]"), std::string::npos);
+  EXPECT_LT(elapsed, std::chrono::milliseconds(4000));
+}
+
+TEST(LuaEvalTool, Binary_chunk_is_rejected_not_executed) {
+  auto tool = make_eval_tool();
+  const std::string bytecode_prefixed = "\x1bLua_not_actually_valid_bytecode";
+  auto result = eval_run(*tool, bytecode_prefixed);
+  EXPECT_TRUE(result->is_error());
+  EXPECT_NE(result->content().find("[lua compile error]"), std::string::npos);
+}
+
+TEST(LuaEvalTool, State_isolation_across_separate_execute_calls) {
+  auto tool = make_eval_tool();
+  auto first = eval_run(*tool, "eval_isolation_global = 42; "
+                               "return eval_isolation_global");
+  EXPECT_FALSE(first->is_error());
+  EXPECT_EQ(extract_section(first->content(), "return"), "42");
+
+  auto second = eval_run(*tool, "return tostring(eval_isolation_global)");
+  EXPECT_FALSE(second->is_error());
+  EXPECT_EQ(extract_section(second->content(), "return"), "nil");
+}
+
+TEST(LuaEvalTool, Scratch_set_get_round_trips_across_separate_calls) {
+  auto tool = make_eval_tool();
+  auto set_result = eval_run(*tool, "return pici.scratch.set('counter', 41)");
+  ASSERT_FALSE(set_result->is_error());
+  EXPECT_EQ(extract_section(set_result->content(), "return"), "true");
+
+  auto get_result = eval_run(*tool, "return pici.scratch.get('counter')");
+  ASSERT_FALSE(get_result->is_error());
+  EXPECT_EQ(extract_section(get_result->content(), "return"), "41");
+}
+
+TEST(LuaEvalTool, Scratch_rejects_set_past_per_key_cap) {
+  auto tool = make_eval_tool();
+  // 300KB, comfortably past the 256KB per-key cap.
+  auto result = eval_run(
+      *tool, "return pici.scratch.set('bigkey', string.rep('x', 300 * 1024))");
+  ASSERT_FALSE(result->is_error()); // nil, err is ordinary Lua data.
+  const auto returned = extract_section(result->content(), "return");
+  EXPECT_NE(returned.find("nil"), std::string::npos);
+  EXPECT_NE(returned.find("per-key"), std::string::npos);
+}
+
+TEST(LuaEvalTool, Scratch_rejects_set_past_total_size_cap) {
+  auto tool = make_eval_tool();
+  // Ten 150KB entries (1.5MB total) comfortably exceed the 1MB total cap,
+  // while each individual entry stays well under the 256KB per-key cap.
+  auto result = eval_run(*tool, R"lua(
+for i = 1, 10 do
+  local ok, err = pici.scratch.set("bulk" .. i, string.rep("x", 150 * 1024))
+  if not ok then
+    return "rejected:" .. tostring(err)
+  end
+end
+return "all-accepted"
+)lua");
+  ASSERT_FALSE(result->is_error());
+  const auto returned = extract_section(result->content(), "return");
+  EXPECT_NE(returned.find("rejected"), std::string::npos);
+  EXPECT_NE(returned.find("total"), std::string::npos);
+}
+
+TEST(LuaEvalTool, Scratch_rejects_set_past_key_count_cap) {
+  auto tool = make_eval_tool();
+  // 300 distinct, tiny keys -- well under the per-key and total byte caps,
+  // but past the 256-key count cap.
+  auto result = eval_run(*tool, R"lua(
+for i = 1, 300 do
+  local ok, err = pici.scratch.set("k" .. i, i)
+  if not ok then
+    return "rejected:" .. tostring(err)
+  end
+end
+return "all-accepted"
+)lua");
+  ASSERT_FALSE(result->is_error());
+  const auto returned = extract_section(result->content(), "return");
+  EXPECT_NE(returned.find("rejected"), std::string::npos);
+  EXPECT_NE(returned.find("key count"), std::string::npos);
 }
