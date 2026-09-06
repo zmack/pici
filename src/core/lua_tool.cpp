@@ -31,6 +31,7 @@ extern "C" {
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_set>
 #include <vector>
 
 #include "core/agent_runtime_identity.h"
@@ -42,19 +43,63 @@ extern "C" {
 namespace pi::core {
 namespace {
 
+// Shared recursion-depth cap for the Lua<->JSON conversion helpers below.
+// The review that drove this cap found two real process crashes in code
+// with no depth limit at all: a 200,000-deep nested Lua table (only ~14MB
+// of Lua memory -- well under any memory cap) stack-overflows the process
+// via ~200,000 C++ stack frames. 200 is deep enough for any normal
+// tool/add-on payload while keeping the C++ call stack shallow.
+constexpr int kLuaJsonMaxDepth = 200;
+
+// Lua only guarantees LUA_MINSTACK (20) free stack slots to a freshly
+// entered C function; it does NOT grow the stack automatically as a C
+// function keeps pushing values across its own recursive calls. Each
+// recursion level below holds a small, bounded number of values live on
+// the Lua stack across its own recursive call (the table/key being built,
+// the value fetched via lua_next/lua_rawgeti) -- empirically confirmed
+// (via a standalone reproduction against this exact Lua runtime) that
+// omitting this check corrupts the Lua stack and crashes the process via
+// SIGSEGV at only ~35-40 levels of nesting, well before the depth cap
+// above would ever engage. luaL_checkstack grows the stack on demand (or
+// raises a clean, catchable Lua error if a hard limit is hit) -- calling
+// it once per recursion level keeps arbitrarily deep (up to the cap)
+// recursion safe.
+constexpr int kLuaJsonStackHeadroom = 4;
+
+void json_to_lua(lua_State *L, const nlohmann::json &j, int depth);
+
+// json_to_lua has a depth cap but deliberately NOT a cycle guard: unlike
+// the Lua-to-JSON direction below, its input is always an nlohmann::json
+// tree built by parsing text (lua_json_decode) or by explicit construction
+// elsewhere in this codebase -- never from a live object graph with
+// back-references -- so it cannot contain a cycle. Adding cycle detection
+// here would guard against an input shape this function can never receive.
+// The depth cap alone still protects against a pathologically deep (but
+// acyclic) JSON document.
 // NOLINTNEXTLINE(misc-no-recursion)
-void json_to_lua(lua_State *L, const nlohmann::json &j) {
+void json_to_lua(lua_State *L, const nlohmann::json &j, int depth) {
+  if (depth >= kLuaJsonMaxDepth) {
+    // Past the cap: return a clean nil rather than recursing further.
+    lua_pushnil(L);
+    return;
+  }
+  // See kLuaJsonStackHeadroom's comment above: without this, a deeply
+  // nested (but well under the depth cap) document can still corrupt the
+  // Lua stack and crash the process, because Lua doesn't grow the stack
+  // automatically as a C function recurses.
+  luaL_checkstack(L, kLuaJsonStackHeadroom,
+                  "pici: JSON document too deeply nested to decode");
   if (j.is_object()) {
     lua_newtable(L);
     for (const auto &[key, val] : j.items()) {
       lua_pushstring(L, key.c_str());
-      json_to_lua(L, val);
+      json_to_lua(L, val, depth + 1);
       lua_rawset(L, -3);
     }
   } else if (j.is_array()) {
     lua_newtable(L);
     for (std::size_t i = 0; i < j.size(); ++i) {
-      json_to_lua(L, j[i]);
+      json_to_lua(L, j[i], depth + 1);
       lua_rawseti(L, -2, static_cast<lua_Integer>(i) + 1);
     }
   } else if (j.is_string()) {
@@ -73,13 +118,69 @@ void json_to_lua(lua_State *L, const nlohmann::json &j) {
   }
 }
 
-nlohmann::json lua_to_json(lua_State *L, int idx);
+// Public entry point used throughout this file; starts the depth counter
+// at 0. Behavior for any non-pathological input is unchanged from before
+// the depth cap was added.
+void json_to_lua(lua_State *L, const nlohmann::json &j) {
+  json_to_lua(L, j, 0);
+}
 
-// NOLINTNEXTLINE(misc-no-recursion)
-nlohmann::json lua_table_to_json(lua_State *L, int idx) {
+nlohmann::json lua_to_json(lua_State *L, int idx, int depth,
+                           std::unordered_set<const void *> &visited_tables);
+
+nlohmann::json
+lua_table_to_json(lua_State *L, int idx, int depth, // NOLINT(misc-no-recursion)
+                  std::unordered_set<const void *> &visited_tables) {
   if (idx < 0) {
     idx = lua_gettop(L) + idx + 1;
   }
+  if (depth >= kLuaJsonMaxDepth) {
+    // Depth cap: e.g. `local t={} for i=1,200000 do t={t} end` is only
+    // ~14MB of Lua memory (well under any memory cap) but would otherwise
+    // recurse ~200,000 C++ stack frames and crash the process with a stack
+    // overflow. Returning null here is consistent with how this function
+    // already maps other can't-represent-as-JSON values (e.g. functions,
+    // userdata) to null in lua_to_json below.
+    return nullptr;
+  }
+  // See kLuaJsonStackHeadroom's comment above: without this, a deeply
+  // nested (but well under the depth cap) table can still corrupt the Lua
+  // stack and crash the process, because Lua doesn't grow the stack
+  // automatically as a C function recurses.
+  luaL_checkstack(L, kLuaJsonStackHeadroom,
+                  "pici: table too deeply nested to convert to JSON");
+  // Cycle guard: a table's identity is stable for the lifetime of this
+  // call via lua_topointer. `visited_tables` tracks tables currently on
+  // the recursion path (ancestors), not every table ever seen -- the same
+  // table legitimately appearing twice as unrelated sibling values (a DAG,
+  // not a cycle) must not be flagged. Erasing on scope exit (below) keeps
+  // the set scoped to "currently an ancestor."
+  const void *table_ptr = lua_topointer(L, idx);
+  const bool track_identity = table_ptr != nullptr;
+  if (track_identity && !visited_tables.insert(table_ptr).second) {
+    // This table is already an ancestor of itself on the current
+    // recursion path (e.g. `local t={}; t.x=t`) -- without this check,
+    // converting it would recurse forever and SIGSEGV. Return a clean
+    // null instead.
+    return nullptr;
+  }
+  struct VisitedTableGuard {
+    std::unordered_set<const void *> &visited;
+    const void *ptr;
+    bool active;
+    VisitedTableGuard(std::unordered_set<const void *> &visited_in,
+                      const void *ptr_in, bool active_in)
+        : visited(visited_in), ptr(ptr_in), active(active_in) {}
+    ~VisitedTableGuard() {
+      if (active)
+        visited.erase(ptr);
+    }
+    VisitedTableGuard(const VisitedTableGuard &) = delete;
+    VisitedTableGuard &operator=(const VisitedTableGuard &) = delete;
+    VisitedTableGuard(VisitedTableGuard &&) = delete;
+    VisitedTableGuard &operator=(VisitedTableGuard &&) = delete;
+  } guard(visited_tables, table_ptr, track_identity);
+
   const int n = static_cast<int>(lua_rawlen(L, idx));
   int count = 0;
   bool all_int = true;
@@ -95,7 +196,7 @@ nlohmann::json lua_table_to_json(lua_State *L, int idx) {
     nlohmann::json arr = nlohmann::json::array();
     for (int i = 1; i <= n; ++i) {
       lua_rawgeti(L, idx, i);
-      arr.push_back(lua_to_json(L, lua_gettop(L)));
+      arr.push_back(lua_to_json(L, lua_gettop(L), depth + 1, visited_tables));
       lua_pop(L, 1);
     }
     return arr;
@@ -114,7 +215,7 @@ nlohmann::json lua_table_to_json(lua_State *L, int idx) {
       }
     }
     if (!key.empty()) {
-      obj[key] = lua_to_json(L, lua_gettop(L));
+      obj[key] = lua_to_json(L, lua_gettop(L), depth + 1, visited_tables);
     }
     lua_pop(L, 1);
   }
@@ -122,7 +223,8 @@ nlohmann::json lua_table_to_json(lua_State *L, int idx) {
 }
 
 // NOLINTNEXTLINE(misc-no-recursion)
-nlohmann::json lua_to_json(lua_State *L, int idx) {
+nlohmann::json lua_to_json(lua_State *L, int idx, int depth,
+                           std::unordered_set<const void *> &visited_tables) {
   switch (lua_type(L, idx)) {
   case LUA_TSTRING:
     return nlohmann::json( // NOLINT(modernize-return-braced-init-list)
@@ -138,10 +240,19 @@ nlohmann::json lua_to_json(lua_State *L, int idx) {
     return nlohmann::json( // NOLINT(modernize-return-braced-init-list)
         lua_toboolean(L, idx) != 0);
   case LUA_TTABLE:
-    return lua_table_to_json(L, idx);
+    return lua_table_to_json(L, idx, depth, visited_tables);
   default:
     return {nullptr};
   }
+}
+
+// Public entry point used throughout this file; starts the depth counter
+// at 0 and owns the per-call visited-table set. Behavior for any
+// non-pathological input is unchanged from before the depth/cycle guard
+// was added.
+nlohmann::json lua_to_json(lua_State *L, int idx) {
+  std::unordered_set<const void *> visited_tables;
+  return lua_to_json(L, idx, 0, visited_tables);
 }
 
 int lua_json_decode(lua_State *L) {
@@ -178,6 +289,124 @@ void register_json_module(lua_State *L) {
   lua_pushcfunction(L, lua_json_encode);
   lua_setfield(L, -2, "encode");
   lua_setglobal(L, "json");
+}
+
+// The following seven helpers were relocated here (pure move, no behavior
+// change) from LuaHooksImpl's private static section: none of them read or
+// write LuaHooksImpl instance state -- only impl_from(L) recovers the owning
+// LuaHooksImpl*, and that stays a LuaHooksImpl static method. Un-coupling
+// these from LuaHooksImpl lets a later eval-tool trampoline reuse them
+// without needing a LuaHooksImpl instance at all.
+
+// `domain` names the pici.<domain> table this binding belongs to (e.g.
+// "agents", "session") -- used to build both the "not available" message
+// and the generic error fallback so callers under pici.session.* don't
+// misleadingly say "agent task error".
+int push_agent_binding(
+    lua_State *L,
+    const std::function<nlohmann::json(const nlohmann::json &)> &fn,
+    const nlohmann::json &args, std::string_view domain) {
+  if (!fn) {
+    lua_pushnil(L);
+    const auto message = "pici." + std::string(domain) + " is not available";
+    lua_pushstring(L, message.c_str());
+    return 2;
+  }
+  try {
+    auto result = fn(args.is_object() ? args : nlohmann::json::object());
+    if (result.contains("error")) {
+      lua_pushnil(L);
+      const auto &error = result["error"];
+      const auto fallback = std::string(domain) + " action error";
+      const auto message = error.is_object() ? error.value("message", fallback)
+                                             : error.get<std::string>();
+      lua_pushstring(L, message.c_str());
+      return 2;
+    }
+    json_to_lua(L, result);
+    return 1;
+  } catch (const std::exception &e) {
+    lua_pushnil(L);
+    lua_pushstring(L, e.what());
+    return 2;
+  }
+}
+
+nlohmann::json agent_args(lua_State *L) {
+  if (lua_istable(L, 1))
+    return lua_to_json(L, 1);
+  nlohmann::json args = nlohmann::json::object();
+  if (lua_isstring(L, 1) != 0)
+    args["target"] = lua_tostring(L, 1);
+  if (lua_isstring(L, 2) != 0)
+    args["message"] = lua_tostring(L, 2);
+  if (lua_isstring(L, 3) != 0)
+    args["reason"] = lua_tostring(L, 3);
+  return args;
+}
+
+std::stop_token mailbox_stop_token(lua_State *L) {
+  lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_stop_token");
+  auto *token = static_cast<std::stop_token *>(lua_touserdata(L, -1));
+  const auto result = token != nullptr ? *token : std::stop_token{};
+  lua_pop(L, 1);
+  return result;
+}
+
+std::optional<AgentRuntimeIdentity> mailbox_actor(lua_State *L) {
+  lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_actor");
+  auto *actor =
+      static_cast<std::optional<AgentRuntimeIdentity> *>(lua_touserdata(L, -1));
+  const auto result = actor != nullptr ? *actor : std::nullopt;
+  lua_pop(L, 1);
+  return result;
+}
+
+ToolPresentationCallback *mailbox_presentation_callback(lua_State *L) {
+  lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_presentation");
+  auto *callback =
+      static_cast<ToolPresentationCallback *>(lua_touserdata(L, -1));
+  lua_pop(L, 1);
+  return callback;
+}
+
+int push_mailbox_binding(lua_State *L,
+                         const LuaHooks::MailboxBindings::Callback &fn,
+                         const nlohmann::json &args) {
+  if (!fn) {
+    lua_pushnil(L);
+    lua_pushstring(L, "pici.mailbox is not available");
+    return 2;
+  }
+  try {
+    const LuaHooks::MailboxBindings::InvocationContext context{
+        mailbox_actor(L), mailbox_stop_token(L),
+        mailbox_presentation_callback(L)};
+    auto result =
+        fn(args.is_object() ? args : nlohmann::json::object(), context);
+    if (result.contains("error")) {
+      lua_pushnil(L);
+      const auto &error = result["error"];
+      const auto message = error.is_object()
+                               ? error.value("message", "mailbox error")
+                               : error.get<std::string>();
+      const auto code = error.is_object() ? error.value("code", "mailbox_error")
+                                          : std::string("mailbox_error");
+      const auto stable_error = code + ": " + message;
+      lua_pushstring(L, stable_error.c_str());
+      return 2;
+    }
+    json_to_lua(L, result);
+    return 1;
+  } catch (const std::exception &e) {
+    lua_pushnil(L);
+    lua_pushstring(L, e.what());
+    return 2;
+  }
+}
+
+nlohmann::json mailbox_args(lua_State *L) {
+  return lua_istable(L, 1) ? lua_to_json(L, 1) : nlohmann::json::object();
 }
 
 class LuaToolResult : public ToolResult {
@@ -1283,119 +1512,6 @@ public:
     return 0;
   }
 
-  // `domain` names the pici.<domain> table this binding belongs to (e.g.
-  // "agents", "session") -- used to build both the "not available" message
-  // and the generic error fallback so callers under pici.session.* don't
-  // misleadingly say "agent task error".
-  static int push_agent_binding(
-      lua_State *L,
-      const std::function<nlohmann::json(const nlohmann::json &)> &fn,
-      const nlohmann::json &args, std::string_view domain) {
-    if (!fn) {
-      lua_pushnil(L);
-      const auto message = "pici." + std::string(domain) + " is not available";
-      lua_pushstring(L, message.c_str());
-      return 2;
-    }
-    try {
-      auto result = fn(args.is_object() ? args : nlohmann::json::object());
-      if (result.contains("error")) {
-        lua_pushnil(L);
-        const auto &error = result["error"];
-        const auto fallback = std::string(domain) + " action error";
-        const auto message = error.is_object()
-                                 ? error.value("message", fallback)
-                                 : error.get<std::string>();
-        lua_pushstring(L, message.c_str());
-        return 2;
-      }
-      json_to_lua(L, result);
-      return 1;
-    } catch (const std::exception &e) {
-      lua_pushnil(L);
-      lua_pushstring(L, e.what());
-      return 2;
-    }
-  }
-
-  static nlohmann::json agent_args(lua_State *L) {
-    if (lua_istable(L, 1))
-      return lua_to_json(L, 1);
-    nlohmann::json args = nlohmann::json::object();
-    if (lua_isstring(L, 1) != 0)
-      args["target"] = lua_tostring(L, 1);
-    if (lua_isstring(L, 2) != 0)
-      args["message"] = lua_tostring(L, 2);
-    if (lua_isstring(L, 3) != 0)
-      args["reason"] = lua_tostring(L, 3);
-    return args;
-  }
-
-  static std::stop_token mailbox_stop_token(lua_State *L) {
-    lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_stop_token");
-    auto *token = static_cast<std::stop_token *>(lua_touserdata(L, -1));
-    const auto result = token != nullptr ? *token : std::stop_token{};
-    lua_pop(L, 1);
-    return result;
-  }
-
-  static std::optional<AgentRuntimeIdentity> mailbox_actor(lua_State *L) {
-    lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_actor");
-    auto *actor = static_cast<std::optional<AgentRuntimeIdentity> *>(
-        lua_touserdata(L, -1));
-    const auto result = actor != nullptr ? *actor : std::nullopt;
-    lua_pop(L, 1);
-    return result;
-  }
-
-  static ToolPresentationCallback *mailbox_presentation_callback(lua_State *L) {
-    lua_getfield(L, LUA_REGISTRYINDEX, "pici.inline_presentation");
-    auto *callback =
-        static_cast<ToolPresentationCallback *>(lua_touserdata(L, -1));
-    lua_pop(L, 1);
-    return callback;
-  }
-
-  static int push_mailbox_binding(lua_State *L,
-                                  const LuaHooks::MailboxBindings::Callback &fn,
-                                  const nlohmann::json &args) {
-    if (!fn) {
-      lua_pushnil(L);
-      lua_pushstring(L, "pici.mailbox is not available");
-      return 2;
-    }
-    try {
-      const LuaHooks::MailboxBindings::InvocationContext context{
-          mailbox_actor(L), mailbox_stop_token(L),
-          mailbox_presentation_callback(L)};
-      auto result =
-          fn(args.is_object() ? args : nlohmann::json::object(), context);
-      if (result.contains("error")) {
-        lua_pushnil(L);
-        const auto &error = result["error"];
-        const auto message = error.is_object()
-                                 ? error.value("message", "mailbox error")
-                                 : error.get<std::string>();
-        const auto code = error.is_object()
-                              ? error.value("code", "mailbox_error")
-                              : std::string("mailbox_error");
-        const auto stable_error = code + ": " + message;
-        lua_pushstring(L, stable_error.c_str());
-        return 2;
-      }
-      json_to_lua(L, result);
-      return 1;
-    } catch (const std::exception &e) {
-      lua_pushnil(L);
-      lua_pushstring(L, e.what());
-      return 2;
-    }
-  }
-
-  static nlohmann::json mailbox_args(lua_State *L) {
-    return lua_istable(L, 1) ? lua_to_json(L, 1) : nlohmann::json::object();
-  }
-
   static int lua_pici_mailbox_self(lua_State *L) {
     auto *impl = impl_from(L);
     return push_mailbox_binding(L, impl->mailbox_bindings_.self,
@@ -1480,14 +1596,14 @@ public:
 
   static int lua_pici_agents_follow_up(lua_State *L) {
     auto *impl = impl_from(L);
-    return push_agent_binding(L, impl->agent_bindings_.follow_up,
-                              agent_args(L), "agents");
+    return push_agent_binding(L, impl->agent_bindings_.follow_up, agent_args(L),
+                              "agents");
   }
 
   static int lua_pici_agents_interrupt(lua_State *L) {
     auto *impl = impl_from(L);
-    return push_agent_binding(L, impl->agent_bindings_.interrupt,
-                              agent_args(L), "agents");
+    return push_agent_binding(L, impl->agent_bindings_.interrupt, agent_args(L),
+                              "agents");
   }
 
   static int lua_pici_agents_wait(lua_State *L) {

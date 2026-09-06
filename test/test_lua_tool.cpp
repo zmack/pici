@@ -1601,3 +1601,147 @@ TEST(LuaTool, Mailbox_addon_clears_actor_after_error_and_cancellation) {
   EXPECT_EQ(nlohmann::json::parse(recovered->content()).at("agent_id"),
             "actor-b");
 }
+
+// --- lua_to_json / lua_table_to_json / json_to_lua: depth cap + cycle
+// guard regression tests ---
+//
+// A prior adversarial review found these shared conversion helpers (used
+// by the whole Lua add-on system, exercised here via the json module and
+// LuaTool return-value handling) had no recursion depth cap and no cycle
+// guard: a self-referential table caused unbounded C++ recursion and a
+// real SIGSEGV, and a 200,000-deep nested table (only ~14MB of Lua memory)
+// stack-overflowed the process via ~200,000 C++ stack frames. Both are
+// fixed by a depth cap (200) plus, for the Lua-to-JSON direction, a
+// std::unordered_set<const void*> cycle guard keyed on table identity.
+
+TEST(LuaTool, Json_encode_self_referential_table_returns_clean_value) {
+  const auto dir =
+      std::filesystem::temp_directory_path() / "pici-lua-test-cycle";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+
+  auto path = write_lua(dir, "cyclic.lua", R"lua(
+return {
+  name = "cyclic",
+  description = "Self-referential table via json.encode",
+  execute = function(args)
+    local t = {}
+    t.x = t
+    return json.encode(t)
+  end
+}
+)lua");
+
+  auto tool = load_lua_tool(path);
+  auto result = tool->execute("1", "{}");
+  // The bug this guards against is a process crash (SIGSEGV) -- merely
+  // reaching this assertion at all (rather than the test binary dying) is
+  // most of the proof. The exact "null" placement additionally confirms
+  // the cycle was replaced with a clean value, not silently dropped.
+  EXPECT_TRUE(!result->is_error());
+  EXPECT_EQ(result->content(), R"({"x":null})");
+
+  std::filesystem::remove_all(dir);
+}
+
+TEST(LuaTool, Json_encode_deeply_nested_table_returns_clean_value) {
+  const auto dir =
+      std::filesystem::temp_directory_path() / "pici-lua-test-deep";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+
+  // Matches the review's exact reproduction: 200,000 levels of {previous},
+  // only ~14MB of Lua memory, well under any memory cap -- the depth cap
+  // is the only thing that can stop this from being ~200,000 C++ stack
+  // frames deep.
+  auto path = write_lua(dir, "deep.lua", R"lua(
+return {
+  name = "deep",
+  description = "200,000-deep nested table via json.encode",
+  execute = function(args)
+    local t = {}
+    for i = 1, 200000 do
+      t = {t}
+    end
+    local encoded = json.encode(t)
+    local open_brackets = 0
+    for _ in encoded:gmatch("%[") do
+      open_brackets = open_brackets + 1
+    end
+    return tostring(open_brackets) .. ":" .. tostring(#encoded > 0)
+  end
+}
+)lua");
+
+  auto tool = load_lua_tool(path);
+  auto result = tool->execute("1", "{}");
+  ASSERT_TRUE(!result->is_error());
+  // The encoder must have stopped recursing at the depth cap (200), not
+  // produced 200,000 nested arrays.
+  EXPECT_EQ(result->content(), "200:true");
+
+  std::filesystem::remove_all(dir);
+}
+
+TEST(LuaTool, Json_decode_deeply_nested_document_does_not_crash) {
+  const auto dir =
+      std::filesystem::temp_directory_path() / "pici-lua-test-decode-deep";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+
+  // json_to_lua's input is always a parsed nlohmann::json tree, which is
+  // inherently acyclic (see the code comment on json_to_lua in
+  // lua_tool.cpp) -- so only the depth cap applies on this direction, not
+  // a cycle guard. This nests deep enough (well past the 200 cap) to
+  // exercise it, while staying shallow enough that nlohmann::json::parse
+  // itself (unrelated to this fix) doesn't hit its own recursion limits.
+  std::string nested = "0";
+  for (int i = 0; i < 1000; ++i)
+    nested = "[" + nested + "]";
+
+  auto path = write_lua(dir, "decodedeep.lua", R"lua(
+return {
+  name = "decodedeep",
+  description = "Deeply nested json.decode",
+  execute = function(args)
+    local decoded = json.decode(args.text)
+    return type(decoded)
+  end
+}
+)lua");
+
+  auto tool = load_lua_tool(path);
+  auto result = tool->execute("1", nlohmann::json{{"text", nested}}.dump());
+  EXPECT_TRUE(!result->is_error());
+  EXPECT_EQ(result->content(), "table");
+
+  std::filesystem::remove_all(dir);
+}
+
+TEST(LuaTool, Json_encode_normal_nested_table_unchanged_by_depth_cap) {
+  const auto dir =
+      std::filesystem::temp_directory_path() / "pici-lua-test-normal-nested";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+
+  // A normal, shallow, non-pathological table must still round-trip
+  // exactly as before the depth cap and cycle guard were added.
+  auto path = write_lua(dir, "normal.lua", R"lua(
+return {
+  name = "normal",
+  description = "Ordinary nested table",
+  execute = function(args)
+    local t = { a = 1, b = { c = "two", d = { 1, 2, 3 } } }
+    return json.encode(t)
+  end
+}
+)lua");
+
+  auto tool = load_lua_tool(path);
+  auto result = tool->execute("1", "{}");
+  EXPECT_TRUE(!result->is_error());
+  EXPECT_EQ(nlohmann::json::parse(result->content()),
+            (nlohmann::json{{"a", 1}, {"b", {{"c", "two"}, {"d", {1, 2, 3}}}}}));
+
+  std::filesystem::remove_all(dir);
+}

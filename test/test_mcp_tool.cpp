@@ -5,12 +5,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #ifndef FAKE_MCP_SERVER_BINARY
@@ -248,4 +250,26 @@ TEST(McpTool, SanitizeTruncatesOverlongNamesWithDistinctSuffixes) {
   EXPECT_LE(name2.size(), 64u);
   EXPECT_NE(name1, name2)
       << "two names truncating to the same prefix must stay distinct";
+}
+
+// The `lua` built-in tool is deliberately never part of create_all_tools()'s
+// default output (it's wired separately, opt-in, from the CLI's
+// load_tools()) -- so it must be reserved explicitly, or an MCP server
+// could register a tool literally named "lua" and collide with it once the
+// opt-in tool is enabled.
+TEST(McpTool, BuiltinToolNamesReservesOptInLuaToolName) {
+  const auto names = pi::core::mcp::builtin_tool_names();
+  EXPECT_NE(std::find(names.begin(), names.end(), "lua"), names.end())
+      << "\"lua\" is an opt-in built-in tool name and must be reserved even "
+         "though create_all_tools() never produces it by default";
+}
+
+TEST(McpTool, ClaimToolNameRejectsLuaAsAReservedCollision) {
+  std::unordered_set<std::string> taken_names;
+  for (auto &name : pi::core::mcp::builtin_tool_names())
+    taken_names.insert(std::move(name));
+
+  EXPECT_FALSE(pi::core::mcp::claim_tool_name("lua", "some-server", taken_names))
+      << "an MCP server advertising a tool named \"lua\" must be treated as "
+         "a collision with the (possibly not-yet-enabled) built-in lua tool";
 }

@@ -1,8 +1,10 @@
 #include "core/mcp/mcp_tool.h"
 
+#include <array>
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include <string_view>
 #include <utility>
 
 namespace pi::core::mcp {
@@ -92,6 +94,21 @@ std::string sanitize_mcp_tool_name(std::string_view server_name,
   return truncated;
 }
 
+// Opt-in built-in tool names that are NOT part of create_all_tools()'s
+// default output, so the loop below can't discover them on its own. These
+// tools are wired separately (e.g. from the CLI's load_tools(), gated
+// behind their own opt-in flag) rather than being constructed
+// unconditionally by create_all_tools() -- but an MCP server could still
+// register a tool with one of these names today, before the real tool is
+// ever wired up, and collision detection needs to reject that regardless
+// of whether the opt-in flag is currently on. Keep this list explicit and
+// commented so a future reader understands why a name appears here that
+// isn't produced by create_all_tools():
+//   - "lua": the `lua` built-in tool (in-process Lua eval), constructed
+//     only by the CLI's load_tools() when `--lua-eval`/`[tools] lua_eval`
+//     is enabled -- never unconditionally by create_all_tools().
+constexpr std::array<std::string_view, 1> kOptInBuiltinToolNames{"lua"};
+
 std::vector<std::string> builtin_tool_names() {
   // Reuses the real builtin tool set (rather than a hand-maintained literal
   // list) so this can't silently drift out of sync as builtins are
@@ -100,6 +117,8 @@ std::vector<std::string> builtin_tool_names() {
   std::vector<std::string> names;
   for (const auto &tool : create_all_tools())
     names.emplace_back(tool->name());
+  for (const auto &name : kOptInBuiltinToolNames)
+    names.emplace_back(name);
   return names;
 }
 
