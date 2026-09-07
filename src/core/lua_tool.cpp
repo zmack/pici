@@ -2194,11 +2194,19 @@ void *eval_alloc(void *ud, void *ptr, std::size_t osize, std::size_t nsize) {
 // would otherwise run -- so no non-trivially-destructible local may ever
 // be live inside it, and this struct (accessed only through a pointer, but
 // still worth keeping trivial in its own right) follows the same rule.
+// `memory` (Stage 3) is a second pointer-sized field threaded through the
+// same extraspace slot as everything else here: lua_getextraspace(L) is
+// only one pointer wide, already spent on EvalRun* itself, so a binding
+// trampoline that also needs the current call's EvalMemory (for the
+// headroom check below) reaches it via this field rather than a second,
+// separate extraspace/registry mechanism. Still trivially destructible --
+// a raw pointer costs nothing to that guarantee.
 struct EvalRun {
   const std::stop_token *stop{nullptr};
   std::chrono::steady_clock::time_point deadline{};
   bool deadline_hit{false};
   bool cancelled{false};
+  EvalMemory *memory{nullptr};
 };
 static_assert(std::is_trivially_destructible_v<EvalRun>);
 
@@ -2400,6 +2408,255 @@ int eval_scratch_set(lua_State *L) {
 }
 
 // ---------------------------------------------------------------------------
+// pici.agents.*/pici.session.*/pici.mailbox.* trampolines (plan §4
+// "Registration without duplicating LuaHooksImpl's ~21 existing
+// trampolines"). Two generic trampolines dispatch through a per-binding
+// std::function* upvalue -- a pointer into the per-call
+// LuaEvalBindings::Snapshot local in execute() (declared before, and so
+// outliving, the lua_State/RAII closer), never a LuaHooksImpl*, which this
+// tool has no instance of -- reused via the Stage-1-relocated
+// push_agent_binding/push_mailbox_binding helpers. Registration is a loop
+// over static {name, member pointer} tables so the ~17 binding names below
+// don't need 17 hand-written C functions.
+// ---------------------------------------------------------------------------
+
+struct AgentEntry {
+  const char *name;
+  std::function<nlohmann::json(const nlohmann::json &)>
+      LuaHooks::AgentBindings::*member;
+};
+
+constexpr std::array<AgentEntry, 8> kAgentEntries{{
+    {"spawn", &LuaHooks::AgentBindings::spawn},
+    {"get", &LuaHooks::AgentBindings::get},
+    {"list", &LuaHooks::AgentBindings::list},
+    // Lua name != field name: the C++ side calls this send_message (`send`
+    // collides with nothing here, but the struct field predates the eval
+    // tool and already used the longer name for its own reasons).
+    {"send", &LuaHooks::AgentBindings::send_message},
+    {"follow_up", &LuaHooks::AgentBindings::follow_up},
+    {"interrupt", &LuaHooks::AgentBindings::interrupt},
+    {"wait", &LuaHooks::AgentBindings::wait},
+    {"close", &LuaHooks::AgentBindings::close},
+}};
+
+struct SessionEntry {
+  const char *name;
+  std::function<nlohmann::json(const nlohmann::json &)>
+      LuaHooks::SessionBindings::*member;
+};
+
+constexpr std::array<SessionEntry, 4> kSessionEntries{{
+    {"request_compaction", &LuaHooks::SessionBindings::request_compaction},
+    {"request_model_switch", &LuaHooks::SessionBindings::request_model_switch},
+    {"request_fork", &LuaHooks::SessionBindings::request_fork},
+    {"action_status", &LuaHooks::SessionBindings::action_status},
+}};
+
+struct MailboxEntry {
+  const char *name;
+  LuaHooks::MailboxBindings::Callback LuaHooks::MailboxBindings::*member;
+};
+
+constexpr std::array<MailboxEntry, 9> kMailboxEntries{{
+    {"self", &LuaHooks::MailboxBindings::self},
+    {"list", &LuaHooks::MailboxBindings::list},
+    {"send", &LuaHooks::MailboxBindings::send},
+    {"request", &LuaHooks::MailboxBindings::request},
+    {"reply", &LuaHooks::MailboxBindings::reply},
+    {"inbox", &LuaHooks::MailboxBindings::inbox},
+    {"ack", &LuaHooks::MailboxBindings::ack},
+    {"wait", &LuaHooks::MailboxBindings::wait},
+    {"status", &LuaHooks::MailboxBindings::status},
+}};
+
+// Reuses agent_args' existing quirk-handling (Stage 1 relocated it here
+// unchanged) so this eval tool produces the exact same argument shape
+// LuaHooksImpl's individual per-binding trampolines already do -- not a
+// reimplementation -- plus two binding-specific special cases this eval
+// tool alone needs:
+//  - "list": a bare string argument maps to {path_prefix=...}, exactly
+//    matching lua_pici_agents_list's existing behavior above.
+//  - "spawn": allow_write_tools is unconditionally forced false regardless
+//    of what the script's own argument table requested (plan §5: a
+//    lua-spawned subagent must never receive write tools, independent of
+//    [agents] write_tools's configured value -- bind_agent_spawn,
+//    cmd_run_session.h, reads this key straight off the argument table
+//    with `v.value("allow_write_tools", false)` and no other gate, so a
+//    script that set allow_write_tools=true would otherwise ride through
+//    unchanged whenever the operator has write_tools=all configured).
+nlohmann::json eval_agent_args(lua_State *L, std::string_view binding_name) {
+  nlohmann::json args =
+      (binding_name == "list" && lua_isstring(L, 1) != 0)
+          ? nlohmann::json{{"path_prefix", lua_tostring(L, 1)}}
+          : agent_args(L);
+  if (binding_name == "spawn") {
+    if (!args.is_object())
+      args = nlohmann::json::object();
+    args["allow_write_tools"] = false;
+  }
+  return args;
+}
+
+// Clamps args["timeout_ms"] to the remaining time budget, for the
+// agents.wait/mailbox.wait trampolines specifically (plan §3, "the hook
+// can't preempt a blocking C call"): LUA_MASKCOUNT only fires between VM
+// instructions, so it cannot interrupt a blocking C++ call inside a
+// binding -- a generous script-level timeout_ms must never be allowed to
+// park the tool thread longer than the tool's own remaining budget.
+// Returns an error message if the budget is already exhausted (the
+// binding must then not be called at all); otherwise mutates `args` in
+// place and returns nullopt.
+std::optional<std::string> eval_clamp_wait_timeout(lua_State *L,
+                                                   nlohmann::json &args) {
+  EvalRun *run = eval_run_from(L);
+  if (run == nullptr)
+    return std::nullopt; // No run context: nothing to clamp against.
+  const auto now = std::chrono::steady_clock::now();
+  if (now >= run->deadline)
+    return "pici: time budget exceeded";
+  const auto remaining_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(run->deadline - now)
+          .count();
+  if (!args.is_object())
+    args = nlohmann::json::object();
+  const long long requested = args.value("timeout_ms", remaining_ms);
+  args["timeout_ms"] = std::min<long long>(requested, remaining_ms);
+  return std::nullopt;
+}
+
+// Reserved-memory headroom check shared by both trampolines below (plan §3
+// "Binding calls need a reserved-memory headroom check, not a rewrite of
+// push_agent_binding/push_mailbox_binding"): those two helpers hold
+// non-trivially-destructible C++ locals across allocating lua_push* calls
+// that can now genuinely fail (LUA_ERRMEM) under this tool's capped
+// allocator -- including, in the worst case, a longjmp out of a live catch
+// block, which is undefined behavior. Checking headroom before ever
+// entering either helper -- rather than rewriting them to be longjmp-safe
+// throughout -- makes that allocating path overwhelmingly unlikely to ever
+// hit the cap in practice.
+bool eval_binding_headroom_ok(lua_State *L) {
+  EvalRun *run = eval_run_from(L);
+  return run == nullptr || run->memory == nullptr ||
+         run->memory->has_headroom(kEvalBindingReserveBytes);
+}
+
+// Upvalues: 1 = lightuserdata pointing at the snapshot's
+// std::function<json(json)> member for this binding; 2 = domain string
+// ("agents"/"session"), used by push_agent_binding for "not available"/
+// generic-error wording; 3 = the Lua-facing binding name (e.g. "spawn",
+// "wait"), used only for the two special cases above.
+int eval_agent_trampoline(lua_State *L) {
+  auto *fn = static_cast<
+      const std::function<nlohmann::json(const nlohmann::json &)> *>(
+      lua_touserdata(L, lua_upvalueindex(1)));
+  const char *domain = lua_tostring(L, lua_upvalueindex(2));
+  const char *binding_name = lua_tostring(L, lua_upvalueindex(3));
+  try {
+    if (!eval_binding_headroom_ok(L)) {
+      lua_pushnil(L);
+      lua_pushstring(L, "pici: memory budget too low for this call");
+      return 2;
+    }
+    nlohmann::json args = eval_agent_args(L, binding_name);
+    if (std::string_view(binding_name) == "wait") {
+      auto clamp_error = eval_clamp_wait_timeout(L, args);
+      if (clamp_error) {
+        lua_pushnil(L);
+        lua_pushstring(L, clamp_error->c_str());
+        return 2;
+      }
+    }
+    using AgentFn = std::function<nlohmann::json(const nlohmann::json &)>;
+    return push_agent_binding(L, fn != nullptr ? *fn : AgentFn{}, args, domain);
+  } catch (...) {
+    // A genuine C++ exception must never cross the C ABI back into liblua
+    // (longjmp-based) -- push_agent_binding already catches
+    // std::exception; this catches everything else (including a non-std
+    // throw) the same way.
+    lua_pushnil(L);
+    lua_pushstring(L, "pici: internal error");
+    return 2;
+  }
+}
+
+// Same shape as eval_agent_trampoline above, dispatching through
+// push_mailbox_binding instead. Upvalue 2 (domain, always "mailbox") is
+// registered for symmetry with the agent/session tables but unused here --
+// push_mailbox_binding's "not available"/error wording is already fixed,
+// unlike push_agent_binding's domain-parameterized wording.
+int eval_mailbox_trampoline(lua_State *L) {
+  auto *fn = static_cast<const LuaHooks::MailboxBindings::Callback *>(
+      lua_touserdata(L, lua_upvalueindex(1)));
+  const char *binding_name = lua_tostring(L, lua_upvalueindex(3));
+  try {
+    if (!eval_binding_headroom_ok(L)) {
+      lua_pushnil(L);
+      lua_pushstring(L, "pici: memory budget too low for this call");
+      return 2;
+    }
+    nlohmann::json args = mailbox_args(L);
+    if (std::string_view(binding_name) == "wait") {
+      auto clamp_error = eval_clamp_wait_timeout(L, args);
+      if (clamp_error) {
+        lua_pushnil(L);
+        lua_pushstring(L, clamp_error->c_str());
+        return 2;
+      }
+    }
+    using MailboxFn = LuaHooks::MailboxBindings::Callback;
+    return push_mailbox_binding(L, fn != nullptr ? *fn : MailboxFn{}, args);
+  } catch (...) {
+    lua_pushnil(L);
+    lua_pushstring(L, "pici: internal error");
+    return 2;
+  }
+}
+
+// Builds pici.agents/pici.session/pici.mailbox by looping over the static
+// entry tables above; each entry's member pointer resolves against
+// `snapshot` (owned by execute()'s bindings_snapshot local, which outlives
+// the lua_State), never a LuaHooksImpl instance.
+void eval_push_agent_binding_table(lua_State *L,
+                                   const LuaHooks::AgentBindings &agents) {
+  lua_newtable(L);
+  for (const auto &entry : kAgentEntries) {
+    lua_pushlightuserdata(L, const_cast<void *>(static_cast<const void *>(
+                                 &(agents.*entry.member))));
+    lua_pushstring(L, "agents");
+    lua_pushstring(L, entry.name);
+    lua_pushcclosure(L, &eval_agent_trampoline, 3);
+    lua_setfield(L, -2, entry.name);
+  }
+}
+
+void eval_push_session_binding_table(lua_State *L,
+                                     const LuaHooks::SessionBindings &session) {
+  lua_newtable(L);
+  for (const auto &entry : kSessionEntries) {
+    lua_pushlightuserdata(L, const_cast<void *>(static_cast<const void *>(
+                                 &(session.*entry.member))));
+    lua_pushstring(L, "session");
+    lua_pushstring(L, entry.name);
+    lua_pushcclosure(L, &eval_agent_trampoline, 3);
+    lua_setfield(L, -2, entry.name);
+  }
+}
+
+void eval_push_mailbox_binding_table(lua_State *L,
+                                     const LuaHooks::MailboxBindings &mailbox) {
+  lua_newtable(L);
+  for (const auto &entry : kMailboxEntries) {
+    lua_pushlightuserdata(L, const_cast<void *>(static_cast<const void *>(
+                                 &(mailbox.*entry.member))));
+    lua_pushstring(L, "mailbox");
+    lua_pushstring(L, entry.name);
+    lua_pushcclosure(L, &eval_mailbox_trampoline, 3);
+    lua_setfield(L, -2, entry.name);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The curated environment (plan §3, "Curated libraries, not luaL_openlibs").
 // ---------------------------------------------------------------------------
 
@@ -2428,7 +2685,8 @@ void eval_build_curated_os(lua_State *L) {
 }
 
 void eval_build_pici_table(lua_State *L, EvalOutput *output,
-                           LuaEvalBindings *bindings) {
+                           LuaEvalBindings *bindings,
+                           const LuaEvalBindings::Snapshot &snapshot) {
   lua_newtable(L);
 
   lua_pushlightuserdata(L, output);
@@ -2447,18 +2705,47 @@ void eval_build_pici_table(lua_State *L, EvalOutput *output,
   lua_setfield(L, -2, "set");
   lua_setfield(L, -2, "scratch");
 
+  eval_push_agent_binding_table(L, snapshot.agents);
+  lua_setfield(L, -2, "agents");
+  eval_push_session_binding_table(L, snapshot.session);
+  lua_setfield(L, -2, "session");
+  eval_push_mailbox_binding_table(L, snapshot.mailbox);
+  lua_setfield(L, -2, "mailbox");
+
+  // pici.model/pici.cwd/pici.tools (plan §4): read-only snapshot data, not
+  // bindings -- no trampoline, pushed once as plain Lua values.
+  lua_newtable(L); // pici.model
+  lua_pushstring(L, snapshot.model_id.c_str());
+  lua_setfield(L, -2, "id");
+  lua_pushstring(L, snapshot.model_provider.c_str());
+  lua_setfield(L, -2, "provider");
+  lua_pushstring(L, snapshot.model_api.c_str());
+  lua_setfield(L, -2, "api");
+  lua_setfield(L, -2, "model");
+
+  lua_pushstring(L, snapshot.cwd.c_str());
+  lua_setfield(L, -2, "cwd");
+
+  lua_newtable(L); // pici.tools
+  for (std::size_t i = 0; i < snapshot.tool_names.size(); ++i) {
+    lua_pushstring(L, snapshot.tool_names[i].c_str());
+    lua_rawseti(L, -2, static_cast<lua_Integer>(i) + 1);
+  }
+  lua_setfield(L, -2, "tools");
+
   lua_setglobal(L, "pici");
 }
 
 // Builds the full run-mode environment: curated libraries, the
 // setmetatable/__gc shim, the pcall/xpcall shims, print capture, the
 // string pattern-matching removal, the curated os table, json, and pici
-// (log/truncate_tool_result/scratch only in Stage 2 -- agents/session/
-// mailbox are Stage 3). Never called for mode:"check" -- a script that is
-// only compiled, never run, cannot observe or mutate any of this, which is
-// the whole point of check mode.
+// (log/truncate_tool_result/scratch/agents/session/mailbox/model/cwd/
+// tools). Never called for mode:"check" -- a script that is only
+// compiled, never run, cannot observe or mutate any of this, which is the
+// whole point of check mode.
 void eval_build_environment(lua_State *L, EvalOutput *output,
-                            LuaEvalBindings *bindings) {
+                            LuaEvalBindings *bindings,
+                            const LuaEvalBindings::Snapshot &snapshot) {
   for (const auto &lib : kEvalLibs) {
     luaL_requiref(L, lib.name, lib.func, 1);
     lua_pop(L, 1);
@@ -2505,7 +2792,7 @@ void eval_build_environment(lua_State *L, EvalOutput *output,
 
   eval_build_curated_os(L);
   register_json_module(L);
-  eval_build_pici_table(L, output, bindings);
+  eval_build_pici_table(L, output, bindings, snapshot);
 }
 
 // ---------------------------------------------------------------------------
@@ -2567,7 +2854,8 @@ constexpr std::string_view kLuaEvalDescription =
     "debug, coroutine, load/loadfile/dofile, string.find/match/gmatch/gsub "
     "(pattern matching is not available in this sandbox -- use plain "
     "string operations), and the file/shell tools -- use bash/read/write "
-    "for those.\n"
+    "for those. pici.agents.spawn never grants write tools to the spawned "
+    "subagent, regardless of any allow_write_tools value passed to it.\n"
     "\n"
     "Every pici.* call returns either a result table, or nil plus an error "
     "string as a second value -- check it: `local t, err = "
@@ -2641,13 +2929,12 @@ public:
     // before the RAII closer that owns it) so that reverse-order C++
     // destruction tears the state down first, while anything the state
     // might still reach through a trampoline upvalue pointing into this
-    // snapshot remains valid until that happens. Stage 2 wires no
-    // trampolines that read from it yet (that's Stage 3), but the
-    // declaration order is load-bearing once it does, so it is
-    // established here rather than left for a later stage to get right.
+    // snapshot remains valid until that happens. The pici.agents/session/
+    // mailbox trampolines (Stage 3) hold lightuserdata upvalues pointing
+    // directly into this object's members -- never move, copy, or
+    // reassign it after eval_build_environment has set those up.
     const LuaEvalBindings::Snapshot bindings_snapshot =
         bindings_ ? bindings_->snapshot() : LuaEvalBindings::Snapshot{};
-    static_cast<void>(bindings_snapshot); // Unused until Stage 3.
 
     EvalMemory memory{.limit = kEvalMemoryLimitBytes};
     lua_State *raw_state = lua_newstate(&eval_alloc, &memory);
@@ -2675,10 +2962,11 @@ public:
     run.stop = &context.stop_token;
     run.deadline = std::chrono::steady_clock::now() +
                    std::chrono::milliseconds(timeout_ms);
+    run.memory = &memory;
     eval_store_run(L, &run);
 
     if (!check_only)
-      eval_build_environment(L, &output, bindings_.get());
+      eval_build_environment(L, &output, bindings_.get(), bindings_snapshot);
 
     const int load_status = eval_load(L, script);
     if (load_status != LUA_OK) {
@@ -2714,6 +3002,18 @@ public:
     lua_pushcfunction(L, &eval_message_handler);
     lua_insert(L, -2);
     constexpr int kMsghIndex = 1;
+
+    // Published under the same registry keys InlineLuaTool's
+    // execute_inline_tool uses, so push_mailbox_binding's
+    // InvocationContext (mailbox_actor/mailbox_stop_token/
+    // mailbox_presentation_callback) sees this call's real actor,
+    // cancellable stop_token, and presentation callback rather than the
+    // defaults those helpers fall back to when the keys are unset.
+    LuaRegistryPointerGuard stop_token_guard(L, "pici.inline_stop_token",
+                                             &context.stop_token);
+    LuaRegistryPointerGuard actor_guard(L, "pici.inline_actor", &context.actor);
+    LuaRegistryPointerGuard presentation_guard(L, "pici.inline_presentation",
+                                               &context.on_presentation);
 
     lua_sethook(L, &eval_count_hook, LUA_MASKCOUNT,
                 kEvalCountHookInstructionCount);
