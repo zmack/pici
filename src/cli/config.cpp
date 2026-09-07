@@ -511,15 +511,14 @@ parse_mcp_server(std::size_t index, const toml::table &table, Config &config) {
   auto name = read_string(table, "name", index_path, config);
   if (!name || name->empty()) {
     diagnostic(config, true, index_path,
-              "name is required and must not be empty");
+               "name is required and must not be empty");
     return std::nullopt;
   }
   const auto path = "mcp_servers." + *name;
 
   auto command = read_string(table, "command", path, config);
   if (!command || command->empty()) {
-    diagnostic(config, true, path,
-              "command is required and must not be empty");
+    diagnostic(config, true, path, "command is required and must not be empty");
     return std::nullopt;
   }
 
@@ -807,8 +806,8 @@ Config load_config_document(const std::filesystem::path &path) {
             });
         if (duplicate) {
           diagnostic(config, true, index_path,
-                    "duplicate mcp server name \"" + server->name +
-                        "\" (lookup is case-insensitive)");
+                     "duplicate mcp server name \"" + server->name +
+                         "\" (lookup is case-insensitive)");
           continue;
         }
         config.mcp_servers.push_back(std::move(*server));

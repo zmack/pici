@@ -998,8 +998,8 @@ public:
       cli::Args args, std::shared_ptr<const core::ModelCatalog> registry,
       std::shared_ptr<pi::auth::Authentication> authentication = {},
       std::shared_ptr<core::SessionStore> session_store = {},
-      std::function<std::shared_ptr<core::Mailbox>(
-          const core::MailboxOptions &)>
+      std::function<
+          std::shared_ptr<core::Mailbox>(const core::MailboxOptions &)>
           ensure_mailbox = {},
       std::function<std::vector<core::ProviderRefreshStatus>(
           const std::vector<std::string> &, std::stop_token)>
@@ -1605,7 +1605,8 @@ private:
         thinking = core::thinking_level_from_string(
             args.at("thinking").get<std::string>());
       }
-      auto result = runtime().request_deferred_model_switch(selection, thinking);
+      auto result =
+          runtime().request_deferred_model_switch(selection, thinking);
       if (!result.accepted)
         return {{"error", *result.error}};
       return {{"accepted", true}};
@@ -2607,8 +2608,7 @@ inline int cmd_run(
     std::vector<std::shared_ptr<const core::ToolDefinition>> mcp_tools = {}) {
   CmdRunSession session(args, registry, std::move(authentication),
                         std::move(session_store), std::move(ensure_mailbox),
-                        std::move(refresh_model_catalog),
-                        std::move(mcp_tools));
+                        std::move(refresh_model_catalog), std::move(mcp_tools));
   return session.run();
 }
 
