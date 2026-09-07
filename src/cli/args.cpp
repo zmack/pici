@@ -180,6 +180,8 @@ Args parse_args(int argc, char **argv) {
       result.no_tools = true;
     } else if (arg == "--no-builtin-tools" || arg == "-nbt") {
       result.no_builtin_tools = true;
+    } else if (arg == "--lua-eval") {
+      result.lua_eval = true;
     } else if (arg == "--tools" || arg == "-t") {
       auto v = need("--tools");
       // comma-separated list
@@ -328,6 +330,8 @@ void print_help(const char *prog) {
          "medium, high, xhigh\n"
          "  --no-tools, -nt             Disable all tools\n"
          "  --no-builtin-tools, -nbt    Disable built-in tools only\n"
+         "  --lua-eval                  Enable the `lua` tool: in-process "
+         "Lua eval with session/subagent/mailbox access (opt-in)\n"
          "  --no-skills, -ns            Disable skill scanning and the skill "
          "tool\n"
          "  --tools, -t <names>         Comma-separated allowlist of tool "

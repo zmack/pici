@@ -57,6 +57,7 @@
 #include "core/builtin_tools.h"
 #include "core/compaction.h"
 #include "core/event_types.h"
+#include "core/lua_eval_tool.h"
 #include "core/lua_tool.h"
 #include "core/mailbox/mailbox_bindings.h"
 #include "core/mailbox/mailbox_coordinator.h"
@@ -1011,6 +1012,18 @@ public:
         injected_refresh_model_catalog_(std::move(refresh_model_catalog)),
         mcp_tools_(std::move(mcp_tools)) {}
 
+  // Defense-in-depth (plans/velvety-skipping-marble.md §3): the
+  // session.*/agents.* binding closures captured into lua_eval_bindings_
+  // close over `this` by raw pointer, same as configure_hooks()'s own
+  // lambdas do. The sequential, per-call-throwaway-state design of the
+  // `lua` tool means no call should ever outlive session teardown -- this
+  // is one line of defense regardless, run before any other member (in
+  // particular bundle_) starts tearing down.
+  ~CmdRunSession() {
+    if (lua_eval_bindings_)
+      lua_eval_bindings_->clear();
+  }
+
   int run() {
     if (!resolve_model())
       return 1;
@@ -1252,6 +1265,32 @@ private:
               break;
             }
         }
+      }
+    }
+
+    // The `lua` built-in tool (plans/velvety-skipping-marble.md): opt-in
+    // only, gated exactly like the built-in/MCP blocks above --
+    // --no-tools/--no-builtin-tools/faux-control all suppress it too, and
+    // --tools (when non-empty) must name it explicitly. Structurally,
+    // make_lua_eval_tool is never called from create_all_tools() itself, so
+    // ACP (which builds its own tool set elsewhere) cannot acquire it even
+    // by accident -- this is the only call site. Registered here, before
+    // base_tools_ is captured below, so it survives /reload-addons
+    // (apply_hook_tools() rebuilds from base_tools_ plus hook-registered
+    // tools every time); lua_eval_bindings_ itself is republished by every
+    // configure_hooks() call, not just the ones after this point.
+    if (args_.lua_eval && !args_.no_tools && !args_.no_builtin_tools &&
+        args_.faux_control_socket.empty()) {
+      lua_eval_bindings_ = std::make_shared<core::LuaEvalBindings>();
+      auto tool = core::make_lua_eval_tool(lua_eval_bindings_);
+      if (args_.tools.empty()) {
+        agent().add_tool(std::move(tool));
+      } else {
+        for (const auto &name : args_.tools)
+          if (tool->name() == name) {
+            agent().add_tool(std::move(tool));
+            break;
+          }
       }
     }
 
@@ -1502,10 +1541,17 @@ private:
     };
   }
 
+  // Rebuilds LuaHooks::AgentInfo unconditionally -- not just when add-on
+  // hooks exist -- and republishes it to lua_eval_bindings_ (Stage 4 fix,
+  // plans/velvety-skipping-marble.md §4.3: this function used to
+  // early-return at the very top whenever no add-ons were loaded, which
+  // left the `lua` tool with zero working bindings forever in that
+  // extremely common configuration). Only the final
+  // `bundle_.hooks->configure(info)` call stays guarded on add-on hooks
+  // actually existing; when lua_eval_bindings_ is null (the flag is off),
+  // this is byte-identical to the previous behavior aside from the now-
+  // unconditional (but side-effect-free) `info` construction above it.
   void configure_hooks() {
-    if (!bundle_.hooks || !bundle_.hooks->configure)
-      return;
-
     auto task_manager = runtime().agent().task_tree();
     auto mailbox = runtime().mailbox_runtime().coordinator();
 
@@ -1593,7 +1639,11 @@ private:
     bind_agent_wait(info, task_manager);
     bind_agent_close(info, task_manager);
 
-    bundle_.hooks->configure(info);
+    if (lua_eval_bindings_)
+      lua_eval_bindings_->store(info);
+
+    if (bundle_.hooks && bundle_.hooks->configure)
+      bundle_.hooks->configure(info);
   }
 
   void reload_addons() {
@@ -2516,6 +2566,11 @@ private:
   core::SandboxMode sandbox_mode_{core::SandboxMode::auto_mode};
   std::function<void(const std::string &)> faux_tool_registrar_;
   std::vector<std::shared_ptr<const core::ToolDefinition>> base_tools_;
+  // The `lua` built-in tool's live binding holder (plans/velvety-skipping-
+  // marble.md), set only when --lua-eval/[tools] lua_eval opts in
+  // (load_tools()); republished by every configure_hooks() call, cleared on
+  // teardown (~CmdRunSession()) as defense-in-depth.
+  std::shared_ptr<core::LuaEvalBindings> lua_eval_bindings_;
   std::shared_ptr<cli::ReadlineWake> repl_wake_;
   std::shared_ptr<core::SubagentActivityBridge> activity_;
   std::shared_ptr<std::atomic_uint64_t> compat_counter_;

@@ -40,6 +40,7 @@ struct Args {
   // Tools
   bool no_tools{false};
   bool no_builtin_tools{false};
+  bool lua_eval{false}; // --lua-eval / [tools] lua_eval: opt-in `lua` tool
   std::vector<std::string> tools;       // allowlist of tool names
   std::string tools_dir;                // directory for Lua tools
   std::vector<std::string> hooks_files; // Lua hooks files (repeatable)

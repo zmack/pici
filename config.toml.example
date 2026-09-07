@@ -92,6 +92,15 @@
 # disabled   = false                   # --no-tools
 # no_builtin = false                   # --no-builtin-tools
 # list       = ["read", "bash", "apply_patch", "edit", "write", "grep", "find", "ls"]
+# lua_eval   = false                   # --lua-eval  (opt-in; default off)
+#   Lets the agent execute Lua mid-turn, in-process, via a `lua` tool call --
+#   with access to session-lifecycle actions (compaction/model-switch/fork),
+#   subagent spawning, and mailbox messaging. This is real, if control-plane-
+#   only, power: no new filesystem/shell reach, but the model can fork the
+#   session or switch its own model. Accepted limitation: the curated Lua
+#   environment has no string.find/match/gmatch/gsub (Lua's pattern-matching
+#   engine can be driven into unbounded-CPU backtracking that no time budget
+#   can interrupt), so the tool cannot do regex-like text matching.
 
 [addons]
 # files = ["~/.config/pici/rewind.lua"]  # --hooks-file (repeatable, loads in order)

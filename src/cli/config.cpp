@@ -615,6 +615,7 @@ void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
   // [tools]
   cfg.no_tools = boolean("tools", "disabled");
   cfg.no_builtin_tools = boolean("tools", "no_builtin");
+  cfg.lua_eval = boolean("tools", "lua_eval");
   cfg.tools = str_array("tools", "list");
   if (auto d = str("tools", "dir"); !d.empty())
     cfg.tools_dir = expand_tilde(d);
@@ -861,6 +862,7 @@ Args merge_args(const Args &config, const Args &cli) {
 
   out.no_tools = config.no_tools || cli.no_tools;
   out.no_builtin_tools = config.no_builtin_tools || cli.no_builtin_tools;
+  out.lua_eval = config.lua_eval || cli.lua_eval;
   out.tools = merge_vec(config.tools, cli.tools);
   out.tools_dir = merge_str(config.tools_dir, cli.tools_dir);
 

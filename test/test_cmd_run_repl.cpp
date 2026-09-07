@@ -29,6 +29,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -120,6 +121,13 @@ protected:
   persisted_session(CmdRunSession &session) {
     return session.bundle_.session_store->load(session.current_session_id_);
   }
+  static std::shared_ptr<const core::ToolDefinition>
+  find_tool(CmdRunSession &session, std::string_view name) {
+    for (const auto &tool : session.agent().state().tools())
+      if (tool->name() == name)
+        return tool;
+    return nullptr;
+  }
 };
 
 TEST_F(CmdRunSessionTest, ToolsCommandListsBuiltinTools) {
@@ -129,6 +137,73 @@ TEST_F(CmdRunSessionTest, ToolsCommandListsBuiltinTools) {
 
   EXPECT_CALL(*renderer, on_command_output(HasSubstr("read")));
   EXPECT_FALSE(dispatch(session, "/tools"));
+}
+
+// LuaEvalTool wiring (plans/velvety-skipping-marble.md, Stage 4). make_args()
+// never sets hooks_files, so this session has zero add-ons configured --
+// exactly the common case the configure_hooks() early-return bug (fixed
+// this stage) used to leave with permanently-empty `lua` bindings. This is
+// the actual regression test for that fix: it isn't enough for the `lua`
+// tool to merely be present (that only proves load_tools() registration
+// wiring); it must also have working bindings, which only happens if
+// configure_hooks() reached lua_eval_bindings_->store(info) despite
+// bundle_.hooks->configure having nothing to do here.
+TEST_F(CmdRunSessionTest,
+      LuaEvalToolPresentAndBindingsWorkWithZeroAddonsConfigured) {
+  auto args = make_args();
+  args.lua_eval = true;
+  CmdRunSession session(args, empty_registry());
+  MockRenderer *renderer = nullptr;
+  ASSERT_TRUE(bootstrap(session, &renderer));
+
+  auto tool = find_tool(session, "lua");
+  ASSERT_NE(tool, nullptr);
+
+  // pici.agents.get against a real (empty) TaskTree, reached through a
+  // freshly-store()'d LuaEvalBindings snapshot. If configure_hooks() had
+  // early-returned before store() (the bug), this would instead report
+  // "pici.agents is not available".
+  nlohmann::json call_args{
+      {"script", "local t, err = pici.agents.get{target='missing'}\n"
+                "return tostring(t), err"},
+      {"mode", "run"}};
+  auto result = tool->execute("1", call_args.dump());
+  ASSERT_FALSE(result->is_error());
+  EXPECT_EQ(result->content().find("pici.agents is not available"),
+           std::string::npos)
+      << result->content();
+  EXPECT_NE(result->content().find("task not found"), std::string::npos)
+      << result->content();
+}
+
+TEST_F(CmdRunSessionTest, LuaEvalToolAbsentWithoutFlag) {
+  CmdRunSession session(make_args(), empty_registry());
+  MockRenderer *renderer = nullptr;
+  ASSERT_TRUE(bootstrap(session, &renderer));
+
+  EXPECT_EQ(find_tool(session, "lua"), nullptr);
+}
+
+TEST_F(CmdRunSessionTest, LuaEvalToolAbsentWithNoTools) {
+  auto args = make_args();
+  args.lua_eval = true;
+  args.no_tools = true;
+  CmdRunSession session(args, empty_registry());
+  MockRenderer *renderer = nullptr;
+  ASSERT_TRUE(bootstrap(session, &renderer));
+
+  EXPECT_EQ(find_tool(session, "lua"), nullptr);
+}
+
+TEST_F(CmdRunSessionTest, LuaEvalToolAbsentWithNoBuiltinTools) {
+  auto args = make_args();
+  args.lua_eval = true;
+  args.no_builtin_tools = true;
+  CmdRunSession session(args, empty_registry());
+  MockRenderer *renderer = nullptr;
+  ASSERT_TRUE(bootstrap(session, &renderer));
+
+  EXPECT_EQ(find_tool(session, "lua"), nullptr);
 }
 
 TEST_F(CmdRunSessionTest, SkillsCommandReportsDisabledWhenNoSkillsSet) {

@@ -75,6 +75,7 @@ thinking      = "medium"
 dir      = "/tmp/tools"
 disabled = false
 no_builtin = false
+lua_eval = true
 list     = ["read", "bash"]
 
 [addons]
@@ -112,6 +113,7 @@ retention_days = 45
     EXPECT_TRUE(cfg.thinking == ThinkingLevel::medium);
     EXPECT_EQ(cfg.tools_dir, std::string("/tmp/tools"));
     EXPECT_TRUE(!cfg.no_tools);
+    EXPECT_TRUE(cfg.lua_eval);
     EXPECT_EQ(cfg.tools.size(), std::size_t(2));
     EXPECT_EQ(cfg.hooks_files.size(), std::size_t(2));
     EXPECT_EQ(cfg.hooks_dir, std::string("/tmp/addons"));
@@ -527,6 +529,32 @@ TEST_F(ConfigTest, MergeBooleanFlags) {
     auto out = merge_args(conf, cli);
     EXPECT_TRUE(out.no_tools); // conf true OR cli false → true
     EXPECT_TRUE(out.verbose);  // conf false OR cli true → true
+  }
+}
+
+TEST_F(ConfigTest, MergeLuaEvalCliTrueWinsOverConfig) {
+  // merge: CLI-true wins, matching the no_tools/no_builtin_tools OR
+  // precedent -- either side saying "on" is enough.
+  {
+    Args conf;
+    conf.lua_eval = false;
+    Args cli;
+    cli.lua_eval = true;
+    auto out = merge_args(conf, cli);
+    EXPECT_TRUE(out.lua_eval);
+  }
+}
+
+TEST_F(ConfigTest, MergeLuaEvalConfigAloneEnables) {
+  // merge: config alone (CLI absent) still enables it -- [tools] lua_eval
+  // is a real opt-in path, not just --lua-eval.
+  {
+    Args conf;
+    conf.lua_eval = true;
+    Args cli;
+    cli.lua_eval = false;
+    auto out = merge_args(conf, cli);
+    EXPECT_TRUE(out.lua_eval);
   }
 }
 

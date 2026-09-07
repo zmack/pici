@@ -333,6 +333,76 @@ return {
   EXPECT_NE(result.out.find("read\n"), std::string::npos) << result.out;
 }
 
+// LuaEvalTool ("lua") gating (plans/velvety-skipping-marble.md Stage 4):
+// opt-in via --lua-eval, then subject to exactly the same
+// --no-tools/--no-builtin-tools/--tools-allowlist/faux-control gating as its
+// neighboring built-ins in load_tools() -- see the CmdRunSessionTest-based
+// regression test in test_cmd_run_repl.cpp for confirmation that the
+// registered tool also has *working* bindings (the actual configure_hooks()
+// bug this stage fixes), not just that it appears in this list.
+
+TEST(CmdRun, ListTools_LuaEvalFlagAddsLuaTool) {
+  TempDir home;
+  auto result =
+      run_cli(isolation_args(home, {"--list-tools", "--lua-eval"}), home.path);
+  ASSERT_TRUE(result.exited_normally);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_NE(result.out.find("lua\n"), std::string::npos) << result.out;
+}
+
+TEST(CmdRun, ListTools_WithoutLuaEvalFlagLuaToolAbsent) {
+  TempDir home;
+  auto result = run_cli(isolation_args(home, {"--list-tools"}), home.path);
+  ASSERT_TRUE(result.exited_normally);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_EQ(result.out.find("lua\n"), std::string::npos) << result.out;
+}
+
+TEST(CmdRun, ListTools_LuaEvalWithNoToolsLuaToolAbsent) {
+  TempDir home;
+  auto result = run_cli(
+      isolation_args(home, {"--list-tools", "--lua-eval", "--no-tools"}),
+      home.path);
+  ASSERT_TRUE(result.exited_normally);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_NE(result.out.find("(no tools loaded)"), std::string::npos)
+      << result.out;
+}
+
+TEST(CmdRun, ListTools_LuaEvalWithNoBuiltinToolsLuaToolAbsent) {
+  TempDir home;
+  auto result = run_cli(isolation_args(
+                            home, {"--list-tools", "--lua-eval",
+                                   "--no-builtin-tools"}),
+                        home.path);
+  ASSERT_TRUE(result.exited_normally);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_EQ(result.out.find("lua\n"), std::string::npos) << result.out;
+}
+
+TEST(CmdRun, ListTools_LuaEvalWithAllowlistNotNamingLuaIsAbsent) {
+  TempDir home;
+  auto result = run_cli(
+      isolation_args(home,
+                     {"--list-tools", "--lua-eval", "--tools", "read,bash"}),
+      home.path);
+  ASSERT_TRUE(result.exited_normally);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_NE(result.out.find("read\n"), std::string::npos) << result.out;
+  EXPECT_EQ(result.out.find("lua\n"), std::string::npos) << result.out;
+}
+
+TEST(CmdRun, ListTools_LuaEvalWithAllowlistNamingLuaIsPresent) {
+  TempDir home;
+  auto result = run_cli(
+      isolation_args(home, {"--list-tools", "--lua-eval", "--tools", "lua"}),
+      home.path);
+  ASSERT_TRUE(result.exited_normally);
+  EXPECT_EQ(result.exit_code, 0);
+  EXPECT_NE(result.out.find("lua\n"), std::string::npos) << result.out;
+  EXPECT_EQ(result.out.find("read\n"), std::string::npos) << result.out;
+}
+
 TEST(CmdRun, ListAddons_NoHooksPrintsEmptyMessage) {
   TempDir home;
   auto result = run_cli(isolation_args(home, {"--list-addons"}), home.path);
