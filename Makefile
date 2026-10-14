@@ -8,7 +8,13 @@ BUILD_DIR ?= build
 RELEASE_BUILD_DIR ?= build-release
 RELEASE_JEMALLOC_BUILD_DIR ?= build-release-jemalloc
 TSAN_BUILD_DIR ?= build-tsan
+ASAN_BUILD_DIR ?= build-asan
 BUILD_PARALLEL ?= --parallel
+# clang-tidy: TIDY_JOBS=0 picks a bounded automatic count (see
+# docs/cpp-safety-tooling.md); TIDY_STRICT=ON fails on any warning.
+TIDY_JOBS ?= 0
+TIDY_STRICT ?= OFF
+TIDY_CONFIGURE_FLAGS ?= -DPI_CPP_TIDY_JOBS=$(TIDY_JOBS) -DPI_CPP_TIDY_STRICT=$(TIDY_STRICT)
 
 COMMON_CONFIGURE_FLAGS ?= -DPI_CPP_OTEL_API=OFF
 DEV_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Debug
@@ -19,8 +25,9 @@ RELEASE_JEMALLOC_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Release \
 TSAN_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Debug \
 	-DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
 	-DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+ASAN_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Debug -DPI_CPP_ASAN_UBSAN=ON
 
-.PHONY: help configure dev release release-jemalloc strip-release lint format format-check test tsan check clean clean-release clean-release-jemalloc clean-tsan
+.PHONY: help configure dev release release-jemalloc strip-release lint format format-check test tsan asan check tidy-fix clean clean-release clean-release-jemalloc clean-tsan clean-asan
 
 help:
 	@printf '%s\n' \
@@ -29,15 +36,18 @@ help:
 		'  make release      Configure and build pi-cli + pi-acp in $(RELEASE_BUILD_DIR)' \
 		'  make release-jemalloc Configure and build a Release tree with jemalloc memory stats in $(RELEASE_JEMALLOC_BUILD_DIR)' \
 		'  make strip-release Strip symbols from $(RELEASE_BUILD_DIR)/{pi-cli,pi-acp}' \
-		'  make lint         Run the CMake clang-tidy target' \
+		'  make lint         Run clang-tidy (TIDY_JOBS=N, TIDY_STRICT=ON)' \
+		'  make tidy-fix     Apply clang-tidy fixes (serial by default; review first)' \
 		'  make format       Run the CMake clang-format target' \
 		'  make format-check Check formatting without editing files' \
 		'  make test         Build the dev tree and run ctest' \
 		'  make tsan         Build with ThreadSanitizer in $(TSAN_BUILD_DIR) and run ctest' \
+		'  make asan         Build with ASan+UBSan in $(ASAN_BUILD_DIR) and run ctest' \
 		'  make check        Run test + lint + tsan (CI / pre-push gate)' \
 		'  make clean        Remove $(BUILD_DIR)' \
 		'  make clean-release Remove $(RELEASE_BUILD_DIR)' \
 		'  make clean-tsan   Remove $(TSAN_BUILD_DIR)' \
+		'  make clean-asan   Remove $(ASAN_BUILD_DIR)' \
 		'' \
 		'Variables:' \
 		'  BUILD_DIR=build-dev RELEASE_BUILD_DIR=build-release RELEASE_JEMALLOC_BUILD_DIR=build-release-jemalloc TSAN_BUILD_DIR=build-tsan BUILD_PARALLEL=--parallel'
@@ -60,8 +70,14 @@ strip-release: release
 	$(STRIP) --strip-all $(RELEASE_BUILD_DIR)/pi-cli
 	$(STRIP) --strip-all $(RELEASE_BUILD_DIR)/pi-acp
 
+# The tidy target manages its own process pool; do not pass BUILD_PARALLEL.
 lint: configure
-	$(CMAKE) --build $(BUILD_DIR) --target tidy $(BUILD_PARALLEL)
+	$(CMAKE) -B $(BUILD_DIR) $(TIDY_CONFIGURE_FLAGS)
+	$(CMAKE) --build $(BUILD_DIR) --target tidy
+
+tidy-fix: configure
+	$(CMAKE) -B $(BUILD_DIR) $(TIDY_CONFIGURE_FLAGS)
+	$(CMAKE) --build $(BUILD_DIR) --target tidy-fix
 
 format: configure
 	$(CMAKE) --build $(BUILD_DIR) --target format
@@ -86,6 +102,15 @@ tsan:
 	setarch $$(uname -m) -R env TSAN_OPTIONS="halt_on_error=1" \
 		$(CTEST) --test-dir $(TSAN_BUILD_DIR) --output-on-failure
 
+# AddressSanitizer + UndefinedBehaviorSanitizer build.  Mutually exclusive with
+# TSan (separate build dir) and with the jemalloc memstats build.
+asan:
+	$(CMAKE) -B $(ASAN_BUILD_DIR) $(COMMON_CONFIGURE_FLAGS) $(ASAN_CONFIGURE_FLAGS)
+	$(CMAKE) --build $(ASAN_BUILD_DIR) $(BUILD_PARALLEL)
+	env ASAN_OPTIONS="detect_leaks=1:strict_string_checks=1" \
+		UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" \
+		$(CTEST) --test-dir $(ASAN_BUILD_DIR) --output-on-failure
+
 # Full gate: functional tests, static analysis, and the race detector.
 # Slower than `make test` alone (tsan needs its own build), so this is meant
 # for CI / pre-push, not the inner dev loop.
@@ -102,3 +127,6 @@ clean-release-jemalloc:
 
 clean-tsan:
 	$(CMAKE) -E rm -rf $(TSAN_BUILD_DIR)
+
+clean-asan:
+	$(CMAKE) -E rm -rf $(ASAN_BUILD_DIR)

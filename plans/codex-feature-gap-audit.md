@@ -1,0 +1,125 @@
+# Codex comparison evidence
+
+Read-only delegated audit; source-derived correctness candidates are not reproduced failures.
+
+Pici has a substantial delegation implementation. The largest gaps against the checked-out Codex are **recoverable child sessions, model-driven nested delegation, typed questions and approvals, and session-scoped delegation across frontends**. Several smaller correctness issues are good first implementation candidates.
+
+This audit used only checked-out sources. I read all five required guidance files first, made no edits or commits, spawned no agents, and ran no builds or tests. Pici HEAD was `fd28dc3c37970bf06fec8df408257ba17da9acac`; vendor/codex HEAD was `f82e36592278a0a782fb0d0fc97e5fa10e832ac2`. Working-tree changes appeared during the audit in `CMakeLists.txt`, `Makefile`, and `claude.md`; I left them and all existing untracked files untouched.
+
+Statuses below mean:
+
+- **Implemented:** a concrete source path implements the behavior.
+- **Partial:** supporting machinery exists, but coverage or semantics are incomplete.
+- **Missing:** no implementation found in the inspected sources.
+- **Intentionally absent:** source or normative guidance explicitly excludes it.
+- **Uncertain:** source inspection does not establish the end-to-end guarantee.
+
+Links point to exact checkout paths and starting lines; accompanying ranges identify the relevant evidence.
+
+**Delegation comparison**
+
+| Capability | Pici finding | Checked-out Codex comparison |
+|---|---|---|
+| Spawn | **Implemented.** Named tasks, parent selection, child runtime construction, slot reservation, duplicate checks, model/tool selection, and asynchronous execution. See [src/core/agent_task.cpp:540–697](../src/core/agent_task.cpp:540). Model-facing orchestration requires the explicitly loaded [addons/agents.lua:1–39](../addons/agents.lua:1). | V2 spawn constructs a canonical child path, prepares child configuration, and submits attributed initial input: [multi_agents_v2/spawn.rs:132–208](../vendor/codex/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs:132). |
+| Message | **Partial relative to Codex.** `send_message` queues passive information without starting execution. The task runner consumes `work`, while passive messages are drained by an explicit `follow_up`; sending to a running child does not itself steer its current run. See [agent_task.cpp:1084–1107](../src/core/agent_task.cpp:1084), [906–924](../src/core/agent_task.cpp:906), and [1234–1285](../src/core/agent_task.cpp:1234). Mailbox steering has a separate immediate admission path. | V2 distinguishes queue-only messages from turn-triggering tasks, preserves sender/recipient attribution, and handles unloaded recipients: [control/api.rs:100–177](../vendor/codex/codex-rs/core/src/agent/control/api.rs:100). |
+| Follow-up | **Implemented.** Serialized work for running or completed children; completed tasks retain their transcript and identity. Passive queued messages are flattened into text preceding the new prompt. See [agent_task.cpp:1234–1295](../src/core/agent_task.cpp:1234). | V2 uses a distinct `TriggerTurn` delivery mode. It explicitly rejects follow-up tasks targeting the root: [control/api.rs:122–160](../vendor/codex/codex-rs/core/src/agent/control/api.rs:122). |
+| Interrupt | **Implemented, with narrower semantics.** Cancels a currently running task and retains its runtime for reuse. Pending initialization/work is not interrupted by this method. See [agent_task.cpp:1298–1318](../src/core/agent_task.cpp:1298). Reuse is covered by [test_agent_tasks.cpp:830–869](../test/test_agent_tasks.cpp:830). | V2 returns the previously observed status, rejects root/self interruption, and treats an unloaded/dead target as successfully interrupted without reloading: [control/interrupt.rs:14–50](../vendor/codex/codex-rs/core/src/agent/control/interrupt.rs:14). |
+| Wait | **Implemented, with frontend differences.** Generation-based target snapshots, timeout, and stop-token cancellation. It waits for *changes*, not necessarily completion. Default `after_generation=0` can return existing state immediately. See [agent_task.cpp:1472–1510](../src/core/agent_task.cpp:1472). RPC passes cancellation; the Lua binding does not. | V2 waits for mailbox activity, steered input, or timeout, without target IDs: [multi_agents_v2/wait.rs:53–111](../vendor/codex/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs:53). V1 exposes a different wait tool. These surfaces should not be conflated. |
+| Close | **Implemented.** Recursively closes descendants, interrupts and joins runners, unregisters endpoints, then erases tasks. The returned close snapshot retains the result; subsequent lookup cannot retrieve it. See [agent_task.cpp:1321–1399](../src/core/agent_task.cpp:1321) and [1450–1469](../src/core/agent_task.cpp:1450). | Explicit model-callable close belongs to Codex V1. V2’s registered surface contains spawn/message/follow-up/wait/interrupt/list, without explicit close or resume: [tools/spec_plan.rs:1511–1588](../vendor/codex/codex-rs/core/src/tools/spec_plan.rs:1511). |
+| Resume | **Partial.** An interrupted/completed resident task can receive follow-up work. **Missing:** reopening a closed child or restoring it after process restart. Child construction explicitly supplies no store: [agent_task.cpp:612–620](../src/core/agent_task.cpp:612). | V1 has explicit resume; controller resume loads absent runtimes from stored rollout: [control/resume.rs:14–35](../vendor/codex/codex-rs/core/src/agent/control/resume.rs:14). V2 additionally supports lazy child reload. |
+| Nested delegation | **Partial.** External callers can spawn with another task as `parent_id`, enforcing depth in the same tree. **Missing:** child-driven delegation through a child-owned tree. The factory constructs but never activates children: [session_runtime.cpp:99–115](../src/core/session/session_runtime.cpp:99). `allow_subagents` is declared and parsed but has no task-implementation use: [agent_task.h:102–114](../src/core/agent_task.h:102), [cmd_run_session.h:1395–1412](../src/cli/cmd_run_session.h:1395). | V2 carries hierarchical paths and conditionally exposes collaboration tools to child models: [tools/spec_plan.rs:728–738](../vendor/codex/codex-rs/core/src/tools/spec_plan.rs:728). Nesting is capability-dependent. |
+| Context inheritance | **Implemented.** None/full/prefix/recent modes copy transcript values; default is none. System prompt and effective model inherit independently; explicit overrides are accepted. See [agent_task.cpp:508–568](../src/core/agent_task.cpp:508). | V2 defaults to full history; `none` starts fresh. Numeric legacy turn counts also mean full history rather than a bounded slice: [spawn.rs:279–300](../vendor/codex/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs:279). Child configuration also carries reasoning, role, permission, and cwd settings: [child_config.rs:103–201](../vendor/codex/codex-rs/core/src/agent/child_config.rs:103). |
+| Results and status | **Implemented.** Typed statuses, result text/error/stop reason/usage/truncation, generations, and live context projections. See [agent_task.h:64–152](../src/core/agent_task.h:64). **Partial:** usage represents the latest assistant message, not cumulative delegation expenditure: [agent_task.cpp:377–415](../src/core/agent_task.cpp:377), [894–898](../src/core/agent_task.cpp:894). | Codex status includes terminal text/error: [protocol.rs:1932–1947](../vendor/codex/codex-rs/protocol/src/protocol.rs:1932). V2 explicitly routes terminal results and completion activity toward the parent. |
+
+**Limits, notifications, and recovery**
+
+Pici’s configured limits are real admission bounds: **4 active child executions, 8 resident children, depth 2, 4 direct children, 32 queued items, 256 KiB per message/result, 2 MiB inherited context, and 60 seconds maximum wait**. Reservations count in-flight spawns, preventing simple concurrent over-admission. Evidence: [agent_task.h:257–266](../src/core/agent_task.h:257), [agent_task.cpp:649–696](../src/core/agent_task.cpp:649). The active counter covers children, so the root can execute in addition.
+
+Codex has version-specific limits. V1 defaults to six agent slots and depth one. V2 defaults to four concurrent threads per session and derives three child slots; its wait defaults are 10 seconds minimum, 30 seconds default, one hour maximum. See [config/mod.rs:254–264](../vendor/codex/codex-rs/core/src/config/mod.rs:254) and [1660–1672](../vendor/codex/codex-rs/core/src/config/mod.rs:1660). The V1 depth rule must not be presented as a universal V2 restriction.
+
+| Area | Assessment |
+|---|---|
+| Token budgets | **Missing in Pici delegation.** `max_tokens` is a provider-response setting, not a shared task-tree expenditure budget: [agent.h:44–61](../src/core/agent.h:44). Codex has shared root-tree accounting, weighted usage, reminders, and budget-exceeded signaling: [rollout_budget.rs:18–66](../vendor/codex/codex-rs/core/src/rollout_budget.rs:18), [control/budget.rs:11–35](../vendor/codex/codex-rs/core/src/agent/control/budget.rs:11). |
+| Growing context | **Partial.** Pici caps inherited context at spawn, but that is not a lifetime transcript cap. Child factory configuration omits auto-compaction: [session_runtime.cpp:99–108](../src/core/session/session_runtime.cpp:99). |
+| Parent notifications | **Partial.** Pici emits typed child/status events and presents CLI activity, but does not automatically deliver completed results to the parent executor. See [agent_task.cpp:965–992](../src/core/agent_task.cpp:965), [subagent_activity.cpp:66–130](../src/core/subagent_activity.cpp:66). Codex V2 sends attributed queue-only result notifications; delivery is explicitly **best effort**, not guaranteed: [control/completion.rs:1–4, 92–140](../vendor/codex/codex-rs/core/src/agent/control/completion.rs:1). |
+| Silent transcript insertion | **Intentionally absent in Pici.** Child results must not silently splice into parent history. This is a preserved invariant, not a defect: [test_agent_tasks.cpp:940–973](../test/test_agent_tasks.cpp:940), [object-taxonomy.md:88–95](../docs/object-taxonomy.md:88). |
+| Child recovery | **Intentionally absent in the current MVP; a concrete product gap.** Children are documented as in-memory only: [agent_task.h:241–248](../src/core/agent_task.h:241). Root-session journals exist, but no child transcript/task restoration is established by them. |
+| Codex recovery | **Implemented, conditional on stores and successful reads.** V2 restores persisted open descendant identities before reopening runtimes: [control/spawn.rs:190–272](../vendor/codex/codex-rs/core/src/agent/control/spawn.rs:190). Residency eviction materializes rollout and preserves pending mail locally: [control/residency.rs:35–79](../vendor/codex/codex-rs/core/src/agent/control/residency.rs:35). |
+| Mail durability | Pici’s process `Mailbox` is stronger than its transient task queues: acceptance callbacks acknowledge durable claims, with lease-based redelivery: [mailbox_coordinator.cpp:844–869](../src/core/mailbox/mailbox_coordinator.cpp:844). Codex’s unloaded-agent mailbox shown here is an in-memory map: [control/mailbox.rs:15–32](../vendor/codex/codex-rs/core/src/agent/control/mailbox.rs:15). **Uncertain:** crash-proof delivery of every pending Codex inter-agent message. |
+
+**Permissions, sandboxing, worktrees, and human input**
+
+Pici implements native capability filtering. Children receive `child_safe` tools; write tools require both configured permission and caller opt-in. Arbitrary Lua orchestration tools are excluded, while a small bundled mailbox-tool allowlist can be child-safe. MCP tools are explicitly not child-safe. Evidence: [agent_task.cpp:451–499](../src/core/agent_task.cpp:451), [lua_tool.cpp:1940–1951](../src/core/lua_tool.cpp:1940), [mcp_tool.h:100–106](../src/core/mcp/mcp_tool.h:100).
+
+This is **partial isolation**, not an independent child sandbox:
+
+- Children share inherited tool objects. Bash therefore retains the policy object captured by the parent’s tool; the child runtime’s newly defaulted policy is not a separately enforced capability ceiling. See [agent_task.cpp:475–503](../src/core/agent_task.cpp:475), [builtin_tools.cpp:1816–1838](../src/core/builtin_tools.cpp:1816).
+- Native file tools enforce workspace containment; Bash uses bubblewrap with writable workspace and isolated network/process namespaces. See [builtin_tools.cpp:133–166](../src/core/builtin_tools.cpp:133), [sandbox.cpp:89–146](../src/core/sandbox.cpp:89).
+- Child construction removes permission hooks and context transforms: [agent_task.cpp:571–581](../src/core/agent_task.cpp:571). The native gate is consequently essential.
+- **Uncertain:** comprehensive credential isolation across all executable adapters. MCP explicitly inherits the process environment: [mcp_config.h:30–39](../src/core/mcp/mcp_config.h:30). The Bash launcher shown does not establish an environment allowlist.
+
+Codex copies live approval policy, reviewer, cwd, and permission-profile snapshots into children: [child_config.rs:175–201](../vendor/codex/codex-rs/core/src/agent/child_config.rs:175). Its tool orchestration includes approval, sandbox selection, and escalation/retry: [tools/orchestrator.rs:1–6](../vendor/codex/codex-rs/core/src/tools/orchestrator.rs:1). Platform sandbox selection includes macOS, Linux, and Windows: [sandboxing/manager.rs:52–57](../vendor/codex/codex-rs/sandboxing/src/manager.rs:52).
+
+**Managed worktrees are missing in Pici.** Running from a manually created worktree is possible, but spawn has no workspace/worktree selection or ownership contract. Codex implements creation, listing, thread ownership binding, and removal that refuses local changes: [worktree/src/lib.rs:40–62](../vendor/codex/codex-rs/worktree/src/lib.rs:40), [274–285](../vendor/codex/codex-rs/worktree/src/lib.rs:274). **Uncertain:** automatic worktree allocation for every Codex child; the spawn path inspected does not establish that guarantee.
+
+**Typed questions and approval responses are missing in Pici.** Text conversation and Lua denial hooks exist, but I found no correlated pending-question/approval command, result, event, or frontend response surface. Codex implements:
+
+- Root-only structured questions, with mode-dependent blocking: [request_user_input.rs:67–89](../vendor/codex/codex-rs/core/src/tools/handlers/request_user_input.rs:67).
+- Asynchronous question events returning immediate acceptance: [request_user_input_async.rs:131–147](../vendor/codex/codex-rs/core/src/tools/handlers/request_user_input_async.rs:131).
+- Bounded retained root authorization evidence for worker reviewers: [control/user_authorization.rs:46–105](../vendor/codex/codex-rs/core/src/agent/control/user_authorization.rs:46).
+
+**Frontend parity**
+
+| Frontend | Pici coverage |
+|---|---|
+| Interactive CLI | **Implemented:** explicit agents add-on tools/commands, task activity, and subagent presentation. Activation connects typed task events to presentation: [cmd_run_session.h:1313–1322](../src/cli/cmd_run_session.h:1313). |
+| JSONL RPC | **Implemented:** spawn/list/send/follow-up/wait/interrupt/close commands. Wait runs on cancellable workers: [rpc_mode.cpp:261–288](../src/cli/rpc_mode.cpp:261), [603–614](../src/cli/rpc_mode.cpp:603). **Partial:** no task-event subscription is passed into RPC; root execution streams events, while child status/results require explicit queries/waits. See [cmd_run_session.h:1062–1065](../src/cli/cmd_run_session.h:1062), [rpc_mode.cpp:214–222](../src/cli/rpc_mode.cpp:214). |
+| ACP task API | **Implemented:** task endpoints plus event polling/SSE: [handlers.cpp:828–836](../src/acp/handlers.cpp:828), [task_events.cpp:60–85](../src/acp/task_events.cpp:60). |
+| ACP session execution | **Intentionally absent:** delegation in normal `/runs` sessions. `/tasks` uses a separate process-wide scratch runtime and lacks session addressing: [server.cpp:84–120](../src/acp/server.cpp:84). Hooks, mailbox, skills, context discovery, and auto-compaction are explicitly excluded: [acp/main.cpp:220–231](../src/acp/main.cpp:220). |
+
+ACP thus has task functionality, but **does not have delegation parity with a CLI/RPC durable session**. Its scratch tree also uses default limits and disables child write tools regardless of CLI configuration.
+
+**Concrete correctness candidates**
+
+These are source-derived findings, not reproduced test failures.
+
+1. **Nonstreamed results bypass the output cap.** Streaming deltas are capped, but fallback assistant text is assigned without checking size or setting truncation: [agent_task.cpp:862–893](../src/core/agent_task.cpp:862). Apply one bounded result-assembly path.
+
+2. **Context normalization can retain an incomplete multi-tool exchange.** If truncation preserves a tool-call message and only its first result, the cleanup stops because the last retained message is a tool result. Its advertised incomplete-exchange removal only examines an assistant at the tail: [agent_task.cpp:143–190](../src/core/agent_task.cpp:143). Validate complete exchanges before installation.
+
+3. **Waiting does not free resident/direct-child slots.** Spawn instructions claim it does, but wait only observes generations; close erases tasks. Compare [addons/agents.lua:25](../addons/agents.lua:25), [agent_task.cpp:653–674](../src/core/agent_task.cpp:653), [1384–1385](../src/core/agent_task.cpp:1384), and [1472–1510](../src/core/agent_task.cpp:1472). Fix descriptions and diagnostics.
+
+4. **Lua waits omit caller cancellation.** The core accepts a stop token; RPC supplies it, but the agents binding calls `wait(request)` without one: [cmd_run_session.h:1503–1513](../src/cli/cmd_run_session.h:1503). Lua-eval clamps remaining time, which does not provide cancellation parity: [lua_tool.cpp:2501–2525](../src/core/lua_tool.cpp:2501).
+
+5. **Root pseudo-task operations need validation.** Root status is initialized once and snapshots copy it; `follow_up` can reserve work for root despite root having no task runner. See [agent_task.cpp:330–339](../src/core/agent_task.cpp:330), [377–389](../src/core/agent_task.cpp:377), [1258–1285](../src/core/agent_task.cpp:1258). Derive root status from its owning `Agent`; route or reject unsupported root operations.
+
+**Prioritized implementation candidates and ownership**
+
+The governing boundary is [object-taxonomy.md:32–80](../docs/object-taxonomy.md:32): `Agent` owns `TaskTree`; tasks own child `SessionRuntime`; stores own durable truth; frontends translate commands and present events.
+
+| Priority | Candidate | Archetype, owner, lifetime, authority, contract |
+|---|---|---|
+| 1 | Fix the five correctness issues above; remove or implement ineffective `allow_subagents`. | Existing **TaskTree Aggregate**, owned by `Agent`, activation lifetime, authoritative for task lifecycle/results. Context validation and result assembly are bounded **Operations**. Use the Delegation contract; adapters only translate cancellation and arguments. |
+| 2 | Make children capable of nested delegation with inherited ceilings. | Each child `Agent` owns its own **TaskTree Aggregate** for its activation; each task owns its child **SessionRuntime Runtime**. Supply a complete child factory specification. Keep one authority for shared budget/capacity reservations so nesting cannot multiply limits. |
+| 3 | Add durable child sessions and explicit recovery policy. | **SessionStore Store**, process-owned, owns durable child transcripts and explicitly recorded parent task facts. **TaskTree Aggregate** owns recovered live status. Reconstruct activations rather than treating stored presence as a live runtime. Preserve durable-write-before-live-install transitions. |
+| 4 | Add attributed messages, completion notifications, and RPC task events. | **Message/event Values** cross Delegation and Session contracts. `TaskTree` owns lifecycle facts; process **Mailbox Aggregate** owns durable entries; **MailboxStore** owns leases/acks. Deliver results explicitly without silently splicing transcripts. Frontend **Adapters** serialize the same events. |
+| 5 | Introduce typed questions and approvals with child routing. | Correlated request/response **Values** through the Session contract. `Agent` owns pending execution state and enforcement; `SessionRuntime` routes frontend responses for its activation. CLI/RPC/ACP **Adapters** own UI/wire state. Lua can deny within native policy but cannot grant escalation. |
+| 6 | Add explicit child workspace and sandbox policy; then optional managed worktrees. | A reusable process-owned Git **Adapter** performs bounded creation/cleanup **Operations**. Tasks own child runtimes bound to workspace/policy **Values**; `SessionStore` records durable associations. Child permissions must remain bounded independently of mutable parent tool objects. |
+| 7 | Unify ACP tasks with session-scoped delegation through an explicit protocol change. | ACP **Adapter** resolves session-addressed commands through **SessionRuntime**. `Agent` retains the sole `TaskTree` authority. Do not silently expand ACP’s documented capability exclusions. |
+
+A related architectural gap is that `PiciProcess` currently owns shared facilities but exposes no session factory or runtime ownership collection: [pici_process.h:59–117](../src/core/process/pici_process.h:59). Frontends still construct runtimes directly. Completing that composition seam would make recovery, nested child construction, and frontend parity easier to implement without duplicating policy.
+
+**Compact broader feature comparison**
+
+| Feature | Pici | Checked-out Codex |
+|---|---|---|
+| Models/providers/auth | **Implemented:** catalog views/discovery, provider-bound authentication, multiple inference adapters. [models.h:233–255](../src/core/models.h:233), [authentication.h:23–43](../src/core/auth/authentication.h:23), [main.cpp:50–66](../src/main.cpp:50). | Richer child role/model/reasoning configuration: [child_config.rs:51–100](../vendor/codex/codex-rs/core/src/agent/child_config.rs:51). |
+| Editing/search/tools | **Implemented:** read, patch, edit, write, grep, find, ls, Bash; parallel execution. [builtin_tools.cpp:2117–2156](../src/core/builtin_tools.cpp:2117), [agent_loop.cpp:814–901](../src/core/agent_loop.cpp:814). | Additional deferred tool discovery: [tool_search.rs:66–80](../vendor/codex/codex-rs/core/src/tools/handlers/tool_search.rs:66). |
+| Long-running shell sessions | **Partial:** bounded cancellable Bash execution; no model-facing resumable process handle found. [builtin_tools.cpp:1820–1889](../src/core/builtin_tools.cpp:1820). | **Implemented:** session-addressed `write_stdin` alongside unified execution. [write_stdin.rs:25–49](../vendor/codex/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs:25). |
+| Sessions/compaction | **Implemented:** durable replay, branching, compaction records. Remote compaction is limited to Codex Responses; child auto-compaction is absent. [session_store.h:28–76](../src/core/session/session_store.h:28), [compaction.cpp:40–41](../src/core/compaction.cpp:40). | Includes persisted descendant identity restoration and runtime eviction/reload described above. |
+| Skills/extensions | **Implemented:** discovered instruction packages and Lua customization. [skills.h:45–59](../src/core/skills.h:45), [lua_tool.cpp:1940–1952](../src/core/lua_tool.cpp:1940). | Includes a broader plugin/application tool surface, conditionally enabled: [tools/spec_plan.rs:720–721](../vendor/codex/codex-rs/core/src/tools/spec_plan.rs:720). |
+| MCP | **Partial:** process-owned stdio servers, tool discovery/calls, cancellation/timeouts. Dynamic rediscovery/reconnect is **intentionally absent**. [mcp_config.h:24–43](../src/core/mcp/mcp_config.h:24), [mcp_client.h:66–90](../src/core/mcp/mcp_client.h:66). | Includes resource listing with pagination and per-server timeouts: [connection_manager/resources.rs:37–63](../vendor/codex/codex-rs/codex-mcp/src/connection_manager/resources.rs:37). |
+| Plans/task tracking | Pici has delegated-task status, but **missing** a separate typed plan/checklist tool in inspected built-ins. | `update_plan` emits typed plan updates; it is distinct from agent status and prohibited in Plan mode: [plan.rs:87–98](../vendor/codex/codex-rs/core/src/tools/handlers/plan.rs:87). |
+| Hosted web/image tools | **Missing as native Pici capabilities** in the inspected built-in set; external tools may supply equivalents. | Web search and image generation exist behind provider/model/feature gates: [tools/spec_plan.rs:697–712](../vendor/codex/codex-rs/core/src/tools/spec_plan.rs:697), [781–795](../vendor/codex/codex-rs/core/src/tools/spec_plan.rs:781). |
+
+Existing tests substantiate lifecycle reuse, live usage observation, shutdown races, and transcript separation, but I did not execute them. Runtime reliability, model compliance, platform enforcement, and external-tool behavior remain **uncertain** beyond the source evidence stated here.

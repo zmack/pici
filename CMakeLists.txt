@@ -10,6 +10,35 @@ option(PI_CPP_BUILD_TESTS "Build tests" ON)
 option(PI_CPP_OTEL_API   "Compile OpenTelemetry API instrumentation" OFF)
 option(PI_CPP_OTEL_SDK   "Link OpenTelemetry SDK + OTLP/HTTP exporter for real trace export" OFF)
 option(PI_CPP_USE_CCACHE "Use ccache when it is available" ON)
+option(PI_CPP_ASAN_UBSAN "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+
+if(PI_CPP_ASAN_UBSAN)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
+       NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR "PI_CPP_ASAN_UBSAN requires GCC or Clang for both C and C++.")
+    endif()
+    # ASan and TSan cannot share a process, and jemalloc's malloc override
+    # conflicts with ASan's interceptors: fail at configure time.
+    get_cmake_property(PI_CPP_CONFIG_VARIABLES VARIABLES)
+    foreach(flag_variable IN LISTS PI_CPP_CONFIG_VARIABLES)
+        if(flag_variable MATCHES "^CMAKE_(C|CXX|EXE_LINKER|SHARED_LINKER|MODULE_LINKER)_FLAGS($|_)" AND
+           "${${flag_variable}}" MATCHES "-fsanitize=[^ \t]*thread")
+            message(FATAL_ERROR "PI_CPP_ASAN_UBSAN is mutually exclusive with ThreadSanitizer (${flag_variable}).")
+        endif()
+    endforeach()
+    if(PI_CPP_MEMSTATS)
+        message(FATAL_ERROR "PI_CPP_ASAN_UBSAN is incompatible with PI_CPP_MEMSTATS (jemalloc).")
+    endif()
+    # Global flags so vendored dependencies are instrumented consistently.
+    # No -fno-sanitize-recover: UBSan reports and continues unless
+    # UBSAN_OPTIONS=halt_on_error=1 is set (the Makefile target does).
+    set(PI_CPP_ASAN_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${PI_CPP_ASAN_FLAGS}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${PI_CPP_ASAN_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address,undefined")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address,undefined")
+    message(STATUS "Sanitizers: AddressSanitizer + UndefinedBehaviorSanitizer enabled")
+endif()
 
 if(PI_CPP_USE_CCACHE)
     find_program(CCACHE_PROGRAM ccache)
@@ -531,7 +560,7 @@ if(PI_CPP_MEMSTATS)
     if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=" OR CMAKE_EXE_LINKER_FLAGS MATCHES "-fsanitize=")
         message(FATAL_ERROR
             "PI_CPP_MEMSTATS is incompatible with sanitizer builds: "
-            "jemalloc's malloc override and TSan's malloc interceptors conflict.")
+            "jemalloc's malloc override and ASan/TSan's malloc interceptors conflict.")
     endif()
     target_compile_definitions(pi-core PUBLIC PI_CPP_MEMSTATS_ENABLED)
     # Primary path is dlsym + LD_PRELOAD (no link step). The optional link-
@@ -986,114 +1015,94 @@ if(APPLE)
     )
 endif()
 
+# Versioned names newest-first so an installed clang-tidy-19 is found without
+# a hint; unversioned names come last as the distro default.
+set(PI_CPP_LLVM_VERSIONS 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14)
+set(PI_CPP_CLANG_TIDY_NAMES)
+set(PI_CPP_CLANG_FORMAT_NAMES)
+foreach(llvm_version IN LISTS PI_CPP_LLVM_VERSIONS)
+    list(APPEND PI_CPP_CLANG_TIDY_NAMES clang-tidy-${llvm_version})
+    list(APPEND PI_CPP_CLANG_FORMAT_NAMES clang-format-${llvm_version})
+endforeach()
+list(APPEND PI_CPP_CLANG_TIDY_NAMES clang-tidy)
+list(APPEND PI_CPP_CLANG_FORMAT_NAMES clang-format)
+
 find_program(CLANG_TIDY_BIN
-    NAMES clang-tidy-23 clang-tidy-22 clang-tidy-20 clang-tidy
+    NAMES ${PI_CPP_CLANG_TIDY_NAMES}
     HINTS ${PI_CPP_LLVM_TOOL_HINTS}
 )
-find_program(RUN_CLANG_TIDY_BIN
-    NAMES run-clang-tidy-23 run-clang-tidy-22 run-clang-tidy-20 run-clang-tidy
-    HINTS ${PI_CPP_LLVM_TOOL_HINTS}
-)
+find_program(PI_CPP_TIDY_PYTHON NAMES python3 python)
 
-if(CLANG_TIDY_BIN)
-    # Enumerate sources instead of relying on run-clang-tidy's path-regex
-    # matching. The latter accepts a regex as a positional argument but a
-    # non-match silently results in no translation units being analyzed.
-    # Passing the enumerated absolute paths as run-clang-tidy's positional
-    # "files" arguments keeps that safety property (each file matches at
-    # least itself) while still selecting the file list explicitly.
-    file(GLOB_RECURSE TIDY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
-    list(FILTER TIDY_SOURCES EXCLUDE REGEX "/src/acp/handlers[.]cpp$")
-    set(TIDY_HANDLERS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/acp/handlers.cpp")
+if(PI_CPP_BUILD_TESTS AND PI_CPP_TIDY_PYTHON)
+    add_test(NAME test-tidy-runner
+        COMMAND ${PI_CPP_TIDY_PYTHON} -B -m unittest discover
+            -s ${CMAKE_CURRENT_SOURCE_DIR}/test -p test_run_clang_tidy.py
+    )
+endif()
 
-    include(ProcessorCount)
-    ProcessorCount(PI_CPP_NPROC)
-    if(PI_CPP_NPROC EQUAL 0)
-        set(PI_CPP_NPROC 1)
+set(PI_CPP_TIDY_JOBS "0" CACHE STRING
+    "Parallel clang-tidy processes for tidy; 0 = auto (CPUs, memory, and PI_CPP_TIDY_MAX_AUTO_JOBS)")
+set(PI_CPP_TIDY_MAX_AUTO_JOBS "4" CACHE STRING
+    "Upper bound on the auto-selected tidy job count")
+option(PI_CPP_TIDY_STRICT "Make the tidy target fail when clang-tidy reports warnings" OFF)
+
+if(CLANG_TIDY_BIN AND PI_CPP_TIDY_PYTHON)
+    # scripts/run_clang_tidy.py enumerates src/**/*.cpp at run time (not at
+    # configure time, so new files are never missed), checks each against
+    # compile_commands.json, runs one clang-tidy per file with bounded
+    # parallelism, and propagates clang-tidy failures.  Warnings are advisory
+    # unless PI_CPP_TIDY_STRICT is ON.  tidy-fix always defaults to one job
+    # because concurrent -fix runs race on edits to shared headers; pass an
+    # explicit PI_CPP_TIDY_JOBS to override.
+    #
+    # src/acp/handlers.cpp is analyzed with clang-analyzer-* disabled.  This
+    # exclusion predates this wiring; the original rationale is not recorded
+    # in the repository, so keep it until someone re-evaluates the analyzer
+    # cost/behavior on that file.  All other checks still run on it.
+    set(PI_CPP_TIDY_COMMON_ARGS
+        --clang-tidy ${CLANG_TIDY_BIN}
+        --build-dir ${CMAKE_BINARY_DIR}
+        --source-root ${CMAKE_CURRENT_SOURCE_DIR}
+        --jobs ${PI_CPP_TIDY_JOBS}
+        --max-auto-jobs ${PI_CPP_TIDY_MAX_AUTO_JOBS}
+        --no-analyzer src/acp/handlers.cpp
+        # Debian's clang 18 frontend supports concepts but does not define
+        # the feature-test macro that libstdc++'s C++23 <expected> header
+        # uses to expose std::expected.
+        --extra-arg=-D__cpp_concepts=202002L
+        --extra-arg=-Wno-builtin-macro-redefined
+    )
+    set(PI_CPP_TIDY_STRICT_ARG)
+    if(PI_CPP_TIDY_STRICT)
+        set(PI_CPP_TIDY_STRICT_ARG --strict)
     endif()
 
-    if(RUN_CLANG_TIDY_BIN)
-        # NOTE: -source-filter was replaced by a positional path-regex
-        # argument in newer run-clang-tidy releases (LLVM 18+); older
-        # releases used -source-filter instead. If `make lint` reports an
-        # "unrecognized arguments" error for whichever form is in use here,
-        # the installed run-clang-tidy predates or postdates this switch —
-        # check `run-clang-tidy -h` and swap the flag accordingly.
-        add_custom_target(tidy
-            COMMAND ${RUN_CLANG_TIDY_BIN}
-                -clang-tidy-binary ${CLANG_TIDY_BIN}
-                -p ${CMAKE_BINARY_DIR}
-                # Debian's clang 18 frontend supports concepts but does not
-                # define the feature-test macro that libstdc++'s C++23
-                # <expected> header uses to expose std::expected.
-                -extra-arg=-D__cpp_concepts=202002L
-                -extra-arg=-Wno-builtin-macro-redefined
-                -quiet
-                -j ${PI_CPP_NPROC}
-                ${TIDY_SOURCES}
-            COMMAND ${CLANG_TIDY_BIN}
-                -p ${CMAKE_BINARY_DIR}
-                -extra-arg=-D__cpp_concepts=202002L
-                -extra-arg=-Wno-builtin-macro-redefined
-                -quiet
-                -checks=-clang-analyzer-*
-                ${TIDY_HANDLERS_SOURCE}
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Running clang-tidy (parallel x${PI_CPP_NPROC}, ${CLANG_TIDY_BIN})"
-            VERBATIM
-        )
-        add_custom_target(tidy-fix
-            COMMAND ${RUN_CLANG_TIDY_BIN}
-                -clang-tidy-binary ${CLANG_TIDY_BIN}
-                -p ${CMAKE_BINARY_DIR}
-                -extra-arg=-D__cpp_concepts=202002L
-                -extra-arg=-Wno-builtin-macro-redefined
-                -quiet
-                -fix
-                -j ${PI_CPP_NPROC}
-                ${TIDY_SOURCES}
-            COMMAND ${CLANG_TIDY_BIN}
-                -p ${CMAKE_BINARY_DIR}
-                -extra-arg=-D__cpp_concepts=202002L
-                -extra-arg=-Wno-builtin-macro-redefined
-                -quiet
-                -fix
-                -checks=-clang-analyzer-*
-                ${TIDY_HANDLERS_SOURCE}
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Running clang-tidy --fix (parallel x${PI_CPP_NPROC})"
-            VERBATIM
-        )
-    else()
-        add_custom_target(tidy
-            COMMAND ${CLANG_TIDY_BIN}
-                -p ${CMAKE_BINARY_DIR}
-                -extra-arg=-D__cpp_concepts=202002L
-                -extra-arg=-Wno-builtin-macro-redefined
-                -quiet
-                ${TIDY_SOURCES}
-            COMMAND ${CLANG_TIDY_BIN}
-                -p ${CMAKE_BINARY_DIR}
-                -extra-arg=-D__cpp_concepts=202002L
-                -extra-arg=-Wno-builtin-macro-redefined
-                -quiet
-                -checks=-clang-analyzer-*
-                ${TIDY_HANDLERS_SOURCE}
-            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-            COMMENT "Running clang-tidy (${CLANG_TIDY_BIN})"
-            VERBATIM
-        )
-    endif()
+    add_custom_target(tidy
+        COMMAND ${PI_CPP_TIDY_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_clang_tidy.py
+            ${PI_CPP_TIDY_COMMON_ARGS} ${PI_CPP_TIDY_STRICT_ARG}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Running clang-tidy (${CLANG_TIDY_BIN})"
+        USES_TERMINAL
+        VERBATIM
+    )
+    add_custom_target(tidy-fix
+        COMMAND ${PI_CPP_TIDY_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_clang_tidy.py
+            ${PI_CPP_TIDY_COMMON_ARGS} --fix
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Running clang-tidy --fix (${CLANG_TIDY_BIN})"
+        USES_TERMINAL
+        VERBATIM
+    )
 
     message(STATUS "clang-tidy: ${CLANG_TIDY_BIN}  →  'cmake --build build --target tidy'")
 else()
-    message(STATUS "clang-tidy not found — skipping tidy target (install LLVM or set PI_CPP_LLVM_BIN_DIR)")
+    message(STATUS "clang-tidy or python3 not found — skipping tidy target (install LLVM or set PI_CPP_LLVM_BIN_DIR)")
 endif()
 
 # ─── clang-format ─────────────────────────────────────────────────────────────
 
 find_program(CLANG_FORMAT_BIN
-    NAMES clang-format-23 clang-format-22 clang-format-20 clang-format
+    NAMES ${PI_CPP_CLANG_FORMAT_NAMES}
     HINTS ${PI_CPP_LLVM_TOOL_HINTS}
 )
 

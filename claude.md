@@ -26,11 +26,15 @@ or the specific `test-*` target for focused test work.  Use
 need the CLI binary.
 
 Run `make format` to keep formatting consistent.  Run `make lint` to inspect
-clang-tidy warnings.  The tidy
-target currently prints advisory warnings from the broader codebase and exits
-successfully; treat new warnings in touched code as actionable.  Use
-`cmake --build build --target tidy-fix` only when you have reviewed the intended
-scope, because it can make broad mechanical edits.
+clang-tidy warnings.  Warnings are advisory (exit 0), but clang-tidy failures,
+a missing tool, or an empty source set fail the run; `make lint TIDY_STRICT=ON`
+also fails on warnings.  Lint runs a bounded number of parallel processes
+(`TIDY_JOBS=N` to override); do not run it concurrently with a full build.
+Use `cmake --build build --target tidy-fix` (serial by default) only when you
+have reviewed the intended scope, because it can make broad mechanical edits.
+`make asan` builds and tests with AddressSanitizer + UndefinedBehaviorSanitizer
+in `build-asan` (exclusive with `make tsan` and jemalloc builds).  Details:
+[docs/cpp-safety-tooling.md](docs/cpp-safety-tooling.md).
 
 ## Code Style
 
