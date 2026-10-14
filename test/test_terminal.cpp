@@ -651,8 +651,17 @@ TEST(Terminal, TerminalTitleHelpers) {
     }
   }
   {
-    std::filesystem::path p = "/tmp/some-unique-pici-test-dir";
-    EXPECT_EQ(terminal_project_label(p), "some-unique-pici-test-dir");
+    // The label search walks up looking for .git, so build a hermetic tree
+    // instead of relying on what exists above the system temp directory.
+    std::error_code ec;
+    auto root = std::filesystem::temp_directory_path() /
+                ("pici-title-test-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root / "repo" / ".git");
+    EXPECT_EQ(terminal_project_label(root / "repo"), "repo");
+    EXPECT_EQ(terminal_project_label(root / "repo" / "does" / "not" / "exist"),
+              "repo");
+    std::filesystem::remove_all(root, ec);
   }
   { EXPECT_EQ(terminal_project_label(std::filesystem::path{}), "pici"); }
 }

@@ -132,6 +132,35 @@ std::string read_until_from(int fd, std::string output, std::size_t from,
   return output;
 }
 
+// Reads through the child's RESULT line. "RESULT:" can arrive before the rest
+// of the line, so after the marker keep reading until the child exits and the
+// pty reports EOF/EIO (bounded by the same deadline as read_until).
+std::string read_result(int fd, std::string output) {
+  output = read_until(fd, std::move(output), "RESULT:");
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline) {
+    pollfd descriptor{.fd = fd, .events = POLLIN};
+    if (::poll(&descriptor, 1, 100) <= 0)
+      continue;
+    char buffer[256];
+    const auto count = ::read(fd, buffer, sizeof(buffer));
+    if (count <= 0)
+      break;
+    output.append(buffer, static_cast<std::size_t>(count));
+  }
+  return output;
+}
+
+// Waits for the child's READY line and then for readline to finish entering
+// raw mode (it emits the bracketed-paste enable right after tcsetattr). READY
+// alone is printed before raw mode, and tcsetattr(TCSAFLUSH) discards input
+// already queued on the pty, so writing keys right after READY is racy.
+std::string wait_until_raw(int fd) {
+  auto output = read_until(fd, {}, "READY");
+  return read_until(fd, std::move(output), "\033[?2004h");
+}
+
 std::string read_new_output(int fd, std::string output) {
   const auto initial_size = output.size();
   const auto deadline =
@@ -250,7 +279,7 @@ TEST_F(ReadlineEnvironment, test_tty_wake_and_reentry) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     EXPECT_TRUE(output.find("READY") != std::string::npos);
     output = read_until(master, std::move(output), "héllo");
     EXPECT_EQ(::write(master, "\033[D", 3), 3);
@@ -260,7 +289,7 @@ TEST_F(ReadlineEnvironment, test_tty_wake_and_reentry) {
     EXPECT_TRUE(wake.notify());
     EXPECT_TRUE(wake.notify());
     EXPECT_TRUE(wake.notify());
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected_result =
         "RESULT:" +
         std::to_string(static_cast<int>(ReadlineExit::mailbox_wake)) +
@@ -301,11 +330,11 @@ TEST_F(ReadlineEnvironment, test_escape_wake) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "draft");
     EXPECT_EQ(::write(master, "\033", 1), 1);
     EXPECT_TRUE(wake.notify());
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" +
         std::to_string(static_cast<int>(ReadlineExit::mailbox_wake)) +
@@ -333,11 +362,11 @@ TEST_F(ReadlineEnvironment, test_eof_wake_race) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "draft");
     EXPECT_TRUE(wake.notify());
     EXPECT_EQ(::write(master, "\004", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::eof)) +
         ":2:draft";
@@ -376,7 +405,7 @@ TEST_F(ReadlineEnvironment, test_mouse_wheel_scroll) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
 
     // Wheel-up (Cb=64, no modifiers): three scroll_line_up actions per
     // notch, none of the down action.
@@ -393,7 +422,7 @@ TEST_F(ReadlineEnvironment, test_mouse_wheel_scroll) {
     output = read_new_output(master, std::move(output));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
 
     const auto up_marker =
         "ACTION:" +
@@ -454,13 +483,13 @@ TEST_F(ReadlineEnvironment, test_wrap_boundary_cursor_placement) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "0123456789");
     EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
     EXPECT_TRUE(output.find("\033[7m") != std::string::npos);
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
     EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
@@ -485,7 +514,7 @@ TEST_F(ReadlineEnvironment, test_wrap_boundary_cursor_placement) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "ABCDE");
     // Walk the cursor back to offset 10 — the boundary between the two
     // wrapped rows, i.e. sitting right at the soft wrap.
@@ -496,7 +525,7 @@ TEST_F(ReadlineEnvironment, test_wrap_boundary_cursor_placement) {
     EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
     EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
@@ -519,7 +548,7 @@ TEST_F(ReadlineEnvironment, test_alt_enter_inserts_newline) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     EXPECT_EQ(::write(master, "ab", 2), 2);
     output = read_new_output(master, std::move(output));
     // ESC immediately followed by \r — the legacy Alt+Enter
@@ -531,7 +560,7 @@ TEST_F(ReadlineEnvironment, test_alt_enter_inserts_newline) {
     // Plain Enter still submits — it must not have been
     // reinterpreted.
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     // The child's dprintf writes result.text (containing the real \n
     // Alt+Enter inserted) back through the pty's own *output*
     // processing, which still has ONLCR enabled (RawMode only
@@ -565,7 +594,7 @@ TEST_F(ReadlineEnvironment, test_bare_lf_inserts_newline) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     EXPECT_EQ(::write(master, "ab", 2), 2);
     output = read_new_output(master, std::move(output));
     // Bare '\n' (Ctrl+J) -- must insert, not submit.
@@ -575,7 +604,7 @@ TEST_F(ReadlineEnvironment, test_bare_lf_inserts_newline) {
     output = read_new_output(master, std::move(output));
     // Plain Enter ('\r') still submits.
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":5:ab\r\ncd";
@@ -602,7 +631,7 @@ TEST_F(ReadlineEnvironment, test_multiline_navigation_and_backspace) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     // Build "ab\ncd" via Alt+Enter; cursor ends at offset 5 (the end).
     EXPECT_EQ(::write(master, "ab", 2), 2);
     output = read_new_output(master, std::move(output));
@@ -628,7 +657,7 @@ TEST_F(ReadlineEnvironment, test_multiline_navigation_and_backspace) {
     output = read_new_output(master, std::move(output));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":2:abcd";
@@ -655,7 +684,7 @@ TEST_F(ReadlineEnvironment, test_bracketed_paste_is_inert_block_insert) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     // A paste with an embedded newline AND a trailing newline: neither
     // must submit, and both must land in the buffer as literal bytes.
     const std::string paste = "\033[200~line1\nline2\n\033[201~";
@@ -665,7 +694,7 @@ TEST_F(ReadlineEnvironment, test_bracketed_paste_is_inert_block_insert) {
     EXPECT_TRUE(output.find("RESULT:") == std::string::npos);
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     // See the Alt+Enter test above: the pty's own output processing
     // (ONLCR) renders the buffer's real embedded \n bytes as \r\n here.
     // The :12: cursor count confirms the buffer itself holds 12 bytes
@@ -703,7 +732,7 @@ TEST_F(ReadlineEnvironment, test_embedded_newline_cursor_placement) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "ABCDE");
     EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
     // The final fill-and-toggle sequence must reach the reverse-video
@@ -722,7 +751,7 @@ TEST_F(ReadlineEnvironment, test_embedded_newline_cursor_placement) {
     EXPECT_TRUE(output.find("\033[1B\r\033[7m") == std::string::npos);
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   }
@@ -748,7 +777,7 @@ TEST_F(ReadlineEnvironment, test_embedded_newline_cursor_placement) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "ABCDE");
     EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
     // See the comment on the identical check just above -- M6's footer
@@ -758,7 +787,7 @@ TEST_F(ReadlineEnvironment, test_embedded_newline_cursor_placement) {
     EXPECT_TRUE(output.find("\033[1B\r\033[7m") == std::string::npos);
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   }
@@ -790,7 +819,7 @@ TEST_F(ReadlineEnvironment, test_composer_height_cap) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     // Wait for the first redraw to complete in full (its trailing
     // "\033[?7h", not just the content partway through).
     output = read_until(master, std::move(output),
@@ -811,7 +840,7 @@ TEST_F(ReadlineEnvironment, test_composer_height_cap) {
               pi::core::kMaxComposerRows);
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   }
@@ -843,7 +872,7 @@ TEST_F(ReadlineEnvironment, test_word_wrap_boundary) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "foo");
 
     // The renderer emits "\033[K\r\n" for a row transition; ONLCR is
@@ -860,7 +889,7 @@ TEST_F(ReadlineEnvironment, test_word_wrap_boundary) {
     EXPECT_TRUE(!has_out_of_range_cursor_forward(output, kColumns));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":15:hello world foo";
@@ -888,7 +917,7 @@ TEST_F(ReadlineEnvironment, test_word_wrap_boundary) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), std::string(4, 'x'));
     // Wait for the redraw to finish so all four wrapped rows (40
     // chars / 10 columns) have actually been emitted.
@@ -901,7 +930,7 @@ TEST_F(ReadlineEnvironment, test_word_wrap_boundary) {
     EXPECT_TRUE(count_occurrences(output, "\033[K\r\r\n") >= 3U);
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   }
@@ -932,14 +961,14 @@ void run_editing_case(std::string name, std::string_view initial_draft,
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     if (!input.empty()) {
       EXPECT_EQ(::write(master, input.data(), input.size()),
                 static_cast<ssize_t>(input.size()));
       output = read_new_output(master, std::move(output));
     }
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     // The trailing "\r\n" (the dprintf format's own '\n' after "%s", doubled
     // by ONLCR same as everywhere else in this file) anchors the end of the
     // text field -- without it, an expected text that happens to be a
@@ -1028,7 +1057,7 @@ TEST_F(ReadlineEnvironment, test_ctrl_arrows_scroll_transcript_not_buffer) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     // Ctrl+Up, Ctrl+Down, Ctrl+Home, Ctrl+End -- one of each, in the
     // xterm-compatible CSI "1;5<letter>" modifier encoding.
     EXPECT_EQ(::write(master, "\033[1;5A", 6), 6);
@@ -1041,7 +1070,7 @@ TEST_F(ReadlineEnvironment, test_ctrl_arrows_scroll_transcript_not_buffer) {
     output = read_new_output(master, std::move(output));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
 
     const auto up =
         "ACTION:" +
@@ -1155,7 +1184,7 @@ TEST_F(ReadlineEnvironment, test_ctrl_y_yanks_last_kill_only) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "AAAA BBBB");
     // Ctrl+W at offset 4 kills "AAAA" (kill buffer: "AAAA"), leaving
     // " BBBB" with the cursor at 0.
@@ -1172,7 +1201,7 @@ TEST_F(ReadlineEnvironment, test_ctrl_y_yanks_last_kill_only) {
     output = read_new_output(master, std::move(output));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":5: BBBB";
@@ -1236,7 +1265,7 @@ TEST_F(ReadlineEnvironment,
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     await_kitty_probe_query(master, output);
     // Answer only the DA1 sentinel -- a plausible xterm-style DA1
     // reply -- never the Kitty flags query itself.
@@ -1255,7 +1284,7 @@ TEST_F(ReadlineEnvironment,
     EXPECT_EQ(::write(master, "cd", 2), 2);
     output = read_new_output(master, std::move(output));
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
 
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
@@ -1289,7 +1318,7 @@ TEST_F(ReadlineEnvironment,
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     await_kitty_probe_query(master, output);
     // Flags reply (progressive-enhancement flag 1, "disambiguate
     // escape codes") followed by the DA1 sentinel, in that order --
@@ -1316,7 +1345,7 @@ TEST_F(ReadlineEnvironment,
     static constexpr std::string_view kPlainEnter = "\033[13u";
     EXPECT_EQ(::write(master, kPlainEnter.data(), kPlainEnter.size()),
               static_cast<ssize_t>(kPlainEnter.size()));
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
 
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
@@ -1347,7 +1376,7 @@ TEST_F(ReadlineEnvironment, test_kitty_probe_typeahead_survives_probe_window) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     await_kitty_probe_query(master, output);
     // A fast typist's keystrokes, arriving while the probe is still
     // reading, before either reply is sent.
@@ -1363,7 +1392,7 @@ TEST_F(ReadlineEnvironment, test_kitty_probe_typeahead_survives_probe_window) {
     EXPECT_EQ(::write(master, "cd", 2), 2);
     output = read_new_output(master, std::move(output));
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
 
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
@@ -1396,7 +1425,7 @@ TEST_F(ReadlineEnvironment,
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     EXPECT_EQ(::write(master, "ab", 2), 2);
     output = read_new_output(master, std::move(output));
     EXPECT_EQ(::write(master, "\033\r", 2), 2);
@@ -1404,7 +1433,7 @@ TEST_F(ReadlineEnvironment,
     EXPECT_EQ(::write(master, "cd", 2), 2);
     output = read_new_output(master, std::move(output));
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
 
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
@@ -1440,7 +1469,7 @@ TEST_F(ReadlineEnvironment, test_kitty_supported_existing_bindings_unaffected) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     await_kitty_probe_query(master, output);
     static constexpr std::string_view kSupportedReply = "\033[?1u\033[?62c";
     EXPECT_EQ(::write(master, kSupportedReply.data(), kSupportedReply.size()),
@@ -1474,7 +1503,7 @@ TEST_F(ReadlineEnvironment, test_kitty_supported_existing_bindings_unaffected) {
     static constexpr std::string_view kPlainEnter = "\033[13u";
     EXPECT_EQ(::write(master, kPlainEnter.data(), kPlainEnter.size()),
               static_cast<ssize_t>(kPlainEnter.size()));
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
 
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
@@ -1518,7 +1547,7 @@ TEST_F(ReadlineEnvironment,
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     EXPECT_EQ(::write(master, "ab", 2), 2);
     output = read_new_output(master, std::move(output));
     // Bare Escape: enters Normal mode, no visible change.
@@ -1541,7 +1570,7 @@ TEST_F(ReadlineEnvironment,
     output = read_new_output(master, std::move(output));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":2:aXb";
@@ -1582,7 +1611,7 @@ TEST_F(ReadlineEnvironment, test_vim_mode_dd_deletes_whole_line_end_to_end) {
     // every mode so the user is never trapped needing to press 'i'
     // first just to send a message.
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":6:line1\r\nline3";
@@ -1621,7 +1650,7 @@ TEST_F(ReadlineEnvironment, test_vim_mode_c_operator_enters_insert_mode) {
     output = read_new_output(master, std::move(output));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":1:Xworld";
@@ -1650,7 +1679,7 @@ TEST_F(ReadlineEnvironment, test_vim_mode_uncovered_key_is_safe_noop) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     EXPECT_EQ(::write(master, "hi", 2), 2);
     output = read_new_output(master, std::move(output));
     EXPECT_EQ(::write(master, "\x1b", 1), 1);
@@ -1659,7 +1688,7 @@ TEST_F(ReadlineEnvironment, test_vim_mode_uncovered_key_is_safe_noop) {
     output = read_new_output(master, std::move(output));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     // If 'x' had fallen through to plain-insert instead of being
     // swallowed as an uncovered Normal-mode key, this would read
     // "hix" instead.
@@ -1692,7 +1721,7 @@ TEST_F(ReadlineEnvironment,
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     EXPECT_EQ(::write(master, "\x1b", 1), 1);
     poll(nullptr, 0, 60);
     // Plain Left (CSI "[D"), the ordinary arrow-key escape sequence --
@@ -1707,7 +1736,7 @@ TEST_F(ReadlineEnvironment,
     output = read_new_output(master, std::move(output));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":2:aXb";
@@ -1735,12 +1764,12 @@ TEST_F(ReadlineEnvironment, test_vim_mode_false_leaves_hjkl_as_literal_text) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     EXPECT_EQ(::write(master, "hjkl", 4), 4);
     output = read_new_output(master, std::move(output));
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":4:hjkl";
@@ -1781,7 +1810,7 @@ TEST_F(ReadlineEnvironment, test_footer_hint_shown_and_bookkept) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     // Wait for the first redraw to finish in full (its trailing
     // "\033[?7h", not just the content partway through).
     output = read_until(master, std::move(output), "\033[?7h");
@@ -1803,7 +1832,7 @@ TEST_F(ReadlineEnvironment, test_footer_hint_shown_and_bookkept) {
     EXPECT_TRUE(second_redraw.find("Alt+Enter: newline") != std::string::npos);
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":1:a";
@@ -1839,13 +1868,13 @@ TEST_F(ReadlineEnvironment,
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "\033[?7h");
     EXPECT_TRUE(output.find("l5") != std::string::npos);
     EXPECT_TRUE(output.find("Alt+Enter: newline") == std::string::npos);
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     EXPECT_TRUE(output.find("RESULT:" + std::to_string(static_cast<int>(
                                             ReadlineExit::submitted))) !=
                 std::string::npos);
@@ -2202,7 +2231,7 @@ TEST_F(ReadlineEnvironment,
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     // Wait for the first redraw to finish in full.
     output = read_until(master, std::move(output), "\033[?7h");
     EXPECT_TRUE(output.find("Alt+Enter: newline") != std::string::npos);
@@ -2248,7 +2277,7 @@ TEST_F(ReadlineEnvironment,
                 std::string::npos);
 
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     const auto expected =
         "RESULT:" + std::to_string(static_cast<int>(ReadlineExit::submitted)) +
         ":0:";
@@ -2291,7 +2320,7 @@ TEST_F(ReadlineEnvironment,
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     output = read_until(master, std::move(output), "\033[?7h");
     EXPECT_TRUE(output.find("\033[100m") != std::string::npos);
     EXPECT_TRUE(output.find("\033]11;?") == std::string::npos);
@@ -2299,7 +2328,7 @@ TEST_F(ReadlineEnvironment,
     EXPECT_EQ(::write(master, "x", 1), 1);
     output = read_new_output(master, std::move(output));
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     EXPECT_TRUE(output.find("RESULT:" + std::to_string(static_cast<int>(
                                             ReadlineExit::submitted))) !=
                 std::string::npos);
@@ -2327,7 +2356,7 @@ TEST_F(ReadlineEnvironment, test_osc11_probe_supported_blends_truecolor_tint) {
       _exit(0);
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     await_osc11_probe_query(master, output);
     // A dark background (r=g=0x1e, b=0x22 -- decimal 30/30/34),
     // ST-terminated ("\033\\") rather than the BEL terminator the query
@@ -2348,7 +2377,7 @@ TEST_F(ReadlineEnvironment, test_osc11_probe_supported_blends_truecolor_tint) {
     EXPECT_EQ(::write(master, "x", 1), 1);
     output = read_new_output(master, std::move(output));
     EXPECT_EQ(::write(master, "\r", 1), 1);
-    output = read_until(master, std::move(output), "RESULT:");
+    output = read_result(master, std::move(output));
     EXPECT_EQ(wait_for_child(child), 0);
     ::close(master);
   }
@@ -2451,7 +2480,7 @@ TEST_F(ReadlineEnvironment,
         ::pause();
     }
 
-    auto output = read_until(master, {}, "READY");
+    auto output = wait_until_raw(master);
     // Each readline() round trip (first paint, then the
     // submit-triggered clear) emits exactly two "\033[?7h" markers;
     // three occurrences reach the second interactive prompt's first
