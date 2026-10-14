@@ -33,7 +33,8 @@ also fails on warnings.  Lint runs a bounded number of parallel processes
 Use `cmake --build build --target tidy-fix` (serial by default) only when you
 have reviewed the intended scope, because it can make broad mechanical edits.
 `make asan` builds and tests with AddressSanitizer + UndefinedBehaviorSanitizer
-in `build-asan` (exclusive with `make tsan` and jemalloc builds).  Details:
+in `build-asan` (exclusive with `make tsan` and jemalloc builds).
+`make safety` runs test + lint + asan as the single CI safety gate.  Details:
 [docs/cpp-safety-tooling.md](docs/cpp-safety-tooling.md).
 
 ## Code Style

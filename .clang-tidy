@@ -28,13 +28,14 @@ Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
   misc-*,
+  -misc-include-cleaner,
   -misc-const-correctness,
   -misc-non-private-member-variables-in-classes,
   concurrency-*,
 
 WarningsAsErrors: ''
 
-HeaderFilterRegex: '^.*/pici/src/(core|http)/.*\.(h|hpp)$'
+HeaderFilterRegex: '^.*/src/(core|http)/.*\.(h|hpp)$'
 
 CheckOptions:
   - key: modernize-use-default-member-init.UseAssignment

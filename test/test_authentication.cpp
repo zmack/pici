@@ -28,8 +28,7 @@ public:
                                  .source = "test-binding"};
   }
 
-  pi::auth::AuthAvailability
-  availability(std::string_view) const override {
+  pi::auth::AuthAvailability availability(std::string_view) const override {
     return pi::auth::AuthAvailability::configured;
   }
 
@@ -37,8 +36,7 @@ public:
   mutable std::string last_explicit_key;
 };
 
-class RecordingDiscoveryAdapter final
-    : public pi::core::ModelDiscoveryAdapter {
+class RecordingDiscoveryAdapter final : public pi::core::ModelDiscoveryAdapter {
 public:
   pi::core::ProviderModelReport
   discover(const pi::core::ProviderDiscoveryRequest &request,
@@ -61,8 +59,8 @@ std::shared_ptr<const pi::core::ModelCatalog> catalog_for_binding() {
   provider.auth = pi::core::ProviderAuthPolicy::required;
   provider.authentication_adapter = "bound-auth";
   return std::make_shared<const pi::core::ModelCatalog>(
-      std::map<std::string, pi::core::ProviderConfig>{{"bound-provider",
-                                                        provider}});
+      std::map<std::string, pi::core::ProviderConfig>{
+          {"bound-provider", provider}});
 }
 
 } // namespace
@@ -75,14 +73,16 @@ TEST(Authentication, ResolvesThroughProviderBinding) {
 
   const auto resolved = authentication.resolve("bound-provider", "runtime");
   ASSERT_TRUE(resolved.has_value());
-  EXPECT_EQ(resolved->bearer_token, std::optional<std::string>{"binding-token"});
+  EXPECT_EQ(resolved->bearer_token,
+            std::optional<std::string>{"binding-token"});
   EXPECT_EQ(adapter->last_provider, "bound-provider");
   EXPECT_EQ(adapter->last_explicit_key, "runtime");
 }
 
 TEST(Authentication, DiscoveryAndInferenceUseTheSameBinding) {
   auto discovery = std::make_shared<RecordingDiscoveryAdapter>();
-  auto discoveries = std::make_shared<pi::core::ModelDiscoveryAdapterCollection>();
+  auto discoveries =
+      std::make_shared<pi::core::ModelDiscoveryAdapterCollection>();
   discoveries->register_adapter("bound-discovery", discovery);
   pi::core::ProviderConfig provider;
   provider.id = "bound-provider";
@@ -92,15 +92,20 @@ TEST(Authentication, DiscoveryAndInferenceUseTheSameBinding) {
   provider.authentication_adapter = "bound-auth";
   provider.discovery_adapter = "bound-discovery";
   auto catalog = std::make_shared<pi::core::ModelCatalog>(
-      std::map<std::string, pi::core::ProviderConfig>{{"bound-provider",
-                                                        provider}},
+      std::map<std::string, pi::core::ProviderConfig>{
+          {"bound-provider", provider}},
       discoveries);
   auto adapter = std::make_shared<RecordingAuthenticationAdapter>();
   auto authentication = std::make_shared<pi::auth::Authentication>(catalog);
   authentication->register_adapter("bound-auth", adapter);
   catalog->set_request_auth_resolver(
-      [authentication](std::string_view id, const std::stop_token &stop) {
-        return authentication->resolve(id, {}, stop);
+      [weak = std::weak_ptr(authentication)](
+          std::string_view id,
+          const std::stop_token &stop) -> std::optional<pi::core::RequestAuth> {
+        const auto locked = weak.lock();
+        if (!locked)
+          return std::nullopt;
+        return locked->resolve(id, {}, stop);
       });
 
   ASSERT_EQ(catalog->refresh({"bound-provider"}).size(), std::size_t{12});

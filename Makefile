@@ -27,7 +27,7 @@ TSAN_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Debug \
 	-DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
 ASAN_CONFIGURE_FLAGS ?= -DCMAKE_BUILD_TYPE=Debug -DPI_CPP_ASAN_UBSAN=ON
 
-.PHONY: help configure dev release release-jemalloc strip-release lint format format-check test tsan asan check tidy-fix clean clean-release clean-release-jemalloc clean-tsan clean-asan
+.PHONY: help safety configure dev release release-jemalloc strip-release lint format format-check test tsan asan check tidy-fix clean clean-release clean-release-jemalloc clean-tsan clean-asan
 
 help:
 	@printf '%s\n' \
@@ -44,6 +44,7 @@ help:
 		'  make tsan         Build with ThreadSanitizer in $(TSAN_BUILD_DIR) and run ctest' \
 		'  make asan         Build with ASan+UBSan in $(ASAN_BUILD_DIR) and run ctest' \
 		'  make check        Run test + lint + tsan (CI / pre-push gate)' \
+		'  make safety       Run test + lint + asan (C++ safety gate; single CI command)' \
 		'  make clean        Remove $(BUILD_DIR)' \
 		'  make clean-release Remove $(RELEASE_BUILD_DIR)' \
 		'  make clean-tsan   Remove $(TSAN_BUILD_DIR)' \
@@ -115,6 +116,11 @@ asan:
 # Slower than `make test` alone (tsan needs its own build), so this is meant
 # for CI / pre-push, not the inner dev loop.
 check: test lint tsan
+
+# C++ safety gate for CI: functional tests, clang-tidy (fails on tool/compile
+# errors; warnings are baselined in docs/cpp-safety-tooling.md, so not strict),
+# then ASan+UBSan.  Needs clang-tidy; do not run with other heavy builds.
+safety: test lint asan
 
 clean:
 	$(CMAKE) -E rm -rf $(BUILD_DIR)

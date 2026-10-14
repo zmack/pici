@@ -15,7 +15,7 @@ namespace {
 // kReadMaxLines) -- MCP results aren't otherwise bounded anywhere, and
 // shouldn't go into the transcript/next provider request unbounded.
 constexpr std::size_t kMaxResultLines = 2000;
-constexpr std::size_t kMaxResultBytes = 64 * 1024;
+constexpr std::size_t kMaxResultBytes = 64UL * 1024;
 
 constexpr std::size_t kMaxSanitizedNameLength = 64;
 

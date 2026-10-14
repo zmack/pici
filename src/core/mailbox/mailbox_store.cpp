@@ -335,9 +335,18 @@ MailboxStore::MailboxStore(MailboxStoreOptions options)
     options_.clock = system_now;
   if (!options_.id_generator)
     options_.id_generator = random_id;
-  open();
-  configure_connection();
-  migrate();
+  // A throwing constructor never runs the destructor, so release the
+  // connection opened by open() if a later step rejects the database.
+  try {
+    open();
+    configure_connection();
+    migrate();
+  } catch (...) {
+    if (database_ != nullptr)
+      sqlite3_close(database_);
+    database_ = nullptr;
+    throw;
+  }
 }
 
 MailboxStore::~MailboxStore() {

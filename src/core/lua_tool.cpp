@@ -1936,8 +1936,11 @@ public:
     pending_tools_.push_back(std::move(spec));
   }
 
-  // Phase 2: called from load_lua_hooks after make_shared returns.
-  void finalize_inline_tools() {
+  // Phase 2: called from load_lua_hooks after make_shared returns. The tools
+  // are returned, not stored: each holds a strong reference to this impl, so
+  // keeping them here would be an ownership cycle.
+  std::vector<std::shared_ptr<const ToolDefinition>> finalize_inline_tools() {
+    std::vector<std::shared_ptr<const ToolDefinition>> tools;
     static constexpr std::array<std::string_view, 6> child_tools = {
         "agents_self",    "agents_list",  "agents_send",
         "agents_request", "agents_reply", "agents_inbox"};
@@ -1949,14 +1952,10 @@ public:
           shared_from_this(), spec.exec_ref, std::move(spec.name),
           std::move(spec.description), std::move(spec.schema), source_path_,
           child_safe);
-      inline_tools_.push_back(std::move(tool));
+      tools.push_back(std::move(tool));
     }
     pending_tools_.clear();
-  }
-
-  const std::vector<std::shared_ptr<const ToolDefinition>> &
-  inline_tools() const {
-    return inline_tools_;
+    return tools;
   }
 
   static int lua_pici_add_tool(lua_State *L) {
@@ -2061,7 +2060,6 @@ private:
   std::string source_path_;
   bool bundled_child_safe_tools_{false};
   std::vector<PendingTool> pending_tools_;
-  std::vector<std::shared_ptr<const ToolDefinition>> inline_tools_;
   std::vector<LuaHooks::Command> commands_;
   LuaHooks::RunAgentFn run_agent_fn_;
   LuaHooks::AgentBindings agent_bindings_;
@@ -2096,7 +2094,7 @@ InlineLuaTool::execute(std::string_view args_json,
 // hardening, so none of it should be simplified away.
 // ===========================================================================
 
-constexpr std::size_t kEvalMemoryLimitBytes = 64 * 1024 * 1024;
+constexpr std::size_t kEvalMemoryLimitBytes = 64UL * 1024 * 1024;
 
 // Reserved headroom before dispatching to a binding trampoline (Stage 3)
 // or any other allocating call whose C++ locals aren't longjmp-safe (see
@@ -2106,7 +2104,7 @@ constexpr std::size_t kEvalMemoryLimitBytes = 64 * 1024 * 1024;
 // cap. Nothing in Stage 2 calls has_headroom yet (there are no
 // trampolines to gate); the mechanism is built now so Stage 3 only has to
 // call it.
-constexpr std::size_t kEvalBindingReserveBytes = 8 * 1024 * 1024;
+constexpr std::size_t kEvalBindingReserveBytes = 8UL * 1024 * 1024;
 
 constexpr int kEvalCountHookInstructionCount = 1000; // matches lua_stop_hook.
 
@@ -2119,17 +2117,17 @@ constexpr int kEvalMaxTimeoutMs = 120000;
 // safety valve against a script that prints gigabytes), then the whole
 // tool-result text is run through the same truncate_head_ex every other
 // built-in tool's output uses, once, after the run finishes.
-constexpr std::size_t kEvalOutputHardCapBytes = 1024 * 1024;
+constexpr std::size_t kEvalOutputHardCapBytes = 1024UL * 1024;
 constexpr std::size_t kEvalOutputMaxLines = 2000;
-constexpr std::size_t kEvalOutputMaxBytes = 64 * 1024;
+constexpr std::size_t kEvalOutputMaxBytes = 64UL * 1024;
 
 // pici.scratch caps (plan §4.4): a total cap, PLUS a separate per-key cap
 // and key-count cap -- a single pathological key must not be able to
 // consume the whole total budget on its own, and a flood of many small
 // keys must not be able to grow unboundedly just because each one
 // individually stays under the per-key cap.
-constexpr std::size_t kScratchTotalBytesCap = 1024 * 1024;
-constexpr std::size_t kScratchPerKeyBytesCap = 256 * 1024;
+constexpr std::size_t kScratchTotalBytesCap = 1024UL * 1024;
+constexpr std::size_t kScratchPerKeyBytesCap = 256UL * 1024;
 constexpr std::size_t kScratchMaxKeys = 256;
 
 // ---------------------------------------------------------------------------
@@ -2153,6 +2151,8 @@ struct EvalMemory {
 // when `ptr` is non-null; when `ptr` is null, `osize` is instead a *type
 // tag* for the (non-existent) previous block, not a size -- so treating it
 // as a size in that branch would be wrong.
+// NOLINTBEGIN(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
+// lua_Alloc is a C allocator ABI: it must free/realloc raw blocks Lua owns.
 void *eval_alloc(void *ud, void *ptr, std::size_t osize, std::size_t nsize) {
   auto *mem = static_cast<EvalMemory *>(ud);
   const std::size_t old_size = (ptr == nullptr) ? 0 : osize;
@@ -2181,6 +2181,7 @@ void *eval_alloc(void *ud, void *ptr, std::size_t osize, std::size_t nsize) {
   mem->used += nsize - old_size;
   return out;
 }
+// NOLINTEND(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
 
 // ---------------------------------------------------------------------------
 // Count-hook run context, retrieved via lua_getextraspace (plan §3
@@ -2211,11 +2212,14 @@ struct EvalRun {
 static_assert(std::is_trivially_destructible_v<EvalRun>);
 
 void eval_store_run(lua_State *L, EvalRun *run) {
+  // Intentionally copies the pointer value itself into the Lua extra space.
+  // NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion,bugprone-sizeof-expression)
   std::memcpy(lua_getextraspace(L), &run, sizeof(run));
 }
 
 EvalRun *eval_run_from(lua_State *L) {
   EvalRun *run = nullptr;
+  // NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion,bugprone-sizeof-expression)
   std::memcpy(&run, lua_getextraspace(L), sizeof(run));
   return run;
 }
@@ -2621,6 +2625,8 @@ void eval_push_agent_binding_table(lua_State *L,
                                    const LuaHooks::AgentBindings &agents) {
   lua_newtable(L);
   for (const auto &entry : kAgentEntries) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): Lua light
+    // userdata is an untyped void*; the pointee is only read back as const.
     lua_pushlightuserdata(L, const_cast<void *>(static_cast<const void *>(
                                  &(agents.*entry.member))));
     lua_pushstring(L, "agents");
@@ -2634,6 +2640,8 @@ void eval_push_session_binding_table(lua_State *L,
                                      const LuaHooks::SessionBindings &session) {
   lua_newtable(L);
   for (const auto &entry : kSessionEntries) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): Lua light
+    // userdata is an untyped void*; the pointee is only read back as const.
     lua_pushlightuserdata(L, const_cast<void *>(static_cast<const void *>(
                                  &(session.*entry.member))));
     lua_pushstring(L, "session");
@@ -2647,6 +2655,8 @@ void eval_push_mailbox_binding_table(lua_State *L,
                                      const LuaHooks::MailboxBindings &mailbox) {
   lua_newtable(L);
   for (const auto &entry : kMailboxEntries) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): Lua light
+    // userdata is an untyped void*; the pointee is only read back as const.
     lua_pushlightuserdata(L, const_cast<void *>(static_cast<const void *>(
                                  &(mailbox.*entry.member))));
     lua_pushstring(L, "mailbox");
@@ -3265,10 +3275,10 @@ std::shared_ptr<LuaHooks> load_lua_hooks(const std::filesystem::path &path,
     impl->configure_info(info);
   };
   impl->set_source_path(path.string());
-  impl->finalize_inline_tools(); // needs shared_ptr; safe here post-make_shared
+  // Needs a shared_ptr; safe here post-make_shared.
+  hooks->registered_tools = impl->finalize_inline_tools();
   hooks->source_path = impl->source_path();
   hooks->commands = impl->commands();
-  hooks->registered_tools = impl->inline_tools();
   if (impl->has_complete()) {
     hooks->complete = [impl](std::string_view partial,
                              const std::vector<Message> &transcript)

@@ -1330,9 +1330,19 @@ private:
   // field; split out of configure_hooks() purely to shrink that function's
   // branch count, with no behavior change.
 
+  // The bindings live in the Lua hooks, which the agent (and so its TaskTree)
+  // owns; capture the tree weakly to avoid an ownership cycle.
+  static std::shared_ptr<core::TaskTree>
+  live_tree(const std::weak_ptr<core::TaskTree> &weak) {
+    auto tree = weak.lock();
+    if (!tree)
+      throw std::runtime_error("agent task tree is no longer available");
+    return tree;
+  }
+
   void bind_run_agent(core::LuaHooks::AgentInfo &info,
                       const std::shared_ptr<core::TaskTree> &task_manager) {
-    info.run_agent = [task_manager,
+    info.run_agent = [weak_tasks = std::weak_ptr<core::TaskTree>(task_manager),
                       this](const core::LuaHooks::AgentRunConfig &cfg)
         -> core::LuaHooks::AgentRunResult {
       core::LuaHooks::AgentRunResult result;
@@ -1348,7 +1358,7 @@ private:
           request.context.mode = core::ContextInheritanceMode::through_message;
           request.context.through = cfg.fork_at;
         }
-        auto current = task_manager->spawn(request);
+        auto current = live_tree(weak_tasks)->spawn(request);
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::seconds(60);
         for (;;) {
@@ -1360,8 +1370,8 @@ private:
               std::chrono::duration_cast<std::chrono::milliseconds>(
                   deadline - std::chrono::steady_clock::now());
           if (remaining <= std::chrono::milliseconds::zero()) {
-            task_manager->interrupt(current.id,
-                                    core::AgentInterruptReason::timeout);
+            live_tree(weak_tasks)
+                ->interrupt(current.id, core::AgentInterruptReason::timeout);
             result.error = "sub-agent wait timed out";
             break;
           }
@@ -1370,7 +1380,7 @@ private:
           wait_request.after_generation = current.generation;
           wait_request.timeout =
               std::min(remaining, std::chrono::milliseconds(1000));
-          auto update = task_manager->wait(wait_request);
+          auto update = live_tree(weak_tasks)->wait(wait_request);
           if (update.timed_out)
             continue;
           for (const auto &changed : update.changed)
@@ -1381,7 +1391,7 @@ private:
           result.text = current.result->text;
           result.error = current.result->error;
         }
-        task_manager->close(current.id);
+        live_tree(weak_tasks)->close(current.id);
       } catch (const std::exception &error) {
         result.error = error.what();
       }
@@ -1392,7 +1402,8 @@ private:
   static void
   bind_agent_spawn(core::LuaHooks::AgentInfo &info,
                    const std::shared_ptr<core::TaskTree> &task_manager) {
-    info.agents.spawn = [task_manager](const nlohmann::json &v) {
+    info.agents.spawn = [weak_tasks = std::weak_ptr<core::TaskTree>(
+                             task_manager)](const nlohmann::json &v) {
       try {
         core::SpawnAgentRequest request;
         request.parent_id = v.value("parent_id", std::string{});
@@ -1409,7 +1420,7 @@ private:
               v.at("tools").get<std::vector<std::string>>();
         request.allow_subagents = v.value("allow_subagents", false);
         request.allow_write_tools = v.value("allow_write_tools", false);
-        return snapshot_json(task_manager->spawn(request));
+        return snapshot_json(live_tree(weak_tasks)->spawn(request));
       } catch (const core::AgentTaskError &error) {
         return task_error_json(error);
       } catch (const std::exception &error) {
@@ -1421,10 +1432,11 @@ private:
   static void
   bind_agent_get(core::LuaHooks::AgentInfo &info,
                  const std::shared_ptr<core::TaskTree> &task_manager) {
-    info.agents.get = [task_manager](const nlohmann::json &v) {
+    info.agents.get = [weak_tasks = std::weak_ptr<core::TaskTree>(
+                           task_manager)](const nlohmann::json &v) {
       try {
         const auto target = v.value("target", v.value("id", std::string{}));
-        auto snapshot = task_manager->get(target);
+        auto snapshot = live_tree(weak_tasks)->get(target);
         if (!snapshot)
           return nlohmann::json{
               {"error",
@@ -1440,12 +1452,14 @@ private:
   static void
   bind_agent_list(core::LuaHooks::AgentInfo &info,
                   const std::shared_ptr<core::TaskTree> &task_manager) {
-    info.agents.list = [task_manager](const nlohmann::json &v) {
+    info.agents.list = [weak_tasks = std::weak_ptr<core::TaskTree>(
+                            task_manager)](const nlohmann::json &v) {
       nlohmann::json values = nlohmann::json::array();
       const auto prefix = v.value("path_prefix", std::string{});
-      for (const auto &snapshot : task_manager->list(
-               prefix.empty() ? std::optional<std::string_view>{}
-                              : std::optional<std::string_view>{prefix}))
+      for (const auto &snapshot :
+           live_tree(weak_tasks)
+               ->list(prefix.empty() ? std::optional<std::string_view>{}
+                                     : std::optional<std::string_view>{prefix}))
         values.push_back(snapshot_json(snapshot));
       return values;
     };
@@ -1454,13 +1468,15 @@ private:
   static void
   bind_agent_queue(core::LuaHooks::AgentInfo &info,
                    const std::shared_ptr<core::TaskTree> &task_manager) {
-    auto queue_binding = [task_manager](const nlohmann::json &v,
-                                        bool follow_up) {
+    auto queue_binding = [weak_tasks =
+                              std::weak_ptr<core::TaskTree>(task_manager)](
+                             const nlohmann::json &v, bool follow_up) {
       try {
         const auto target = v.value("target", std::string{});
         const auto message = make_agent_message(v);
-        auto snapshot = follow_up ? task_manager->follow_up(target, message)
-                                  : task_manager->send_message(target, message);
+        auto snapshot =
+            follow_up ? live_tree(weak_tasks)->follow_up(target, message)
+                      : live_tree(weak_tasks)->send_message(target, message);
         return snapshot_json(snapshot);
       } catch (const core::AgentTaskError &error) {
         return task_error_json(error);
@@ -1479,7 +1495,8 @@ private:
   static void
   bind_agent_interrupt(core::LuaHooks::AgentInfo &info,
                        const std::shared_ptr<core::TaskTree> &task_manager) {
-    info.agents.interrupt = [task_manager](const nlohmann::json &v) {
+    info.agents.interrupt = [weak_tasks = std::weak_ptr<core::TaskTree>(
+                                 task_manager)](const nlohmann::json &v) {
       try {
         const auto reason = v.value("reason", std::string("parent"));
         core::AgentInterruptReason parsed = core::AgentInterruptReason::parent;
@@ -1490,7 +1507,8 @@ private:
         else if (reason == "timeout")
           parsed = core::AgentInterruptReason::timeout;
         return snapshot_json(
-            task_manager->interrupt(v.value("target", std::string{}), parsed));
+            live_tree(weak_tasks)
+                ->interrupt(v.value("target", std::string{}), parsed));
       } catch (const core::AgentTaskError &error) {
         return task_error_json(error);
       } catch (const std::exception &error) {
@@ -1502,7 +1520,8 @@ private:
   static void
   bind_agent_wait(core::LuaHooks::AgentInfo &info,
                   const std::shared_ptr<core::TaskTree> &task_manager) {
-    info.agents.wait = [task_manager](const nlohmann::json &v) {
+    info.agents.wait = [weak_tasks = std::weak_ptr<core::TaskTree>(
+                            task_manager)](const nlohmann::json &v) {
       try {
         core::AgentWaitRequest request;
         if (v.contains("targets"))
@@ -1510,7 +1529,7 @@ private:
         request.after_generation = v.value("after_generation", 0ULL);
         request.timeout =
             std::chrono::milliseconds(v.value("timeout_ms", 30000ULL));
-        const auto result = task_manager->wait(request);
+        const auto result = live_tree(weak_tasks)->wait(request);
         nlohmann::json changed = nlohmann::json::array();
         for (const auto &snapshot : result.changed)
           changed.push_back(snapshot_json(snapshot));
@@ -1529,10 +1548,11 @@ private:
   static void
   bind_agent_close(core::LuaHooks::AgentInfo &info,
                    const std::shared_ptr<core::TaskTree> &task_manager) {
-    info.agents.close = [task_manager](const nlohmann::json &v) {
+    info.agents.close = [weak_tasks = std::weak_ptr<core::TaskTree>(
+                             task_manager)](const nlohmann::json &v) {
       try {
         return snapshot_json(
-            task_manager->close(v.value("target", std::string{})));
+            live_tree(weak_tasks)->close(v.value("target", std::string{})));
       } catch (const core::AgentTaskError &error) {
         return task_error_json(error);
       } catch (const std::exception &error) {

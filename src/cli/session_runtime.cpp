@@ -177,9 +177,15 @@ AgentOptionsResult build_agent_options(const AgentOptionsConfig &config) {
   auto authentication = config.authentication;
   if (config.model_catalog && authentication)
     config.model_catalog->set_request_auth_resolver(
-        [authentication](std::string_view provider,
-                         const std::stop_token &stop_token) {
-          return authentication->resolve(provider, {}, stop_token);
+        // Weak: Authentication already holds the catalog, so a strong capture
+        // here would be an ownership cycle that is never freed.
+        [weak = std::weak_ptr(authentication)](
+            std::string_view provider, const std::stop_token &stop_token)
+            -> std::optional<core::RequestAuth> {
+          const auto locked = weak.lock();
+          if (!locked)
+            return std::nullopt;
+          return locked->resolve(provider, {}, stop_token);
         });
   opts.get_auth =
       [authentication](std::string_view p) -> std::optional<core::RequestAuth> {
