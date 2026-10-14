@@ -162,8 +162,7 @@ private:
   int calls_{0}; // per-instance; share one instance to count across turns
 };
 
-AgentTaskSnapshot wait_terminal(TaskTree &manager,
-                                AgentTaskSnapshot current) {
+AgentTaskSnapshot wait_terminal(TaskTree &manager, AgentTaskSnapshot current) {
   for (int attempts = 0; attempts < 5; ++attempts) {
     if (current.status == AgentTaskStatusKind::completed ||
         current.status == AgentTaskStatusKind::errored ||
@@ -201,12 +200,10 @@ void register_scripted_client(std::string provider,
 
 class TaskTreeShutdown {
 public:
-  explicit TaskTreeShutdown(TaskTree &manager)
-      : manager_(&manager) {}
+  explicit TaskTreeShutdown(TaskTree &manager) : manager_(&manager) {}
 
   TaskTreeShutdown(const TaskTreeShutdown &) = delete;
-  TaskTreeShutdown &
-  operator=(const TaskTreeShutdown &) = delete;
+  TaskTreeShutdown &operator=(const TaskTreeShutdown &) = delete;
 
   ~TaskTreeShutdown() {
     if (manager_ != nullptr)
@@ -225,6 +222,67 @@ public:
 private:
   TaskTree *manager_;
 };
+
+// Returns one fixed, non-streamed assistant message (no text deltas) and
+// records the transcript each call was handed.
+class FixedReplyClient : public LLMClient {
+public:
+  FixedReplyClient(std::string reply,
+                   std::shared_ptr<std::vector<Message>> seen = {})
+      : reply_(std::move(reply)), seen_(std::move(seen)) {}
+
+  std::shared_ptr<AssistantMessage>
+  stream(const Model &model, const AgentContext &context, const StreamOptions &,
+         AssistantEventCallback, std::stop_token) override {
+    if (seen_)
+      *seen_ = context.messages;
+    auto message = std::make_shared<AssistantMessage>();
+    message->api = model.api;
+    message->provider = model.provider;
+    message->model = model.id;
+    message->stop_reason = StopReason::stop;
+    message->content.emplace_back(TextContent{.text = reply_});
+    return message;
+  }
+
+  std::string_view provider_name() const override { return "fixed-reply"; }
+  std::string_view api_id() const override { return "fixed-reply"; }
+
+private:
+  std::string reply_;
+  std::shared_ptr<std::vector<Message>> seen_;
+};
+
+Agent::Options fixed_reply_options(const std::string &provider,
+                                   std::string reply,
+                                   std::shared_ptr<std::vector<Message>> seen) {
+  LLMClientRegistry::instance().register_client(
+      provider, [reply = std::move(reply), seen = std::move(seen)] {
+        return std::make_shared<FixedReplyClient>(reply, seen);
+      });
+  Agent::Options options;
+  options.model =
+      Model{.id = provider + "-model", .api = provider, .provider = provider};
+  return options;
+}
+
+AssistantMessage tool_call_message(std::vector<std::string> ids) {
+  AssistantMessage assistant;
+  assistant.stop_reason = StopReason::tool_use;
+  for (auto &id : ids)
+    assistant.content.emplace_back(ToolCall{.id = std::move(id), .name = "ls"});
+  return assistant;
+}
+
+ToolResultMessage tool_result_message(std::string id) {
+  return ToolResultMessage{.tool_call_id = std::move(id),
+                           .tool_name = "ls",
+                           .content = {TextContent{.text = "ok"}}};
+}
+
+UserMessage user_message(std::string text) {
+  return UserMessage{.content = {TextContent{.text = std::move(text)}}};
+}
 } // namespace
 
 TEST(AgentTasks, PropagatesRuntimeIdentityAndFiltersTools) {
@@ -285,7 +343,7 @@ return {}
   SessionRuntime identity_root(
       {.agent_options = identity_options, .tools = std::move(identity_tools)});
   TaskTree identity_manager(identity_root.agent(), default_child_factory(),
-                                    identity_options);
+                            identity_options);
   TaskTreeShutdown identity_shutdown(identity_manager);
   std::vector<AgentRuntimeIdentity> registered;
   identity_manager.set_endpoint_registration(
@@ -331,8 +389,8 @@ return {}
   SessionRuntime write_root(
       {.agent_options = identity_options, .tools = create_coding_tools()});
   TaskTree write_manager(write_root.agent(), default_child_factory(),
-                                 identity_options, TaskTree::Limits{},
-                                 {}, TaskTree::ChildWriteTools::core);
+                         identity_options, TaskTree::Limits{}, {},
+                         TaskTree::ChildWriteTools::core);
   TaskTreeShutdown write_shutdown(write_manager);
   const auto write_child = write_manager.spawn({.task_name = "writer",
                                                 .prompt = "write",
@@ -345,7 +403,7 @@ return {}
   write_shutdown.shutdown();
 
   TaskTree rollback_manager(identity_root.agent(), default_child_factory(),
-                                    identity_options);
+                            identity_options);
   TaskTreeShutdown rollback_shutdown(rollback_manager);
   bool unregister_called = false;
   rollback_manager.set_endpoint_registration(
@@ -367,9 +425,8 @@ return {}
   EXPECT_TRUE(rollback_manager.active_executions() == 0);
   rollback_shutdown.shutdown();
 
-  TaskTree construction_manager(identity_root.agent(),
-                                        default_child_factory(),
-                                        identity_options);
+  TaskTree construction_manager(identity_root.agent(), default_child_factory(),
+                                identity_options);
   TaskTreeShutdown construction_shutdown(construction_manager);
   bool construction_unregistered = false;
   construction_manager.set_endpoint_registration(
@@ -413,8 +470,7 @@ TEST(AgentTasks, RejectsDuplicatePendingTaskDuringShutdown) {
   });
   SessionRuntime concurrency_root({.agent_options = identity_options});
   TaskTree concurrency_manager(concurrency_root.agent(),
-                                       default_child_factory(),
-                                       identity_options);
+                               default_child_factory(), identity_options);
   TaskTreeShutdown concurrency_shutdown(concurrency_manager);
   std::mutex registration_mutex;
   std::condition_variable registration_changed;
@@ -494,9 +550,8 @@ TEST(AgentTasks, EnforcesDirectChildCapacity) {
   SessionRuntime capacity_root({.agent_options = identity_options});
   TaskTree::Limits capacity_limits;
   capacity_limits.max_direct_children = 2;
-  TaskTree capacity_manager(capacity_root.agent(),
-                                    default_child_factory(), identity_options,
-                                    capacity_limits);
+  TaskTree capacity_manager(capacity_root.agent(), default_child_factory(),
+                            identity_options, capacity_limits);
   TaskTreeShutdown capacity_shutdown(capacity_manager);
   std::mutex capacity_mutex;
   std::condition_variable capacity_changed;
@@ -566,7 +621,7 @@ TEST(AgentTasks, RejectsNestedSpawnAfterParentClose) {
   });
   SessionRuntime parent_root({.agent_options = identity_options});
   TaskTree parent_manager(parent_root.agent(), default_child_factory(),
-                                  identity_options);
+                          identity_options);
   TaskTreeShutdown parent_shutdown(parent_manager);
   std::mutex parent_mutex;
   std::condition_variable parent_changed;
@@ -638,8 +693,8 @@ TEST(AgentTasks, WaitsForUnregisterBeforeShutdown) {
         std::make_shared<std::optional<AgentRuntimeIdentity>>());
   });
   SessionRuntime unregister_root({.agent_options = identity_options});
-  TaskTree unregister_manager(unregister_root.agent(),
-                                      default_child_factory(), identity_options);
+  TaskTree unregister_manager(unregister_root.agent(), default_child_factory(),
+                              identity_options);
   std::mutex unregister_mutex;
   std::condition_variable unregister_changed;
   bool nested_registration_entered = false;
@@ -840,8 +895,8 @@ TEST(AgentTasks, InterruptsAndReusesTask) {
   Agent::Options interrupt_options;
   interrupt_options.model = interrupt_model;
   SessionRuntime interrupt_root({.agent_options = interrupt_options});
-  TaskTree interrupt_manager(interrupt_root.agent(),
-                                     default_child_factory(), interrupt_options);
+  TaskTree interrupt_manager(interrupt_root.agent(), default_child_factory(),
+                             interrupt_options);
   TaskTreeShutdown interrupt_shutdown(interrupt_manager);
   auto interrupted =
       interrupt_manager.spawn({.task_name = "slow", .prompt = "wait"});
@@ -890,7 +945,7 @@ TEST(AgentTasks, ReportsMidTurnUsage) {
   usage_options.model = usage_model;
   SessionRuntime usage_root({.agent_options = usage_options});
   TaskTree usage_manager(usage_root.agent(), default_child_factory(),
-                                 usage_options);
+                         usage_options);
   TaskTreeShutdown usage_shutdown(usage_manager);
   auto observed_child =
       usage_manager.spawn({.task_name = "observed", .prompt = "observe"});
@@ -956,7 +1011,7 @@ TEST(AgentTasks, DoesNotSpliceChildResultIntoParent) {
   splice_options.model = splice_model;
   SessionRuntime splice_root({.agent_options = splice_options});
   TaskTree splice_manager(splice_root.agent(), default_child_factory(),
-                                  splice_options);
+                          splice_options);
   TaskTreeShutdown splice_shutdown(splice_manager);
   EXPECT_TRUE(splice_root.agent().state().messages().size() == std::size_t{0});
   const auto splice_child = splice_manager.spawn(
@@ -985,4 +1040,192 @@ TEST(AgentTasks, DoesNotSpliceChildResultIntoParent) {
       });
   EXPECT_TRUE(!leaked_into_parent);
   splice_shutdown.shutdown();
+}
+
+TEST(AgentTasks, CapsNonStreamedResultAtOutputLimit) {
+  auto options =
+      fixed_reply_options("cap-nonstream", std::string(1000, 'x'), {});
+  SessionRuntime root({.agent_options = options});
+  TaskTree::Limits limits;
+  limits.max_output_bytes = 100;
+  TaskTree tree(root.agent(), default_child_factory(), options, limits);
+  TaskTreeShutdown shutdown(tree);
+  const auto done = wait_terminal(
+      tree, tree.spawn({.task_name = "big", .prompt = "produce output"}));
+  EXPECT_TRUE(done.status == AgentTaskStatusKind::completed);
+  ASSERT_TRUE(done.result.has_value());
+  EXPECT_LE(done.result->text.size(), limits.max_output_bytes);
+  EXPECT_TRUE(done.result->truncated);
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, DoesNotTruncateNonStreamedResultWithinLimit) {
+  auto options = fixed_reply_options("cap-nonstream-ok", "short", {});
+  SessionRuntime root({.agent_options = options});
+  TaskTree::Limits limits;
+  limits.max_output_bytes = 100;
+  TaskTree tree(root.agent(), default_child_factory(), options, limits);
+  TaskTreeShutdown shutdown(tree);
+  const auto done = wait_terminal(
+      tree, tree.spawn({.task_name = "small", .prompt = "produce output"}));
+  ASSERT_TRUE(done.result.has_value());
+  EXPECT_EQ(done.result->text, "short");
+  EXPECT_FALSE(done.result->truncated);
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, InheritedContextDropsPartialMultiToolExchange) {
+  auto seen = std::make_shared<std::vector<Message>>();
+  auto options = fixed_reply_options("ctx-multitool", "done", seen);
+  SessionRuntime root({.agent_options = options});
+  root.agent().state().set_messages({
+      user_message("first"),
+      tool_call_message({"call_a", "call_b"}),
+      tool_result_message("call_a"),
+      tool_result_message("call_b"),
+      user_message("second"),
+  });
+  TaskTree tree(root.agent(), default_child_factory(), options);
+  TaskTreeShutdown shutdown(tree);
+  // Cutting after the first of two results leaves call_b unanswered.
+  const auto done = wait_terminal(
+      tree,
+      tree.spawn({.task_name = "cut",
+                  .prompt = "go",
+                  .context = {.mode = ContextInheritanceMode::through_message,
+                              .through = 3}}));
+  EXPECT_TRUE(done.status == AgentTaskStatusKind::completed);
+  for (const auto &message : *seen) {
+    EXPECT_FALSE(std::holds_alternative<ToolResultMessage>(message));
+    if (const auto *assistant = std::get_if<AssistantMessage>(&message))
+      for (const auto &block : assistant->content)
+        EXPECT_FALSE(std::holds_alternative<ToolCall>(block));
+  }
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, InheritedContextKeepsCompleteMultiToolExchange) {
+  auto seen = std::make_shared<std::vector<Message>>();
+  auto options = fixed_reply_options("ctx-multitool-ok", "done", seen);
+  SessionRuntime root({.agent_options = options});
+  root.agent().state().set_messages({
+      user_message("first"),
+      tool_call_message({"call_a", "call_b"}),
+      tool_result_message("call_a"),
+      tool_result_message("call_b"),
+      user_message("second"),
+  });
+  TaskTree tree(root.agent(), default_child_factory(), options);
+  TaskTreeShutdown shutdown(tree);
+  const auto done = wait_terminal(
+      tree,
+      tree.spawn({.task_name = "whole",
+                  .prompt = "go",
+                  .context = {.mode = ContextInheritanceMode::through_message,
+                              .through = 4}}));
+  EXPECT_TRUE(done.status == AgentTaskStatusKind::completed);
+  // user, assistant(2 calls), 2 results, then the spawn prompt.
+  EXPECT_EQ(seen->size(), std::size_t{5});
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, RootFollowUpIsRejectedWithoutReservingExecution) {
+  auto options = fixed_reply_options("root-followup", "ok", {});
+  SessionRuntime root({.agent_options = options});
+  TaskTree::Limits limits;
+  limits.max_active_executions = 1;
+  TaskTree tree(root.agent(), default_child_factory(), options, limits);
+  TaskTreeShutdown shutdown(tree);
+  try {
+    tree.follow_up("root", user_message("again"));
+    ADD_FAILURE() << "follow_up on the root pseudo-task must be rejected";
+  } catch (const AgentTaskError &error) {
+    EXPECT_TRUE(error.kind() == AgentTaskErrorKind::invalid_state);
+  }
+  const auto root_snapshot = tree.get("root");
+  ASSERT_TRUE(root_snapshot.has_value());
+  EXPECT_TRUE(root_snapshot->status == AgentTaskStatusKind::idle);
+  EXPECT_EQ(root_snapshot->queued_message_count, std::size_t{0});
+  // The failed follow-up must not have consumed the only execution slot.
+  const auto done = wait_terminal(
+      tree, tree.spawn({.task_name = "child", .prompt = "still runs"}));
+  EXPECT_TRUE(done.status == AgentTaskStatusKind::completed);
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, RootStatusTracksOwningAgent) {
+  auto entered = std::make_shared<std::atomic<bool>>(false);
+  auto release = std::make_shared<std::atomic<bool>>(false);
+  auto client = std::make_shared<BlockingUsageClient>(entered, release);
+  LLMClientRegistry::instance().register_client("root-status",
+                                                [client] { return client; });
+  Agent::Options options;
+  options.model = Model{.id = "root-status-model",
+                        .api = "root-status",
+                        .provider = "root-status"};
+  SessionRuntime root({.agent_options = options});
+  TaskTree tree(root.agent(), default_child_factory(), options);
+  TaskTreeShutdown shutdown(tree);
+  ASSERT_TRUE(tree.get("root")->status == AgentTaskStatusKind::idle);
+
+  // BlockingUsageClient returns at once on its first call; burn that one so
+  // the next root turn blocks.
+  root.agent().prompt("warm up").wait();
+  auto stream = root.agent().prompt("block");
+  ASSERT_TRUE(pi::test::wait_until([&] { return entered->load(); },
+                                   std::chrono::seconds(2),
+                                   "root turn to block"));
+  EXPECT_TRUE(tree.get("root")->status == AgentTaskStatusKind::running);
+  release->store(true);
+  stream.wait();
+  ASSERT_TRUE(pi::test::wait_until(
+      [&] { return tree.get("root")->status == AgentTaskStatusKind::idle; },
+      std::chrono::seconds(2), "root to return to idle"));
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, RejectsUnsupportedAllowSubagents) {
+  auto options = fixed_reply_options("allow-subagents", "ok", {});
+  SessionRuntime root({.agent_options = options});
+  TaskTree tree(root.agent(), default_child_factory(), options);
+  TaskTreeShutdown shutdown(tree);
+  try {
+    tree.spawn(
+        {.task_name = "nested", .prompt = "go", .allow_subagents = true});
+    ADD_FAILURE() << "allow_subagents is unsupported and must be rejected";
+  } catch (const AgentTaskError &error) {
+    EXPECT_TRUE(error.kind() == AgentTaskErrorKind::invalid_state);
+  }
+  EXPECT_TRUE(tree.list().size() == std::size_t{1}); // root only
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, ChildLimitDiagnosticSaysCloseNotWaitFreesSlot) {
+  auto options = fixed_reply_options("slot-guidance", "ok", {});
+  SessionRuntime root({.agent_options = options});
+  TaskTree::Limits limits;
+  limits.max_direct_children = 1;
+  TaskTree tree(root.agent(), default_child_factory(), options, limits);
+  TaskTreeShutdown shutdown(tree);
+  const auto first =
+      wait_terminal(tree, tree.spawn({.task_name = "one", .prompt = "go"}));
+  ASSERT_TRUE(first.status == AgentTaskStatusKind::completed);
+  try {
+    tree.spawn({.task_name = "two", .prompt = "go"});
+    ADD_FAILURE() << "second direct child must exceed the cap";
+  } catch (const AgentTaskError &error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("close_agent"), std::string::npos);
+    EXPECT_EQ(message.find("wait_agent or close_agent"), std::string::npos);
+  }
+  // Waiting does not release the slot; closing does.
+  AgentWaitRequest wait_request;
+  wait_request.targets = {first.id};
+  wait_request.timeout = std::chrono::milliseconds(0);
+  static_cast<void>(tree.wait(wait_request));
+  EXPECT_THROW(tree.spawn({.task_name = "two", .prompt = "go"}),
+               AgentTaskError);
+  tree.close(first.id);
+  EXPECT_NO_THROW(tree.spawn({.task_name = "two", .prompt = "go"}));
+  shutdown.shutdown();
 }

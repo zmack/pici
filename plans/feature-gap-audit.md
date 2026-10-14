@@ -62,6 +62,14 @@ and the direct-child-limit error suggest `wait_agent` can free a resident
 slot. `TaskTree::wait()` only observes; the parent child set remains until
 close. A completed child can continue consuming residency and its name.
 
+Status (task 174): fixed. Guidance and diagnostics now say `close_agent` frees
+slots and `wait_agent` does not. `allow_subagents=true` is rejected by
+`TaskTree::spawn()` (`invalid_state`) until child-owned trees exist (task 176).
+Nonstreamed results share the streamed byte cap, inherited context is cut at
+the first incomplete tool exchange, root `follow_up` is rejected, root status
+derives from the owning `Agent`, and Lua `agents.wait` receives the tool's stop
+token. `pici.run_agent`'s internal 1 s polling wait still ignores cancellation.
+
 Additional source-derived correctness candidates from the Codex audit:
 
 - Nonstreamed assistant text in `execute_work()` bypasses the output byte cap
@@ -96,8 +104,8 @@ despite that target ownership in the taxonomy (`pici_process.h:59–117`).
 | Agent loop, streaming, cancellation, tool execution, steering and follow-up | Strong existing mechanisms; no need to port another loop | `src/core/agent*.{h,cpp}`, `vendor/pi/packages/agent/src/` |
 | Durable sessions, forks and tree navigation | Implemented, with narrower automation surfaces | `src/core/session/session_store.h`, `src/cli/cmd_run_session.h` `/tree`; Pi `docs/sessions.md` and `docs/rpc-commands.md` |
 | Compaction | Partial parity: Pici remote compaction is tied to `openai-codex-responses`; Pi can summarize with the selected model and preserve recent history | `src/core/compaction.cpp:40`, `src/core/llm_client.h:129`; Pi `docs/compaction.md:43` |
-| MCP | Implemented stdio handshake/tool discovery/calls, bounded startup, cancellation and result truncation | `src/core/mcp/mcp_client.h`, `mcp_config.h`, `mcp_tool.cpp`, `src/core/process/pici_process.cpp` |
-| Rich MCP lifecycle | Missing from the present Pici contracts: streamable HTTP, server OAuth, resources, deferred tool discovery, reconnect/tool-list refresh UI | Pi `docs/mcp.md`; Pici `McpServerConfig` is command/args/env/cwd, `McpClient` owns `McpStdioTransport`, and discovered tools are installed at process construction |
+| MCP | Implemented stdio and streamable-HTTP (`McpHttpTransport`, libcurl) handshake/tool discovery/calls, bounded startup, cancellation, result truncation, reconnect of dead transports and `tools/list_changed` re-listing for new sessions | `src/core/mcp/mcp_client.h`, `mcp_config.h`, `mcp_tool.cpp`, `src/core/process/pici_process.cpp` |
+| Rich MCP lifecycle | Missing from the present Pici contracts: server OAuth, resources, deferred tool discovery, standalone HTTP GET event stream, live tool-refresh UI for running sessions | Pi `docs/mcp.md`; Pici `McpClient` owns an `McpTransport` (stdio or HTTP) plus factory; `PiciProcess` owns the clients and `refresh_mcp_tools()` |
 | Extension customization | Substantial Lua add-on system, skills, hooks, commands, tool formatting and reload exist | `src/core/lua_tool.h`, `addons/README.md`; Pi's TypeScript extension APIs are a different ecosystem, not a drop-in parity target |
 | Extension distribution | Missing install/resource packaging and managed package distribution | `src/cli/session_runtime.cpp:17` explicitly uses a source-tree bundled path; Pi `docs/packages.md` supports npm/git packages |
 | RPC automation | Partial parity: Pici has core prompt/model/session/task commands | Pi additionally documents queue clearing/modes, retry controls, standalone bash, stats, HTML export, entries/tree queries and command discovery in `docs/rpc-commands.md`; compare against Pici's explicit dispatch table |
@@ -213,7 +221,8 @@ Tracked backlog:
    sandbox/cwd and policy values; optional worktree operation owned by the
    process/session composition path. Establish cleanup/conflict semantics and
    native permission limits before granting Lua/MCP tools to children.
-7. **Expand MCP in phases.** Transport Adapter, lifecycle/reconnect, then
+7. **Expand MCP in phases.** Phase 1 (transport Adapter, reconnect, tool-list
+   refresh) is done (task 179); remaining:
    resources/deferred discovery and server-bound authentication. Process-owned
    reusable implementations and credential isolation must stay explicit.
 8. **Provider-neutral compaction and packaging.** Reuse the compaction

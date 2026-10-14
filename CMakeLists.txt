@@ -517,6 +517,7 @@ add_library(pi-core
     src/core/sandbox.cpp
     src/core/lua_tool.cpp
     src/core/mcp/mcp_transport.cpp
+    src/core/mcp/mcp_http_transport.cpp
     src/core/mcp/mcp_client.cpp
     src/core/mcp/mcp_tool.cpp
     src/core/markdown.cpp
@@ -594,6 +595,7 @@ target_link_libraries(pi-core PUBLIC
     ts-lang-lua
     ts-lang-javascript
     SQLite::SQLite3
+    CURL::libcurl
 )
 
 if(PI_CPP_OTEL_API)
@@ -732,7 +734,7 @@ if(PI_CPP_BUILD_TESTS)
     add_test(NAME test-model_catalog COMMAND test-model_catalog)
 
     add_executable(test-pici_process test/test_pici_process.cpp)
-    target_link_libraries(test-pici_process PRIVATE pi-http)
+    target_link_libraries(test-pici_process PRIVATE pi-http httplib::httplib)
     add_test(NAME test-pici_process COMMAND test-pici_process)
 
     add_executable(test-openai_completions test/test_openai_completions.cpp)
@@ -812,6 +814,12 @@ if(PI_CPP_BUILD_TESTS)
     )
     add_dependencies(test-mcp_client fake-mcp-server)
     add_test(NAME test-mcp_client COMMAND test-mcp_client)
+
+    add_executable(test-mcp_http test/test_mcp_http.cpp)
+    target_include_directories(test-mcp_http PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    target_link_libraries(test-mcp_http PRIVATE pi-core httplib::httplib)
+    add_test(NAME test-mcp_http COMMAND test-mcp_http)
 
     add_executable(test-mcp_tool test/test_mcp_tool.cpp)
     target_link_libraries(test-mcp_tool PRIVATE pi-core)
@@ -979,7 +987,7 @@ if(PI_CPP_BUILD_TESTS)
         test-faux_control_mode test-readline test-wrap test-vim-mode test-model_picker
         test-model_picker_settings test-acp
         test-frontend-parity test-cmd_run test-cmd_run_repl
-        test-mcp_transport test-mcp_client test-mcp_tool
+        test-mcp_transport test-mcp_client test-mcp_tool test-mcp_http
     )
     foreach(test_target IN LISTS PI_CPP_GTEST_TEST_TARGETS)
         target_link_libraries(${test_target} PRIVATE GTest::gtest_main

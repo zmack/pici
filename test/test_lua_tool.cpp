@@ -2035,8 +2035,7 @@ TEST(LuaEvalTool, Unconfigured_bindings_report_clean_not_available_error) {
   // convention for a null std::function.
   auto [tool, bindings] = make_eval_tool_with_bindings();
   static_cast<void>(bindings);
-  auto result =
-      eval_run(*tool, "return pici.agents.spawn{task_name='x'}");
+  auto result = eval_run(*tool, "return pici.agents.spawn{task_name='x'}");
   ASSERT_FALSE(result->is_error());
   const auto returned = extract_section(result->content(), "return");
   EXPECT_NE(returned.find("nil"), std::string::npos);
@@ -2102,9 +2101,10 @@ TEST(LuaEvalTool, Pre_cancelled_stop_token_returns_cancelled_result) {
   auto tool = make_eval_tool();
   std::stop_source cancelled;
   cancelled.request_stop();
-  auto result = tool->execute(
-      R"({"script":"return 1"})",
-      ToolExecutionContext{.call_id = "1", .stop_token = cancelled.get_token()});
+  auto result =
+      tool->execute(R"({"script":"return 1"})",
+                    ToolExecutionContext{.call_id = "1",
+                                         .stop_token = cancelled.get_token()});
   EXPECT_TRUE(result->is_error());
   EXPECT_EQ(result->content(), "Tool execution cancelled");
 }
@@ -2164,7 +2164,7 @@ TEST(LuaEvalTool, Agents_wait_clamps_timeout_to_remaining_budget) {
   auto [tool, bindings] = make_eval_tool_with_bindings();
   long long recorded_timeout_ms = -1;
   LuaHooks::AgentInfo info;
-  info.agents.wait = [&](const nlohmann::json &args) {
+  info.agents.wait = [&](const nlohmann::json &args, const std::stop_token &) {
     recorded_timeout_ms = args.value("timeout_ms", -1LL);
     return nlohmann::json{{"status", "done"}};
   };
@@ -2180,6 +2180,56 @@ TEST(LuaEvalTool, Agents_wait_clamps_timeout_to_remaining_budget) {
   EXPECT_LE(recorded_timeout_ms, 200);
 }
 
+TEST(LuaEvalTool, Agents_wait_receives_callers_stop_token) {
+  auto [tool, bindings] = make_eval_tool_with_bindings();
+  bool saw_cancel = false;
+  LuaHooks::AgentInfo info;
+  info.agents.wait = [&](const nlohmann::json &, const std::stop_token &stop) {
+    for (int i = 0; i < 2000 && !stop.stop_requested(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    saw_cancel = stop.stop_requested();
+    return nlohmann::json{{"caller_interrupted", saw_cancel}};
+  };
+  bindings->store(info);
+  std::stop_source source;
+  std::jthread canceller([&source] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    source.request_stop();
+  });
+  tool->execute(
+      R"({"script":"return pici.agents.wait{targets={'x'}, timeout_ms=1000}"})",
+      ToolExecutionContext{.call_id = "1", .stop_token = source.get_token()});
+  EXPECT_TRUE(saw_cancel);
+}
+
+TEST(LuaTool, Agents_addon_wait_receives_callers_stop_token) {
+  const auto path =
+      std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "agents.lua";
+  auto hooks = load_lua_hooks(path, true);
+  bool saw_cancel = false;
+  LuaHooks::AgentInfo info;
+  info.agents.wait = [&](const nlohmann::json &, const std::stop_token &stop) {
+    for (int i = 0; i < 2000 && !stop.stop_requested(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    saw_cancel = stop.stop_requested();
+    return nlohmann::json{{"caller_interrupted", saw_cancel}};
+  };
+  hooks->configure(info);
+  const auto tool =
+      *std::ranges::find_if(hooks->registered_tools, [](const auto &t) {
+        return t->name() == "wait_agent";
+      });
+  std::stop_source source;
+  std::jthread canceller([&source] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    source.request_stop();
+  });
+  tool->execute(
+      R"({"targets":["x"]})",
+      ToolExecutionContext{.call_id = "1", .stop_token = source.get_token()});
+  EXPECT_TRUE(saw_cancel);
+}
+
 TEST(LuaEvalTool, Mailbox_wait_clamps_timeout_to_remaining_budget) {
   auto [tool, bindings] = make_eval_tool_with_bindings();
   long long recorded_timeout_ms = -1;
@@ -2192,8 +2242,8 @@ TEST(LuaEvalTool, Mailbox_wait_clamps_timeout_to_remaining_budget) {
   LuaHooks::AgentInfo info;
   info.mailbox.wait = wait;
   bindings->store(info);
-  auto result = eval_run(
-      *tool, "return pici.mailbox.wait{timeout_ms=999999}", 200);
+  auto result =
+      eval_run(*tool, "return pici.mailbox.wait{timeout_ms=999999}", 200);
   ASSERT_FALSE(result->is_error());
   EXPECT_GE(recorded_timeout_ms, 0);
   EXPECT_LT(recorded_timeout_ms, 999999);
@@ -2238,14 +2288,15 @@ TEST(LuaEvalTool, Agents_session_mailbox_bindings_are_wired_and_callable) {
     return nlohmann::json{{"pending", false}};
   };
   info.mailbox.self = [](const nlohmann::json &,
-                        const LuaHooks::MailboxBindings::InvocationContext &) {
+                         const LuaHooks::MailboxBindings::InvocationContext &) {
     return nlohmann::json{{"agent_id", "a1"}};
   };
   bindings->store(info);
 
   // agents.list's bare-string-argument quirk (-> {path_prefix=...}),
   // reused unchanged from agent_args via eval_agent_args.
-  auto agents_result = eval_run(*tool, "return pici.agents.list('foo/').path_prefix_seen");
+  auto agents_result =
+      eval_run(*tool, "return pici.agents.list('foo/').path_prefix_seen");
   ASSERT_FALSE(agents_result->is_error());
   EXPECT_EQ(extract_section(agents_result->content(), "return"), "foo/");
 

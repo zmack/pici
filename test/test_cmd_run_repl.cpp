@@ -31,12 +31,15 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
+#include <thread>
 
 using namespace pi;
 using ::testing::HasSubstr;
@@ -81,8 +84,8 @@ protected:
 
   void SetUp() override {
     home_dir_ = std::filesystem::temp_directory_path() /
-               ("pici-cmd-run-repl-test-" + std::to_string(::getpid()) + "-" +
-                std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+                ("pici-cmd-run-repl-test-" + std::to_string(::getpid()) + "-" +
+                 std::to_string(reinterpret_cast<std::uintptr_t>(this)));
     std::filesystem::remove_all(home_dir_);
     std::filesystem::create_directories(home_dir_);
   }
@@ -149,7 +152,7 @@ TEST_F(CmdRunSessionTest, ToolsCommandListsBuiltinTools) {
 // configure_hooks() reached lua_eval_bindings_->store(info) despite
 // bundle_.hooks->configure having nothing to do here.
 TEST_F(CmdRunSessionTest,
-      LuaEvalToolPresentAndBindingsWorkWithZeroAddonsConfigured) {
+       LuaEvalToolPresentAndBindingsWorkWithZeroAddonsConfigured) {
   auto args = make_args();
   args.lua_eval = true;
   CmdRunSession session(args, empty_registry());
@@ -163,14 +166,14 @@ TEST_F(CmdRunSessionTest,
   // freshly-store()'d LuaEvalBindings snapshot. If configure_hooks() had
   // early-returned before store() (the bug), this would instead report
   // "pici.agents is not available".
-  nlohmann::json call_args{
-      {"script", "local t, err = pici.agents.get{target='missing'}\n"
-                "return tostring(t), err"},
-      {"mode", "run"}};
+  nlohmann::json call_args{{"script",
+                            "local t, err = pici.agents.get{target='missing'}\n"
+                            "return tostring(t), err"},
+                           {"mode", "run"}};
   auto result = tool->execute("1", call_args.dump());
   ASSERT_FALSE(result->is_error());
   EXPECT_EQ(result->content().find("pici.agents is not available"),
-           std::string::npos)
+            std::string::npos)
       << result->content();
   EXPECT_NE(result->content().find("task not found"), std::string::npos)
       << result->content();
@@ -259,8 +262,8 @@ TEST_F(CmdRunSessionTest, CompactCommandDeclinesOutsideInteractiveTerminal) {
   ASSERT_TRUE(bootstrap(session, &renderer));
 
   EXPECT_CALL(*renderer,
-             on_command_output(HasSubstr("only available in an interactive "
-                                         "terminal session")));
+              on_command_output(HasSubstr("only available in an interactive "
+                                          "terminal session")));
   EXPECT_FALSE(dispatch(session, "/compact"));
 }
 
@@ -376,4 +379,58 @@ TEST_F(CmdRunSessionTest, ModelCommandCommitsExplicitSelection) {
   ASSERT_TRUE(persisted.has_value());
   EXPECT_EQ(persisted->header.provider, "openai");
   EXPECT_EQ(persisted->header.model, "gpt-4o");
+}
+
+// Lua delegation waits must honor the caller's stop token like the JSONL RPC
+// wait does. "root" never changes generation here, so an uncancelled wait
+// would park for the full timeout.
+TEST_F(CmdRunSessionTest, AgentsAddonWaitReturnsPromptlyWhenCancelled) {
+  const auto addon =
+      std::filesystem::path(PI_CPP_SOURCE_DIR) / "addons" / "agents.lua";
+  CmdRunSession session(make_args({addon.string()}), empty_registry());
+  MockRenderer *renderer = nullptr;
+  ASSERT_TRUE(bootstrap(session, &renderer));
+  auto tool = find_tool(session, "wait_agent");
+  ASSERT_NE(tool, nullptr);
+
+  std::stop_source cancel;
+  std::jthread canceller([&cancel] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    cancel.request_stop();
+  });
+  const auto started = std::chrono::steady_clock::now();
+  auto result =
+      tool->execute(R"({"targets":["root"],"timeout_ms":30000})",
+                    core::ToolExecutionContext{
+                        .call_id = "w", .stop_token = cancel.get_token()});
+  EXPECT_LT(std::chrono::steady_clock::now() - started,
+            std::chrono::seconds(5));
+  EXPECT_TRUE(result->is_error());
+  EXPECT_EQ(result->content(), "Tool execution cancelled");
+}
+
+TEST_F(CmdRunSessionTest, LuaEvalAgentsWaitReturnsPromptlyWhenCancelled) {
+  auto args = make_args();
+  args.lua_eval = true;
+  CmdRunSession session(args, empty_registry());
+  MockRenderer *renderer = nullptr;
+  ASSERT_TRUE(bootstrap(session, &renderer));
+  auto tool = find_tool(session, "lua");
+  ASSERT_NE(tool, nullptr);
+
+  std::stop_source cancel;
+  std::jthread canceller([&cancel] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    cancel.request_stop();
+  });
+  nlohmann::json call_args{
+      {"script", "return pici.agents.wait{targets={'root'}, timeout_ms=30000}"},
+      {"mode", "run"},
+      {"timeout_ms", 20000}};
+  const auto started = std::chrono::steady_clock::now();
+  tool->execute(call_args.dump(),
+                core::ToolExecutionContext{.call_id = "w",
+                                           .stop_token = cancel.get_token()});
+  EXPECT_LT(std::chrono::steady_clock::now() - started,
+            std::chrono::seconds(5));
 }

@@ -22,6 +22,10 @@
 
 namespace pi::core {
 
+namespace mcp {
+class McpClient;
+}
+
 class PiciProcess {
 public:
   struct Config {
@@ -89,23 +93,29 @@ public:
   // MailboxAttachment to it (plans/object-taxonomy-migration.md Phase 8).
   std::shared_ptr<Mailbox> ensure_mailbox(const MailboxOptions &options) const;
 
-  // Tools discovered from every configured, enabled MCP server whose
-  // handshake succeeded, merged and de-duplicated (see pici_process.cpp).
-  // Frozen for this process's lifetime -- tools are discovered once at
-  // construction and never re-discovered afterward.
-  //
-  // Two related non-goals, deliberate for v1 and named together because
-  // they're really the same underlying question ("how should pici react to
-  // a server's tool set changing after startup"): this process never
-  // reconnects/respawns a server whose transport has died (see
-  // McpClient::is_alive()'s doc comment in mcp_client.h -- a dead server's
-  // tools stay registered but every call to them fails cleanly instead of
-  // hanging or retrying), and it never listens for or reacts to a live
-  // server's `notifications/tools/list_changed`. Both are intentional scope
-  // cuts, not oversights -- revisit them together if either is ever needed.
-  std::vector<std::shared_ptr<const ToolDefinition>> mcp_tools() const {
-    return mcp_tools_;
-  }
+  // One configured, enabled MCP server: the process-owned reusable client
+  // (which owns the stdio or streamable-HTTP transport) and the tools last
+  // listed from it. Archetype: Adapter state owned by PiciProcess; the
+  // client is the sole live authority for the connection.
+  struct McpServerEntry {
+    std::string name;
+    std::shared_ptr<mcp::McpClient> client;
+    std::vector<std::shared_ptr<const ToolDefinition>> tools;
+  };
+
+  // Tools from every configured, enabled MCP server, merged and de-
+  // duplicated (see pici_process.cpp). The first call after construction
+  // returns the startup discovery. Before returning, any server whose
+  // transport died, never finished its handshake, or announced
+  // `notifications/tools/list_changed` is reconnected / re-listed (bounded,
+  // throttled; failures are logged and keep that server's previous tools).
+  // Sessions snapshot the result when they load their tools, so a refresh is
+  // seen by sessions created afterwards, not by already-running ones.
+  std::vector<std::shared_ptr<const ToolDefinition>> mcp_tools() const;
+
+  // Forces the reconnect/re-list pass described above and returns the
+  // refreshed tool set.
+  std::vector<std::shared_ptr<const ToolDefinition>> refresh_mcp_tools() const;
 
 private:
   std::shared_ptr<ModelCatalog> model_catalog_;
@@ -114,7 +124,10 @@ private:
   std::shared_ptr<SessionStore> session_store_;
   mutable std::mutex mailbox_mutex_;
   mutable std::shared_ptr<Mailbox> mailbox_;
-  std::vector<std::shared_ptr<const ToolDefinition>> mcp_tools_;
+  mutable std::mutex mcp_refresh_mutex_;
+  mutable std::mutex mcp_mutex_;
+  mutable std::vector<McpServerEntry> mcp_servers_;
+  mutable std::vector<std::shared_ptr<const ToolDefinition>> mcp_tools_;
 };
 
 } // namespace pi::core

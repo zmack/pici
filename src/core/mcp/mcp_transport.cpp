@@ -340,12 +340,6 @@ void McpStdioTransport::write_message(const nlohmann::json &message) {
 
 nlohmann::json McpStdioTransport::call(const std::string &method,
                                        nlohmann::json params,
-                                       std::chrono::milliseconds timeout) {
-  return call(method, std::move(params), timeout, std::stop_token{});
-}
-
-nlohmann::json McpStdioTransport::call(const std::string &method,
-                                       nlohmann::json params,
                                        std::chrono::milliseconds timeout,
                                        std::stop_token stop_tok) {
   const auto id = next_id_.fetch_add(1);

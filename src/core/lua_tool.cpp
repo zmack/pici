@@ -311,6 +311,25 @@ void register_json_module(lua_State *L) {
 int push_agent_binding(
     lua_State *L,
     const std::function<nlohmann::json(const nlohmann::json &)> &fn,
+    const nlohmann::json &args, std::string_view domain);
+
+std::stop_token mailbox_stop_token(lua_State *L);
+
+// agents.wait blocks, so it alone receives the running tool's stop token.
+int push_agent_wait_binding(lua_State *L,
+                            const LuaHooks::AgentBindings::WaitCallback &fn,
+                            const nlohmann::json &args) {
+  std::function<nlohmann::json(const nlohmann::json &)> bound;
+  if (fn)
+    bound = [&fn, stop = mailbox_stop_token(L)](const nlohmann::json &a) {
+      return fn(a, stop);
+    };
+  return push_agent_binding(L, bound, args, "agents");
+}
+
+int push_agent_binding(
+    lua_State *L,
+    const std::function<nlohmann::json(const nlohmann::json &)> &fn,
     const nlohmann::json &args, std::string_view domain) {
   if (!fn) {
     lua_pushnil(L);
@@ -1614,8 +1633,8 @@ public:
 
   static int lua_pici_agents_wait(lua_State *L) {
     auto *impl = impl_from(L);
-    return push_agent_binding(L, impl->agent_bindings_.wait, agent_args(L),
-                              "agents");
+    return push_agent_wait_binding(L, impl->agent_bindings_.wait,
+                                   agent_args(L));
   }
 
   static int lua_pici_agents_close(lua_State *L) {
@@ -2430,7 +2449,7 @@ struct AgentEntry {
       LuaHooks::AgentBindings::*member;
 };
 
-constexpr std::array<AgentEntry, 8> kAgentEntries{{
+constexpr std::array<AgentEntry, 7> kAgentEntries{{
     {"spawn", &LuaHooks::AgentBindings::spawn},
     {"get", &LuaHooks::AgentBindings::get},
     {"list", &LuaHooks::AgentBindings::list},
@@ -2440,7 +2459,6 @@ constexpr std::array<AgentEntry, 8> kAgentEntries{{
     {"send", &LuaHooks::AgentBindings::send_message},
     {"follow_up", &LuaHooks::AgentBindings::follow_up},
     {"interrupt", &LuaHooks::AgentBindings::interrupt},
-    {"wait", &LuaHooks::AgentBindings::wait},
     {"close", &LuaHooks::AgentBindings::close},
 }};
 
@@ -2563,14 +2581,6 @@ int eval_agent_trampoline(lua_State *L) {
       return 2;
     }
     nlohmann::json args = eval_agent_args(L, binding_name);
-    if (std::string_view(binding_name) == "wait") {
-      auto clamp_error = eval_clamp_wait_timeout(L, args);
-      if (clamp_error) {
-        lua_pushnil(L);
-        lua_pushstring(L, clamp_error->c_str());
-        return 2;
-      }
-    }
     using AgentFn = std::function<nlohmann::json(const nlohmann::json &)>;
     return push_agent_binding(L, fn != nullptr ? *fn : AgentFn{}, args, domain);
   } catch (...) {
@@ -2578,6 +2588,33 @@ int eval_agent_trampoline(lua_State *L) {
     // (longjmp-based) -- push_agent_binding already catches
     // std::exception; this catches everything else (including a non-std
     // throw) the same way.
+    lua_pushnil(L);
+    lua_pushstring(L, "pici: internal error");
+    return 2;
+  }
+}
+
+// agents.wait: eval_agent_trampoline's shape plus the timeout clamp, with the
+// running tool's stop token forwarded (upvalue 1 = the WaitCallback).
+int eval_agent_wait_trampoline(lua_State *L) {
+  auto *fn = static_cast<const LuaHooks::AgentBindings::WaitCallback *>(
+      lua_touserdata(L, lua_upvalueindex(1)));
+  try {
+    if (!eval_binding_headroom_ok(L)) {
+      lua_pushnil(L);
+      lua_pushstring(L, "pici: memory budget too low for this call");
+      return 2;
+    }
+    nlohmann::json args = eval_agent_args(L, "wait");
+    auto clamp_error = eval_clamp_wait_timeout(L, args);
+    if (clamp_error) {
+      lua_pushnil(L);
+      lua_pushstring(L, clamp_error->c_str());
+      return 2;
+    }
+    return push_agent_wait_binding(
+        L, fn != nullptr ? *fn : LuaHooks::AgentBindings::WaitCallback{}, args);
+  } catch (...) {
     lua_pushnil(L);
     lua_pushstring(L, "pici: internal error");
     return 2;
@@ -2634,6 +2671,10 @@ void eval_push_agent_binding_table(lua_State *L,
     lua_pushcclosure(L, &eval_agent_trampoline, 3);
     lua_setfield(L, -2, entry.name);
   }
+  lua_pushlightuserdata(
+      L, const_cast<void *>(static_cast<const void *>(&agents.wait)));
+  lua_pushcclosure(L, &eval_agent_wait_trampoline, 1);
+  lua_setfield(L, -2, "wait");
 }
 
 void eval_push_session_binding_table(lua_State *L,

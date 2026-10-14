@@ -165,29 +165,27 @@ std::vector<Message> normalize_context(std::vector<Message> messages,
     result.push_back(std::move(message));
   }
 
-  // An assistant tool-call message without all of its results is not a valid
-  // provider context. Drop that incomplete final exchange.
-  while (!result.empty()) {
-    const auto *assistant = std::get_if<AssistantMessage>(&result.back());
+  // An assistant tool-call message must be followed by results for every call
+  // before any other message. Cut the context at the first exchange that is
+  // not (a truncation can keep a prefix of several results).
+  for (std::size_t i = 0; i < result.size(); ++i) {
+    const auto *assistant = std::get_if<AssistantMessage>(&result[i]);
     if (assistant == nullptr)
-      break;
-    std::set<std::string> ids;
+      continue;
+    std::set<std::string> pending;
     for (const auto &block : assistant->content)
       if (const auto *call = std::get_if<ToolCall>(&block))
-        ids.insert(call->id);
-    if (ids.empty())
-      break;
-    std::set<std::string> results;
-    for (std::size_t i = result.size(); i-- > 0;) {
-      if (const auto *tool = std::get_if<ToolResultMessage>(&result[i]))
-        results.insert(tool->tool_call_id);
-      if (std::holds_alternative<UserMessage>(result[i]))
+        pending.insert(call->id);
+    for (std::size_t j = i + 1; !pending.empty() && j < result.size(); ++j) {
+      const auto *tool = std::get_if<ToolResultMessage>(&result[j]);
+      if (tool == nullptr)
         break;
+      pending.erase(tool->tool_call_id);
     }
-    if (std::ranges::all_of(
-            ids, [&results](const auto &id) { return results.contains(id); }))
+    if (!pending.empty()) {
+      result.resize(i);
       break;
-    result.pop_back();
+    }
   }
   return result;
 }
@@ -382,7 +380,11 @@ AgentTaskSnapshot TaskTree::snapshot(const std::shared_ptr<Task> &task) const {
     result.task_path = task->task_path;
     result.parent_id = task->parent_id;
     result.task_name = task->task_name;
-    result.status = task->status;
+    // The root pseudo-task's state lives in its owning Agent.
+    result.status = task->session == nullptr
+                        ? (owner_.is_streaming() ? AgentTaskStatusKind::running
+                                                 : AgentTaskStatusKind::idle)
+                        : task->status;
     result.result = task->result;
     result.child_count = task->children.size();
     result.queued_message_count = task->mailbox.size() + task->work.size();
@@ -657,8 +659,8 @@ TaskTree::reserve_spawn(const SpawnAgentRequest &request) {
           "parent child limit reached (" +
               std::to_string(parent->children.size() + pending_children) + "/" +
               std::to_string(limits_.max_direct_children) +
-              " direct children); call wait_agent or close_agent on an "
-              "existing child before spawning more");
+              " direct children); close_agent a finished child to free a slot "
+              "(wait_agent only observes status and frees nothing)");
     for (const auto &child_id : parent->children) {
       const auto child = tasks_.at(child_id);
       if (child->task_name == request.task_name)
@@ -671,7 +673,8 @@ TaskTree::reserve_spawn(const SpawnAgentRequest &request) {
   }
   if (tasks_.size() - 1 + pending_spawns_ >= limits_.max_resident_tasks)
     throw AgentTaskError(AgentTaskErrorKind::residency_limit,
-                         "resident child task limit reached");
+                         "resident child task limit reached; close_agent a "
+                         "finished child to free a slot");
   if (active_executions_ >= limits_.max_active_executions)
     throw AgentTaskError(AgentTaskErrorKind::execution_limit,
                          "active child execution limit reached");
@@ -698,6 +701,10 @@ TaskTree::reserve_spawn(const SpawnAgentRequest &request) {
 }
 
 AgentTaskSnapshot TaskTree::spawn(const SpawnAgentRequest &request) {
+  if (request.allow_subagents)
+    throw AgentTaskError(AgentTaskErrorKind::invalid_state,
+                         "allow_subagents is not supported: children cannot "
+                         "delegate; the caller spawns under a parent_id");
   if (!valid_task_name(request.task_name))
     throw AgentTaskError(
         AgentTaskErrorKind::invalid_context,
@@ -852,8 +859,18 @@ void TaskTree::execute_work(const std::shared_ptr<Task> &task,
   std::size_t output_bytes = 0;
   bool saw_text_delta = false;
   std::optional<AssistantMessage> final_message;
-  auto callback = [this, task, &result, &aborted, &output_bytes,
-                   &saw_text_delta, &final_message](const AgentEvent &event) {
+  // Single bounded assembly path for streamed deltas and the nonstreamed
+  // final message alike.
+  auto append_capped = [this, &result, &output_bytes](std::string_view text) {
+    const auto remaining = limits_.max_output_bytes - output_bytes;
+    const auto taken = std::min(remaining, text.size());
+    result.text.append(text.data(), taken);
+    output_bytes += taken;
+    if (text.size() > taken)
+      result.truncated = true;
+  };
+  auto callback = [this, task, &result, &aborted, &saw_text_delta,
+                   &final_message, &append_capped](const AgentEvent &event) {
     emit(ChildAgentEvent{.task_id = task->id, .event = event});
     if (std::holds_alternative<TurnAbortedEvent>(event)) {
       aborted = true;
@@ -863,16 +880,7 @@ void TaskTree::execute_work(const std::shared_ptr<Task> &task,
       if (const auto *delta = std::get_if<AssistantMessageTextDeltaEvent>(
               &update->assistant_message_event)) {
         saw_text_delta = true;
-        if (output_bytes < limits_.max_output_bytes) {
-          const auto remaining = limits_.max_output_bytes - output_bytes;
-          result.text.append(delta->delta.data(),
-                             std::min(remaining, delta->delta.size()));
-          output_bytes += std::min(remaining, delta->delta.size());
-          if (delta->delta.size() > remaining)
-            result.truncated = true;
-        } else {
-          result.truncated = true;
-        }
+        append_capped(delta->delta);
       }
     } else if (const auto *end = std::get_if<MessageEndEvent>(&event)) {
       if (const auto *assistant =
@@ -887,10 +895,8 @@ void TaskTree::execute_work(const std::shared_ptr<Task> &task,
   };
 
   const auto run = task->session->run_messages(std::move(messages), callback);
-  if (!saw_text_delta && final_message)
-    result.text = final_message->content.empty()
-                      ? std::string{}
-                      : assistant_text(*final_message);
+  if (!saw_text_delta && final_message && !final_message->content.empty())
+    append_capped(assistant_text(*final_message));
   if (final_message) {
     result.stop_reason = final_message->stop_reason;
     result.usage = final_message->usage;
@@ -1248,6 +1254,10 @@ AgentTaskSnapshot TaskTree::follow_up(const AgentTaskId &target,
     task = find_task_locked(target);
     if (!task)
       throw AgentTaskError(AgentTaskErrorKind::not_found, "task not found");
+    // The root pseudo-task has no runner; its Agent is driven by its frontend.
+    if (task->session == nullptr)
+      throw AgentTaskError(AgentTaskErrorKind::invalid_state,
+                           "the root task cannot be followed up; use steer");
     std::scoped_lock task_lock(task->mutex);
     if (task->status == AgentTaskStatusKind::closing ||
         task->status == AgentTaskStatusKind::shutdown)

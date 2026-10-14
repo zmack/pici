@@ -63,6 +63,23 @@
 # cwd     = "/opt/mcp"
 # env     = { MCP_LOG_LEVEL = "warn" }
 # call_timeout_ms = 30000
+#
+# A server with `url` instead of `command` uses the streamable-HTTP
+# transport (http:// or https://; no credentials inside the URL, redirects
+# are not followed). `bearer_token_env` NAMES an environment variable holding
+# a bearer token -- the token itself never goes in this file, the tool
+# catalog, transcripts or logs. `headers` is for non-secret headers only
+# (Authorization/Cookie/... are rejected). A dead stdio child or an expired
+# HTTP session is reconnected on the next tool call or session start (at
+# most once per second), and a server's tools/list_changed notification
+# re-lists its tools for sessions created afterwards. MCP tools stay
+# unavailable to child sessions.
+#
+# [[mcp_servers]]
+# name             = "remote"
+# url              = "https://mcp.example.com/mcp"
+# bearer_token_env = "REMOTE_MCP_TOKEN"
+# headers          = { X-Tenant = "acme" }
 
 [agent]
 # system_prompt = "You are a helpful coding assistant."  # --system-prompt

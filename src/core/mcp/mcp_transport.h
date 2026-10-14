@@ -82,15 +82,49 @@ public:
   using std::runtime_error::runtime_error;
 };
 
-class McpStdioTransport {
+// Transport-neutral surface McpClient drives. McpStdioTransport (child
+// process) and McpHttpTransport (streamable HTTP, mcp_http_transport.h) are
+// the two Adapters; callers never see which one is behind a client.
+class McpTransport {
+public:
+  virtual ~McpTransport() = default;
+
+  // Sends a request and returns its "result" field. Throws TransportError on
+  // a dead transport, JSON-RPC error response, malformed reply or timeout.
+  // `stop_tok`, when stop-capable, races the wait against cancellation.
+  virtual nlohmann::json call(const std::string &method, nlohmann::json params,
+                              std::chrono::milliseconds timeout,
+                              std::stop_token stop_tok) = 0;
+
+  nlohmann::json call(const std::string &method, nlohmann::json params,
+                      std::chrono::milliseconds timeout) {
+    return call(method, std::move(params), timeout, std::stop_token{});
+  }
+
+  // Fire-and-forget; throws TransportError on a dead transport.
+  virtual void notify(const std::string &method, nlohmann::json params) = 0;
+
+  virtual void set_notification_callback(NotificationCallback cb) = 0;
+
+  // False once the transport is known unusable (child gone, reader dead,
+  // HTTP session expired). McpClient::reconnect() replaces such a transport.
+  virtual bool is_alive() const = 0;
+
+  // Diagnostic tail for failed calls; empty when the transport has none.
+  virtual std::string recent_stderr() const { return {}; }
+};
+
+class McpStdioTransport final : public McpTransport {
 public:
   explicit McpStdioTransport(McpServerProcessConfig config);
-  ~McpStdioTransport();
+  ~McpStdioTransport() override;
 
   McpStdioTransport(const McpStdioTransport &) = delete;
   McpStdioTransport &operator=(const McpStdioTransport &) = delete;
   McpStdioTransport(McpStdioTransport &&) = delete;
   McpStdioTransport &operator=(McpStdioTransport &&) = delete;
+
+  using McpTransport::call;
 
   // Sends a request, waits up to `timeout` for the matching response, and
   // returns its "result" field. Throws TransportError on: a dead transport
@@ -98,9 +132,6 @@ public:
   // malformed/absent id, a JSON-RPC error response, or a timeout. Safe to
   // call concurrently from multiple threads -- the write path is
   // serialized and each call gets its own request id / pending-map slot.
-  nlohmann::json call(const std::string &method, nlohmann::json params,
-                      std::chrono::milliseconds timeout);
-
   // Same as above, but also races the wait against `stop_tok`: if it is
   // stopped before the timeout elapses or a response arrives, this
   // best-effort sends `notifications/cancelled` (carrying the request id
@@ -116,20 +147,20 @@ public:
   // std::stop_token{}.
   nlohmann::json call(const std::string &method, nlohmann::json params,
                       std::chrono::milliseconds timeout,
-                      std::stop_token stop_tok);
+                      std::stop_token stop_tok) override;
 
   // Sends a notification (no id, no reply expected, no pending-map entry).
   // Throws TransportError on a dead transport, same as call().
-  void notify(const std::string &method, nlohmann::json params);
+  void notify(const std::string &method, nlohmann::json params) override;
 
-  void set_notification_callback(NotificationCallback cb);
+  void set_notification_callback(NotificationCallback cb) override;
 
   // True if the child appears to still be running. Never blocks: uses
   // waitpid(..., WNOHANG) and caches the reaped status once observed, so
   // repeated/concurrent calls (including one racing the destructor's own
   // final reap) never re-issue waitpid on an already-reaped pid (which
   // would return ECHILD and could otherwise be mistaken for a new signal).
-  bool is_alive() const;
+  bool is_alive() const override;
 
   pid_t pid() const { return pid_; }
 
@@ -139,7 +170,7 @@ public:
   // far even while the child is still running -- there is no "final"
   // snapshot distinct from this. Intended for surfacing on a failed call
   // (see McpTool::execute()), never printed directly to pici's own stderr.
-  std::string recent_stderr() const;
+  std::string recent_stderr() const override;
 
   // Testing/diagnostic hook: the request id the NEXT call() will use.
   // Exists so tests can deliberately construct an id collision between a

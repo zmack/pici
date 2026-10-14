@@ -193,7 +193,7 @@ TEST(McpTool, SanitizesToolNameToProviderSafeCharacterSet) {
   EXPECT_LE(name.size(), 64u);
 }
 
-TEST(McpTool, ExecuteReturnsErrorResultImmediatelyWhenTransportAlreadyDead) {
+TEST(McpTool, ExecuteReconnectsWhenTransportAlreadyDead) {
   auto client = make_initialized_client("dead-server");
   auto tools = client->list_tools(std::chrono::milliseconds(2000));
   std::shared_ptr<const ToolDefinition> tool;
@@ -204,24 +204,18 @@ TEST(McpTool, ExecuteReturnsErrorResultImmediatelyWhenTransportAlreadyDead) {
   ASSERT_NE(tool, nullptr);
 
   // Kill the server WITHOUT going through the tool interface (no in-flight
-  // call), then confirm execute() notices via is_alive() and refuses to
-  // even attempt a call.
-  client->transport().notify("test/crash", nlohmann::json::object());
+  // call), then confirm execute() notices via is_alive() and respawns it.
+  client->transport()->notify("test/crash", nlohmann::json::object());
   ASSERT_TRUE(pi::test::wait_until([&] { return !client->is_alive(); },
                                    std::chrono::milliseconds(2000),
                                    "server exiting after test/crash"));
 
-  const auto start = std::chrono::steady_clock::now();
   auto result = tool->execute("call-dead", R"({"text":"hello"})");
-  const auto elapsed = std::chrono::steady_clock::now() - start;
-
   ASSERT_NE(result, nullptr);
-  EXPECT_TRUE(result->is_error());
-  EXPECT_NE(result->content().find("no longer running"), std::string::npos)
-      << "actual content: " << result->content();
-  // No call was attempted at all -- this should return near-instantly, not
-  // pay for a write/wait cycle against a dead transport.
-  EXPECT_LT(elapsed, std::chrono::milliseconds(50));
+  EXPECT_FALSE(result->is_error()) << result->content();
+  EXPECT_EQ(result->content(), "hello");
+  EXPECT_TRUE(client->is_alive());
+  EXPECT_TRUE(client->tools_stale());
 }
 
 TEST(McpTool, ExecuteResultDetailsIncludeCapturedStderrOnServerCrash) {

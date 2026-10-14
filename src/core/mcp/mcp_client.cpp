@@ -9,7 +9,78 @@
 
 namespace pi::core::mcp {
 
+McpClient::McpClient(std::string server_name,
+                     McpServerProcessConfig process_config,
+                     std::optional<std::chrono::milliseconds> call_timeout)
+    : McpClient(std::move(server_name),
+                TransportFactory([config = std::move(process_config)]() {
+                  return std::make_unique<McpStdioTransport>(config);
+                }),
+                call_timeout) {}
+
+McpClient::McpClient(std::string server_name, TransportFactory factory,
+                     std::optional<std::chrono::milliseconds> call_timeout)
+    : server_name_(std::move(server_name)), factory_(std::move(factory)),
+      call_timeout_(call_timeout) {
+  transport_ = factory_();
+  install_notification_hook(*transport_);
+}
+
+std::shared_ptr<McpTransport> McpClient::transport() const {
+  std::lock_guard<std::mutex> lock(transport_mutex_);
+  return transport_;
+}
+
+void McpClient::install_notification_hook(McpTransport &transport) {
+  transport.set_notification_callback(
+      [stale = tools_stale_](const std::string &method,
+                             const nlohmann::json &) {
+        if (method == "notifications/tools/list_changed")
+          stale->store(true);
+      });
+}
+
 void McpClient::initialize(std::chrono::milliseconds timeout) {
+  handshake(*transport(), timeout);
+  initialized_.store(true);
+}
+
+bool McpClient::reconnect(std::string *error,
+                          std::chrono::milliseconds timeout) {
+  std::lock_guard<std::mutex> serialize(reconnect_mutex_);
+  if (transport()->is_alive() && initialized_.load())
+    return true;
+
+  const auto now = std::chrono::steady_clock::now();
+  if (last_reconnect_failure_.time_since_epoch().count() != 0 &&
+      now - last_reconnect_failure_ < backoff_) {
+    if (error != nullptr)
+      *error = last_reconnect_error_;
+    return false;
+  }
+
+  try {
+    auto fresh = std::shared_ptr<McpTransport>(factory_());
+    install_notification_hook(*fresh);
+    handshake(*fresh, timeout);
+    {
+      std::lock_guard<std::mutex> lock(transport_mutex_);
+      transport_ = std::move(fresh);
+    }
+    initialized_.store(true);
+    tools_stale_->store(true);
+    return true;
+  } catch (const std::exception &err) {
+    last_reconnect_failure_ = std::chrono::steady_clock::now();
+    last_reconnect_error_ = err.what();
+    if (error != nullptr)
+      *error = last_reconnect_error_;
+    return false;
+  }
+}
+
+void McpClient::handshake(McpTransport &transport,
+                          std::chrono::milliseconds timeout) {
   const nlohmann::json params{
       {"protocolVersion", "2024-11-05"},
       // Phase 1 declares no sampling/roots/elicitation capability. This
@@ -25,7 +96,7 @@ void McpClient::initialize(std::chrono::milliseconds timeout) {
   nlohmann::json response;
   try {
     response =
-        transport_.call(std::string(methods::kInitialize), params, timeout);
+        transport.call(std::string(methods::kInitialize), params, timeout);
   } catch (const std::exception &err) {
     throw std::runtime_error(std::string("mcp initialize failed: ") +
                              err.what());
@@ -41,9 +112,8 @@ void McpClient::initialize(std::chrono::milliseconds timeout) {
   // Notification: no reply expected. If the transport is already dead this
   // throws TransportError, which is a std::runtime_error and propagates as
   // the same "initialize failed" family of error.
-  transport_.notify(std::string(methods::kInitialized),
-                    nlohmann::json::object());
-  initialized_ = true;
+  transport.notify(std::string(methods::kInitialized),
+                   nlohmann::json::object());
 }
 
 namespace {
@@ -71,8 +141,11 @@ bool schema_is_loadable(const nlohmann::json &input_schema) {
 
 std::vector<std::shared_ptr<const ToolDefinition>>
 McpClient::list_tools(std::chrono::milliseconds timeout) {
-  const auto response = transport_.call(std::string(methods::kToolsList),
-                                        nlohmann::json::object(), timeout);
+  // Cleared before the request so a list_changed arriving mid-listing marks
+  // the result stale again instead of being lost.
+  tools_stale_->store(false);
+  const auto response = transport()->call(std::string(methods::kToolsList),
+                                          nlohmann::json::object(), timeout);
   if (!response.is_object() || !response.contains("tools") ||
       !response.at("tools").is_array()) {
     throw std::runtime_error(
@@ -131,8 +204,8 @@ nlohmann::json McpClient::call_tool(const std::string &tool_name,
       {"name", tool_name},
       {"arguments", std::move(arguments)},
   };
-  return transport_.call(std::string(methods::kToolsCall), params, timeout,
-                         std::move(stop_tok));
+  return transport()->call(std::string(methods::kToolsCall), params, timeout,
+                           std::move(stop_tok));
 }
 
 } // namespace pi::core::mcp
