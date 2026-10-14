@@ -21,9 +21,24 @@ struct McpServerConfig {
   // (see mcp_tool.h's sanitize_mcp_tool_name).
   std::string name;
 
-  // Required: the command to spawn (resolved against PATH the same way
-  // McpStdioTransport::spawn already does -- see mcp_transport.cpp).
+  // Stdio transport: the command to spawn (resolved against PATH the same
+  // way McpStdioTransport::spawn already does -- see mcp_transport.cpp).
+  // Exactly one of `command` and `url` is set (config parsing enforces it).
   std::string command;
+
+  // Streamable-HTTP transport: the MCP endpoint (http:// or https://,
+  // no userinfo). When set, args/env/cwd are unused.
+  std::string url;
+
+  // Extra non-secret request headers for the HTTP transport. Authentication-
+  // owned headers (Authorization, Cookie, ...) are rejected at parse time.
+  std::map<std::string, std::string> headers;
+
+  // Name of the environment variable holding the bearer token for the HTTP
+  // transport. Only the NAME lives in config; the value is read when the
+  // transport is built and held only inside McpHttpTransport -- it never
+  // enters the config, tool catalog, transcripts or logs.
+  std::string bearer_token_env;
 
   std::vector<std::string> args;
 

@@ -517,17 +517,42 @@ parse_mcp_server(std::size_t index, const toml::table &table, Config &config) {
   const auto path = "mcp_servers." + *name;
 
   auto command = read_string(table, "command", path, config);
-  if (!command || command->empty()) {
-    diagnostic(config, true, path, "command is required and must not be empty");
+  auto url = read_string(table, "url", path, config);
+  const bool has_command = command && !command->empty();
+  const bool has_url = url && !url->empty();
+  if (has_command == has_url) {
+    diagnostic(config, true, path,
+               "exactly one of command (stdio) or url (streamable HTTP) is "
+               "required");
     return std::nullopt;
   }
 
   McpServerConfig server;
   server.name = std::move(*name);
-  server.command = std::move(*command);
-  server.args = parse_string_array(table, "args", path, config);
-  parse_env_table(table, path, server.env, config);
-  server.cwd = read_string(table, "cwd", path, config);
+  if (has_url) {
+    server.url = std::move(*url);
+    if (!server.url.starts_with("http://") &&
+        !server.url.starts_with("https://")) {
+      diagnostic(config, true, path + ".url",
+                 "must start with http:// or https://");
+      return std::nullopt;
+    }
+    if (server.url.substr(0, server.url.find('/', 8)).find('@') !=
+        std::string::npos) {
+      diagnostic(config, true, path + ".url",
+                 "credentials in the url are not allowed; use "
+                 "bearer_token_env");
+      return std::nullopt;
+    }
+    parse_headers(table, path, server.headers, config);
+    if (auto token_env = read_string(table, "bearer_token_env", path, config))
+      server.bearer_token_env = std::move(*token_env);
+  } else {
+    server.command = std::move(*command);
+    server.args = parse_string_array(table, "args", path, config);
+    parse_env_table(table, path, server.env, config);
+    server.cwd = read_string(table, "cwd", path, config);
+  }
   server.enabled = read_boolean(table, "enabled", path, config).value_or(true);
   if (const auto timeout =
           read_positive_integer(table, "call_timeout_ms", path, config))

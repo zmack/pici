@@ -41,6 +41,8 @@ PiciProcess                         process composition root
 +-- MailboxStore                    durable entry/presence operations
 +-- CredentialStore                 durable credential operations
 +-- adapter implementations         reusable process-owned implementations
+|   +-- McpClient[0..N]             one per enabled MCP server (Adapter)
+|       +-- McpTransport            stdio child or streamable-HTTP, replaceable
 +-- SessionRuntime[0..N]            one live durable-session activation
     +-- Agent                       one live executor
     |   +-- AgentState              mutable execution state
@@ -57,6 +59,12 @@ do not imply ownership. In particular:
 
 - A provider owns its three binding choices, not necessarily the shared
   adapter implementation selected by each binding.
+- `McpClient` is a process-owned Adapter over one MCP server. It is the sole
+  live authority for that connection: it replaces a dead transport itself
+  (`reconnect()`), and `PiciProcess` only snapshots the tools it lists.
+  Bearer tokens are resolved from a named environment variable straight into
+  the HTTP transport; they never enter config values, the tool catalog,
+  transcripts or logs. MCP tools stay `child_safe = false`.
 - Process-owned stores remain durable authorities; aggregates use them but do
   not contain or independently create them.
 - OAuth is an authentication adapter selected by a provider; it is not a

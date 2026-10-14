@@ -46,7 +46,7 @@ private:
 // success path, never printed to pici's own stderr directly (see
 // McpStdioTransport::recent_stderr()'s doc comment).
 std::optional<std::string> stderr_details(const McpClient &client) {
-  auto tail = client.transport().recent_stderr();
+  auto tail = client.transport()->recent_stderr();
   if (tail.empty())
     return std::nullopt;
   return nlohmann::json{{"stderr_tail", std::move(tail)}}.dump();
@@ -167,17 +167,17 @@ McpTool::execute(std::string_view call_id, std::string_view args_json,
   (void)call_id;
   (void)on_update;
 
-  // "Mark unavailable, no auto-reconnect" (see McpClient::is_alive()'s doc
-  // comment): if the transport is already known dead, fail immediately with
-  // a clear message instead of attempting a write at all. This is belt-and-
-  // suspenders on top of the transport's own EPIPE/reader-death handling,
-  // which already makes a dead-transport write safe -- this just avoids the
-  // pointless attempt and gives a clearer error than a generic "write
-  // failed".
+  // A transport known dead (child exited, HTTP session expired) is replaced
+  // before the call; reconnect() is throttled, so a hard-down server fails
+  // fast here instead of being retried by every call.
   if (!client_->is_alive()) {
-    return error_result("MCP server \"" + server_name_ +
-                            "\" is no longer running",
-                        stderr_details(*client_));
+    std::string reconnect_error;
+    if (!client_->reconnect(&reconnect_error)) {
+      return error_result(
+          "MCP server \"" + server_name_ +
+              "\" is unavailable and reconnect failed: " + reconnect_error,
+          stderr_details(*client_));
+    }
   }
 
   auto args = nlohmann::json::parse(args_json, nullptr, false);

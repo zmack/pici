@@ -297,6 +297,62 @@ call_timeout_ms = 15000
   EXPECT_EQ(server.call_timeout_ms.value(), std::int64_t(15000));
 }
 
+TEST_F(ConfigTest, McpServerParsesStreamableHttpTransport) {
+  auto p = write_toml("pici_mcp_http.toml", R"toml(
+[[mcp_servers]]
+name             = "remote"
+url              = "https://mcp.example.test/v1/mcp"
+bearer_token_env = "REMOTE_MCP_TOKEN"
+headers          = { X-Tenant = "acme" }
+)toml");
+  auto config = load_config_document(p);
+  EXPECT_TRUE(!config.has_errors());
+  ASSERT_EQ(config.mcp_servers.size(), std::size_t(1));
+  const auto &server = config.mcp_servers.front();
+  EXPECT_EQ(server.url, std::string("https://mcp.example.test/v1/mcp"));
+  EXPECT_EQ(server.bearer_token_env, std::string("REMOTE_MCP_TOKEN"));
+  EXPECT_EQ(server.headers.at("X-Tenant"), std::string("acme"));
+  EXPECT_TRUE(server.command.empty());
+}
+
+TEST_F(ConfigTest, McpServerHttpRejectsBadCombinationsAndCredentials) {
+  auto both = write_toml("pici_mcp_both.toml", R"toml(
+[[mcp_servers]]
+name    = "x"
+command = "npx"
+url     = "https://mcp.example.test/mcp"
+)toml");
+  auto config = load_config_document(both);
+  EXPECT_TRUE(config.has_errors());
+  EXPECT_TRUE(config.mcp_servers.empty());
+
+  auto userinfo = write_toml("pici_mcp_userinfo.toml", R"toml(
+[[mcp_servers]]
+name = "x"
+url  = "https://user:pw@mcp.example.test/mcp"
+)toml");
+  config = load_config_document(userinfo);
+  EXPECT_TRUE(config.has_errors());
+  EXPECT_TRUE(config.mcp_servers.empty());
+
+  auto scheme = write_toml("pici_mcp_scheme.toml", R"toml(
+[[mcp_servers]]
+name = "x"
+url  = "ftp://mcp.example.test/mcp"
+)toml");
+  config = load_config_document(scheme);
+  EXPECT_TRUE(config.has_errors());
+
+  auto auth_header = write_toml("pici_mcp_auth_header.toml", R"toml(
+[[mcp_servers]]
+name    = "x"
+url     = "https://mcp.example.test/mcp"
+headers = { Authorization = "Bearer abc" }
+)toml");
+  config = load_config_document(auth_header);
+  EXPECT_TRUE(config.has_errors());
+}
+
 TEST_F(ConfigTest, McpServerMissingCommandIsDiagnosticError) {
   auto p = write_toml("pici_mcp_missing_command.toml", R"toml(
 [[mcp_servers]]

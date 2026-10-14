@@ -1,8 +1,10 @@
 #pragma once
 
-// McpClient: thin wrapper owning a persistent McpStdioTransport plus the
-// MCP initialize/initialized handshake, plus (Phase 2) tool discovery
-// (list_tools()) and invocation (call_tool()).
+// McpClient: thin wrapper owning a persistent McpTransport (stdio child or
+// streamable HTTP) plus the MCP initialize/initialized handshake, tool
+// discovery (list_tools()), invocation (call_tool()), and reconnect() --
+// which rebuilds the transport from its factory and re-handshakes when the
+// current one has died.
 //
 // list_tools() returns pi::core::ToolDefinition (not the concrete McpTool
 // type) deliberately: this header must not depend on core/mcp/mcp_tool.h,
@@ -17,8 +19,11 @@
 #include "core/mcp/mcp_transport.h"
 #include "core/message_types.h"
 
+#include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
@@ -45,6 +50,8 @@ inline constexpr std::chrono::milliseconds kDefaultMcpCallTimeout{60000};
 // test_mcp_tool.cpp's fixtures.
 class McpClient : public std::enable_shared_from_this<McpClient> {
 public:
+  using TransportFactory = std::function<std::unique_ptr<McpTransport>()>;
+
   // `server_name` is this server's configured name (McpServerConfig::name).
   // McpClient itself doesn't otherwise need it (it's a transport-level
   // concept, not a protocol one), but list_tools() needs it to qualify
@@ -55,9 +62,13 @@ public:
   // use kDefaultMcpCallTimeout" (see effective_call_timeout()).
   McpClient(
       std::string server_name, McpServerProcessConfig process_config,
-      std::optional<std::chrono::milliseconds> call_timeout = std::nullopt)
-      : server_name_(std::move(server_name)),
-        transport_(std::move(process_config)), call_timeout_(call_timeout) {}
+      std::optional<std::chrono::milliseconds> call_timeout = std::nullopt);
+
+  // `factory` builds a fresh, un-handshaken transport; it is called once
+  // here and again by every reconnect(). It may throw (e.g. spawn failure).
+  McpClient(
+      std::string server_name, TransportFactory factory,
+      std::optional<std::chrono::milliseconds> call_timeout = std::nullopt);
   ~McpClient() = default;
 
   McpClient(const McpClient &) = delete;
@@ -71,25 +82,15 @@ public:
   void initialize(
       std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
-  McpStdioTransport &transport() { return transport_; }
-  const McpStdioTransport &transport() const { return transport_; }
+  // The current transport. A snapshot: reconnect() may replace it, and a
+  // caller still holding the old one keeps it alive until it lets go.
+  std::shared_ptr<McpTransport> transport() const;
 
-  // True if the underlying transport's child process still appears to be
-  // running. McpTool::execute() checks this before issuing a call (belt-
-  // and-suspenders on top of the transport's own EPIPE/reader-death
-  // handling: this just avoids attempting a call at all, and gives a
-  // clearer error message, once a server is already known dead).
-  //
-  // v1 deliberately does NOT reconnect a dead server, and does NOT react to
-  // a live server's `notifications/tools/list_changed` -- both are the same
-  // underlying question ("how should pici react to a server's tool set
-  // changing after startup: a crash-then-restart, or a live add/remove") and
-  // are out of scope together, not by oversight. Once a server is dead, its
-  // tools stay registered (so they remain visible/nameable) but every call
-  // to them fails cleanly via is_alive() below; there is no path back to
-  // "alive" for an McpClient short of restarting the whole pici process.
-  bool is_alive() const { return transport_.is_alive(); }
-  bool is_initialized() const { return initialized_; }
+  // True if the current transport still appears usable (child running /
+  // HTTP session not expired). McpTool::execute() checks this before a call
+  // and calls reconnect() when it is false.
+  bool is_alive() const { return transport()->is_alive(); }
+  bool is_initialized() const { return initialized_.load(); }
   const std::string &server_name() const { return server_name_; }
 
   // The timeout McpTool::execute() should use for a tools/call against this
@@ -124,10 +125,47 @@ public:
             std::chrono::milliseconds timeout = kDefaultMcpCallTimeout,
             std::stop_token stop_tok = std::stop_token{});
 
+  // Replaces a dead transport: builds a new one from the factory,
+  // handshakes it, installs it, and marks the tool list stale (the server may
+  // have restarted with a different tool set). Returns true if the client is
+  // usable afterwards (also true, with no work done, when the transport is
+  // still alive and initialized). Returns false and fills `error` (never
+  // containing credentials) on failure. Concurrent callers serialize; a
+  // failed attempt is not retried for kReconnectBackoff, so a hard-down
+  // server is not hammered by every tool call.
+  bool reconnect(
+      std::string *error = nullptr,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+
+  // True when the server sent notifications/tools/list_changed, or the
+  // client reconnected, since the last list_tools(). PiciProcess uses it to
+  // decide which servers to re-list.
+  bool tools_stale() const { return tools_stale_->load(); }
+
+  static constexpr std::chrono::milliseconds kReconnectBackoff{1000};
+
+  // Test hook: shortens kReconnectBackoff-style throttling to zero.
+  void set_reconnect_backoff_for_testing(std::chrono::milliseconds backoff) {
+    backoff_ = backoff;
+  }
+
 private:
+  void handshake(McpTransport &transport, std::chrono::milliseconds timeout);
+  void install_notification_hook(McpTransport &transport);
+
   std::string server_name_;
-  McpStdioTransport transport_;
-  bool initialized_{false};
+  TransportFactory factory_;
+  mutable std::mutex transport_mutex_;
+  std::shared_ptr<McpTransport> transport_;
+  std::mutex reconnect_mutex_;
+  std::chrono::steady_clock::time_point last_reconnect_failure_{};
+  std::chrono::milliseconds backoff_{kReconnectBackoff};
+  std::string last_reconnect_error_;
+  std::atomic<bool> initialized_{false};
+  // Shared with the transport's notification callback, which may outlive a
+  // reconnect's old transport but never needs the client itself.
+  std::shared_ptr<std::atomic<bool>> tools_stale_{
+      std::make_shared<std::atomic<bool>>(false)};
   std::optional<std::chrono::milliseconds> call_timeout_;
 };
 

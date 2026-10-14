@@ -7,6 +7,7 @@
 #include "core/mcp/mcp_config.h"
 #include "core/models.h"
 #include "core/session/session_record.h"
+#include "support/fake_http_mcp_server.h"
 #include "support/gtest_helpers.h"
 
 #include <gtest/gtest.h>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 #ifndef FAKE_MCP_SERVER_BINARY
@@ -251,20 +253,22 @@ TEST(PiciProcess, McpToolsBecomeUnavailableAfterServerCrashWithoutAffectingOther
   EXPECT_FALSE(good_result->is_error());
   EXPECT_EQ(good_result->content(), "still-fine");
 
-  // Subsequent calls to the crashed server's tool must return a CLEAN
-  // error immediately (via McpTool::execute()'s is_alive() pre-check), not
-  // hang -- and must NOT succeed, which would only happen if something had
-  // reconnected/respawned the server. v1 deliberately never does (see
-  // PiciProcess::mcp_tools()'s doc comment) -- repeating the call proves
-  // it, since a respawn (if one existed) would eventually let a later call
-  // through.
-  for (int attempt = 0; attempt < 3; ++attempt) {
+  // The next calls to the crashed server's tool reconnect (respawn + new
+  // handshake) transparently. The dying child's EOF may not have been
+  // observed yet, so allow a few attempts; each failure must be a clean
+  // error, never a hang.
+  std::shared_ptr<pi::core::ToolResult> recovered;
+  for (int attempt = 0; attempt < 50; ++attempt) {
     auto result = crashy_tool->execute("call-crash-retry", R"({"text":"x"})");
     ASSERT_NE(result, nullptr);
-    EXPECT_TRUE(result->is_error());
-    EXPECT_NE(result->content().find("no longer running"), std::string::npos)
-        << "attempt " << attempt << ": " << result->content();
+    if (!result->is_error()) {
+      recovered = std::move(result);
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
+  ASSERT_NE(recovered, nullptr) << "crashed server was never reconnected";
+  EXPECT_EQ(recovered->content(), "x");
 
   // "good" keeps working the whole time -- one crashed server never
   // affects any other configured server.
@@ -298,4 +302,51 @@ TEST(PiciProcess, McpServerHandshakesRunConcurrentlyNotSerially) {
       << "ms, expected well under the "
       << (kDelayMs * 2)
       << "ms a fully-serial (sum-of-delays) handshake would take";
+}
+
+TEST(PiciProcess, HttpMcpServerToolsReconnectAndRefresh) {
+  pi::test::FakeHttpMcpServer server;
+  auto config = two_provider_config();
+  pi::core::mcp::McpServerConfig remote;
+  remote.name = "remote";
+  remote.url = server.url();
+  config.mcp_servers = {remote};
+  pi::core::PiciProcess process(config);
+
+  auto tools = process.mcp_tools();
+  ASSERT_EQ(tools.size(), 1u);
+  EXPECT_EQ(tools[0]->name(), "remote__echo");
+  EXPECT_FALSE(tools[0]->capabilities().child_safe);
+  auto first = tools[0]->execute("c1", R"({"text":"one"})");
+  EXPECT_EQ(first->content(), "one");
+
+  // The server loses its session and grows a tool. The next call fails
+  // once, then the following one reconnects and succeeds.
+  server.set_session("sess-2");
+  server.set_tools({"echo", "extra"});
+  EXPECT_TRUE(tools[0]->execute("c2", R"({"text":"two"})")->is_error());
+  auto recovered = tools[0]->execute("c3", R"({"text":"three"})");
+  EXPECT_FALSE(recovered->is_error()) << recovered->content();
+  EXPECT_EQ(recovered->content(), "three");
+  EXPECT_EQ(server.initialize_count(), 2);
+
+  // Reconnect marked the server stale, so the next snapshot re-lists it.
+  const auto refreshed = process.mcp_tools();
+  ASSERT_EQ(refreshed.size(), 2u);
+  EXPECT_EQ(refreshed[1]->name(), "remote__extra");
+}
+
+TEST(PiciProcess, HttpMcpServerDownAtStartupIsRetriedOnRefresh) {
+  std::string url;
+  {
+    pi::test::FakeHttpMcpServer gone;
+    url = gone.url();
+  }
+  auto config = two_provider_config();
+  pi::core::mcp::McpServerConfig remote;
+  remote.name = "remote";
+  remote.url = url;
+  config.mcp_servers = {remote};
+  pi::core::PiciProcess process(config);
+  EXPECT_TRUE(process.mcp_tools().empty());
 }
