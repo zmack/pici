@@ -1502,7 +1502,8 @@ private:
   static void
   bind_agent_wait(core::LuaHooks::AgentInfo &info,
                   const std::shared_ptr<core::TaskTree> &task_manager) {
-    info.agents.wait = [task_manager](const nlohmann::json &v) {
+    info.agents.wait = [task_manager](const nlohmann::json &v,
+                                      const std::stop_token &stop_token) {
       try {
         core::AgentWaitRequest request;
         if (v.contains("targets"))
@@ -1510,7 +1511,7 @@ private:
         request.after_generation = v.value("after_generation", 0ULL);
         request.timeout =
             std::chrono::milliseconds(v.value("timeout_ms", 30000ULL));
-        const auto result = task_manager->wait(request);
+        const auto result = task_manager->wait(request, stop_token);
         nlohmann::json changed = nlohmann::json::array();
         for (const auto &snapshot : result.changed)
           changed.push_back(snapshot_json(snapshot));
