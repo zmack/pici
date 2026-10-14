@@ -62,6 +62,14 @@ and the direct-child-limit error suggest `wait_agent` can free a resident
 slot. `TaskTree::wait()` only observes; the parent child set remains until
 close. A completed child can continue consuming residency and its name.
 
+Status (task 174): fixed. Guidance and diagnostics now say `close_agent` frees
+slots and `wait_agent` does not. `allow_subagents=true` is rejected by
+`TaskTree::spawn()` (`invalid_state`) until child-owned trees exist (task 176).
+Nonstreamed results share the streamed byte cap, inherited context is cut at
+the first incomplete tool exchange, root `follow_up` is rejected, root status
+derives from the owning `Agent`, and Lua `agents.wait` receives the tool's stop
+token. `pici.run_agent`'s internal 1 s polling wait still ignores cancellation.
+
 Additional source-derived correctness candidates from the Codex audit:
 
 - Nonstreamed assistant text in `execute_work()` bypasses the output byte cap

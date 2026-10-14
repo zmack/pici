@@ -107,6 +107,8 @@ struct SpawnAgentRequest {
   std::optional<std::string> system_prompt;
   std::optional<std::string> model_spec;
   std::vector<std::string> requested_tools;
+  // Unsupported: children own no TaskTree, so spawn() rejects true rather
+  // than silently ignoring it.
   bool allow_subagents{false};
   // Explicit caller opt-in; the manager's configured policy remains the
   // authoritative upper bound.

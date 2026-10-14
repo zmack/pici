@@ -22,7 +22,7 @@ local function tool(name, description, schema, fn)
   })
 end
 
-tool("spawn_agent", "Start a child agent. Canonical usage omits model so the child reuses the parent session's effective model/provider; only set model when intentionally overriding it. Children are read-only by default; write tools require agents.write_tools = core/all and explicit allow_write_tools. There is a fixed cap on live direct children per parent; once it's hit, spawn_agent fails with 'parent child limit reached (N/limit)' until you wait_agent or close_agent an existing child to free a slot -- don't just retry with a new task_name.", {
+tool("spawn_agent", "Start a child agent. Canonical usage omits model so the child reuses the parent session's effective model/provider; only set model when intentionally overriding it. Children are read-only by default; write tools require agents.write_tools = core/all and explicit allow_write_tools. There is a fixed cap on live direct children per parent; once it's hit, spawn_agent fails with 'parent child limit reached (N/limit)' until you close_agent a finished child to free a slot (wait_agent only observes status and frees nothing; closing is permanent and discards the child's transcript) -- don't just retry with a new task_name.", {
   type = "object",
   properties = {
     task_name = {type = "string"},
@@ -45,7 +45,7 @@ tool("list_agents", "List the root task and retained child-agent statuses.", {
   return agents.list(args)
 end)
 
-tool("wait_agent", "Wait for a child status change with a bounded timeout.", {
+tool("wait_agent", "Wait for a child status change with a bounded timeout. Does not free a child slot; use close_agent for that.", {
   type = "object",
   properties = {
     targets = {type = "array", items = {type = "string"}, description = "Child agent ids to wait on (also accepted as 'ids')"},

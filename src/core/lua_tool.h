@@ -147,13 +147,17 @@ struct LuaHooks {
   // Core-owned asynchronous task operations. Each function receives a JSON
   // request table and returns either a structured result or {error={...}}.
   struct AgentBindings {
+    // Blocking waits take the calling tool's stop token so cancellation ends
+    // them like the JSONL RPC wait.
+    using WaitCallback = std::function<nlohmann::json(const nlohmann::json &,
+                                                      const std::stop_token &)>;
     std::function<nlohmann::json(const nlohmann::json &)> spawn;
     std::function<nlohmann::json(const nlohmann::json &)> get;
     std::function<nlohmann::json(const nlohmann::json &)> list;
     std::function<nlohmann::json(const nlohmann::json &)> send_message;
     std::function<nlohmann::json(const nlohmann::json &)> follow_up;
     std::function<nlohmann::json(const nlohmann::json &)> interrupt;
-    std::function<nlohmann::json(const nlohmann::json &)> wait;
+    WaitCallback wait;
     std::function<nlohmann::json(const nlohmann::json &)> close;
   };
 
