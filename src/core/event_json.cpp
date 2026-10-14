@@ -36,6 +36,8 @@ nlohmann::json request_json(const InputProvenance &request) {
       return "mailbox";
     case InputProvenance::Source::follow_up:
       return "follow_up";
+    case InputProvenance::Source::child_completion:
+      return "child_completion";
     }
     return "ordinary";
   }();

@@ -1,9 +1,11 @@
 #include "core/agent_task.h"
 #include "core/builtin_tools.h"
+#include "core/child_completion.h"
 #include "core/llm_client.h"
 #include "core/lua_tool.h"
 #include "core/providers/faux.h"
 #include "core/session/session_runtime.h"
+#include "core/task_event_json.h"
 #include "support/gtest_helpers.h"
 
 #include <algorithm>
@@ -1228,4 +1230,366 @@ TEST(AgentTasks, ChildLimitDiagnosticSaysCloseNotWaitFreesSlot) {
   tree.close(first.id);
   EXPECT_NO_THROW(tree.spawn({.task_name = "two", .prompt = "go"}));
   shutdown.shutdown();
+}
+
+namespace {
+
+ChildCompletion completion_for(std::string id, std::uint64_t generation,
+                               std::string text = "done") {
+  return ChildCompletion{.task_id = std::move(id),
+                         .task_path = "/root/child",
+                         .task_name = "child",
+                         .run_generation = generation,
+                         .text = std::move(text)};
+}
+
+std::string input_text(const AgentInput &input) {
+  const auto *user = std::get_if<UserMessage>(&input.message);
+  if (user == nullptr || user->content.empty())
+    return {};
+  const auto *text = std::get_if<TextContent>(&user->content.front());
+  return text != nullptr ? text->text : std::string{};
+}
+
+struct EventLog {
+  std::mutex mutex;
+  std::vector<AgentTaskEvent> events;
+
+  TaskTree::EventCallback callback() {
+    return [this](const AgentTaskEvent &event) {
+      std::scoped_lock lock(mutex);
+      events.push_back(event);
+    };
+  }
+
+  std::size_t completions() {
+    std::scoped_lock lock(mutex);
+    return static_cast<std::size_t>(std::ranges::count_if(
+        events, [](const AgentTaskEvent &event) {
+          return std::holds_alternative<AgentTaskCompletionEvent>(event);
+        }));
+  }
+};
+
+TaskTree::Limits delivering_limits() {
+  TaskTree::Limits limits;
+  limits.deliver_completions = true;
+  return limits;
+}
+
+bool wait_pending(Agent &agent, std::size_t count) {
+  return pi::test::wait_until(
+      [&] { return agent.pending_child_completions() == count; },
+      std::chrono::seconds(2), "pending child completions");
+}
+
+} // namespace
+
+TEST(ChildCompletionInbox, DeduplicatesAndRemembersDrainedKeys) {
+  ChildCompletionInbox inbox;
+  using A = ChildCompletionInbox::Admission;
+  EXPECT_TRUE(inbox.admit(completion_for("a", 1)) == A::admitted);
+  EXPECT_TRUE(inbox.admit(completion_for("a", 1)) == A::duplicate);
+  EXPECT_TRUE(inbox.admit(completion_for("a", 2)) == A::admitted);
+  EXPECT_EQ(inbox.drain().completions.size(), std::size_t{2});
+  // A late replay of an already-delivered key is still a duplicate.
+  EXPECT_TRUE(inbox.admit(completion_for("a", 2)) == A::duplicate);
+  EXPECT_EQ(inbox.pending(), std::size_t{0});
+}
+
+TEST(ChildCompletionInbox, BoundsPendingAndCountsDrops) {
+  ChildCompletionInbox inbox;
+  using A = ChildCompletionInbox::Admission;
+  for (std::size_t i = 0; i < ChildCompletionInbox::kMaxPending; ++i)
+    EXPECT_TRUE(inbox.admit(completion_for("t" + std::to_string(i), 1)) ==
+                A::admitted);
+  EXPECT_TRUE(inbox.admit(completion_for("extra", 1)) == A::overflow);
+  EXPECT_TRUE(inbox.admit(completion_for("extra2", 1)) == A::overflow);
+  const auto batch = inbox.drain();
+  EXPECT_EQ(batch.completions.size(), ChildCompletionInbox::kMaxPending);
+  EXPECT_EQ(batch.dropped, std::size_t{2});
+  EXPECT_EQ(inbox.drain().dropped, std::size_t{0});
+}
+
+TEST(ChildCompletionInbox, CancelDropsPendingAndLateArrivals) {
+  ChildCompletionInbox inbox;
+  using A = ChildCompletionInbox::Admission;
+  ASSERT_TRUE(inbox.admit(completion_for("a", 1)) == A::admitted);
+  ASSERT_TRUE(inbox.admit(completion_for("b", 1)) == A::admitted);
+  EXPECT_EQ(inbox.cancel("a"), std::size_t{1});
+  EXPECT_TRUE(inbox.admit(completion_for("a", 2)) == A::cancelled);
+  EXPECT_EQ(inbox.drain().completions.size(), std::size_t{1});
+  inbox.close();
+  EXPECT_TRUE(inbox.admit(completion_for("c", 1)) == A::closed);
+  inbox.clear();
+  EXPECT_TRUE(inbox.admit(completion_for("a", 1)) == A::admitted);
+}
+
+TEST(ChildCompletionInbox, TruncatesOnUtf8Boundary) {
+  std::string text = "ab\xC3\xA9"
+                     "cd"; // "abécd": é is two bytes at 2..3
+  EXPECT_TRUE(truncate_utf8(text, 3));
+  EXPECT_EQ(text, "ab");
+  std::string short_text = "abc";
+  EXPECT_FALSE(truncate_utf8(short_text, 3));
+  EXPECT_EQ(short_text, "abc");
+}
+
+TEST(AgentChildCompletions, ClaimRendersAttributedInputAndDroppedNote) {
+  Agent agent;
+  ASSERT_TRUE(agent.admit_child_completion(completion_for("t1", 3, "result")));
+  const auto claimed = agent.claim_child_completions();
+  ASSERT_EQ(claimed.size(), std::size_t{1});
+  const auto &input = claimed.front();
+  EXPECT_TRUE(input.presentation.source ==
+              InputProvenance::Source::child_completion);
+  EXPECT_EQ(input.presentation.message_id.value_or(""), "t1#3");
+  EXPECT_EQ(input.presentation.sender_task_path.value_or(""), "/root/child");
+  EXPECT_NE(input_text(input).find("run_generation=3"), std::string::npos);
+  EXPECT_NE(input_text(input).find("result"), std::string::npos);
+  EXPECT_TRUE(agent.claim_child_completions().empty());
+
+  for (std::size_t i = 0; i <= ChildCompletionInbox::kMaxPending; ++i)
+    agent.admit_child_completion(completion_for("m" + std::to_string(i), 1));
+  const auto overflowed = agent.claim_child_completions();
+  ASSERT_EQ(overflowed.size(), ChildCompletionInbox::kMaxPending + 1);
+  EXPECT_NE(input_text(overflowed.back()).find("dropped=1"),
+            std::string::npos);
+}
+
+TEST(AgentChildCompletions, SurvivesUserInterruptButNotResetOrShutdown) {
+  Agent agent;
+  ASSERT_TRUE(agent.admit_child_completion(completion_for("a", 1)));
+  agent.interrupt(TurnAbortReason::user_interrupt);
+  EXPECT_EQ(agent.pending_child_completions(), std::size_t{1});
+  agent.reset();
+  EXPECT_EQ(agent.pending_child_completions(), std::size_t{0});
+  ASSERT_TRUE(agent.admit_child_completion(completion_for("a", 1)));
+  agent.interrupt(TurnAbortReason::shutdown);
+  EXPECT_FALSE(agent.admit_child_completion(completion_for("b", 1)));
+}
+
+TEST(AgentTasks, CompletionDeliveryIsOffByDefault) {
+  auto options = fixed_reply_options("completion-off", "child said hi", {});
+  SessionRuntime root({.agent_options = options});
+  EventLog log;
+  TaskTree tree(root.agent(), default_child_factory(), options, {},
+                log.callback());
+  TaskTreeShutdown shutdown(tree);
+  const auto done = wait_terminal(
+      tree, tree.spawn({.task_name = "quiet", .prompt = "go"}));
+  EXPECT_TRUE(done.status == AgentTaskStatusKind::completed);
+  EXPECT_EQ(root.agent().pending_child_completions(), std::size_t{0});
+  EXPECT_EQ(log.completions(), std::size_t{0});
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, DeliversCompletionToIdleParentWithoutSplicing) {
+  auto options = fixed_reply_options("completion-idle", "child said hi", {});
+  SessionRuntime root({.agent_options = options});
+  EventLog log;
+  TaskTree tree(root.agent(), default_child_factory(), options,
+                delivering_limits(), log.callback());
+  TaskTreeShutdown shutdown(tree);
+  const auto done = wait_terminal(
+      tree, tree.spawn({.task_name = "worker", .prompt = "go"}));
+  ASSERT_TRUE(done.status == AgentTaskStatusKind::completed);
+  EXPECT_EQ(done.run_generation, std::uint64_t{1});
+  ASSERT_TRUE(wait_pending(root.agent(), 1));
+  EXPECT_EQ(log.completions(), std::size_t{1});
+  // Admission alone never writes the parent transcript or starts a turn.
+  EXPECT_EQ(root.agent().state().messages().size(), std::size_t{0});
+  EXPECT_FALSE(root.agent().is_streaming());
+
+  const auto claimed = root.agent().claim_child_completions();
+  ASSERT_EQ(claimed.size(), std::size_t{1});
+  const auto text = input_text(claimed.front());
+  EXPECT_NE(text.find("task_id=" + done.id), std::string::npos);
+  EXPECT_NE(text.find("run_generation=1"), std::string::npos);
+  EXPECT_NE(text.find("child said hi"), std::string::npos);
+  // No wake loop: a claim drains, and nothing re-admits the same run.
+  EXPECT_TRUE(root.agent().claim_child_completions().empty());
+  EXPECT_EQ(root.agent().state().messages().size(), std::size_t{0});
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, CompletionContentIsBoundedAndRunsAreCorrelated) {
+  auto options = fixed_reply_options("completion-bound", std::string(100, 'x'),
+                                     {});
+  SessionRuntime root({.agent_options = options});
+  auto limits = delivering_limits();
+  limits.max_completion_bytes = 10;
+  TaskTree tree(root.agent(), default_child_factory(), options, limits);
+  TaskTreeShutdown shutdown(tree);
+  auto first = wait_terminal(
+      tree, tree.spawn({.task_name = "big", .prompt = "go"}));
+  ASSERT_TRUE(wait_pending(root.agent(), 1));
+  const auto one = root.agent().claim_child_completions();
+  ASSERT_EQ(one.size(), std::size_t{1});
+  EXPECT_NE(input_text(one.front()).find("truncated=true"), std::string::npos);
+  EXPECT_EQ(input_text(one.front()).find(std::string(11, 'x')),
+            std::string::npos);
+  // The full result stays readable through the lifecycle authority.
+  EXPECT_EQ(tree.get(first.id)->result->text.size(), std::size_t{100});
+
+  auto again = wait_terminal(
+      tree, tree.follow_up(first.id, user_message("more")));
+  EXPECT_EQ(again.run_generation, std::uint64_t{2});
+  ASSERT_TRUE(wait_pending(root.agent(), 1));
+  const auto two = root.agent().claim_child_completions();
+  ASSERT_EQ(two.size(), std::size_t{1});
+  EXPECT_EQ(two.front().presentation.message_id.value_or(""),
+            first.id + "#2");
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, ParentCausedInterruptIsNotDeliveredButUserInterruptIs) {
+  auto calls = std::make_shared<std::atomic<int>>(0);
+  LLMClientRegistry::instance().register_client("completion-int", [calls] {
+    return std::make_shared<InterruptClient>(calls);
+  });
+  Agent::Options options;
+  options.model = Model{.id = "completion-int-model",
+                        .api = "completion-int",
+                        .provider = "completion-int"};
+  SessionRuntime root({.agent_options = options});
+  TaskTree tree(root.agent(), default_child_factory(), options,
+                delivering_limits());
+  TaskTreeShutdown shutdown(tree);
+  auto child = tree.spawn({.task_name = "slow", .prompt = "wait"});
+  ASSERT_TRUE(pi::test::wait_until([&] { return calls->load() == 1; },
+                                   std::chrono::seconds(2), "child to block"));
+  auto interrupted = tree.interrupt(child.id, AgentInterruptReason::parent);
+  auto settled = wait_terminal(tree, interrupted);
+  EXPECT_TRUE(settled.status == AgentTaskStatusKind::interrupted);
+  EXPECT_EQ(root.agent().pending_child_completions(), std::size_t{0});
+
+  // The reused task now completes normally (second call returns "reused").
+  auto reused = wait_terminal(
+      tree, tree.follow_up(child.id, user_message("again")));
+  EXPECT_TRUE(reused.status == AgentTaskStatusKind::completed);
+  ASSERT_TRUE(wait_pending(root.agent(), 1));
+  const auto claimed = root.agent().claim_child_completions();
+  EXPECT_NE(input_text(claimed.front()).find("run_generation=2"),
+            std::string::npos);
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, UserInterruptedChildIsDelivered) {
+  auto calls = std::make_shared<std::atomic<int>>(0);
+  LLMClientRegistry::instance().register_client("completion-user", [calls] {
+    return std::make_shared<InterruptClient>(calls);
+  });
+  Agent::Options options;
+  options.model = Model{.id = "completion-user-model",
+                        .api = "completion-user",
+                        .provider = "completion-user"};
+  SessionRuntime root({.agent_options = options});
+  TaskTree tree(root.agent(), default_child_factory(), options,
+                delivering_limits());
+  TaskTreeShutdown shutdown(tree);
+  auto child = tree.spawn({.task_name = "slow", .prompt = "wait"});
+  ASSERT_TRUE(pi::test::wait_until([&] { return calls->load() == 1; },
+                                   std::chrono::seconds(2), "child to block"));
+  wait_terminal(tree, tree.interrupt(child.id, AgentInterruptReason::user));
+  ASSERT_TRUE(wait_pending(root.agent(), 1));
+  const auto claimed = root.agent().claim_child_completions();
+  EXPECT_EQ(claimed.front().presentation.message_kind.value_or(""),
+            "interrupted");
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, CloseCancelsPendingAndShutdownDeliversNothing) {
+  auto options = fixed_reply_options("completion-close", "ok", {});
+  SessionRuntime root({.agent_options = options});
+  TaskTree tree(root.agent(), default_child_factory(), options,
+                delivering_limits());
+  TaskTreeShutdown shutdown(tree);
+  auto done = wait_terminal(
+      tree, tree.spawn({.task_name = "closer", .prompt = "go"}));
+  ASSERT_TRUE(wait_pending(root.agent(), 1));
+  tree.close(done.id);
+  EXPECT_EQ(root.agent().pending_child_completions(), std::size_t{0});
+  // A late arrival for the closed task is dropped.
+  EXPECT_FALSE(root.agent().admit_child_completion(
+      completion_for(done.id, done.run_generation + 1)));
+
+  auto second = wait_terminal(
+      tree, tree.spawn({.task_name = "survivor", .prompt = "go"}));
+  ASSERT_TRUE(wait_pending(root.agent(), 1));
+  shutdown.shutdown();
+  // Shutdown closes every child without producing completions for them.
+  EXPECT_EQ(root.agent().pending_child_completions(), std::size_t{0});
+  // A shutting-down parent admits nothing further.
+  root.agent().interrupt(TurnAbortReason::shutdown);
+  EXPECT_FALSE(root.agent().admit_child_completion(completion_for("late", 1)));
+  EXPECT_TRUE(second.status == AgentTaskStatusKind::completed);
+}
+
+TEST(AgentTasks, BusyParentReceivesCompletionAtTurnBoundary) {
+  auto entered = std::make_shared<std::atomic<bool>>(false);
+  auto release = std::make_shared<std::atomic<bool>>(false);
+  auto client = std::make_shared<BlockingUsageClient>(entered, release);
+  LLMClientRegistry::instance().register_client("completion-busy",
+                                                [client] { return client; });
+  Agent::Options options;
+  options.model = Model{.id = "completion-busy-model",
+                        .api = "completion-busy",
+                        .provider = "completion-busy"};
+  SessionRuntime root({.agent_options = options});
+  root.agent().prompt("warm up").wait();
+  auto stream = root.agent().prompt("block");
+  ASSERT_TRUE(pi::test::wait_until([&] { return entered->load(); },
+                                   std::chrono::seconds(2),
+                                   "root turn to block"));
+  ASSERT_TRUE(root.agent().admit_child_completion(
+      completion_for("c1", 1, "distinctive-child-result")));
+  release->store(true);
+  stream.wait();
+  root.agent().wait_for_idle();
+  EXPECT_EQ(root.agent().pending_child_completions(), std::size_t{0});
+  std::size_t attributed = 0;
+  for (const auto &message : root.agent().state().messages()) {
+    const auto *user = std::get_if<UserMessage>(&message);
+    if (user == nullptr || user->content.empty())
+      continue;
+    const auto *text = std::get_if<TextContent>(&user->content.front());
+    if (text != nullptr &&
+        text->text.find("[pici child task completion]") == 0 &&
+        text->text.find("distinctive-child-result") != std::string::npos)
+      ++attributed;
+  }
+  EXPECT_EQ(attributed, std::size_t{1});
+}
+
+TEST(AgentTasks, RootMessageIsRejectedInsteadOfQueuedInUnconsumedMailbox) {
+  auto options = fixed_reply_options("completion-root-msg", "ok", {});
+  SessionRuntime root({.agent_options = options});
+  TaskTree tree(root.agent(), default_child_factory(), options);
+  TaskTreeShutdown shutdown(tree);
+  try {
+    tree.send_message("root", Message{user_message("hello")});
+    ADD_FAILURE() << "send_message on the root pseudo-task must be rejected";
+  } catch (const AgentTaskError &error) {
+    EXPECT_TRUE(error.kind() == AgentTaskErrorKind::invalid_state);
+  }
+  EXPECT_EQ(tree.get("root")->queued_message_count, std::size_t{0});
+  shutdown.shutdown();
+}
+
+TEST(AgentTasks, SerializesCompletionEvent) {
+  auto completion = completion_for("t9", 4, "payload");
+  completion.truncated = true;
+  completion.error = "boom";
+  const auto json = task_event_to_json(
+      AgentTaskCompletionEvent{.completion = std::move(completion)});
+  EXPECT_EQ(json.at("type"), "task.completion");
+  EXPECT_EQ(json.at("task_id"), "t9");
+  EXPECT_EQ(json.at("run_generation"), 4);
+  EXPECT_EQ(json.at("status"), "completed");
+  EXPECT_EQ(json.at("text"), "payload");
+  EXPECT_EQ(json.at("error"), "boom");
+  EXPECT_EQ(json.at("truncated"), true);
+  EXPECT_EQ(task_event_to_json(AgentTaskClosedEvent{.id = "x"}).at("type"),
+            "task.closed");
 }

@@ -508,6 +508,8 @@ add_library(pi-core
     src/core/agent_loop.cpp
     src/core/agent.cpp
     src/core/agent_task.cpp
+    src/core/child_completion.cpp
+    src/core/task_event_json.cpp
     src/core/subagent_activity.cpp
     src/core/subagent_panel.cpp
     src/core/compaction.cpp

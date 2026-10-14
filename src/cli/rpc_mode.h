@@ -15,6 +15,22 @@
 
 namespace pi::cli {
 
+// Late-bound fan-in for TaskTree events. The TaskTree callback is fixed when
+// the session activates, before the RPC connection exists, so the callback
+// publishes here and RpcMode attaches/detaches its handler.
+class RpcTaskEventRelay {
+public:
+  using Handler = std::function<void(const core::AgentTaskEvent &)>;
+
+  void attach(Handler handler);
+  void detach();
+  void publish(const core::AgentTaskEvent &event) const;
+
+private:
+  mutable std::mutex mutex_;
+  Handler handler_;
+};
+
 // Long-lived, line-delimited JSON control surface for embedding pici. Commands
 // arrive on stdin and all responses and agent events are emitted on stdout.
 class RpcMode {
@@ -23,7 +39,8 @@ public:
 
   RpcMode(core::SessionRuntime &session, Output output,
           core::TaskTree *task_manager = nullptr,
-          std::shared_ptr<auth::Authentication> authentication = {});
+          std::shared_ptr<auth::Authentication> authentication = {},
+          std::shared_ptr<RpcTaskEventRelay> task_events = {});
   ~RpcMode();
 
   RpcMode(const RpcMode &) = delete;
@@ -48,6 +65,8 @@ private:
   void handle_abort(const nlohmann::json &command);
   void handle_spawn_agent(const nlohmann::json &command);
   void handle_list_agents(const nlohmann::json &command);
+  void handle_subscribe_tasks(const nlohmann::json &command);
+  void on_task_event(const core::AgentTaskEvent &event);
   void handle_agent_target_command(const nlohmann::json &command,
                                    const std::string &type);
   void handle_interrupt_agent(const nlohmann::json &command);
@@ -63,6 +82,9 @@ private:
   core::SessionRuntime &session_;
   core::TaskTree *task_manager_{nullptr};
   std::shared_ptr<auth::Authentication> authentication_;
+  std::shared_ptr<RpcTaskEventRelay> task_events_;
+  std::atomic<bool> subscribed_{false};
+  std::atomic<bool> subscribe_child_events_{false};
   Output output_;
   mutable std::mutex output_mutex_;
   std::atomic<bool> run_active_{false};
@@ -73,6 +95,7 @@ private:
 
 int run_rpc_mode(core::SessionRuntime &session, std::istream &input,
                  std::ostream &output, core::TaskTree *task_manager = nullptr,
-                 std::shared_ptr<auth::Authentication> authentication = {});
+                 std::shared_ptr<auth::Authentication> authentication = {},
+                 std::shared_ptr<RpcTaskEventRelay> task_events = {});
 
 } // namespace pi::cli

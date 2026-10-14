@@ -45,6 +45,8 @@ struct SubagentLimitsConfig {
   std::optional<std::size_t> max_nesting_depth;
   std::optional<std::size_t> max_direct_children;
   std::optional<std::size_t> max_wait_seconds;
+  // Opt-in attributed delivery of child completions to the parent session.
+  std::optional<bool> deliver_completions;
 };
 
 struct Config {

@@ -1062,7 +1062,7 @@ public:
     if (args_.rpc_mode)
       return cli::run_rpc_mode(runtime(), std::cin, std::cout,
                                runtime().agent().task_tree().get(),
-                               authentication_);
+                               authentication_, rpc_task_events_);
 
     setup_interactive_session();
     build_completion_and_control_fns();
@@ -1312,12 +1312,17 @@ private:
 
   void activate_runtime() {
     repl_wake_ = std::make_shared<cli::ReadlineWake>();
+    if (args_.rpc_mode)
+      rpc_task_events_ = std::make_shared<cli::RpcTaskEventRelay>();
     activity_ = std::make_shared<core::SubagentActivityBridge>(
         [wake = repl_wake_] { static_cast<void>(wake->notify()); });
     cli::activate_runtime_bundle(
         bundle_,
-        [activity = activity_](const core::AgentTaskEvent &event) {
+        [activity = activity_,
+         relay = rpc_task_events_](const core::AgentTaskEvent &event) {
           activity->observe(event);
+          if (relay)
+            relay->publish(event);
         },
         [wake = repl_wake_] { static_cast<void>(wake->notify()); });
   }
@@ -1963,6 +1968,32 @@ private:
     return result;
   }
 
+  // Idle-parent delivery of opt-in child completions (TaskTree::Limits::
+  // deliver_completions). Claims what the Agent's inbox admitted, runs it as
+  // an attributed turn, and shares the autonomous-turn budget with idle
+  // mailbox turns so completion -> spawn -> completion chains stay bounded.
+  void run_idle_completion_turns() {
+    while (autonomous_budget_.can_run() && !autonomous_budget_exhausted_) {
+      auto messages = agent().claim_child_completions();
+      if (messages.empty())
+        return;
+      {
+        // See run_and_persist()'s comment: title_controller_ is always set.
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+        core::TerminalTitleActivityGuard title_activity(*title_controller_);
+        accumulate(run_message_turn(
+            runtime(), std::move(messages), *renderer_, args_.verbose,
+            stream_diagnostics_, bundle_.hook_runtime,
+            [this] { return build_ui_context(); },
+            (isatty(STDIN_FILENO) != 0 && !args_.print_mode && !panel_mounted_)
+                ? activity_
+                : nullptr));
+      }
+      autonomous_budget_.record();
+    }
+    autonomous_budget_exhausted_ = autonomous_budget_.exhausted();
+  }
+
   void run_idle_mailbox_turns() {
     constexpr std::size_t kAutonomousBatchLimit = 16;
     auto &mailbox_runtime = runtime().mailbox_runtime();
@@ -2121,6 +2152,7 @@ private:
         readline_draft_ = std::move(readline_result.text);
         readline_cursor_ = readline_result.cursor;
         activity_->drain(*renderer_);
+        run_idle_completion_turns();
         run_idle_mailbox_turns();
         continue;
       }
@@ -2594,6 +2626,7 @@ private:
   // teardown (~CmdRunSession()) as defense-in-depth.
   std::shared_ptr<core::LuaEvalBindings> lua_eval_bindings_;
   std::shared_ptr<cli::ReadlineWake> repl_wake_;
+  std::shared_ptr<cli::RpcTaskEventRelay> rpc_task_events_;
   std::shared_ptr<core::SubagentActivityBridge> activity_;
   std::shared_ptr<std::atomic_uint64_t> compat_counter_;
   std::string current_session_id_;

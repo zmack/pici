@@ -103,6 +103,9 @@
 # max_nesting_depth      = 2     # how many levels deep delegation can go
 # max_direct_children    = 4     # children one task may spawn directly
 # max_wait_seconds       = 60    # how long agents.wait() blocks per call
+# deliver_completions    = false # opt in: hand each finished child's bounded,
+#   attributed result to the parent as input (queued while the parent is
+#   busy, run as a turn when the REPL is idle) instead of waiting for polling
 
 [tools]
 # dir        = "~/.config/pici/tools"  # --tools-dir  (Lua tool scripts)

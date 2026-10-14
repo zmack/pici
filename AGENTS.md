@@ -24,7 +24,9 @@ The intended ownership facts are:
   runtimes.
 - `SessionRuntime` owns one live `Agent`, an optional `MailboxAttachment`, and
   an optional add-on adapter for one active durable session.
-- `Agent` owns `AgentState`, at most one active run, and its `TaskTree`.
+- `Agent` owns `AgentState`, at most one active run, its `TaskTree`, and the
+  bounded inbox of opt-in `ChildCompletion` input (`TaskTree` still owns child
+  status/results; see `plans/child-completion-delivery.md`).
 - `TaskTree` owns tasks; each resident task owns its child `SessionRuntime`.
 - `ModelCatalog` owns `Provider` definitions. Each provider explicitly selects
   discovery, inference, and authentication bindings. OAuth is selected through

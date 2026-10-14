@@ -15,7 +15,7 @@ namespace pi::core {
 // wraps it in its own frontend-owned type (see stream_renderer.h's
 // RendererRequest) rather than this type growing presentation fields.
 struct InputProvenance {
-  enum class Source { ordinary, mailbox, follow_up };
+  enum class Source { ordinary, mailbox, follow_up, child_completion };
   Source source{Source::ordinary};
   std::optional<std::string> message_id;
   std::optional<std::string> message_kind;

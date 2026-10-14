@@ -421,6 +421,8 @@ std::string request_source_label(InputProvenance::Source source) {
     return "MAILBOX";
   case InputProvenance::Source::follow_up:
     return "FOLLOW-UP";
+  case InputProvenance::Source::child_completion:
+    return "CHILD";
   }
   return {};
 }

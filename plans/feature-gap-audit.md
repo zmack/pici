@@ -198,7 +198,8 @@ Tracked backlog:
    Include bounded nonstreamed output, complete tool-exchange context,
    cancellable Lua waits and truthful root pseudo-task behavior in this first
    correctness pass, using focused reproductions for each.
-2. **Admit completion work to the parent.** Opt-in typed completion Value
+2. **Admit completion work to the parent.** (Implemented by task 175: see
+   `plans/child-completion-delivery.md`.) Opt-in typed completion Value
    through session input admission, with task ID/run generation correlation,
    deduplication, bounded result content and cancellation handling. Parent
    `Agent` owns its input/run state; `TaskTree` owns child status. Never append

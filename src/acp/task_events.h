@@ -23,8 +23,6 @@ struct TaskEventBatch {
   std::vector<TaskEventRecord> events;
 };
 
-nlohmann::json task_event_to_json(const core::AgentTaskEvent &event);
-
 class TaskEventHub {
 public:
   void publish(const core::AgentTaskEvent &event);

@@ -322,6 +322,11 @@ Agent::restore_session(Model model, ThinkingLevel thinking,
           "session restoration requires an empty steering queue");
   }
   {
+    // Completions belong to the session whose children produced them.
+    std::scoped_lock completion_lock(completion_mutex_);
+    completions_.clear();
+  }
+  {
     std::scoped_lock followup_lock(followup_mutex_);
     if (!followup_queue_.empty())
       throw std::runtime_error(
@@ -352,6 +357,11 @@ void Agent::set_session_identity(std::string session_id,
     if (!steering_queue_.empty())
       throw std::runtime_error(
           "session changes require an empty steering queue");
+  }
+  {
+    // Completions belong to the session whose children produced them.
+    std::scoped_lock completion_lock(completion_mutex_);
+    completions_.clear();
   }
   {
     std::scoped_lock followup_lock(followup_mutex_);
@@ -397,7 +407,42 @@ void Agent::clear_follow_up_queue() {
   followup_queue_.clear();
 }
 
+bool Agent::admit_child_completion(ChildCompletion completion) {
+  std::scoped_lock lock(completion_mutex_);
+  return completions_.admit(std::move(completion)) ==
+         ChildCompletionInbox::Admission::admitted;
+}
+
+std::vector<AgentInput> Agent::claim_child_completions() {
+  ChildCompletionInbox::Batch batch;
+  {
+    std::scoped_lock lock(completion_mutex_);
+    batch = completions_.drain();
+  }
+  std::vector<AgentInput> inputs;
+  inputs.reserve(batch.completions.size() + 1);
+  for (const auto &completion : batch.completions)
+    inputs.push_back(child_completion_input(completion));
+  if (batch.dropped != 0)
+    inputs.push_back(child_completion_dropped_input(batch.dropped));
+  return inputs;
+}
+
+std::size_t Agent::cancel_child_completions(const std::string &task_id) {
+  std::scoped_lock lock(completion_mutex_);
+  return completions_.cancel(task_id);
+}
+
+std::size_t Agent::pending_child_completions() const {
+  std::scoped_lock lock(completion_mutex_);
+  return completions_.pending();
+}
+
 void Agent::interrupt(TurnAbortReason reason) {
+  if (reason == TurnAbortReason::shutdown) {
+    std::scoped_lock lock(completion_mutex_);
+    completions_.close();
+  }
   // Synchronize with begin_run(), which replaces the stop source between
   // turns. The lock is not held while the worker executes.
   std::scoped_lock run_lock(worker_mutex_);
@@ -422,6 +467,8 @@ void Agent::reset() {
   }
   clear_steering_queue();
   clear_follow_up_queue();
+  std::scoped_lock lock(completion_mutex_);
+  completions_.clear();
 }
 
 void Agent::wait_for_idle() { state_.wait_until_idle(); }
@@ -565,8 +612,18 @@ AgentLoopConfig Agent::create_loop_config() {
     return messages;
   };
   config.get_steering_envelopes = [this]() {
-    std::scoped_lock lock(steering_mutex_);
-    return std::move(steering_queue_);
+    std::vector<AgentInput> envelopes;
+    {
+      std::scoped_lock lock(steering_mutex_);
+      envelopes = std::move(steering_queue_);
+      steering_queue_.clear();
+    }
+    // Pending child completions join at the same turn boundary, attributed.
+    auto completions = claim_child_completions();
+    envelopes.insert(envelopes.end(),
+                     std::make_move_iterator(completions.begin()),
+                     std::make_move_iterator(completions.end()));
+    return envelopes;
   };
   config.get_follow_up_messages = [this]() {
     std::scoped_lock lock(followup_mutex_);

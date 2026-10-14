@@ -176,3 +176,48 @@ TEST(RpcMode, HandlesSessionAndCompactionEvents) {
   if (reloaded)
     EXPECT_TRUE(reloaded->messages.size() == 1);
 }
+
+TEST(RpcMode, StreamsTaskEventsOnlyAfterSubscription) {
+  core::Agent::Options options;
+  options.model.id = "faux";
+  core::SessionRuntime session({.agent_options = std::move(options)});
+  auto relay = std::make_shared<cli::RpcTaskEventRelay>();
+
+  std::mutex mutex;
+  std::vector<nlohmann::json> output;
+  cli::RpcMode mode(
+      session,
+      [&](const nlohmann::json &line) {
+        std::scoped_lock lock(mutex);
+        output.push_back(line);
+      },
+      nullptr, {}, relay);
+
+  const core::AgentTaskEvent completion = core::AgentTaskCompletionEvent{
+      .completion = {.task_id = "t1", .run_generation = 2, .text = "done"}};
+  const core::AgentTaskEvent child_event = core::ChildAgentEvent{
+      .task_id = "t1", .event = core::AgentStartEvent()};
+
+  relay->publish(completion);
+  {
+    std::scoped_lock lock(mutex);
+    EXPECT_TRUE(output.empty());
+  }
+
+  mode.handle({{"id", "sub"}, {"type", "subscribe_tasks"}});
+  relay->publish(completion);
+  relay->publish(child_event);
+  mode.handle({{"id", "sub2"}, {"type", "subscribe_tasks"},
+               {"child_events", true}});
+  relay->publish(child_event);
+
+  std::scoped_lock lock(mutex);
+  std::vector<std::string> types;
+  for (const auto &line : output)
+    types.push_back(line.value("type", ""));
+  const std::vector<std::string> expected = {
+      "response", "task.completion", "response", "task.event"};
+  EXPECT_EQ(types, expected);
+  EXPECT_EQ(output[1].at("run_generation"), 2);
+  EXPECT_EQ(output[1].at("task_id"), "t1");
+}

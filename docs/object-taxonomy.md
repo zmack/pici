@@ -86,6 +86,7 @@ Contracts are API seams, not additional object archetypes.
 | Input admission | `Mailbox` → `SessionRuntime` | route, accept, acknowledge callback |
 | Inference | `Agent` → provider inference binding | effective context, auth, cancellation; typed events/result |
 | Delegation | `Agent` → owned `TaskTree` | spawn, message, interrupt, wait, close, result |
+| Delegation (completion) | `TaskTree` → parent `Agent` | opt-in `ChildCompletion` Value admitted to the Agent's completion inbox; see `plans/child-completion-delivery.md` |
 
 The native model picker and a later Lua model picker must consume the same
 `ModelCatalogView` and return the same `ModelKey`. Terminal drawing and Lua
@@ -101,6 +102,7 @@ tables are adapter details outside the catalog and session contracts.
 | request credentials | `Authentication` | `CredentialStore` or startup environment snapshot |
 | mailbox entries and leases | active `Mailbox` operation | `MailboxStore` |
 | delegated-task status/result | agent-owned `TaskTree` | parent session journal only when explicitly recorded |
+| pending child-completion input | owning `Agent` (completion inbox) | none; lifecycle facts stay with `TaskTree` |
 
 There must be exactly one live authority for a fact. Projections can become
 stale; stores do not own the live objects they represent.

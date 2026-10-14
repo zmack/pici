@@ -12,6 +12,7 @@
 #include "core/session/session_id.h"
 #include "core/session/session_record.h"
 #include "core/session/session_runtime.h"
+#include "core/task_event_json.h"
 
 #include <chrono>
 #include <cstddef>
@@ -25,6 +26,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace pi::cli {
@@ -49,6 +51,7 @@ nlohmann::json task_snapshot_json(const core::AgentTaskSnapshot &snapshot) {
       {"child_count", snapshot.child_count},
       {"queued_message_count", snapshot.queued_message_count},
       {"generation", snapshot.generation},
+      {"run_generation", snapshot.run_generation},
   };
   if (snapshot.parent_id)
     value["parent_id"] = *snapshot.parent_id;
@@ -175,13 +178,49 @@ model_summary(const core::ModelCatalogEntry &entry,
 
 } // namespace
 
+void RpcTaskEventRelay::attach(Handler handler) {
+  std::scoped_lock lock(mutex_);
+  handler_ = std::move(handler);
+}
+
+void RpcTaskEventRelay::detach() {
+  std::scoped_lock lock(mutex_);
+  handler_ = nullptr;
+}
+
+void RpcTaskEventRelay::publish(const core::AgentTaskEvent &event) const {
+  // Held across the call so detach() waits out an in-flight delivery.
+  std::scoped_lock lock(mutex_);
+  if (handler_)
+    handler_(event);
+}
+
 RpcMode::RpcMode(core::SessionRuntime &session, Output output,
                  core::TaskTree *task_manager,
-                 std::shared_ptr<auth::Authentication> authentication)
+                 std::shared_ptr<auth::Authentication> authentication,
+                 std::shared_ptr<RpcTaskEventRelay> task_events)
     : session_(session), task_manager_(task_manager),
-      authentication_(std::move(authentication)), output_(std::move(output)) {}
+      authentication_(std::move(authentication)),
+      task_events_(std::move(task_events)), output_(std::move(output)) {
+  if (task_events_)
+    task_events_->attach(
+        [this](const core::AgentTaskEvent &event) { on_task_event(event); });
+}
 
-RpcMode::~RpcMode() { stop(); }
+RpcMode::~RpcMode() {
+  stop();
+  if (task_events_)
+    task_events_->detach();
+}
+
+void RpcMode::on_task_event(const core::AgentTaskEvent &event) {
+  if (!subscribed_)
+    return;
+  if (std::holds_alternative<core::ChildAgentEvent>(event) &&
+      !subscribe_child_events_)
+    return;
+  emit(core::task_event_to_json(event));
+}
 
 void RpcMode::emit(const nlohmann::json &value) const {
   std::scoped_lock lock(output_mutex_);
@@ -354,6 +393,15 @@ void RpcMode::handle_spawn_agent(const nlohmann::json &command) {
         command.at("tools").get<std::vector<std::string>>();
   request.allow_write_tools = command.value("allow_write_tools", false);
   response(command, true, task_snapshot_json(task_manager_->spawn(request)));
+}
+
+void RpcMode::handle_subscribe_tasks(const nlohmann::json &command) {
+  const bool enabled = command.value("enabled", true);
+  subscribe_child_events_ = enabled && command.value("child_events", false);
+  subscribed_ = enabled;
+  response(
+      command, true,
+      {{"enabled", enabled}, {"child_events", subscribe_child_events_.load()}});
 }
 
 void RpcMode::handle_list_agents(const nlohmann::json &command) {
@@ -602,6 +650,8 @@ void RpcMode::handle(const nlohmann::json &command) {
       start_compact(command, core::CompactionTrigger::manual);
     } else if (type == "spawn_agent") {
       handle_spawn_agent(command);
+    } else if (type == "subscribe_tasks") {
+      handle_subscribe_tasks(command);
     } else if (type == "list_agents") {
       handle_list_agents(command);
     } else if (type == "send_agent" || type == "follow_up_agent") {
@@ -654,13 +704,14 @@ void RpcMode::wait_for_idle() {
 
 int run_rpc_mode(core::SessionRuntime &session, std::istream &input,
                  std::ostream &output, core::TaskTree *task_manager,
-                 std::shared_ptr<auth::Authentication> authentication) {
+                 std::shared_ptr<auth::Authentication> authentication,
+                 std::shared_ptr<RpcTaskEventRelay> task_events) {
   RpcMode mode(
       session,
       [&output](const nlohmann::json &event) {
         output << event.dump() << '\n' << std::flush;
       },
-      task_manager, std::move(authentication));
+      task_manager, std::move(authentication), std::move(task_events));
   std::string line;
   while (std::getline(input, line)) {
     if (line.empty())

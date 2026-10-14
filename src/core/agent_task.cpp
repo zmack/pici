@@ -300,6 +300,7 @@ struct TaskTree::Task {
   // MessageEndEvent so it is observable while the task is still running.
   TokenUsage last_usage;
   std::uint64_t generation{0};
+  std::uint64_t run_generation{0};
   bool execution_reserved{false};
   bool close_requested{false};
   // This task's dedicated jemalloc arena (§Design 2). Acquired on the
@@ -389,6 +390,7 @@ AgentTaskSnapshot TaskTree::snapshot(const std::shared_ptr<Task> &task) const {
     result.child_count = task->children.size();
     result.queued_message_count = task->mailbox.size() + task->work.size();
     result.generation = task->generation;
+    result.run_generation = task->run_generation;
     // Copy usage under the same lock; execute_work's event callback updates
     // it while the task is running. Trivially copyable, so cheap.
     const TokenUsage last_usage = task->last_usage;
@@ -909,6 +911,60 @@ void TaskTree::execute_work(const std::shared_ptr<Task> &task,
     result.stop_reason = StopReason::aborted;
 }
 
+std::optional<ChildCompletion>
+TaskTree::make_completion(const Task &task, AgentTaskStatusKind status,
+                          std::optional<AgentInterruptReason> cause) const {
+  if (!limits_.deliver_completions || shutting_down_)
+    return std::nullopt;
+  // Only direct children of the root report to the owning Agent; nested
+  // delegation is out of scope here.
+  if (task.session == nullptr ||
+      task.parent_id != std::optional<AgentTaskId>("root"))
+    return std::nullopt;
+  ChildCompletion completion{.task_id = task.id,
+                             .task_path = task.task_path,
+                             .task_name = task.task_name,
+                             .run_generation = task.run_generation};
+  switch (status) {
+  case AgentTaskStatusKind::completed:
+    completion.status = ChildCompletionStatus::completed;
+    break;
+  case AgentTaskStatusKind::errored:
+    completion.status = ChildCompletionStatus::errored;
+    break;
+  case AgentTaskStatusKind::interrupted:
+    // The parent side caused these; telling it would just echo its own act.
+    if (cause == AgentInterruptReason::parent ||
+        cause == AgentInterruptReason::replacement_task ||
+        cause == AgentInterruptReason::shutdown)
+      return std::nullopt;
+    completion.status = ChildCompletionStatus::interrupted;
+    break;
+  default:
+    return std::nullopt;
+  }
+  if (task.result) {
+    completion.text = task.result->text;
+    completion.error = task.result->error;
+    completion.stop_reason = task.result->stop_reason;
+    completion.truncated = task.result->truncated;
+  }
+  if (truncate_utf8(completion.text, limits_.max_completion_bytes))
+    completion.truncated = true;
+  return completion;
+}
+
+void TaskTree::deliver_completion(std::optional<ChildCompletion> completion) {
+  if (completion && owner_.admit_child_completion(*completion))
+    emit(AgentTaskCompletionEvent{.completion = std::move(*completion)});
+}
+
+void TaskTree::cancel_completions(
+    const std::vector<std::shared_ptr<Task>> &tasks) {
+  for (const auto &task : tasks)
+    owner_.cancel_child_completions(task->id);
+}
+
 void TaskTree::run_task(const std::shared_ptr<Task> &task,
                         const std::stop_token &stop_token) {
   std::stop_callback cancel_callback(stop_token, [task] {
@@ -973,6 +1029,7 @@ void TaskTree::run_task(const std::shared_ptr<Task> &task,
     AgentTaskStatusKind previous{AgentTaskStatusKind::pending_init};
     AgentTaskStatusKind current{AgentTaskStatusKind::pending_init};
     bool close_requested = false;
+    std::optional<ChildCompletion> completion;
     {
       std::scoped_lock lock(mutex_, task->mutex);
       if (active_executions_ > 0)
@@ -992,8 +1049,14 @@ void TaskTree::run_task(const std::shared_ptr<Task> &task,
       else
         current = AgentTaskStatusKind::completed;
       task->status = current;
+      ++task->run_generation;
+      completion = make_completion(
+          *task, current, std::exchange(task->pending_interrupt, std::nullopt));
       touch_locked(task);
     }
+    // Admit before announcing the status change so a frontend woken by the
+    // event already finds the completion pending.
+    deliver_completion(std::move(completion));
     emit(AgentTaskStatusChangedEvent{
         .id = task->id, .previous = previous, .current = current});
 
@@ -1098,6 +1161,11 @@ AgentTaskSnapshot TaskTree::send_message(const AgentTaskId &target,
     task = find_task_locked(target);
     if (!task)
       throw AgentTaskError(AgentTaskErrorKind::not_found, "task not found");
+    // Nothing consumes the root's passive mailbox, so queuing there would
+    // silently lose the message. Completions use the Agent's own inbox.
+    if (task->session == nullptr)
+      throw AgentTaskError(AgentTaskErrorKind::invalid_state,
+                           "the root task cannot be messaged; use steer");
     std::scoped_lock task_lock(task->mutex);
     if (task->status == AgentTaskStatusKind::closing ||
         task->status == AgentTaskStatusKind::shutdown)
@@ -1382,6 +1450,7 @@ TaskTree::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
         target_snapshot.queued_message_count =
             task->mailbox.size() + task->work.size();
         target_snapshot.generation = task->generation;
+        target_snapshot.run_generation = task->run_generation;
       }
       if (task->parent_id) {
         if (auto parent = find_task_locked(*task->parent_id)) {
@@ -1395,6 +1464,7 @@ TaskTree::close_tasks(std::vector<std::shared_ptr<Task>> tasks) {
       tasks_.erase(task->id);
   }
   changed_.notify_all();
+  cancel_completions(tasks);
   if (unregister_endpoint) {
     for (const auto &task_id : unregister_ids) {
       try {

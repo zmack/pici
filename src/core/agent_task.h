@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/agent.h"
+#include "core/child_completion.h"
 #include "core/event_types.h"
 #include "core/memory_stats.h"
 
@@ -150,6 +151,8 @@ struct AgentTaskSnapshot {
   std::size_t child_count{0};
   std::size_t queued_message_count{0};
   std::uint64_t generation{0};
+  // Terminal run transitions so far; correlates ChildCompletion values.
+  std::uint64_t run_generation{0};
   // Live context-size info; nullopt only if task state is unavailable.
   std::optional<AgentTaskContextInfo> context_info;
 };
@@ -225,6 +228,12 @@ struct AgentTaskClosedEvent {
   AgentTaskId id;
 };
 
+// Emitted once per completion newly admitted to the parent Agent's inbox
+// (opt-in via Limits::deliver_completions).
+struct AgentTaskCompletionEvent {
+  ChildCompletion completion;
+};
+
 struct ChildAgentEvent {
   AgentTaskId task_id;
   AgentEvent event;
@@ -233,7 +242,8 @@ struct ChildAgentEvent {
 using AgentTaskEvent =
     std::variant<AgentTaskSpawnedEvent, AgentTaskStatusChangedEvent,
                  AgentTaskMessageQueuedEvent, AgentTaskInterruptedEvent,
-                 AgentTaskClosedEvent, ChildAgentEvent>;
+                 AgentTaskClosedEvent, AgentTaskCompletionEvent,
+                 ChildAgentEvent>;
 
 // Everything a child factory needs to construct one child SessionRuntime,
 // so TaskTree itself never assembles a (necessarily partial)
@@ -266,6 +276,10 @@ public:
     std::size_t max_output_bytes{static_cast<std::size_t>(256 * 1024)};
     std::size_t max_context_bytes{static_cast<std::size_t>(2 * 1024 * 1024)};
     std::chrono::milliseconds max_wait{std::chrono::seconds(60)};
+    // Opt-in: build a ChildCompletion at each direct child's terminal run
+    // and admit it to the owning Agent. Off keeps all frontends unchanged.
+    bool deliver_completions{false};
+    std::size_t max_completion_bytes{4096};
   };
 
   using EventCallback = std::function<void(const AgentTaskEvent &)>;
@@ -405,6 +419,13 @@ private:
   AgentTaskSnapshot snapshot(const std::shared_ptr<Task> &task) const;
   void touch_locked(const std::shared_ptr<Task> &task);
   void emit(const AgentTaskEvent &event) const;
+  // Caller holds task.mutex. nullopt when this transition is not delivered.
+  std::optional<ChildCompletion>
+  make_completion(const Task &task, AgentTaskStatusKind status,
+                  std::optional<AgentInterruptReason> cause) const;
+  // Admits to the owning Agent and, only if newly admitted, announces it.
+  void deliver_completion(std::optional<ChildCompletion> completion);
+  void cancel_completions(const std::vector<std::shared_ptr<Task>> &tasks);
   void run_task(const std::shared_ptr<Task> &task,
                 const std::stop_token &stop_token);
   void execute_work(const std::shared_ptr<Task> &task,

@@ -18,6 +18,7 @@
 #include "core/agent_runtime_identity.h"
 #include "core/agent_state.h"
 #include "core/auth_types.h"
+#include "core/child_completion.h"
 #include "core/compaction.h"
 #include "core/event_types.h"
 #include "core/message_types.h"
@@ -162,6 +163,17 @@ public:
   void follow_up(std::vector<Message> messages);
   void clear_follow_up_queue();
 
+  // Input admission for child completions (see core/child_completion.h).
+  // TaskTree calls admit at a child's terminal transition; the Agent is the
+  // sole authority for pending completion input. Pending entries drain into
+  // the steering envelopes of a running loop at the next turn boundary; an
+  // idle frontend claims them explicitly. Returns true only when newly
+  // admitted (false: duplicate, cancelled task, closed, or inbox full).
+  bool admit_child_completion(ChildCompletion completion);
+  std::vector<AgentInput> claim_child_completions();
+  std::size_t cancel_child_completions(const std::string &task_id);
+  std::size_t pending_child_completions() const;
+
   void interrupt(TurnAbortReason reason);
   void abort();
   void reset();
@@ -238,6 +250,9 @@ private:
   // Queue management
   std::mutex steering_mutex_;
   std::vector<AgentInput> steering_queue_;
+
+  mutable std::mutex completion_mutex_;
+  ChildCompletionInbox completions_;
 
   std::mutex followup_mutex_;
   std::vector<Message> followup_queue_;

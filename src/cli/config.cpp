@@ -764,6 +764,9 @@ Config load_config_document(const std::filesystem::path &path) {
       if (const auto value = read_positive_int64(*subagents, "max_wait_seconds",
                                                  "subagents", config))
         config.subagents.max_wait_seconds = static_cast<std::size_t>(*value);
+      if (const auto value = read_boolean(*subagents, "deliver_completions",
+                                          "subagents", config))
+        config.subagents.deliver_completions = *value;
     }
   }
   if (config.defaults.provider == "openai-codex" &&
@@ -957,6 +960,8 @@ core::TaskTree::Limits build_task_tree_limits(const Args &args) {
     limits.max_direct_children = *cfg.max_direct_children;
   if (cfg.max_wait_seconds)
     limits.max_wait = std::chrono::seconds(*cfg.max_wait_seconds);
+  if (cfg.deliver_completions)
+    limits.deliver_completions = *cfg.deliver_completions;
   return limits;
 }
 
