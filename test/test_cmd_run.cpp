@@ -523,3 +523,29 @@ TEST(CmdRun, FauxControlSocket_BootstrapsAndAcceptsQuit) {
   EXPECT_TRUE(wait_for_background_exit(pid, 0, std::chrono::seconds(10)));
   EXPECT_FALSE(std::filesystem::exists(socket_path));
 }
+
+TEST(CmdRun, LuaOnlyListsExactlyOneToolDespiteAddonRegistration) {
+  TempDir home;
+  const auto hooks = home / "addon.lua";
+  write_file(hooks, R"(
+pici.add_tool{name='surprise', description='extra', schema='{"type":"object"}', execute=function() return 'extra' end}
+return {}
+)");
+  const auto result = run_cli(isolation_args(home, {"--sandbox", "required", "--lua-only", "--hooks-file", hooks.string(), "--list-tools"}), home.path);
+  ASSERT_TRUE(result.exited_normally);
+  EXPECT_EQ(result.exit_code, 0) << result.err;
+  EXPECT_TRUE(result.out.starts_with("lua\n")) << result.out;
+  EXPECT_EQ(result.out.find("surprise\n"), std::string::npos);
+  EXPECT_EQ(result.out.find("bash\n"), std::string::npos);
+  EXPECT_TRUE(result.out.contains("fresh, disposable OS sandbox"));
+}
+
+TEST(CmdRun, LuaOnlyRejectsDisabledSandboxAndLegacyEvaluator) {
+  TempDir home;
+  const auto disabled = run_cli(isolation_args(home, {"--lua-only", "--list-tools"}), home.path);
+  EXPECT_NE(disabled.exit_code, 0);
+  EXPECT_TRUE(disabled.err.contains("conflicts")) << disabled.err;
+  const auto legacy = run_cli(isolation_args(home, {"--sandbox", "required", "--lua-only", "--lua-eval", "--list-tools"}), home.path);
+  EXPECT_NE(legacy.exit_code, 0);
+  EXPECT_TRUE(legacy.err.contains("conflicts")) << legacy.err;
+}

@@ -7,6 +7,7 @@
 
 #include "core/auth/authentication.h"
 #include "core/auth/credential_store.h"
+#include "core/lua_worker_tool.h"
 #include "core/mailbox/mailbox_coordinator.h"
 #include "core/mcp/mcp_config.h"
 #include "core/message_types.h"
@@ -59,6 +60,10 @@ public:
   // for MCP server misconfiguration/handshake failure -- those are caught,
   // logged, and simply absent from mcp_tools() (see Config::mcp_servers).
   explicit PiciProcess(const Config &config);
+
+  const std::shared_ptr<const LuaWorkerAdapter> &lua_worker_adapter() const {
+    return lua_worker_adapter_;
+  }
 
   std::shared_ptr<const ModelCatalog> model_catalog() const {
     return model_catalog_;
@@ -118,6 +123,8 @@ public:
   std::vector<std::shared_ptr<const ToolDefinition>> refresh_mcp_tools() const;
 
 private:
+  std::shared_ptr<const LuaWorkerAdapter> lua_worker_adapter_{
+      std::make_shared<LuaWorkerAdapter>()};
   std::shared_ptr<ModelCatalog> model_catalog_;
   auth::CredentialStore credential_store_;
   std::shared_ptr<auth::Authentication> authentication_;

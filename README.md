@@ -544,6 +544,11 @@ also provides static TUI views: `/context genome`, `/context heatmap`, and
 content, reasoning data, and large base64 image payloads. See
 [`addons/context.lua`](addons/context.lua) for the implementation.
 
+For a single sandboxed Lua tool with standard libraries and explicit imports,
+run `./build/pi-cli --lua-only`. The workspace is read-only unless you pass
+`--lua-write-root <dir>` (repeatable). See [sandboxed Lua-only mode](docs/lua-worker-mode.md)
+for library selection, configuration, permission boundaries, and limitations.
+
 Use `/reload-addons` after editing Lua hooks or add-on tools to reload the
 configured files without restarting the session. Built-in and tools-directory
 tools are preserved; registered add-on tools and hook callbacks are replaced.

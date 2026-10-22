@@ -458,6 +458,21 @@ add_library(lua_pi INTERFACE)
 target_link_libraries(lua_pi INTERFACE PkgConfig::LUA)
 message(STATUS "Lua: ${LUA_VERSION} (${LUA_INCLUDE_DIRS})")
 
+FetchContent_Declare(
+    luafilesystem_src
+    GIT_REPOSITORY https://github.com/lunarmodules/luafilesystem.git
+    GIT_TAG 7c6e1b013caec0602ca4796df3b1d7253a2dd258 # v1_8_0
+    SOURCE_SUBDIR cmake-do-not-add
+    EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(luafilesystem_src)
+add_library(pici_lfs STATIC ${luafilesystem_src_SOURCE_DIR}/src/lfs.c)
+target_link_libraries(pici_lfs PRIVATE lua_pi)
+add_executable(pi-lua-worker src/worker/lua_worker_main.cpp)
+target_include_directories(pi-lua-worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(pi-lua-worker PRIVATE lua_pi pici_lfs nlohmann_json::nlohmann_json)
+install(TARGETS pi-lua-worker RUNTIME DESTINATION bin)
+
 find_package(CURL QUIET)
 if(NOT CURL_FOUND)
     set(CURL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
@@ -518,6 +533,7 @@ add_library(pi-core
     src/core/skills.cpp
     src/core/sandbox.cpp
     src/core/lua_tool.cpp
+    src/core/lua_worker_tool.cpp
     src/core/mcp/mcp_transport.cpp
     src/core/mcp/mcp_http_transport.cpp
     src/core/mcp/mcp_client.cpp
@@ -633,6 +649,7 @@ add_executable(pi-cli
     src/cli/system_prompt.cpp
     src/cli/tree_selector.cpp
 )
+add_dependencies(pi-cli pi-lua-worker)
 
 target_link_libraries(pi-cli PRIVATE pi-core pi-http tomlplusplus::tomlplusplus)
 target_compile_definitions(pi-cli PRIVATE
@@ -789,6 +806,11 @@ if(PI_CPP_BUILD_TESTS)
     add_test(NAME test-openai_codex_responses COMMAND test-openai_codex_responses)
 
     add_executable(test-sandbox test/test_sandbox.cpp)
+    add_executable(test-lua_worker test/test_lua_worker.cpp)
+    target_link_libraries(test-lua_worker PRIVATE pi-core GTest::gtest_main)
+    target_compile_definitions(test-lua_worker PRIVATE PI_LUA_WORKER_BINARY="$<TARGET_FILE:pi-lua-worker>")
+    add_dependencies(test-lua_worker pi-lua-worker)
+    add_test(NAME test-lua_worker COMMAND test-lua_worker)
     target_link_libraries(test-sandbox PRIVATE pi-core)
     add_test(NAME test-sandbox COMMAND test-sandbox)
 

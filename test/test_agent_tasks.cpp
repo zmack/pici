@@ -1173,6 +1173,8 @@ TEST(AgentTasks, RootStatusTracksOwningAgent) {
   // BlockingUsageClient returns at once on its first call; burn that one so
   // the next root turn blocks.
   root.agent().prompt("warm up").wait();
+  // Stream completion precedes the worker's idle-state publication.
+  root.agent().wait_for_idle();
   auto stream = root.agent().prompt("block");
   ASSERT_TRUE(pi::test::wait_until([&] { return entered->load(); },
                                    std::chrono::seconds(2),
@@ -1538,6 +1540,7 @@ TEST(AgentTasks, BusyParentReceivesCompletionAtTurnBoundary) {
                         .provider = "completion-busy"};
   SessionRuntime root({.agent_options = options});
   root.agent().prompt("warm up").wait();
+  root.agent().wait_for_idle();
   auto stream = root.agent().prompt("block");
   ASSERT_TRUE(pi::test::wait_until([&] { return entered->load(); },
                                    std::chrono::seconds(2),

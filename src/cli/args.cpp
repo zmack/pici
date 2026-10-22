@@ -182,6 +182,18 @@ Args parse_args(int argc, char **argv) {
       result.no_builtin_tools = true;
     } else if (arg == "--lua-eval") {
       result.lua_eval = true;
+    } else if (arg == "--lua-only") {
+      result.lua_only = true;
+    } else if (arg == "--lua-library" || arg == "--lua-read-root" ||
+               arg == "--lua-write-root") {
+      const auto value = need(arg);
+      auto &values = arg == "--lua-library"     ? result.lua_libraries
+                     : arg == "--lua-read-root" ? result.lua_read_roots
+                                                : result.lua_write_roots;
+      if (!values)
+        values.emplace();
+      if (!value.empty())
+        values->emplace_back(value);
     } else if (arg == "--tools" || arg == "-t") {
       auto v = need("--tools");
       // comma-separated list
@@ -332,6 +344,14 @@ void print_help(const char *prog) {
          "  --no-builtin-tools, -nbt    Disable built-in tools only\n"
          "  --lua-eval                  Enable the `lua` tool: in-process "
          "Lua eval with session/subagent/mailbox access (opt-in)\n"
+         "  --lua-only                  Only a sandboxed Lua worker tool "
+         "(requires bubblewrap)\n"
+         "  --lua-library <name>        Allowed io/os/lfs library, repeatable "
+         "(default all three)\n"
+         "  --lua-read-root <dir>       Read-only workspace directory, "
+         "repeatable (default .)\n"
+         "  --lua-write-root <dir>      Writable workspace directory, "
+         "repeatable (default none)\n"
          "  --no-skills, -ns            Disable skill scanning and the skill "
          "tool\n"
          "  --tools, -t <names>         Comma-separated allowlist of tool "

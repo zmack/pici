@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,6 +43,11 @@ struct Args {
   bool no_tools{false};
   bool no_builtin_tools{false};
   bool lua_eval{false}; // --lua-eval / [tools] lua_eval: opt-in `lua` tool
+  bool lua_only{false}; // sandboxed, disposable Lua worker as the sole tool
+  std::optional<std::vector<std::string>> lua_libraries;
+  std::optional<std::vector<std::string>> lua_read_roots;
+  std::optional<std::vector<std::string>> lua_write_roots;
+  std::optional<std::uint64_t> lua_address_space_mb;
   std::vector<std::string> tools;       // allowlist of tool names
   std::string tools_dir;                // directory for Lua tools
   std::vector<std::string> hooks_files; // Lua hooks files (repeatable)

@@ -238,9 +238,9 @@ int main(int argc, char *argv[]) noexcept {
       args.config_document ? args.config_document->providers : empty_providers;
 
   static const std::vector<pi::core::mcp::McpServerConfig> empty_mcp_servers;
-  const auto &configured_mcp_servers =
-      args.config_document ? args.config_document->mcp_servers
-                           : empty_mcp_servers;
+  const auto &configured_mcp_servers = args.config_document
+                                           ? args.config_document->mcp_servers
+                                           : empty_mcp_servers;
 
   std::optional<pi::core::PiciProcess> process;
   try {
@@ -274,5 +274,5 @@ int main(int argc, char *argv[]) noexcept {
         return process->refresh_model_catalog(provider_ids,
                                               std::move(stop_token));
       },
-      process->mcp_tools());
+      process->mcp_tools(), process->lua_worker_adapter());
 }

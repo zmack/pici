@@ -47,6 +47,7 @@ docs/*
 !docs/architecture-lexicon.md
 !docs/object-taxonomy.md
 !docs/cpp-safety-tooling.md
+!docs/lua-worker-mode.md
 !docs/pici-object-archetypes.html
 
 # Dependencies (install via package manager)

@@ -121,6 +121,10 @@ int main(int argc, char *argv[]) noexcept {
     std::cout << "pi-acp " PI_CPP_VERSION "\n";
     return 0;
   }
+  if (args.lua_only) {
+    std::cerr << "error: pi-acp does not support Lua-only worker mode\n";
+    return 1;
+  }
   if (args.auth_action != pi::cli::AuthAction::none) {
     std::cerr << "error: pi-acp does not support auth subcommands; use pi-cli "
                  "auth ...\n";
@@ -145,9 +149,9 @@ int main(int argc, char *argv[]) noexcept {
   const auto &configured =
       args.config_document ? args.config_document->providers : empty_config;
   static const std::vector<pi::core::mcp::McpServerConfig> empty_mcp_servers;
-  const auto &configured_mcp_servers =
-      args.config_document ? args.config_document->mcp_servers
-                           : empty_mcp_servers;
+  const auto &configured_mcp_servers = args.config_document
+                                           ? args.config_document->mcp_servers
+                                           : empty_mcp_servers;
   std::optional<pi::core::PiciProcess> process;
   try {
     process.emplace(pi::core::PiciProcess::Config{

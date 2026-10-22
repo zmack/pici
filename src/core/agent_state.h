@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -137,12 +138,24 @@ public:
 
   void set_tools(std::vector<std::shared_ptr<const ToolDefinition>> t) {
     std::scoped_lock lock(mutex_);
-    tools_ = std::move(t);
+    tools_ = sole_tool_ ? std::vector{sole_tool_} : std::move(t);
   }
 
   void add_tool(std::shared_ptr<const ToolDefinition> t) {
     std::scoped_lock lock(mutex_);
-    tools_.push_back(std::move(t));
+    if (!sole_tool_)
+      tools_.push_back(std::move(t));
+  }
+
+  // Activation-lifetime admission rule, by object identity rather than name.
+  // All provider snapshots and dispatch lookups consume this same tool set.
+  void restrict_to_tool(std::shared_ptr<const ToolDefinition> tool) {
+    std::scoped_lock lock(mutex_);
+    if (!tool || (sole_tool_ && sole_tool_ != tool))
+      throw std::logic_error(
+          "sole tool cannot be replaced during an activation");
+    sole_tool_ = std::move(tool);
+    tools_ = {sole_tool_};
   }
 
   bool is_streaming() const {
@@ -257,6 +270,8 @@ public:
     messages_.clear();
     ++transcript_epoch_;
     tools_.clear();
+    if (sole_tool_)
+      tools_.push_back(sole_tool_);
     pending_tool_calls_.clear();
     error_message_.reset();
     is_streaming_ = false;
@@ -274,6 +289,7 @@ private:
   std::vector<Message> messages_;
   std::uint64_t transcript_epoch_{0};
   std::vector<std::shared_ptr<const ToolDefinition>> tools_;
+  std::shared_ptr<const ToolDefinition> sole_tool_;
 
   bool is_streaming_{false};
   bool is_complete_{false};

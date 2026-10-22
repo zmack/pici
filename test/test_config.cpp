@@ -268,7 +268,7 @@ env     = { MCP_LOG_LEVEL = "warn", MCP_TOKEN = "secret" }
   ASSERT_EQ(server.args.size(), std::size_t(3));
   EXPECT_EQ(server.args[0], std::string("-y"));
   EXPECT_EQ(server.args[1],
-           std::string("@modelcontextprotocol/server-filesystem"));
+            std::string("@modelcontextprotocol/server-filesystem"));
   EXPECT_EQ(server.args[2], std::string("/tmp/project"));
   EXPECT_EQ(server.env.at("MCP_LOG_LEVEL"), std::string("warn"));
   EXPECT_EQ(server.env.at("MCP_TOKEN"), std::string("secret"));
@@ -825,4 +825,50 @@ TEST_F(ConfigTest, MergeCompactionThresholdConfig) {
     EXPECT_TRUE(out.compaction_threshold_pct > 0.599);
     EXPECT_TRUE(out.compaction_threshold_pct < 0.601);
   }
+}
+
+TEST_F(ConfigTest, LuaWorkerConfigPreservesExplicitEmptyListsAndCliOverrides) {
+  const auto file = write_toml("lua-worker.toml", R"(
+[tools]
+mode = "lua-only"
+[lua]
+libraries = []
+[lua.sandbox]
+read_roots = []
+write_roots = ["scratch"]
+network = false
+address_space_mb = 0
+)");
+  const auto config = load_config_document(file);
+  ASSERT_FALSE(config.has_errors());
+  EXPECT_TRUE(config.defaults.lua_only);
+  ASSERT_TRUE(config.defaults.lua_libraries);
+  EXPECT_TRUE(config.defaults.lua_libraries->empty());
+  ASSERT_TRUE(config.defaults.lua_read_roots);
+  EXPECT_TRUE(config.defaults.lua_read_roots->empty());
+  ASSERT_TRUE(config.defaults.lua_address_space_mb);
+  EXPECT_EQ(*config.defaults.lua_address_space_mb, 0u);
+  const auto cli = parse({"pi", "--lua-only", "--lua-library", "io",
+                          "--lua-library", "lfs", "--lua-write-root", "src"});
+  const auto merged = merge_args(config.defaults, cli);
+  EXPECT_EQ(merged.lua_libraries, (std::vector<std::string>{"io", "lfs"}));
+  EXPECT_EQ(merged.lua_write_roots, (std::vector<std::string>{"src"}));
+  EXPECT_EQ(merged.lua_read_roots, config.defaults.lua_read_roots);
+}
+
+TEST_F(ConfigTest, LuaWorkerConfigRejectsUnsupportedNetworkAndMalformedScopes) {
+  const auto file = write_toml("bad-lua-worker.toml", R"(
+[tools]
+mode = "lua-only"
+[lua]
+libraries = [true]
+[lua.sandbox]
+read_roots = "all"
+network = true
+)");
+  const auto config = load_config_document(file);
+  EXPECT_TRUE(config.has_errors());
+  EXPECT_TRUE(has_diagnostic(config, "lua.libraries"));
+  EXPECT_TRUE(has_diagnostic(config, "lua.sandbox.read_roots"));
+  EXPECT_TRUE(has_diagnostic(config, "lua.sandbox.network"));
 }

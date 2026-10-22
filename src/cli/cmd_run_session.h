@@ -59,6 +59,7 @@
 #include "core/event_types.h"
 #include "core/lua_eval_tool.h"
 #include "core/lua_tool.h"
+#include "core/lua_worker_tool.h"
 #include "core/mailbox/mailbox_bindings.h"
 #include "core/mailbox/mailbox_coordinator.h"
 #include "core/memory_stats.h"
@@ -1004,13 +1005,15 @@ public:
       std::function<std::vector<core::ProviderRefreshStatus>(
           const std::vector<std::string> &, std::stop_token)>
           refresh_model_catalog = {},
-      std::vector<std::shared_ptr<const core::ToolDefinition>> mcp_tools = {})
+      std::vector<std::shared_ptr<const core::ToolDefinition>> mcp_tools = {},
+      std::shared_ptr<const core::LuaWorkerAdapter> lua_worker_adapter = {})
       : args_(std::move(args)), registry_(std::move(registry)),
         injected_authentication_(std::move(authentication)),
         injected_session_store_(std::move(session_store)),
         injected_ensure_mailbox_(std::move(ensure_mailbox)),
         injected_refresh_model_catalog_(std::move(refresh_model_catalog)),
-        mcp_tools_(std::move(mcp_tools)) {}
+        mcp_tools_(std::move(mcp_tools)),
+        lua_worker_adapter_(std::move(lua_worker_adapter)) {}
 
   // Defense-in-depth (plans/velvety-skipping-marble.md §3): the
   // session.*/agents.* binding closures captured into lua_eval_bindings_
@@ -1025,6 +1028,20 @@ public:
   }
 
   int run() {
+    if (args_.lua_only &&
+        (args_.no_tools || args_.no_builtin_tools || args_.lua_eval ||
+         !args_.faux_control_socket.empty() ||
+         args_.sandbox_mode == "disabled" || args_.sandbox_mode == "off" ||
+         (!args_.tools.empty() &&
+          args_.tools != std::vector<std::string>{"lua"}))) {
+      std::cerr << "error: --lua-only conflicts with disabled sandbox/tools, "
+                   "--lua-eval, faux control, or an allowlist other than lua\n";
+      return 1;
+    }
+    if (args_.lua_only) {
+      args_.sandbox_mode = "required";
+      args_.sandbox_mode_explicit = true;
+    }
     if (!resolve_model())
       return 1;
     if (!init_diagnostics())
@@ -1033,7 +1050,12 @@ public:
     if (!open_runtime())
       return 1;
 
-    load_tools();
+    try {
+      load_tools();
+    } catch (const std::exception &error) {
+      std::cerr << "error: " << error.what() << "\n";
+      return 1;
+    }
     build_system_prompt();
 
     // --list-tools / --list-addons (exit immediately after printing)
@@ -1207,6 +1229,28 @@ private:
   }
 
   void load_tools() {
+    if (args_.lua_only) {
+      if (!lua_worker_adapter_)
+        lua_worker_adapter_ = std::make_shared<core::LuaWorkerAdapter>();
+      core::LuaWorkerPolicy policy{.workspace =
+                                       std::filesystem::current_path()};
+      if (args_.lua_libraries)
+        policy.libraries = *args_.lua_libraries;
+      if (args_.lua_address_space_mb)
+        policy.address_space_mb = *args_.lua_address_space_mb;
+      if (args_.lua_read_roots) {
+        policy.read_roots.clear();
+        for (const auto &path : *args_.lua_read_roots)
+          policy.read_roots.emplace_back(path);
+      }
+      if (args_.lua_write_roots)
+        for (const auto &path : *args_.lua_write_roots)
+          policy.write_roots.emplace_back(path);
+      agent().state().restrict_to_tool(
+          core::make_lua_worker_tool(std::move(policy), lua_worker_adapter_));
+      base_tools_ = agent().state().tools();
+      return;
+    }
     if (scripted_registry_) {
       faux_tool_registrar_ = [this](const std::string &name) {
         agent().add_tool(
@@ -1303,9 +1347,28 @@ private:
     std::vector<std::string> tool_names;
     for (const auto &tool : agent().state().tools())
       tool_names.emplace_back(tool->name());
-    const auto system = cli::build_system_prompt(
+    auto system = cli::build_system_prompt(
         args_.system_prompt, args_.append_system_prompts, bundle_.context_files,
         tool_names, std::filesystem::current_path(), bundle_.skill_catalog_ptr);
+    if (args_.lua_only) {
+      // Activation-stable policy text: per-call imports never rewrite the
+      // tool schema or this prefix. Rebuilt on reload/compaction as needed.
+      nlohmann::json snapshot{
+          {"libraries", args_.lua_libraries.value_or(
+                            std::vector<std::string>{"io", "os", "lfs"})},
+          {"read_roots",
+           args_.lua_read_roots.value_or(std::vector<std::string>{"."})},
+          {"write_roots",
+           args_.lua_write_roots.value_or(std::vector<std::string>{})},
+          {"network", false},
+          {"address_space_mb", args_.lua_address_space_mb.value_or(1024)},
+          {"runtime_mounts_read_only",
+           {"/usr", "/bin", "/sbin", "/lib", "/lib64"}},
+          {"temporary_storage", "writable, disposable; 64 MiB"}};
+      system += "\nLua worker policy (workspace is /workspace; requires "
+                "selects libraries, not OS grants):\n" +
+                snapshot.dump() + "\n";
+    }
     agent().state().set_system_prompt(system);
     bundle_.agent_options.system_prompt = system;
   }
@@ -2614,6 +2677,7 @@ private:
   // same --no-tools/--tools-allowlist gating as builtins (but NOT
   // --no-builtin-tools, which is specifically about builtins).
   std::vector<std::shared_ptr<const core::ToolDefinition>> mcp_tools_;
+  std::shared_ptr<const core::LuaWorkerAdapter> lua_worker_adapter_;
   std::mutex effective_context_mutex_;
   std::optional<core::AgentContext> effective_context_;
   cli::RuntimeBundle bundle_;
@@ -2659,10 +2723,12 @@ inline int cmd_run(
     std::function<std::vector<core::ProviderRefreshStatus>(
         const std::vector<std::string> &, std::stop_token)>
         refresh_model_catalog = {},
-    std::vector<std::shared_ptr<const core::ToolDefinition>> mcp_tools = {}) {
+    std::vector<std::shared_ptr<const core::ToolDefinition>> mcp_tools = {},
+    std::shared_ptr<const core::LuaWorkerAdapter> lua_worker_adapter = {}) {
   CmdRunSession session(args, registry, std::move(authentication),
                         std::move(session_store), std::move(ensure_mailbox),
-                        std::move(refresh_model_catalog), std::move(mcp_tools));
+                        std::move(refresh_model_catalog), std::move(mcp_tools),
+                        std::move(lua_worker_adapter));
   return session.run();
 }
 

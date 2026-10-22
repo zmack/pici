@@ -640,6 +640,7 @@ void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
   cfg.no_tools = boolean("tools", "disabled");
   cfg.no_builtin_tools = boolean("tools", "no_builtin");
   cfg.lua_eval = boolean("tools", "lua_eval");
+  cfg.lua_only = str("tools", "mode") == "lua-only";
   cfg.tools = str_array("tools", "list");
   if (auto d = str("tools", "dir"); !d.empty())
     cfg.tools_dir = expand_tilde(d);
@@ -682,6 +683,64 @@ void parse_legacy_defaults(const toml::table &tbl, Args &cfg) {
     cfg.compaction_threshold_pct = *v;
 }
 
+void parse_lua_sandbox(const toml::table &sandbox, Config &config) {
+  for (const auto &[key, value] : sandbox) {
+    if (key != "read_roots" && key != "write_roots" && key != "network" &&
+        key != "address_space_mb")
+      diagnostic(config, true, "lua.sandbox." + std::string(key.str()),
+                 "unknown option");
+  }
+  if (sandbox.contains("read_roots"))
+    config.defaults.lua_read_roots =
+        parse_string_array(sandbox, "read_roots", "lua.sandbox", config);
+  if (sandbox.contains("write_roots"))
+    config.defaults.lua_write_roots =
+        parse_string_array(sandbox, "write_roots", "lua.sandbox", config);
+  if (const auto *memory = sandbox.get("address_space_mb")) {
+    const auto value = memory->value<std::int64_t>();
+    if (!memory->is_integer() || !value || *value < 0 || *value > 65536 ||
+        (*value != 0 && *value < 64))
+      diagnostic(config, true, "lua.sandbox.address_space_mb",
+                 "expected 0 or an integer from 64 to 65536");
+    else
+      config.defaults.lua_address_space_mb = static_cast<std::uint64_t>(*value);
+  }
+  if (const auto *network = sandbox.get("network");
+      network &&
+      (!network->is_boolean() || network->value<bool>().value_or(true)))
+    diagnostic(config, true, "lua.sandbox.network", "only false is supported");
+}
+
+void parse_lua_worker_config(const toml::table &tbl, Config &config) {
+  if (const auto mode = tbl["tools"]["mode"];
+      mode && (!mode.is_string() || mode.value<std::string>() != "lua-only"))
+    diagnostic(config, true, "tools.mode", "expected lua-only");
+  const auto *node = tbl.get("lua");
+  if (node == nullptr)
+    return;
+  const auto *lua = node->as_table();
+  if (lua == nullptr) {
+    diagnostic(config, true, "lua", "expected a table");
+    return;
+  }
+  for (const auto &[key, value] : *lua) {
+    if (key != "libraries" && key != "sandbox")
+      diagnostic(config, true, "lua." + std::string(key.str()),
+                 "unknown option");
+  }
+  if (lua->contains("libraries"))
+    config.defaults.lua_libraries =
+        parse_string_array(*lua, "libraries", "lua", config);
+  const auto *sandbox_node = lua->get("sandbox");
+  if (sandbox_node == nullptr)
+    return;
+  const auto *sandbox = sandbox_node->as_table();
+  if (sandbox == nullptr)
+    diagnostic(config, true, "lua.sandbox", "expected a table");
+  else
+    parse_lua_sandbox(*sandbox, config);
+}
+
 } // namespace
 
 bool Config::has_errors() const {
@@ -704,6 +763,7 @@ Config load_config_document(const std::filesystem::path &path) {
   }
 
   parse_legacy_defaults(tbl, config.defaults);
+  parse_lua_worker_config(tbl, config);
   config.mailbox.path = default_mailbox_path(path);
   if (!config.defaults.mailbox_path.empty())
     config.mailbox.path = expand_tilde(config.defaults.mailbox_path);
@@ -890,6 +950,16 @@ Args merge_args(const Args &config, const Args &cli) {
   out.no_tools = config.no_tools || cli.no_tools;
   out.no_builtin_tools = config.no_builtin_tools || cli.no_builtin_tools;
   out.lua_eval = config.lua_eval || cli.lua_eval;
+  out.lua_only = config.lua_only || cli.lua_only;
+  out.lua_libraries =
+      cli.lua_libraries ? cli.lua_libraries : config.lua_libraries;
+  out.lua_read_roots =
+      cli.lua_read_roots ? cli.lua_read_roots : config.lua_read_roots;
+  out.lua_write_roots =
+      cli.lua_write_roots ? cli.lua_write_roots : config.lua_write_roots;
+  out.lua_address_space_mb = cli.lua_address_space_mb
+                                 ? cli.lua_address_space_mb
+                                 : config.lua_address_space_mb;
   out.tools = merge_vec(config.tools, cli.tools);
   out.tools_dir = merge_str(config.tools_dir, cli.tools_dir);
 
